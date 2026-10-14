@@ -264,6 +264,22 @@ class DeployEnElLugarPorClaudeTest extends TestCase
     }
 
     /**
+     * Deja la línea con la que upload_spa dice que el SPA nuevo ya reemplazó al que atendía.
+     *
+     * @param  ClientVersionUpgrade  $upgrade
+     * @return void
+     */
+    private function spa_reemplazado(ClientVersionUpgrade $upgrade): void
+    {
+        DeploymentLog::create([
+            'client_version_upgrade_id' => $upgrade->id,
+            'step'                      => 'upload_spa',
+            'level'                     => 'success',
+            'line'                      => \App\Services\DeploymentService::MARCA_SPA_REEMPLAZADO . ' (contenido anterior reemplazado)',
+        ]);
+    }
+
+    /**
      * Un comando del upgrade en ese estado.
      *
      * @param  array<string, mixed>  $e
@@ -746,6 +762,8 @@ class DeployEnElLugarPorClaudeTest extends TestCase
         $this->horario($e['client'], '09:00', '18:00');
         $upgrade = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed']);
         $this->marcar_tocado($upgrade);
+        $this->spa_reemplazado($upgrade);
+        $this->fallo_en($upgrade, 'upload_api');
 
         $cuerpo = $this->start($upgrade, ['resume_from_step' => 'upload_api'])->assertStatus(202)->json();
 
@@ -766,6 +784,8 @@ class DeployEnElLugarPorClaudeTest extends TestCase
         $e       = $this->escenario('principal');
         $upgrade = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed']);
         $this->marcar_tocado($upgrade);
+        $this->spa_reemplazado($upgrade);
+        $this->fallo_en($upgrade, 'run_seeders');
 
         $cuerpo = $this->start($upgrade, ['resume_from_step' => 'run_seeders'])->assertStatus(202)->json();
         $this->assertSame('run_seeders', $cuerpo['desde_etapa']);
@@ -978,10 +998,154 @@ class DeployEnElLugarPorClaudeTest extends TestCase
         $this->assertSame('failed', (string) $upgrade->refresh()->deployment_status);
 
         $this->marcar_tocado($upgrade);
+        $this->spa_reemplazado($upgrade);
+        $this->fallo_en($upgrade, 'upload_api');
 
         $cuerpo = $this->start($upgrade, ['resume_from_step' => 'upload_api'])->assertStatus(202)->json();
         $this->assertSame('upload_api', $cuerpo['desde_etapa']);
         $this->assertStringStartsWith('no aplica', $cuerpo['gate_de_horario']);
+        Queue::assertPushed(RunDeploymentJob::class, 1);
+    }
+
+    /* ==========================================================================================
+     | Cuarta tanda (14/10/2026): la marca heredada, la etapa posterior y el gate después del up
+     |========================================================================================= */
+
+    /**
+     * 🔴 1. Con la marca HEREDADA en el log (un start limpio la borró y el job la volvió a escribir al
+     * encontrar el `down`), un fallo en compile_spa se recomienda reanudar desde compile_spa sin gate,
+     * y a las 08:00 (que el gate rechazaría) la reanudación encola.
+     */
+    public function test_con_la_marca_heredada_la_reanudacion_desde_compile_spa_no_pasa_por_el_gate(): void
+    {
+        Queue::fake();
+        Carbon::setTestNow($this->a_las('08:00'));
+
+        $e = $this->escenario('principal');
+        $this->horario($e['client'], '09:00', '18:00');
+        $upgrade = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed']);
+
+        DeploymentLog::create([
+            'client_version_upgrade_id' => $upgrade->id,
+            'step'                      => 'deployment',
+            'level'                     => 'warning',
+            'line'                      => \App\Services\DeploymentService::MARCA_SISTEMA_TOCADO
+                . 'heredado de un intento anterior (storage/framework/down existe).',
+        ]);
+        $this->fallo_en($upgrade, 'compile_spa');
+
+        $get = $this->getJson('/api/claude/upgrades/' . $upgrade->id, $this->headers())->assertStatus(200)->json();
+        $this->assertSame('compile_spa', $get['siguiente_accion']['resume_from_step']);
+        $this->assertStringStartsWith('no aplica', $get['siguiente_accion']['gate_de_horario']);
+
+        $cuerpo = $this->start($upgrade, ['resume_from_step' => 'compile_spa'])->assertStatus(202)->json();
+        $this->assertStringStartsWith('no aplica', $cuerpo['gate_de_horario']);
+        Queue::assertPushed(RunDeploymentJob::class, 1);
+    }
+
+    /**
+     * 🔴 2. En el lugar, deploy/start rechaza una etapa POSTERIOR a la que falló, y más allá de
+     * upload_spa si el SPA nuevo no se llegó a desplegar. Una etapa igual o anterior pasa. Y si el job
+     * murió por timeout DESPUÉS (una "Etapa en curso" más reciente), cuenta esa.
+     */
+    public function test_en_el_lugar_no_se_reanuda_desde_una_etapa_posterior_a_la_que_fallo(): void
+    {
+        Queue::fake();
+        Carbon::setTestNow($this->a_las('02:00'));
+
+        $e = $this->escenario('principal');
+        $this->horario($e['client'], '09:00', '18:00');
+
+        /* Falló en upload_api con el SPA ya desplegado: run_migrations es posterior → 422. */
+        $upgrade = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed']);
+        $this->marcar_tocado($upgrade);
+        $this->spa_reemplazado($upgrade);
+        $this->fallo_en($upgrade, 'upload_api');
+
+        $rechazo = $this->start($upgrade, ['resume_from_step' => 'run_migrations'])->assertStatus(422)->json();
+        $this->assertStringContainsString('POSTERIOR', $rechazo['error']);
+        $this->assertSame('upload_api', $rechazo['etapa_que_fallo']);
+        Queue::assertNothingPushed();
+
+        /* Una "Etapa en curso" más reciente (timeout en run_migrations) manda: ahí sí se acepta. */
+        DeploymentLog::create([
+            'client_version_upgrade_id' => $upgrade->id,
+            'step'                      => 'run_migrations',
+            'level'                     => 'info',
+            'line'                      => \App\Services\DeploymentService::MARCA_ETAPA_EN_CURSO . 'run_migrations (con el sistema del cliente en mantenimiento).',
+        ]);
+        $this->start($upgrade, ['resume_from_step' => 'run_migrations'])->assertStatus(202);
+
+        /* Sin el SPA nuevo desplegado (y sin etapa que falló): más allá de upload_spa → 422. */
+        $sin_spa = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed']);
+        $this->marcar_tocado($sin_spa);
+
+        $rechazo = $this->start($sin_spa, ['resume_from_step' => 'upload_api'])->assertStatus(422)->json();
+        $this->assertStringContainsString('SPA nuevo', $rechazo['error']);
+
+        $this->start($sin_spa, ['resume_from_step' => 'upload_spa'])->assertStatus(202);
+        Queue::assertPushed(RunDeploymentJob::class, 2);
+    }
+
+    /**
+     * 🔴 3. Reanudar los COMANDOS en el lugar (con el cliente ya arriba) lleva el gate del en el lugar
+     * aunque el sistema esté tocado: a las 12:00 con el negocio abierto → 422; en la madrugada → 202.
+     */
+    public function test_reanudar_los_comandos_en_el_lugar_lleva_el_gate(): void
+    {
+        Queue::fake();
+        Carbon::setTestNow($this->mediodia());
+
+        $e = $this->escenario('principal');
+        $this->horario($e['client'], '09:00', '18:00');
+        $upgrade = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed', 'crons_supervisor_at' => now()]);
+        $this->marcar_tocado($upgrade);
+        $this->spa_reemplazado($upgrade);
+        $this->fallo_en($upgrade, 'run_commands');
+
+        $rechazo = $this->start($upgrade, ['resume_from_step' => 'run_commands'])->assertStatus(422)->json();
+        $this->assertSame('abierto', $rechazo['estado_ahora']);
+        Queue::assertNothingPushed();
+
+        Carbon::setTestNow($this->a_las('02:00'));
+        $cuerpo = $this->start($upgrade, ['resume_from_step' => 'run_commands'])->assertStatus(202)->json();
+        $this->assertStringStartsWith('aplicado', $cuerpo['gate_de_horario']);
+        $this->assertSame(420, $cuerpo['gate_de_horario_madrugada']['minutos_hasta_la_apertura']);
+    }
+
+    /**
+     * 🔴 3. El reintento de comandos de claude/* en el lugar usa la regla del en el lugar: la madrugada
+     * pasa (con el gate viejo del post-cierre daba "todavía no abrió"), un receso entre turnos no. Y
+     * siguiente_accion, al recomendarlo, dice que lleva ese gate.
+     */
+    public function test_el_reintento_de_comandos_en_el_lugar_usa_el_gate_del_en_el_lugar(): void
+    {
+        Queue::fake();
+
+        $e = $this->escenario('principal');
+        $this->horario_partido($e['client'], [['09:00', '12:00'], ['16:00', '20:00']]);
+        $upgrade = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed', 'crons_supervisor_at' => now()]);
+        $this->comando_en($e, $upgrade, 'fallido');
+        $this->marcar_tocado($upgrade);
+        $this->fallo_en($upgrade, 'run_commands');
+
+        $get = $this->getJson('/api/claude/upgrades/' . $upgrade->id, $this->headers())->assertStatus(200)->json();
+        $this->assertStringEndsWith('/deploy/retry-commands', $get['siguiente_accion']['endpoint']);
+        $this->assertStringContainsString('regla del en el lugar', $get['siguiente_accion']['gate_de_horario']);
+
+        /* Receso entre turnos (13:00): 422. */
+        Carbon::setTestNow($this->a_las('13:00'));
+        $this->postJson('/api/claude/upgrades/' . $upgrade->id . '/deploy/retry-commands', [
+            'confirm_client_name' => self::NOMBRE,
+        ], $this->headers())->assertStatus(422);
+        Queue::assertNothingPushed();
+
+        /* Madrugada (02:00, abre a las 09:00): pasa. */
+        Carbon::setTestNow($this->a_las('02:00'));
+        $cuerpo = $this->postJson('/api/claude/upgrades/' . $upgrade->id . '/deploy/retry-commands', [
+            'confirm_client_name' => self::NOMBRE,
+        ], $this->headers())->assertStatus(202)->json();
+        $this->assertSame(420, $cuerpo['gate_de_horario_madrugada']['minutos_hasta_la_apertura']);
         Queue::assertPushed(RunDeploymentJob::class, 1);
     }
 

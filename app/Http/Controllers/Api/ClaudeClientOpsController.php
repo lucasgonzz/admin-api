@@ -1950,35 +1950,26 @@ class ClaudeClientOpsController extends Controller
         if ($modo === Client::MODO_EN_EL_LUGAR && $this->texto_o_null($fila['deployment_status']) === 'failed') {
             $sistema_tocado = DeploymentService::sistema_vivo_tocado_segun_los_logs($upgrade_id);
 
-            $linea = DB::table('deployment_logs')
-                ->where('client_version_upgrade_id', $upgrade_id)
-                ->where('line', 'like', DeploymentService::MARCA_ETAPA_QUE_FALLO . '%')
-                ->orderBy('id', 'desc')
-                ->value('step');
-            $etapa_que_fallo = ($linea === null || $linea === 'deployment') ? null : (string) $linea;
+            /* La MISMA lectura que usa deploy/start para no aceptar una etapa posterior: la más reciente
+               entre "Etapa que falló" y la "Etapa en curso" de una ventana que no se cerró (el job murió
+               por timeout sin escribir la que falló). */
+            $resuelta = DeploymentService::etapa_que_fallo_segun_los_logs($upgrade_id);
 
             /* Un cierre (update_default_version / complete) que falló SIN que el despliegue haya llegado
                al `artisan up` lo frenó la guarda del job: el cliente sigue en mantenimiento y lo que hay
                que terminar es la etapa de la ventana que falló antes, no el cierre. */
-            if (in_array($etapa_que_fallo, ['update_default_version', 'complete'], true)) {
+            if ($resuelta !== null && in_array($resuelta['etapa'], ['update_default_version', 'complete'], true)) {
                 $modelo = ClientVersionUpgrade::find($upgrade_id);
                 if ($modelo !== null && DeploymentService::en_el_lugar_sin_llegar_al_up($modelo)) {
-                    $anterior = DB::table('deployment_logs')
-                        ->where('client_version_upgrade_id', $upgrade_id)
-                        ->where('line', 'like', DeploymentService::MARCA_ETAPA_QUE_FALLO . '%')
-                        ->whereNotIn('step', ['deployment', 'update_default_version', 'complete'])
-                        ->orderBy('id', 'desc')
-                        ->value('step');
-                    $etapa_que_fallo = $anterior === null ? null : (string) $anterior;
+                    $resuelta = DeploymentService::etapa_que_fallo_segun_los_logs(
+                        $upgrade_id,
+                        ['deployment', 'update_default_version', 'complete']
+                    );
                 }
             }
 
-            /* Si el job murió por timeout adentro de la ventana, no hay "Etapa que falló": queda la
-               última "Etapa en curso" que el pipeline dejó al arrancar cada etapa con el sistema abajo. */
-            if ($etapa_que_fallo === null) {
-                $etapa_que_fallo = DeploymentService::ultima_etapa_en_curso_en_los_logs($upgrade_id);
-                $etapa_en_curso  = $etapa_que_fallo !== null;
-            }
+            $etapa_que_fallo = $resuelta === null ? null : $resuelta['etapa'];
+            $etapa_en_curso  = $resuelta !== null && $resuelta['de_etapa_en_curso'];
         }
         if ($target_api !== null) {
             $target_api['es_el_frente_principal'] = $target_api['id'] === $frente_principal_id;
@@ -2716,9 +2707,13 @@ class ClaudeClientOpsController extends Controller
                 'endpoint'    => $configure_system,
                 'motivo'      => 'Las tareas post-cierre terminaron. Falta la etapa final de configuración del sistema.',
                 'alternativa' => $retry_commands . ' si quedó algún comando fallado o pendiente: reintenta SOLO los '
-                    . 'comandos, no borra ningún log y lleva el mismo gate de horario que el post-cierre (corre sobre el '
-                    . 'sistema en uso). Exige seeders completos y al menos un comando reintentable; si no los hay, 422 y '
-                    . 'no toca nada.',
+                    . 'comandos, no borra ningún log y lleva '
+                    . ($modo === Client::MODO_EN_EL_LUGAR
+                        ? 'el gate de horario del en el lugar (jornada terminada, o la madrugada con 120 minutos antes de '
+                            . 'abrir; un receso o el negocio abierto dan 422)'
+                        : 'el mismo gate de horario que el post-cierre')
+                    . ' (corre sobre el sistema en uso). Exige seeders completos y al menos un comando reintentable; si no '
+                    . 'los hay, 422 y no toca nada.',
             ];
         }
 
@@ -2734,9 +2729,14 @@ class ClaudeClientOpsController extends Controller
                - en otra (compilar, respaldar, preparar la API sin tocar nada) o sin saber dónde: la rama
                  `failed` de siempre. */
             $gate = $sistema_tocado
-                ? 'no aplica: este upgrade ya tocó el sistema vivo, y una reanudación termina el despliegue.'
+                ? 'no aplica: este upgrade ya tocó el sistema vivo, y una reanudación desde una etapa anterior al '
+                    . 'artisan up termina el despliegue.'
                 : 'aplica: este upgrade todavía no tocó el sistema vivo; un start o una reanudación llevan el gate del '
                     . 'en el lugar (jornada terminada, o la madrugada con 120 minutos antes de abrir).';
+            $gate_de_los_comandos = 'aplica, con la regla del en el lugar: pasa con la jornada de hoy terminada, o en la '
+                . 'madrugada con al menos 120 minutos antes de la primera apertura; un receso entre turnos o el negocio '
+                . 'abierto dan 422 (salvo force + force_reason). Mirá `horario_cliente.estado_ahora` de esta misma '
+                . 'respuesta antes de llamar.';
 
             if (in_array($etapa_que_fallo, ['update_default_version', 'complete'], true)) {
                 return [
@@ -2749,14 +2749,21 @@ class ClaudeClientOpsController extends Controller
 
             if ($etapa_que_fallo === 'run_commands') {
                 return [
-                    'endpoint' => $retry_commands,
-                    'motivo'   => 'Despliegue EN EL LUGAR fallado en un comando: los comandos corren con el sistema ARRIBA, '
-                        . 'así que el cliente está atendiendo. Corregí la causa y reintentá los comandos (no borra ningún '
-                        . 'log; lleva el gate de horario del post-cierre).',
+                    'endpoint'        => $retry_commands,
+                    'gate_de_horario' => $gate_de_los_comandos,
+                    'motivo'          => 'Despliegue EN EL LUGAR fallado en un comando: los comandos corren con el sistema '
+                        . 'ARRIBA, así que el cliente está atendiendo. Corregí la causa y reintentá los comandos (no borra '
+                        . 'ningún log). ⚠️ Corre sobre el sistema en uso: fuera de la ventana del gate contesta 422.',
                 ];
             }
 
-            $en_el_tramo_tocado = in_array($etapa_que_fallo, DeploymentService::ETAPAS_CON_EL_SISTEMA_TOCADO, true)
+            /* Del SPA al `up`, o cualquier etapa anterior al `up` si el sistema ya quedó tocado (por
+               ejemplo, un start limpio que encontró el `down` de un intento anterior y falló compilando):
+               reanudar desde ahí termina el despliegue sin pasar por el gate. Un start limpio, en
+               cambio, lo llevaría y BORRARÍA la marca. */
+            $en_el_tramo_tocado = $etapa_que_fallo !== null
+                && DeploymentService::etapa_antes_del_up($etapa_que_fallo)
+                && ($sistema_tocado || in_array($etapa_que_fallo, DeploymentService::ETAPAS_CON_EL_SISTEMA_TOCADO, true))
                 && ($etapa_que_fallo !== 'upload_spa' || $sistema_tocado);
 
             if ($en_el_tramo_tocado) {
@@ -2770,7 +2777,8 @@ class ClaudeClientOpsController extends Controller
                         : '')
                         . 'Despliegue EN EL LUGAR fallado en ' . $etapa_que_fallo . ', con el sistema vivo ya tocado: '
                         . 'corregí la causa y reanudá con resume_from_step=' . $etapa_que_fallo . ' (si el cliente quedó en '
-                        . 'mantenimiento, termina el despliegue y hace php artisan up). No lo levantes a mano. Mirá GET '
+                        . 'mantenimiento, termina el despliegue y hace php artisan up). deploy/start rechaza una etapa '
+                        . 'posterior a ésta. Un start limpio llevaría el gate y borraría los logs. No lo levantes a mano. Mirá GET '
                         . 'claude/upgrades/' . $upgrade_id . '/logs: la línea "QUEDÓ EN MANTENIMIENTO" o "QUEDÓ EL SPA '
                         . 'NUEVO" dice en qué estado quedó.',
                 ];

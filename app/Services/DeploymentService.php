@@ -295,6 +295,14 @@ class DeploymentService
     private $cierre_verificado = false;
 
     /**
+     * True cuando esta corrida ya dejó la línea de sistema tocado HEREDADO de un intento anterior
+     * (registrar_tocado_heredado()).
+     *
+     * @var bool
+     */
+    private $tocado_heredado_registrado = false;
+
+    /**
      * Secuencia PRE-CIERRE de un despliegue EN EL LUGAR (misión `un-solo-frente`, 14/10/2026).
      *
      * 🔴 Distinta de `$steps`: los SEEDERS corren ADENTRO de la ventana de mantenimiento, antes del
@@ -399,6 +407,22 @@ class DeploymentService
 
     /** Comienzo de la línea del `artisan up` exitoso: cierra la ventana de mantenimiento en los logs. */
     const MARCA_FUERA_DE_MANTENIMIENTO = 'Sistema del cliente fuera de mantenimiento';
+
+    /**
+     * Comienzo de la línea con la que upload_spa dice que el SPA nuevo YA reemplazó al que atendía.
+     * Es la que ya escribía el pipeline (no se cambió el texto): `deploy/start` la busca para no
+     * reanudar más allá de upload_spa un despliegue en el lugar que no llegó a cambiar el SPA (quedaría
+     * `paused` con el SPA viejo y la API nueva).
+     */
+    const MARCA_SPA_REEMPLAZADO = 'SPA desplegado en public_html';
+
+    /**
+     * Última etapa de la ventana de mantenimiento del en el lugar: el `up` va al final de ella. Una
+     * reanudación desde esta etapa o una anterior TERMINA el despliegue (y, con el sistema ya tocado,
+     * no pasa por el gate); desde una posterior (run_commands, pause_for_crons) el cliente ya está
+     * arriba y lleva el gate del en el lugar.
+     */
+    const ULTIMA_ETAPA_ANTES_DEL_UP = 'restart_queue_workers';
 
     /**
      * Etapas en las que un despliegue en el lugar falla con el sistema vivo ya tocado: desde el
@@ -971,6 +995,155 @@ class DeploymentService
     }
 
     /**
+     * Deja la línea de sistema tocado HEREDADO de un intento anterior, una vez por corrida (misión
+     * `un-solo-frente`, 14/10/2026).
+     *
+     * Medido por el verificador: un intento deja el `down`; un start limpio BORRA los logs (con la
+     * marca adentro); ese start falla en compile_spa; y `siguiente_accion` decía "no tocó, el gate
+     * aplica", así que a las 08:00 la reanudación daba 422 con el negocio en 503. Cuando la corrida
+     * descubre que el sistema YA estaba tocado (el `down` en el disco, o un respaldo de este upgrade
+     * con la marca ARCHIVO_TOCADO), lo vuelve a escribir en el log, y el log vuelve a decir la verdad
+     * para el gate de `deploy/start` y para `siguiente_accion`.
+     *
+     * No reemplaza a marcar_sistema_tocado(): esa escribe además el archivo en el respaldo, justo
+     * antes del primer comando de ESTA corrida que modifica el sistema.
+     *
+     * @param  string  $motivo
+     * @return void
+     */
+    private function registrar_tocado_heredado(string $motivo): void
+    {
+        if ($this->tocado_heredado_registrado) {
+            return;
+        }
+
+        $this->tocado_heredado_registrado = true;
+
+        $this->log(
+            $this->etapa_en_curso === null ? 'deployment' : $this->etapa_en_curso,
+            self::MARCA_SISTEMA_TOCADO . 'heredado de un intento anterior (' . $motivo . '). Una reanudación de este '
+            . 'upgrade desde una etapa anterior al php artisan up no pasa por el gate de horario: termina el despliegue.',
+            'warning'
+        );
+    }
+
+    /**
+     * La etapa desde la que se reanuda un despliegue fallado, según sus logs (misión `un-solo-frente`,
+     * 14/10/2026): la MÁS RECIENTE entre la última línea MARCA_ETAPA_QUE_FALLO y la última
+     * MARCA_ETAPA_EN_CURSO de una ventana que no se cerró con el `up` (el job murió por timeout sin
+     * escribir la que falló). Null si no hay ninguna.
+     *
+     * Una sola lectura para los dos que la necesitan: `siguiente_accion` (qué recomendar) y
+     * `deploy/start` (no aceptar una etapa posterior). Si leyeran distinto, uno recomendaría lo que el
+     * otro rechaza.
+     *
+     * @param  int                 $upgrade_id
+     * @param  array<int, string>  $excluir  Etapas de MARCA_ETAPA_QUE_FALLO que no cuentan.
+     * @return array{etapa: string, de_etapa_en_curso: bool}|null
+     */
+    public static function etapa_que_fallo_segun_los_logs(int $upgrade_id, array $excluir = ['deployment'])
+    {
+        $fallo = DeploymentLog::where('client_version_upgrade_id', $upgrade_id)
+            ->where('line', 'like', self::MARCA_ETAPA_QUE_FALLO . '%')
+            ->whereNotIn('step', $excluir)
+            ->orderByDesc('id')
+            ->first(['id', 'step']);
+
+        $en_curso = DeploymentLog::where('client_version_upgrade_id', $upgrade_id)
+            ->where('line', 'like', self::MARCA_ETAPA_EN_CURSO . '%')
+            ->orderByDesc('id')
+            ->first(['id', 'step']);
+
+        if ($en_curso !== null) {
+            $cerrada = DeploymentLog::where('client_version_upgrade_id', $upgrade_id)
+                ->where('id', '>', $en_curso->id)
+                ->where('line', 'like', self::MARCA_FUERA_DE_MANTENIMIENTO . '%')
+                ->exists();
+            if ($cerrada) {
+                $en_curso = null;
+            }
+        }
+
+        if ($en_curso !== null && ($fallo === null || (int) $en_curso->id > (int) $fallo->id)) {
+            return ['etapa' => (string) $en_curso->step, 'de_etapa_en_curso' => true];
+        }
+
+        return $fallo === null ? null : ['etapa' => (string) $fallo->step, 'de_etapa_en_curso' => false];
+    }
+
+    /**
+     * ¿El SPA nuevo de este upgrade ya reemplazó al que atendía, según sus logs?
+     *
+     * @param  int  $upgrade_id
+     * @return bool
+     */
+    public static function spa_reemplazado_segun_los_logs(int $upgrade_id): bool
+    {
+        return DeploymentLog::where('client_version_upgrade_id', $upgrade_id)
+            ->where('step', 'upload_spa')
+            ->where('line', 'like', self::MARCA_SPA_REEMPLAZADO . '%')
+            ->exists();
+    }
+
+    /**
+     * ¿Esa etapa es de la ventana de mantenimiento del en el lugar (anterior al `up`, o la del `up`)?
+     *
+     * @param  string  $etapa
+     * @return bool
+     */
+    public static function etapa_antes_del_up(string $etapa): bool
+    {
+        $posicion = array_search($etapa, self::SECUENCIA_EN_EL_LUGAR, true);
+
+        return $posicion !== false
+            && $posicion <= array_search(self::ULTIMA_ETAPA_ANTES_DEL_UP, self::SECUENCIA_EN_EL_LUGAR, true);
+    }
+
+    /**
+     * En el lugar: por qué NO se puede reanudar desde esa etapa, o null si se puede (misión
+     * `un-solo-frente`, 14/10/2026).
+     *
+     * Medido por el verificador: reanudar desde una etapa POSTERIOR a la que falló salteaba lo que
+     * faltaba (por ejemplo, migrar sobre una API a medio descomprimir), y reanudar desde upload_api
+     * sin que el SPA se hubiera llegado a reemplazar terminaba `paused` con el SPA viejo y la API
+     * nueva, sin que nada lo dijera. Se rechaza:
+     *  - una etapa posterior a la que falló (etapa_que_fallo_segun_los_logs()), y
+     *  - una etapa posterior a upload_spa si el SPA nuevo no se llegó a desplegar
+     *    (MARCA_SPA_REEMPLAZADO).
+     * Una etapa anterior siempre se acepta: rehace de más, pero no saltea nada.
+     *
+     * @param  int     $upgrade_id
+     * @param  string  $etapa
+     * @return string|null
+     */
+    public static function reanudacion_en_el_lugar_invalida(int $upgrade_id, string $etapa)
+    {
+        $orden    = self::SECUENCIA_EN_EL_LUGAR;
+        $posicion = array_search($etapa, $orden, true);
+        if ($posicion === false) {
+            return null;
+        }
+
+        $fallo = self::etapa_que_fallo_segun_los_logs($upgrade_id);
+        if ($fallo !== null) {
+            $posicion_del_fallo = array_search($fallo['etapa'], $orden, true);
+            if ($posicion_del_fallo !== false && $posicion > $posicion_del_fallo) {
+                return 'No se reanuda desde ' . $etapa . ': es POSTERIOR a la etapa que falló (' . $fallo['etapa'] . '), y '
+                    . 'reanudar ahí saltearía lo que quedó sin hacer (por ejemplo, migrar sobre una API a medio '
+                    . 'descomprimir). Reanudá con resume_from_step=' . $fallo['etapa'] . ' (o una anterior).';
+            }
+        }
+
+        if ($posicion > array_search('upload_spa', $orden, true) && ! self::spa_reemplazado_segun_los_logs($upgrade_id)) {
+            return 'No se reanuda desde ' . $etapa . ': el SPA nuevo de este upgrade no se llegó a desplegar (no está la '
+                . 'línea "' . self::MARCA_SPA_REEMPLAZADO . '" en sus logs), y el despliegue terminaría con el SPA viejo y la '
+                . 'API nueva. Reanudá con resume_from_step=upload_spa (o una anterior).';
+        }
+
+        return null;
+    }
+
+    /**
      * En el lugar: si `storage/framework/down` ya existe al arrancar, lo dice en una línea propia y
      * toma el sistema como en mantenimiento (misión `un-solo-frente`, 14/10/2026).
      *
@@ -995,6 +1168,10 @@ class DeploymentService
         }
 
         $this->mantenimiento_posible = true;
+
+        /* Un start limpio borró los logs: sin esta línea, el log diría que este upgrade nunca tocó el
+           sistema, y la reanudación quedaría frenada por el gate con el cliente en 503. */
+        $this->registrar_tocado_heredado('storage/framework/down existe: un intento anterior lo dejó en mantenimiento');
 
         $ultima = self::ultima_etapa_en_curso_en_los_logs((int) $this->upgrade->id);
 
@@ -1044,8 +1221,8 @@ class DeploymentService
      * ¿Este upgrade va EN EL LUGAR y su despliegue no llegó al `artisan up`? (misión `un-solo-frente`,
      * 14/10/2026).
      *
-     * Se mira la marca que deja la pausa del en el lugar recién DESPUÉS del `up`
-     * (`crons_supervisor_at` en el shared, `vps_supervisor_moved_at` en el VPS); un arranque limpio la
+     * Se mira la marca que el pipeline pone con el `up` (al final de restart_queue_workers):
+     * `crons_supervisor_at` en el shared, `vps_supervisor_moved_at` en el VPS; un arranque limpio la
      * borra. Sin ella, el cliente puede estar en mantenimiento, y un reintento de comandos (el de
      * `claude/*` o el botón del panel) correría el comando y pausaría sin levantarlo. Lo que termina el
      * despliegue es reanudarlo desde la etapa que falló.
@@ -1292,6 +1469,9 @@ class DeploymentService
                 . ': es el estado previo bueno, y respaldar de nuevo guardaría un sistema a medio actualizar.',
                 'success'
             );
+            if ($existente['tocado']) {
+                $this->registrar_tocado_heredado('el respaldo de este upgrade tiene la marca ' . self::ARCHIVO_TOCADO);
+            }
             $this->borrar_respaldos_parciales($base);
             $this->aplicar_retencion_de_respaldos($base);
 
@@ -2889,8 +3069,10 @@ class DeploymentService
             $this->log('run_migrations', 'Caché limpiado', 'success');
         }
 
-        if ($this->respalda && ! $this->es_en_el_lugar()) {
-            /* Última rotación al principal: la carpeta destino no atiende, pero la base sí. */
+        if ($this->respalda) {
+            /* Última rotación al principal: la carpeta destino no atiende, pero la base sí. En el lugar
+               ya la dejaron upload_spa o el `down`; si la corrida reanuda desde acá, la deja ésta
+               (marcar_sistema_tocado() es idempotente por corrida). */
             $this->marcar_sistema_tocado('run_migrations');
         }
 
@@ -5307,6 +5489,10 @@ class DeploymentService
      */
     private function poner_en_mantenimiento(string $api_path): void
     {
+        /* El `down` ya modifica el sistema vivo (503). Si la corrida reanuda desde upload_api, la marca
+           la deja ésta; si viene de upload_spa, ya está (idempotente por corrida). */
+        $this->marcar_sistema_tocado('upload_api');
+
         $this->log('upload_api', 'En el lugar: se pone el sistema del cliente en mantenimiento antes de reemplazar la API.');
 
         $this->exec_hosting_ssh(

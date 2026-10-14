@@ -1312,6 +1312,116 @@ class RespaldoYMantenimientoEnElLugarTest extends TestCase
     }
 
     /**
+     * 🔴 1. El escenario exacto del verificador: un intento dejó el `down`; un start limpio (que borró
+     * los logs, con la marca adentro) falla en compile_spa. El job encuentra el `down` y escribe la
+     * marca HEREDADA, así que siguiente_accion recomienda reanudar desde compile_spa sin gate y, a las
+     * 08:00 con horario 09–18 (que el gate rechazaría), la reanudación encola.
+     */
+    public function test_marca_heredada_tras_un_start_limpio_que_falla_en_compile_spa(): void
+    {
+        $e = $this->escenario();
+        $this->ssh->responder('storage/framework/down', 'CC_YA_EN_MANTENIMIENTO');
+        Http::fake(['*' => Http::response(['message' => 'Not Found'], 404)]);
+
+        /* El start limpio borró los logs del intento que dejó el down. */
+        $this->assertSame(0, DeploymentLog::where('client_version_upgrade_id', $e['upgrade']->id)->count());
+
+        $error = $this->correr($this->servicio($e['upgrade']));
+        $this->assertNotNull($error);
+
+        $logs = $this->logs($e['upgrade']);
+        $this->assertStringContainsString(DeploymentService::MARCA_SISTEMA_TOCADO . 'heredado de un intento anterior', $logs);
+        $this->assertStringContainsString(DeploymentService::MARCA_ETAPA_QUE_FALLO . 'compile_spa', $logs);
+        $this->assertTrue(DeploymentService::sistema_vivo_tocado_segun_los_logs((int) $e['upgrade']->id));
+
+        /* Horario 09–18 y las 08:00: un arranque limpio daría 422. */
+        $dia            = new \App\Models\ClientScheduleDay();
+        $dia->client_id = $e['client']->id;
+        $dia->day_key   = 'todos';
+        $dia->save();
+        $rango                         = new \App\Models\ClientScheduleRange();
+        $rango->client_schedule_day_id = $dia->id;
+        $rango->start_time             = '09:00';
+        $rango->end_time               = '18:00';
+        $rango->sort_order             = 0;
+        $rango->save();
+        Carbon::setTestNow(Carbon::parse('2026-10-14 08:00:00', config('app.timezone')));
+
+        config(['services.claude_task_ingest.key' => 'clave-de-prueba-respaldo']);
+        $headers = ['X-Claude-Task-Key' => 'clave-de-prueba-respaldo', 'Accept' => 'application/json'];
+
+        $get = $this->getJson('/api/claude/upgrades/' . $e['upgrade']->id, $headers)->assertStatus(200)->json();
+        $this->assertSame('compile_spa', $get['siguiente_accion']['resume_from_step']);
+        $this->assertStringStartsWith('no aplica', $get['siguiente_accion']['gate_de_horario']);
+
+        \Illuminate\Support\Facades\Queue::fake();
+        $this->postJson('/api/claude/upgrades/' . $e['upgrade']->id . '/deploy/start', [
+            'confirm_client_name' => 'Cliente respaldo',
+            'resume_from_step'    => 'compile_spa',
+        ], $headers)->assertStatus(202);
+
+        /* Contra prueba: un start limpio a la misma hora sí lleva el gate. */
+        $e['upgrade']->refresh()->update(['deployment_status' => 'failed']);
+        $rechazo = $this->postJson('/api/claude/upgrades/' . $e['upgrade']->id . '/deploy/start', [
+            'confirm_client_name' => 'Cliente respaldo',
+        ], $headers)->assertStatus(422)->json();
+        $this->assertSame(60, $rechazo['minutos_hasta_la_apertura']);
+    }
+
+    /**
+     * 1. Reusar un respaldo con la marca TOCADO también deja la marca heredada en el log (una vez).
+     */
+    public function test_reusar_un_respaldo_con_tocado_deja_la_marca_heredada(): void
+    {
+        $e = $this->escenario();
+        $this->respaldo_en_disco($e);
+        $this->servidor_sano();
+
+        $this->invocar($this->servicio($e['upgrade']), 'step_backup_in_place');
+
+        $this->assertSame(
+            1,
+            DeploymentLog::where('client_version_upgrade_id', $e['upgrade']->id)
+                ->where('line', 'like', DeploymentService::MARCA_SISTEMA_TOCADO . 'heredado%')
+                ->count()
+        );
+    }
+
+    /**
+     * 🔴 2. Una reanudación desde upload_api deja la marca (archivo TOCADO y línea) ANTES del `down`; y
+     * una desde run_migrations, antes del `migrate`. Una sola vez por corrida.
+     */
+    public function test_reanudar_desde_upload_api_o_run_migrations_deja_la_marca_antes_de_tocar(): void
+    {
+        $e = $this->escenario();
+        $this->artefactos_en_github($e['to']);
+        $ruta = $this->respaldo_en_disco($e, [], false);
+
+        $error = $this->correr($this->servicio($e['upgrade']), 'upload_api');
+        $this->assertNull($error, $error === null ? '' : $error->getMessage() . "\n" . $this->logs($e['upgrade']));
+
+        $marca = $this->ssh->posicion_de("> '" . $ruta . '/' . DeploymentService::ARCHIVO_TOCADO . "'");
+        $this->assertNotNull($marca, $this->ssh->todo());
+        $this->assertLessThan($this->ssh->posicion_de('php artisan down'), $marca);
+        $this->assertCount(1, $this->comandos_con("> '" . $ruta . '/' . DeploymentService::ARCHIVO_TOCADO . "'"));
+        $this->assertStringContainsString(DeploymentService::MARCA_SISTEMA_TOCADO . 'upload_api', $this->logs($e['upgrade']));
+
+        /* Desde run_migrations (con el down de antes): la marca va antes del migrate. */
+        $this->ssh = new SshDelDeploymentFake();
+        $otro      = $this->escenario();
+        $ruta      = $this->respaldo_en_disco($otro, [], false);
+        $this->ssh->responder('storage/framework/down', 'CC_YA_EN_MANTENIMIENTO');
+
+        $error = $this->correr($this->servicio($otro['upgrade']), 'run_migrations');
+        $this->assertNull($error, $error === null ? '' : $error->getMessage() . "\n" . $this->logs($otro['upgrade']));
+
+        $marca = $this->ssh->posicion_de("> '" . $ruta . '/' . DeploymentService::ARCHIVO_TOCADO . "'");
+        $this->assertNotNull($marca, $this->ssh->todo());
+        $this->assertLessThan($this->ssh->posicion_de('php artisan migrate --force'), $marca);
+        $this->assertStringContainsString(DeploymentService::MARCA_SISTEMA_TOCADO . 'run_migrations', $this->logs($otro['upgrade']));
+    }
+
+    /**
      * 🔴 E. Con el sistema en mantenimiento no se reanuda desde una etapa que va DESPUÉS del up (los
      * comandos o la pausa): frena sin correr ningún comando ni marcar el paso del up, y la línea de la
      * etapa que falló nombra la última etapa de la ventana.

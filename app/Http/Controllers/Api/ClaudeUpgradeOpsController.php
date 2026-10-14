@@ -181,8 +181,20 @@ class ClaudeUpgradeOpsController extends Controller
      */
     const TEXTOS_DEL_GATE_EN_EL_LUGAR = [
         'abierto'   => 'un despliegue EN EL LUGAR reemplaza el código que está atendiendo y deja el sistema en '
-            . 'mantenimiento mientras sube la API y corren las migraciones, los seeders y los comandos',
+            . 'mantenimiento mientras sube la API y corren las migraciones y los seeders (los comandos, después, con el '
+            . 'sistema arriba)',
         'por_abrir' => 'El despliegue en el lugar lo agarraría con el negocio por abrir.',
+    ];
+
+    /**
+     * Textos del gate cuando cuida los COMANDOS de un despliegue en el lugar (el reintento de
+     * comandos, o reanudar los comandos o la pausa): corren sobre el sistema en uso, ya arriba. La
+     * regla es la del en el lugar (la madrugada pasa, un receso no), no la del post-cierre viejo
+     * (misión `un-solo-frente`, 14/10/2026).
+     */
+    const TEXTOS_DEL_GATE_COMANDOS_EN_EL_LUGAR = [
+        'abierto'   => 'los comandos de un despliegue en el lugar corren sobre el sistema en uso',
+        'por_abrir' => 'Los comandos lo agarrarían con el negocio por abrir.',
     ];
 
     /**
@@ -426,8 +438,8 @@ class ClaudeUpgradeOpsController extends Controller
     /**
      * Arranca el pipeline PRE-CIERRE: compile_spa → backup_in_place → upload_spa → upload_api →
      * sync_env_keys → sync_pusher_template → run_migrations → restart_queue_workers → pause_for_crons.
-     * EN EL LUGAR, con run_seeders → run_commands adentro, antes del reinicio del worker y del
-     * `artisan up` (DeploymentService::SECUENCIA_EN_EL_LUGAR).
+     * EN EL LUGAR, con run_seeders adentro de la ventana (antes del reinicio del worker y del `artisan
+     * up`) y run_commands después del `up` (DeploymentService::SECUENCIA_EN_EL_LUGAR).
      *
      * 🔴 En una ROTACIÓN acá NO hay gate de horario, y es a propósito: el pre-cierre sube el código
      * a la API DESTINO, que no es la que atiende, así que se puede correr con el negocio abierto.
@@ -442,8 +454,12 @@ class ClaudeUpgradeOpsController extends Controller
      * atendía; en el lugar se pisa el SPA vivo y el sistema queda en mantenimiento hasta que terminan
      * migraciones, seeders y comandos.
      *
-     * 🔴 Una REANUDACIÓN en el lugar no pasa por el gate: el cliente ya está tocado (puede estar en
-     * mantenimiento), y el gate frena la salida limpia, no la terminación. Queda en el log diario.
+     * 🔴 Una REANUDACIÓN en el lugar no pasa por el gate SOLO si este upgrade ya tocó el sistema vivo
+     * (la marca en sus logs, también la heredada) y la etapa es de la ventana (anterior al `artisan
+     * up`, o la del `up`): ahí el gate frenaría la terminación de un despliegue que dejó al cliente a
+     * medias. Reanudar los comandos o la pausa, con el cliente ya arriba, lleva el gate del en el
+     * lugar. Y una etapa POSTERIOR a la que falló (o posterior a upload_spa sin el SPA nuevo
+     * desplegado) se rechaza: DeploymentService::reanudacion_en_el_lugar_invalida().
      *
      * La destino activa que NO es el principal sigue pidiendo `allow_deploy_to_active_api` (bloque
      * "Freno 3"), y la bandera sigue valiendo en los dos casos: con ella el `start` pasa sin gate, como
@@ -555,6 +571,23 @@ class ClaudeUpgradeOpsController extends Controller
             'frente_principal_client_api_id' => $frente_principal_id,
         ];
 
+        /* 🔴 En el lugar no se reanuda desde una etapa POSTERIOR a la que falló, ni más allá de
+           upload_spa si el SPA nuevo no se llegó a desplegar. Medido por el verificador: reanudar desde
+           upload_api con el SPA viejo terminaba `paused` con SPA viejo y API nueva, sin decirlo. */
+        if ($etapa_de_reanudacion !== null && $modo === Client::MODO_EN_EL_LUGAR) {
+            $invalida = DeploymentService::reanudacion_en_el_lugar_invalida((int) $upgrade->id, $etapa_de_reanudacion);
+            if ($invalida !== null) {
+                $fallo = DeploymentService::etapa_que_fallo_segun_los_logs((int) $upgrade->id);
+
+                return $this->error_422($invalida . ' No se encoló nada.', array_merge($contexto_del_destino, [
+                    'resume_from_step' => $etapa_de_reanudacion,
+                    'etapa_que_fallo'  => $fallo === null ? null : $fallo['etapa'],
+                    'ayuda'            => 'GET claude/upgrades/' . (int) $upgrade->id . ' dice en siguiente_accion desde '
+                        . 'dónde reanudar.',
+                ]));
+            }
+        }
+
         /*
          * Freno 3: desplegar sobre la API ACTIVA es desplegar encima de la instancia que atiende.
          *
@@ -601,16 +634,22 @@ class ClaudeUpgradeOpsController extends Controller
                terminación de un despliegue que dejó al cliente a medias. Si no tocó nada, reanudar es
                una salida limpia más y lleva el gate como un arranque limpio. Medido por el verificador:
                a las 12:00, `resume_from_step=compile_spa` sin haber tocado nada daba 202. */
+            /* Y solo desde una etapa de la ventana (anterior al `up`, o la del `up`): los comandos y la
+               pausa corren con el cliente ya arriba, sobre el sistema en uso, y llevan el gate. */
             $sistema_tocado = $etapa_de_reanudacion !== null
+                && DeploymentService::etapa_antes_del_up($etapa_de_reanudacion)
                 && DeploymentService::sistema_vivo_tocado_segun_los_logs((int) $upgrade->id);
 
             if (! $sistema_tocado) {
+                $despues_del_up = $etapa_de_reanudacion !== null
+                    && ! DeploymentService::etapa_antes_del_up($etapa_de_reanudacion);
+
                 $gate = $this->aplicar_gate_de_horario(
                     $request,
                     $client,
                     $upgrade,
-                    'el pre-cierre en el lugar',
-                    self::TEXTOS_DEL_GATE_EN_EL_LUGAR,
+                    $despues_del_up ? 'la reanudación de los comandos en el lugar' : 'el pre-cierre en el lugar',
+                    $despues_del_up ? self::TEXTOS_DEL_GATE_COMANDOS_EN_EL_LUGAR : self::TEXTOS_DEL_GATE_EN_EL_LUGAR,
                     $contexto_del_destino,
                     self::MINUTOS_MINIMOS_ANTES_DE_LA_PRIMERA_APERTURA
                 );
@@ -689,11 +728,16 @@ class ClaudeUpgradeOpsController extends Controller
         if ($modo === Client::MODO_EN_EL_LUGAR) {
             $respuesta['en_el_lugar'] = $this->que_hace_el_pipeline_en_el_lugar();
             if ($etapa_de_reanudacion !== null && ! $con_bandera && $es_el_principal) {
-                $respuesta['gate_de_horario'] = DeploymentService::sistema_vivo_tocado_segun_los_logs((int) $upgrade->id)
-                    ? 'no aplica: es una reanudación en el lugar y este upgrade ya tocó el sistema vivo (el gate frena la '
-                        . 'salida limpia, no la terminación). Quedó en el log diario.'
-                    : 'aplicado: es una reanudación en el lugar, pero este upgrade todavía no tocó el sistema vivo, así '
-                        . 'que es una salida limpia más.';
+                if (! DeploymentService::etapa_antes_del_up($etapa_de_reanudacion)) {
+                    $respuesta['gate_de_horario'] = 'aplicado: es una reanudación en el lugar de una etapa posterior al '
+                        . 'artisan up (los comandos o la pausa), que corre con el cliente ya arriba, sobre el sistema en uso.';
+                } elseif (DeploymentService::sistema_vivo_tocado_segun_los_logs((int) $upgrade->id)) {
+                    $respuesta['gate_de_horario'] = 'no aplica: es una reanudación en el lugar y este upgrade ya tocó el '
+                        . 'sistema vivo (el gate frena la salida limpia, no la terminación). Quedó en el log diario.';
+                } else {
+                    $respuesta['gate_de_horario'] = 'aplicado: es una reanudación en el lugar, pero este upgrade todavía no '
+                        . 'tocó el sistema vivo, así que es una salida limpia más.';
+                }
             }
         }
 
@@ -710,7 +754,8 @@ class ClaudeUpgradeOpsController extends Controller
                 ? 'Se desplegó sobre la API ACTIVA en producción porque vino allow_deploy_to_active_api=true.'
                 : 'Se despliega EN EL LUGAR sobre el frente principal, que es la API ACTIVA: el pipeline respalda '
                     . 'código, SPA y base antes de tocar nada, y deja el sistema en mantenimiento desde que reemplaza la '
-                    . 'API hasta que terminan las migraciones, los seeders y los comandos.';
+                    . 'API hasta que terminan las migraciones y los seeders; los comandos corren después, con el sistema '
+                    . 'arriba.';
         }
 
         return response()->json($respuesta, 202);
@@ -1003,6 +1048,11 @@ class ClaudeUpgradeOpsController extends Controller
      * en el post-cierre: `force=true` + `force_reason` de al menos FORCE_REASON_MINIMO caracteres, y
      * queda registrado en el log diario.
      *
+     * EN EL LUGAR (misión `un-solo-frente`, 14/10/2026) el gate es el del en el lugar —la jornada
+     * terminada, o la madrugada con MINUTOS_MINIMOS_ANTES_DE_LA_PRIMERA_APERTURA antes de abrir; un
+     * receso entre turnos rechaza—, no el del post-cierre: los comandos son el final del despliegue
+     * que Lucas decidió hacer de madrugada. El panel sigue sin gate, por lo de arriba.
+     *
      * ⚠️ A diferencia de `start`, este endpoint **NO borra los logs** del intento anterior: el
      * motivo por el que un comando falló es justo lo que hace falta para decidir si reintentar. Se
      * declara en la respuesta.
@@ -1121,8 +1171,24 @@ class ClaudeUpgradeOpsController extends Controller
             );
         }
 
-        /* 🔴 El freno que el panel NO tiene. Ver el docblock de este método. */
-        $gate = $this->aplicar_gate_de_horario($request, $client, $upgrade, 'el reintento de comandos');
+        /* 🔴 El freno que el panel NO tiene. Ver el docblock de este método.
+           En el lugar (misión `un-solo-frente`, 14/10/2026) con la regla del en el lugar —la madrugada
+           con 120 minutos antes de la primera apertura pasa, un receso no—: es la que eligió Lucas para
+           tocar el sistema del cliente, y los comandos del en el lugar son el final de ese despliegue.
+           En una rotación, el gate del post-cierre de siempre. */
+        if ($client->modo_de_despliegue_hacia($upgrade->target_client_api_id) === Client::MODO_EN_EL_LUGAR) {
+            $gate = $this->aplicar_gate_de_horario(
+                $request,
+                $client,
+                $upgrade,
+                'el reintento de comandos en el lugar',
+                self::TEXTOS_DEL_GATE_COMANDOS_EN_EL_LUGAR,
+                ['modo' => Client::MODO_EN_EL_LUGAR],
+                self::MINUTOS_MINIMOS_ANTES_DE_LA_PRIMERA_APERTURA
+            );
+        } else {
+            $gate = $this->aplicar_gate_de_horario($request, $client, $upgrade, 'el reintento de comandos');
+        }
         if ($gate['rechazo'] !== null) {
             return $gate['rechazo'];
         }
@@ -1145,6 +1211,10 @@ class ClaudeUpgradeOpsController extends Controller
 
         if ($gate['salteado'] !== null) {
             $respuesta['gate_de_horario_salteado'] = $gate['salteado'];
+        }
+
+        if ($gate['madrugada'] !== null) {
+            $respuesta['gate_de_horario_madrugada'] = $gate['madrugada'];
         }
 
         return response()->json($respuesta, 202);
@@ -1958,10 +2028,11 @@ class ClaudeUpgradeOpsController extends Controller
                 . 'allow_deploy_to_active_api pero sí el gate de horario del en el lugar: la jornada de hoy terminada, o '
                 . 'todavía no abrió hoy y faltan al menos ' . self::MINUTOS_MINIMOS_ANTES_DE_LA_PRIMERA_APERTURA
                 . ' minutos para la primera apertura (la madrugada); si no, force + force_reason. Una reanudación pasa sin '
-                . 'gate solo si este upgrade ya tocó el sistema vivo. El pipeline respalda código, SPA y base antes de tocar nada (backup_in_place), sube la API '
-                . 'antes de tocar el SPA, y deja el sistema en mantenimiento desde upload_api hasta después de las '
-                . 'migraciones y los seeders; los comandos corren con el sistema arriba. Una reanudación pasa sin gate '
-                . 'solo si este upgrade ya tocó el sistema vivo.';
+                . 'gate solo si este upgrade ya tocó el sistema vivo y la etapa es anterior al artisan up (o la del up); '
+                . 'nunca se acepta una etapa posterior a la que falló. El pipeline respalda código, SPA y base antes de '
+                . 'tocar nada (backup_in_place), sube la API antes de tocar el SPA, y deja el sistema en mantenimiento '
+                . 'desde upload_api hasta después de las migraciones y los seeders; los comandos corren con el sistema '
+                . 'arriba (su reintento lleva el gate del en el lugar).';
         }
 
         if ($modo === Client::MODO_ROTACION) {
