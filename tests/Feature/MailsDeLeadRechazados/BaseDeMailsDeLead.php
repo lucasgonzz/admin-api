@@ -230,33 +230,6 @@ abstract class BaseDeMailsDeLead extends TestCase
     }
 
     /**
-     * Lead de la dinámica VIEJA con todos los datos que exige el Mail 1: nombre, documento, demo
-     * asignada, día y horario.
-     *
-     * @param array<string, mixed> $atributos Sobrescriben los del lead.
-     *
-     * @return Lead
-     */
-    protected function crear_lead_de_la_dinamica_vieja(array $atributos = []): Lead
-    {
-        $demo = $this->crear_demo(1);
-
-        $lead = $this->crear_lead(array_merge([
-            'status'          => 'demo_agendada',
-            'doc_number'      => '30111222',
-            'demo_id'         => $demo->id,
-            'demo_date'       => '2026-09-08',
-            'demo_start_time' => '10:00',
-            'demo_end_time'   => '11:00',
-        ], $atributos));
-
-        $lead->demo_experiencia = Lead::EXPERIENCIA_ACTUAL;
-        $lead->save();
-
-        return $lead->refresh();
-    }
-
-    /**
      * Lo que tiene que valer después de un envío que el servidor RECHAZÓ: la ficha NO lo cuenta como
      * enviado y deja el motivo (sin la casilla entera) donde el panel lo muestra como "Fallido".
      *

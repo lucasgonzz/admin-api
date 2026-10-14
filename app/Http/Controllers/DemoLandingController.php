@@ -2,12 +2,14 @@
 
 namespace App\Http\Controllers;
 
-use App\Mail\Helpers\LeadDemoMailHelper;
 use App\Models\Lead;
 use Illuminate\Support\Facades\Log;
 
 /**
  * Landing pública de la demo por lead (prompt 213).
+ *
+ * 🔴 RETIRADA el 14/10/2026 (misión demo-solo-experiencia-nueva): hoy solo redirige a la página de
+ * experiencia del lead. El texto de abajo describe lo que hacía antes y se deja como historia.
  *
  * Todo lo que hoy vive únicamente en el Mail 1 (videos tutoriales, datos de
  * acceso, tienda demo, día y horario del turno) también tiene que estar
@@ -42,20 +44,24 @@ class DemoLandingController extends Controller
             abort(404);
         }
 
-        // Datos del acceso listos: demo asignada y documento cargado (usado como
-        // usuario/contraseña). Sin esto no hay credenciales reales que mostrar.
-        $acceso_listo = ! empty($lead->demo_id) && ! empty($lead->doc_number);
+        // 🔴 Landing RETIRADA (misión demo-solo-experiencia-nueva, 14/10/2026). Esta página
+        // mostraba el link del sistema, el usuario y la contraseña de la demo (doc_number) a
+        // cualquiera que tuviera el uuid, SIN pasar por la página de experiencia ni por su
+        // formulario: justo lo que Lucas pidió que no pueda pasar. Los uuid ya viajaron en el
+        // Mail 1 y por WhatsApp de la dinámica vieja, así que la ruta no se borra: esos links
+        // viejos siguen resolviendo y llevan al lead a su página de experiencia, que es la única
+        // puerta de entrada a la demo.
+        $url_experiencia = $lead->demo_experiencia_url;
+        if (empty($url_experiencia)) {
+            // Sin URL de experiencia armable (ADMIN_SPA_URL sin configurar): antes de mostrar
+            // credenciales se prefiere un 404.
+            abort(404);
+        }
 
-        // Misma fuente de datos que el Mail 1, para que ambos canales muestren
-        // siempre la misma información (nombre, día, horario, videos, accesos).
-        $data = LeadDemoMailHelper::build_view_data($lead);
-        $data['acceso_listo'] = $acceso_listo;
-
-        // Log de visita: solo lead_id, sin datos sensibles del lead.
-        Log::info('DemoLandingController@show: visita a landing de demo.', [
+        Log::info('DemoLandingController@show: link viejo de landing redirigido a la experiencia.', [
             'lead_id' => $lead->id,
         ]);
 
-        return view('demo.landing', $data);
+        return redirect()->away($url_experiencia);
     }
 }

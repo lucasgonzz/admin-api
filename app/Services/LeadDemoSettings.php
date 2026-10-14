@@ -186,11 +186,15 @@ class LeadDemoSettings
     public const KEY_RECALL_BOT_MINUTOS_ANTES = 'recall_bot_minutos_antes';
 
     /**
-     * Clave: dinámica de demo con la que nacen los leads nuevos (grupo 293, prompt 01).
+     * Clave: dinámica de demo con la que nacían los leads nuevos (grupo 293, prompt 01).
      *
-     * Es la setting de "con qué dinámica se estampan los leads nuevos al crearse" — no la lee el
-     * runtime en cada mensaje, solo el hook `creating` del modelo Lead. Ver comentario de la
-     * migración `2026_07_31_140000_add_demo_experiencia_to_leads_table` para el porqué.
+     * 🔴 Desde el 14/10/2026 (misión demo-solo-experiencia-nueva) es una setting INERTE: la
+     * dinámica 'actual' está retirada y todos los leads usan la experiencia nueva, así que
+     * `get_experiencia_default()` devuelve siempre 'nueva' sin leer lo guardado y
+     * `persist_from_request()` no escribe nunca 'actual'. La clave se conserva para no romper el
+     * contrato del PUT de configuración (el SPA todavía manda `experiencia_default`) y por lo que
+     * ya hay guardado en producción. Ver comentario de la migración
+     * `2026_07_31_140000_add_demo_experiencia_to_leads_table` para el origen.
      */
     public const KEY_EXPERIENCIA_DEFAULT = 'demo_experiencia_default';
 
@@ -383,8 +387,8 @@ class LeadDemoSettings
     /** Valor por defecto: minutos antes de la llamada del closer para enviar el bot de Recall.ai. */
     private const DEFAULT_RECALL_BOT_MINUTOS_ANTES = 5;
 
-    /** Valor por defecto: dinámica de demo para leads nuevos (la que hoy funciona en producción). */
-    private const DEFAULT_EXPERIENCIA = 'actual';
+    /** Valor por defecto —y único vigente— de la dinámica de demo: la experiencia nueva (14/10/2026). */
+    private const DEFAULT_EXPERIENCIA = 'nueva';
 
     /** Valor por defecto: tema de la página de experiencia — el que ya está en producción hoy. */
     private const DEFAULT_EXPERIENCIA_TEMA = 'oscuro';
@@ -416,8 +420,12 @@ class LeadDemoSettings
     /** Valores válidos para la frecuencia de slots (minutos). */
     public const VALID_FRECUENCIA_SLOTS = [5, 10, 15, 30, 60];
 
-    /** Valores válidos para la dinámica de demo (`demo_experiencia` / `demo_experiencia_default`). */
-    public const VALID_EXPERIENCIAS = ['actual', 'nueva'];
+    /**
+     * Valores que se aceptan GUARDAR para la dinámica de demo (`demo_experiencia_default`).
+     * Desde el 14/10/2026 solo 'nueva': 'actual' está retirada y un PUT que la mande (un SPA
+     * anterior a la misión) se ignora en silencio en vez de guardarla.
+     */
+    public const VALID_EXPERIENCIAS = ['nueva'];
 
     /** Valores válidos para el tema de la página de experiencia (`demo_experiencia_tema`). */
     public const VALID_TEMAS = ['oscuro', 'claro'];
@@ -661,6 +669,9 @@ class LeadDemoSettings
         // Dinámica de demo default para leads nuevos: guarda isset obligatoria, el SPA todavía no
         // manda este campo (lo agrega el prompt 04) y el update() de settings tiene que seguir
         // funcionando igual en el intervalo entre el deploy del backend y el del front.
+        // 🔴 Desde el 14/10/2026 solo se guarda 'nueva' (VALID_EXPERIENCIAS); si llega 'actual'
+        // (un admin-spa viejo que todavía ofrece la opción) NO se guarda ni se rechaza: se ignora,
+        // así el PUT del resto de la configuración sigue andando y la dinámica retirada no vuelve.
         if (isset($data['experiencia_default'])) {
             $experiencia = (string) $data['experiencia_default'];
             if (in_array($experiencia, self::VALID_EXPERIENCIAS, true)) {
@@ -1248,22 +1259,19 @@ class LeadDemoSettings
     }
 
     /**
-     * Dinámica de demo con la que se estampan los leads nuevos al crearse.
+     * Dinámica de demo de los leads.
      *
-     * Si el valor guardado en `admin_settings` no está en VALID_EXPERIENCIAS (setting corrupta o
-     * nunca configurada), devuelve 'actual': un valor basura acá nunca puede terminar sirviéndole
-     * al agente una variante que no existe.
+     * 🔴 Desde el 14/10/2026 (misión demo-solo-experiencia-nueva) devuelve SIEMPRE 'nueva', sin
+     * leer lo guardado en `admin_settings`: la dinámica 'actual' está retirada y en producción la
+     * clave `demo_experiencia_default` puede seguir guardada con cualquier valor viejo (incluso
+     * 'actual') sin que eso cambie nada. Antes devolvía lo guardado si era válido y 'actual' si
+     * no. `Lead` ya no consulta este método al crear (su hook `saving` fuerza 'nueva'); se
+     * conserva porque `to_array()` lo expone al panel de configuración.
      *
-     * @return string
+     * @return string Siempre 'nueva'.
      */
     public static function get_experiencia_default(): string
     {
-        $stored = (string) AdminSetting::get(self::KEY_EXPERIENCIA_DEFAULT, self::DEFAULT_EXPERIENCIA);
-
-        if (in_array($stored, self::VALID_EXPERIENCIAS, true)) {
-            return $stored;
-        }
-
         return self::DEFAULT_EXPERIENCIA;
     }
 

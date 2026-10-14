@@ -71,7 +71,8 @@ class OfertaAceptadaNoCaducaPorMargenTest extends TestCase
 
         // Grilla previsible y de día completo, para que los horarios de los tests existan de
         // verdad en la disponibilidad. El horario del closer va igual de ancho porque la dinámica
-        // ACTUAL (caso h) resuelve su grilla contra él y no contra la franja de la demo.
+        // ACTUAL (caso h, eliminado el 14/10/2026 al retirarla) resolvía su grilla contra él y no
+        // contra la franja de la demo; se deja ancho por si algún camino todavía lo consulta.
         AdminSetting::set(LeadDemoSettings::KEY_DEMO_HORARIO_LUNES_VIERNES, '00:00-23:59');
         AdminSetting::set(LeadDemoSettings::KEY_DEMO_HORARIO_SABADO, '00:00-23:59');
         AdminSetting::set(LeadDemoSettings::KEY_DEMO_HORARIO_DOMINGO, '00:00-23:59');
@@ -406,31 +407,6 @@ class OfertaAceptadaNoCaducaPorMargenTest extends TestCase
         /* 16:57 + margen de 5 = 17:02: las 17:00 no se pueden ofrecer, las 17:05 sí. */
         $this->assertNotContains('17:00', $slots, 'La grilla de ofrecer perdió el margen: el agente ofrecería turnos que la instancia no llega a preparar.');
         $this->assertContains('17:05', $slots, 'La grilla de ofrecer dejó de traer el primer horario válido.');
-    }
-
-    /**
-     * (h) La dinámica ACTUAL queda intacta: el gate por dinámica corta antes de cualquier
-     *     recálculo, así que un lead `actual` se sigue comportando igual que antes de la misión —
-     *     su margen es el fijo de 30 y su grilla ni siquiera incluye el día de hoy.
-     *
-     * @return void
-     */
-    public function test_la_dinamica_actual_queda_intacta(): void
-    {
-        Carbon::setTestNow($this->momento_de_la_oferta());
-
-        $demo = $this->crear_demo();
-        $lead = $this->crear_lead();
-        $lead->demo_experiencia = Lead::EXPERIENCIA_ACTUAL;
-        $lead->save();
-
-        /* Un horario a 10 minutos vista, ofrecido y enviado: en la dinámica nueva se rescataría;
-         * acá tiene que rechazarse igual que siempre. */
-        $this->mensaje_ya_enviado_ofreciendo($lead, self::FECHA, '17:07');
-        $mensaje        = $this->mensaje_pendiente($lead, $demo, self::FECHA, '17:07');
-        $texto_que_leyo = $mensaje->content;
-
-        $this->assertSeFrenaYNoSeEnvia($lead, $mensaje, $texto_que_leyo, $demo);
     }
 
     /* ------------------------------------------------------------------ */

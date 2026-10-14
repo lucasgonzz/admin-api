@@ -570,35 +570,6 @@ class RespuestasFormularioDemoPanelTest extends TestCase
     }
 
     /**
-     * 7. Un lead de la dinámica ACTUAL no tiene formulario que editar: 422 y no se escribe nada.
-     *
-     * @return void
-     */
-    public function test_un_lead_de_la_dinamica_actual_no_puede_editar_el_formulario(): void
-    {
-        $this->autenticar_admin();
-
-        $lead                  = $this->crear_lead(Lead::EXPERIENCIA_ACTUAL);
-        $lead->use_price_lists = false;
-        $lead->save();
-
-        $respuesta = $this->guardar_desde_el_panel($lead, ['tipo_precios' => 'listas']);
-        $respuesta->assertStatus(422);
-
-        $lead = $lead->fresh();
-
-        $this->assertFalse((bool) $lead->use_price_lists, 'El endpoint escribió las columnas de un lead de la dinámica actual.');
-        $this->assertNull($lead->demo_form_editado_admin_at, 'Quedó la marca de edición manual en un lead sin formulario.');
-        $this->assertSame(0, LeadMessage::where('lead_id', $lead->id)->count(), 'Se escribió un mensaje en el hilo de un lead que no tiene formulario.');
-
-        // Y el detalle de ese lead trae la tarjeta marcada como no editable, para que el modal
-        // muestre el cartel en vez del formulario.
-        $detalle = $this->getJson('/api/admin/lead/' . $lead->id);
-        $detalle->assertStatus(200);
-        $this->assertFalse($detalle->json('model.demo_form_panel.editable'));
-    }
-
-    /**
      * 8. 🔴 CON EL CATÁLOGO SIN SINCRONIZAR, GUARDAR NO SE LLEVA PUESTO EL ROADMAP.
      *
      * El defecto que cubre: el endpoint borraba y PERSISTÍA el plan y los hitos antes de

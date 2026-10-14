@@ -4,7 +4,6 @@ namespace Tests\Feature\MailsDeLeadRechazados;
 
 use App\Exceptions\MailRechazadoPorElServidorException;
 use App\Mail\LeadDemoAccesoMail;
-use App\Mail\LeadDemoMail;
 use App\Models\AdminSetting;
 use App\Models\Lead;
 use App\Models\LeadMessage;
@@ -21,10 +20,11 @@ use Illuminate\Support\Facades\Mail;
  * al aprobar un paquete de acciones desde el panel), cuando el servidor de correo RECHAZA la casilla.
  *
  * Son los puntos 7, 8 y 9 de la misión mails-a-leads-rechazados-por-smtp (6/10/2026), con cinco
- * disparadores distintos:
+ * disparadores distintos. 🔴 Los puntos 7 y 8 (Mail 1 de la dinámica vieja: forzado por el admin y
+ * reenviado a pedido del lead) se SACARON el 14/10/2026, misión demo-solo-experiencia-nueva: esa
+ * dinámica está retirada, ningún lead recibe ya el Mail 1 y un lead sale siempre por la carta. Quedan
+ * los tres caminos del punto 9:
  *
- *   7. Mail 1 (dinámica vieja), FORZADO por el admin al aprobar (`enviar_mail_demo`).
- *   8. Mail 1 (dinámica vieja), REENVIADO a pedido del lead (`reenviar_mail_demo`).
  *   9. Carta de acceso (dinámica nueva), por tres caminos:
  *        9a. al ASIGNAR la demo directa;
  *        9e. cuando el EMAIL llega después (`guardar_email`);
@@ -87,15 +87,13 @@ class EnviosDeLaIaRechazadosTest extends BaseDeMailsDeLead
     }
 
     /**
-     * Los cinco disparadores de mail de la IA, para el data provider.
+     * Los tres disparadores de mail de la IA, para el data provider.
      *
      * @return array<string, array<int, string>>
      */
     public static function disparadores(): array
     {
         return [
-            'punto 7: Mail 1 forzado por el admin'          => ['mail_1_forzado'],
-            'punto 8: Mail 1 reenviado a pedido del lead'   => ['mail_1_reenviado'],
             'punto 9a: carta al asignar la demo'            => ['carta_por_asignacion'],
             'punto 9e: carta cuando llega el email nuevo'   => ['carta_por_email_nuevo'],
             'punto 9r: carta reenviada a pedido del lead'   => ['carta_por_reenvio'],
@@ -113,7 +111,6 @@ class EnviosDeLaIaRechazadosTest extends BaseDeMailsDeLead
     public static function disparadores_con_email_nuevo(): array
     {
         return [
-            'punto 7: Mail 1 cuando llega el email nuevo'   => ['mail_1_por_email_nuevo'],
             'punto 9e: carta cuando llega el email nuevo'   => ['carta_por_email_nuevo'],
         ];
     }
@@ -147,41 +144,6 @@ class EnviosDeLaIaRechazadosTest extends BaseDeMailsDeLead
     private function armar(string $clave): array
     {
         switch ($clave) {
-            case 'mail_1_forzado':
-                // Dinámica vieja, ya agendada, con el mail todavía sin salir: el admin tilda "enviar Mail 1".
-                $lead = $this->con_un_mensaje_entrante($this->crear_lead_de_la_dinamica_vieja());
-
-                return [
-                    'lead'          => $lead,
-                    'pendientes'    => [],
-                    'final_actions' => $this->final_actions(['enviar_mail_demo' => true]),
-                    'reintento'     => $this->final_actions(['enviar_mail_demo' => true]),
-                    'mailable'      => LeadDemoMail::class,
-                    'enviado_antes' => null,
-                    // Con el mail forzado y sin email nuevo, el evento de éxito que ya existe se llama "reagendado".
-                    'evento_ok'     => 'Mail de demo reenviado (reagendado)',
-                    'evento_fallo'  => 'Mail de demo no enviado: el servidor de correo rechazó la casilla',
-                    'evento_falla'  => 'Mail de demo no enviado: falló el envío',
-                ];
-
-            case 'mail_1_reenviado':
-                // Dinámica vieja con el Mail 1 ya enviado hace horas: el lead pide que se lo reenvíen.
-                $lead = $this->con_un_mensaje_entrante($this->crear_lead_de_la_dinamica_vieja([
-                    'demo_mail_sent_at' => self::ENVIADO_ANTES,
-                ]));
-
-                return [
-                    'lead'          => $lead,
-                    'pendientes'    => [],
-                    'final_actions' => $this->final_actions(['reenviar_mail_demo' => true]),
-                    'reintento'     => $this->final_actions(['reenviar_mail_demo' => true]),
-                    'mailable'      => LeadDemoMail::class,
-                    'enviado_antes' => self::ENVIADO_ANTES,
-                    'evento_ok'     => 'Mail de demo reenviado (pedido del lead)',
-                    'evento_fallo'  => 'Mail de demo no enviado: el servidor de correo rechazó la casilla',
-                    'evento_falla'  => 'Mail de demo no enviado: falló el envío',
-                ];
-
             case 'carta_por_asignacion':
                 // Dinámica nueva sin demo: al aprobar `{ahora: true}` se asigna la instancia y sale la carta.
                 $demo = $this->crear_demo(1);
@@ -219,24 +181,6 @@ class EnviosDeLaIaRechazadosTest extends BaseDeMailsDeLead
                     'evento_ok'     => 'Carta de acceso enviada',
                     'evento_fallo'  => 'Carta de acceso no enviada: el servidor de correo rechazó la casilla',
                     'evento_falla'  => 'Carta de acceso no enviada: falló el envío',
-                ];
-
-            case 'mail_1_por_email_nuevo':
-                // Dinámica vieja, ya agendada y SIN email: el lead lo pasa después y llega como `guardar_email`. Es el único
-                // camino del Mail 1 donde el paquete trae `guardar_email`, y por eso el único donde el resumen de acciones
-                // de la burbuja dice "Enviar mail de acceso a la demo a <casilla>" (ver los tests del resumen).
-                $lead = $this->con_un_mensaje_entrante($this->crear_lead_de_la_dinamica_vieja(['email' => null]));
-
-                return [
-                    'lead'          => $lead,
-                    'pendientes'    => ['guardar_email' => self::CASILLA],
-                    'final_actions' => $this->final_actions(['guardar_email' => self::CASILLA, 'enviar_mail_demo' => true]),
-                    'reintento'     => $this->final_actions(['enviar_mail_demo' => true]),
-                    'mailable'      => LeadDemoMail::class,
-                    'enviado_antes' => null,
-                    'evento_ok'     => 'Mail de demo enviado',
-                    'evento_fallo'  => 'Mail de demo no enviado: el servidor de correo rechazó la casilla',
-                    'evento_falla'  => 'Mail de demo no enviado: falló el envío',
                 ];
 
             default:
