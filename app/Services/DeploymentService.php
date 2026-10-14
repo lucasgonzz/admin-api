@@ -202,24 +202,74 @@ class DeploymentService
     private $modo;
 
     /**
-     * Directorio del respaldo de este despliegue en el servidor del cliente: el que hizo
-     * step_backup_in_place() en esta corrida, o el que dejó anotado en los logs una corrida anterior
-     * del mismo upgrade (reanudación). Null en una rotación. Se nombra en las líneas de
-     * mantenimiento, para que quien tenga que volver atrás sepa dónde está.
+     * ¿Este despliegue se respalda antes de tocar nada? (misión `un-solo-frente`, 14/10/2026).
+     *
+     * Sí en dos casos, y no solo en el lugar:
+     *  - EN EL LUGAR: se pisa el código que atiende y la base viva.
+     *  - La ÚLTIMA ROTACIÓN hacia el frente principal: el código va a la carpeta que no atiende,
+     *    pero las migraciones pegan sobre la MISMA base viva (los dos frentes comparten base). Y si
+     *    `active_client_api_id` estuviera cargado al revés, el principal sería el que atiende de
+     *    verdad.
+     * El mantenimiento (`down`/`up`) y el orden nuevo de seeders, en cambio, son solo del en el lugar.
+     *
+     * @var bool
+     */
+    private $respalda = false;
+
+    /**
+     * True si esta corrida sigue la secuencia PRE-CIERRE del en el lugar, la que corre seeders y
+     * comandos adentro de la ventana de mantenimiento (resolver_secuencia()). False en el post-cierre
+     * del en el lugar (que encuentra todo ya corrido) y en cualquier rotación.
+     *
+     * @var bool
+     */
+    private $en_ventana_de_mantenimiento = false;
+
+    /**
+     * Directorio del respaldo de este upgrade en el servidor del cliente. 🔴 Sale del DISCO (lo
+     * deja step_backup_in_place() o lo encuentra assert_respaldo_previo_si_reanuda()), no de
+     * `deployment_logs`: un `deploy/start` limpio borra los logs, y el respaldo sigue estando. Null si
+     * esta corrida no lo necesitó. Se nombra en las líneas de mantenimiento, para que quien tenga que
+     * volver atrás sepa dónde está.
      *
      * @var string|null
      */
     private $ruta_del_respaldo = null;
 
     /**
-     * True desde que el sistema del cliente PUEDE estar en mantenimiento (`artisan down` salió bien
-     * en esta corrida, o la corrida reanuda desde una etapa que viene después del `down` de un
-     * intento anterior) hasta que `artisan up` sale bien. Lo mira run() para decir, en una línea
+     * True mientras el sistema del cliente PUEDE estar en mantenimiento: desde que `artisan down`
+     * salió bien en esta corrida, o desde el arranque si `storage/framework/down` ya existía (lo dejó
+     * un intento anterior), hasta que `artisan up` sale bien. Lo mira run() para decir, en una línea
      * propia, que el cliente quedó en mantenimiento si algo falla en el medio.
      *
      * @var bool
      */
     private $mantenimiento_posible = false;
+
+    /**
+     * True cuando el SPA nuevo ya quedó desplegado y la API todavía es la vieja (en el lugar, entre
+     * el final de upload_spa y el `down` de upload_api). Si algo falla en ese tramo, run() lo dice en
+     * una línea propia.
+     *
+     * @var bool
+     */
+    private $spa_nuevo_con_api_vieja = false;
+
+    /**
+     * True mientras el despliegue del SPA está vaciando y rellenando la carpeta que atiende (en el
+     * lugar): un fallo ahí puede dejar al cliente sin pantalla.
+     *
+     * @var bool
+     */
+    private $spa_vaciandose = false;
+
+    /**
+     * True cuando el zip de la API nueva ya está bajado, verificado y SUBIDO al hosting en esta
+     * corrida (en el lugar lo hace upload_spa antes de tocar el SPA vivo; upload_api lo reusa).
+     *
+     * @var bool
+     */
+    private $api_subida_al_hosting = false;
 
     /**
      * Etapa que se está ejecutando, para nombrarla en las líneas de un fallo.
@@ -229,41 +279,80 @@ class DeploymentService
     private $etapa_en_curso = null;
 
     /**
-     * Etapas que corren con el sistema del cliente en mantenimiento en un despliegue EN EL LUGAR:
-     * el `down` va adentro de upload_api (justo antes de descomprimir) y el `up` al final de
-     * run_migrations. 🔴 Ninguna de estas le pega por HTTP al empresa-api del cliente (todo es SSH,
-     * SFTP y artisan), que es lo que permite tenerlas con el sistema abajo: un HTTP a una API en
-     * `down` contesta 503. Medido el 14/10/2026: el único HTTP al cliente del pipeline es el PUT de
-     * step_update_default_version(), que es post-cierre.
+     * Secuencia PRE-CIERRE de un despliegue EN EL LUGAR (misión `un-solo-frente`, 14/10/2026).
+     *
+     * 🔴 Distinta de `$steps` en un punto: los seeders y los comandos corren ADENTRO de la ventana
+     * de mantenimiento, antes del `artisan up` (que va al comienzo de pause_for_crons). Con la
+     * rotación el código nuevo no atendía hasta configure-system, así que los seeders podían esperar
+     * al post-cierre; en el lugar el código nuevo atiende desde el `up`, y lo haría con los datos que
+     * los seeders todavía no cargaron. `$steps` no se toca: es la lista que replican el panel y
+     * `claude/*`, y la de toda rotación.
+     *
+     * Ninguna etapa entre el `down` (upload_api) y el `up` le pega por HTTP al empresa-api del
+     * cliente: todo es SSH, SFTP y artisan (un HTTP a una API en `down` contesta 503). Medido el
+     * 14/10/2026: el único HTTP al cliente del pipeline es el PUT de step_update_default_version().
      *
      * @var array<int, string>
      */
-    const ETAPAS_CON_MANTENIMIENTO = ['upload_api', 'sync_env_keys', 'sync_pusher_template', 'run_migrations'];
+    const SECUENCIA_EN_EL_LUGAR = [
+        'compile_spa',
+        'backup_in_place',
+        'upload_spa',
+        'upload_api',
+        'sync_env_keys',
+        'sync_pusher_template',
+        'run_migrations',
+        'run_seeders',
+        'run_commands',
+        'restart_queue_workers',
+        'pause_for_crons',
+    ];
 
     /**
-     * Etapas posteriores al respaldo y anteriores a la pausa: las que pisan algo del cliente. Reanudar
-     * un despliegue EN EL LUGAR desde una de ellas exige que este upgrade ya tenga un respaldo
-     * exitoso (assert_respaldo_previo_si_reanuda_en_el_lugar()).
+     * Secuencia POST-CIERRE de un despliegue en el lugar: lo que corre cuando `start-post-closure`
+     * (o el reintento de comandos) despacha desde `run_seeders`. Los seeders y comandos ya corrieron
+     * adentro del mantenimiento y no se vuelven a correr (los ya `exitoso` se omiten), así que es un
+     * no-op que deja el upgrade en `paused_post_tasks`, igual que una rotación.
      *
      * @var array<int, string>
      */
-    const ETAPAS_QUE_PISAN = ['upload_spa', 'upload_api', 'sync_env_keys', 'sync_pusher_template', 'run_migrations'];
+    const SECUENCIA_POST_CIERRE_EN_EL_LUGAR = ['run_seeders', 'run_commands', 'update_default_version', 'complete'];
+
+    /**
+     * Prefijo con el que `deploy/start` le pide al job reanudar `run_seeders` o `run_commands` ADENTRO
+     * de la ventana de mantenimiento (en el lugar, después de un fallo en esas etapas). Sin prefijo,
+     * esas dos etapas son el post-cierre (start-post-closure, retry-commands): con el mismo nombre
+     * no habría forma de distinguir "terminá el despliegue y levantá el sistema" de "corré el
+     * post-cierre y pausá".
+     */
+    const PREFIJO_REANUDACION_EN_MANTENIMIENTO = 'en_mantenimiento:';
 
     /** Carpeta de los respaldos, debajo del home del usuario SSH con el que entra el pipeline. */
     const CARPETA_DE_RESPALDOS = 'cc-respaldos';
 
-    /** Respaldos que se conservan por carpeta de cliente: el de este despliegue y el anterior. */
-    const RESPALDOS_A_CONSERVAR = 2;
+    /**
+     * Nombre de cada respaldo COMPLETO dentro de `cc-respaldos/<carpeta>/`:
+     * `<AAAAMMDD-HHMMSS>-upgrade-<id>`. Un respaldo en curso (o cortado) vive en `<nombre>.parcial` y
+     * se renombra recién cuando pasó todas las verificaciones: un nombre sin `.parcial` ES un
+     * respaldo completo.
+     */
+    const PATRON_DE_RESPALDO = '/^(\d{8}-\d{6})-upgrade-(\d+)$/';
 
-    /** Nombre de cada respaldo dentro de `cc-respaldos/<carpeta>/`: `<AAAAMMDD-HHMMSS>-upgrade-<id>`. */
-    const PATRON_DE_RESPALDO = '/^\d{8}-\d{6}-upgrade-\d+$/';
+    /** Un respaldo a medio hacer (o de un intento cortado). */
+    const PATRON_DE_RESPALDO_PARCIAL = '/^\d{8}-\d{6}-upgrade-\d+\.parcial$/';
+
+    /** Sufijo del directorio de un respaldo mientras se arma. */
+    const SUFIJO_PARCIAL = '.parcial';
+
+    /** Comienzo de la línea de log del respaldo exitoso (informativa: la ruta real sale del disco). */
+    const MARCA_RESPALDO_OK = 'RESPALDO OK en ';
 
     /**
-     * Comienzo de la línea de log del respaldo exitoso. 🔴 No es decorativo: una reanudación la lee
-     * para saber dónde quedó el respaldo (ruta_del_respaldo_en_los_logs()), así que cambiar este
-     * texto es cambiar ese contrato.
+     * Comienzo de la línea que nombra la etapa que falló en un despliegue en el lugar. La lee
+     * `GET claude/upgrades/{id}` para recomendar `resume_from_step=<etapa>` en `siguiente_accion`.
+     * Cambiar este texto es cambiar ese contrato.
      */
-    const MARCA_RESPALDO_OK = 'RESPALDO OK en ';
+    const MARCA_ETAPA_QUE_FALLO = 'Etapa que falló: ';
 
     /**
      * Archivo de opciones con el que `mysqldump` lee las credenciales de la base. Vive adentro del
@@ -310,6 +399,11 @@ class DeploymentService
             ? Client::MODO_ROTACION
             : (string) $client->modo_de_despliegue_hacia($this->target_api->id);
 
+        /* En el lugar, o la última rotación hacia el frente principal: ver `$respalda`. */
+        $this->respalda = $this->modo === Client::MODO_EN_EL_LUGAR
+            || ($client !== null
+                && (int) $this->target_api->id === (int) $client->resolver_frente_principal_client_api_id());
+
         /* La credencial se resuelve dinámicamente en connect() según hosting_type de target_api */
         $this->credential = ClientSshCredential::where('type', $this->get_hosting_credential_type())->firstOrFail();
     }
@@ -338,7 +432,7 @@ class DeploymentService
      * punto por donde nace la sesión que ejecuta los comandos contra el hosting del cliente, y un test
      * la reemplaza por un doble para poder afirmar QUÉ comandos se mandan y en qué orden (el respaldo
      * antes de pisar nada, `artisan down` antes de descomprimir la API, `artisan up` después de
-     * migrar) sin abrir ningún socket. El cuerpo es el que tenía connect().
+     * migraciones, seeders y comandos) sin abrir ningún socket. El cuerpo es el que tenía connect().
      *
      * @param  ClientSshCredential  $credential
      * @return SSH2
@@ -386,19 +480,28 @@ class DeploymentService
     }
 
     /**
-     * Después de un fallo EN EL LUGAR, deja escrito en una línea propia lo que quedó tocado del
-     * sistema vivo del cliente y cómo se sale (misión `un-solo-frente`, 14/10/2026).
+     * Después de un fallo EN EL LUGAR, deja escrito qué etapa falló y, en una línea propia, lo que
+     * quedó tocado del sistema vivo del cliente y cómo se sigue (misión `un-solo-frente`, 14/10/2026).
      *
-     * Dos casos, porque son los dos en que el cliente queda distinto de como estaba:
+     * Primero, SIEMPRE en el lugar, la línea MARCA_ETAPA_QUE_FALLO: de ahí saca `GET
+     * claude/upgrades/{id}` la recomendación `resume_from_step=<etapa>`.
      *
-     *  - 🔴 Falló entre `artisan down` y `artisan up`: el sistema QUEDÓ EN MANTENIMIENTO. Es a
-     *    propósito —mejor un 503 que código nuevo atendiendo contra una base a medio migrar—, pero
-     *    nadie lo va a ver en el panel si no lo dice una línea que no se pueda confundir con el error
-     *    técnico: qué comando lo levanta, cuándo conviene NO levantarlo todavía, y dónde está el
-     *    respaldo para volver atrás. Lleva la causa al final, recortada, porque esta línea pasa a ser
-     *    el `ultimo_error` que lee `GET claude/upgrades/{id}`.
-     *  - Falló en upload_spa: esa etapa vacía el SPA vivo antes de descomprimir el nuevo, así que el
-     *    cliente puede haber quedado sin pantalla. Se dice dónde está el SPA respaldado.
+     * Después, según dónde quedó el cliente:
+     *
+     *  - 🔴 Falló con el sistema en mantenimiento (entre el `artisan down` de upload_api y el
+     *    `artisan up` de pause_for_crons, o con el `down` heredado de un intento anterior): QUEDÓ EN
+     *    MANTENIMIENTO. Es a propósito —mejor un 503 que código nuevo atendiendo contra una base a
+     *    medio migrar o a medio sembrar—, y la línea dice que NO se levanta a mano, desde qué etapa se
+     *    reanuda (la que falló: reanudar desde run_migrations después de un fallo en upload_api
+     *    migraría sobre código a medio descomprimir) y dónde está el respaldo.
+     *  - Quedó el SPA nuevo con la API vieja (falló entre el final de upload_spa y el `down`).
+     *  - Falló mientras el SPA se vaciaba y rellenaba: puede haber quedado sin pantalla.
+     *  - Falló en upload_spa ANTES de tocar el SPA (preparando la API): no se tocó nada vivo.
+     *
+     * ⚠️ Ninguna de estas líneas es el `logs.ultimo_error` de `GET claude/upgrades/{id}`: cuando el
+     * job termina fallado, RunDeploymentJob::failed() escribe DESPUÉS su propia línea de error
+     * ("El job terminó fallado… el motivo real es la línea de error de más arriba"). Por eso la
+     * etapa que falló viaja en una línea con marca fija, y `siguiente_accion` la busca por la marca.
      *
      * En una rotación no escribe nada: ahí lo único tocado es la carpeta que no atiende.
      *
@@ -415,18 +518,49 @@ class DeploymentService
 
         try {
             $etapa    = $this->etapa_en_curso === null ? 'deployment' : $this->etapa_en_curso;
+            $causa    = $this->truncate_for_log($e->getMessage(), 300);
             $respaldo = $this->ruta_del_respaldo === null
-                ? 'sin dato en esta corrida (buscá la línea "' . self::MARCA_RESPALDO_OK . '" de backup_in_place)'
+                ? 'sin dato en esta corrida (mirá ~/' . self::CARPETA_DE_RESPALDOS . '/<carpeta>/ en el servidor)'
                 : $this->ruta_del_respaldo;
+
+            $this->log($etapa, self::MARCA_ETAPA_QUE_FALLO . $etapa . '. Causa: ' . $causa, 'error');
 
             if ($this->mantenimiento_posible) {
                 $this->log(
                     $etapa,
                     '🔴 EL SISTEMA DEL CLIENTE QUEDÓ EN MANTENIMIENTO (php artisan down): el despliegue en el lugar falló en '
-                    . $etapa . ' antes del php artisan up. Para levantarlo, por SSH (' . $this->get_hosting_credential_type()
-                    . '): ' . $this->comando_para_levantar() . ' — pero primero decidí: corregir la causa y reanudar con '
-                    . 'resume_from_step=run_migrations (vuelve a migrar y termina con artisan up), o volver atrás con el '
-                    . 'respaldo: ' . $respaldo . '. Causa: ' . $this->truncate_for_log($e->getMessage(), 300),
+                    . $etapa . ' antes del php artisan up. NO lo levantes a mano: el código nuevo puede estar a medio '
+                    . 'descomprimir, o la base a medio migrar o a medio sembrar. Corregí la causa y reanudá con '
+                    . 'resume_from_step=' . $etapa . ': desde ahí termina el despliegue y hace php artisan up al final. '
+                    . 'Si hay que volver atrás, el respaldo está en ' . $respaldo . ' (y recién después de restaurarlo, '
+                    . 'por SSH ' . $this->get_hosting_credential_type() . ': ' . $this->comando_para_levantar() . '). '
+                    . 'Causa: ' . $causa,
+                    'error'
+                );
+
+                return;
+            }
+
+            if ($this->spa_nuevo_con_api_vieja) {
+                $this->log(
+                    $etapa,
+                    '🔴 QUEDÓ EL SPA NUEVO CON LA API VIEJA: el SPA ya está desplegado y la API todavía no se '
+                    . 'reemplazó (el sistema NO está en mantenimiento). Reanudá con resume_from_step=upload_api: '
+                    . 'sube la API si hace falta, pone el sistema en mantenimiento y la reemplaza. Si hay que volver '
+                    . 'atrás, el SPA anterior está en ' . $respaldo . '/spa.tar.gz (se descomprime en '
+                    . $this->get_spa_hosting_dir() . '). Causa: ' . $causa,
+                    'error'
+                );
+
+                return;
+            }
+
+            if ($this->spa_vaciandose) {
+                $this->log(
+                    $etapa,
+                    '🔴 Falló mientras se reemplazaba el SPA que está atendiendo: el cliente puede haber quedado sin '
+                    . 'pantalla. La API no se tocó. Reanudá con resume_from_step=upload_spa, o restaurá el SPA desde '
+                    . $respaldo . '/spa.tar.gz (se descomprime en ' . $this->get_spa_hosting_dir() . ').',
                     'error'
                 );
 
@@ -436,10 +570,9 @@ class DeploymentService
             if ($etapa === 'upload_spa') {
                 $this->log(
                     $etapa,
-                    '🔴 En el lugar, upload_spa vacía el SPA que está atendiendo antes de descomprimir el nuevo: si falló '
-                    . 'después de vaciarlo, el cliente puede haber quedado sin pantalla. La API no se tocó. SPA respaldado en '
-                    . $respaldo . '/spa.tar.gz (se restaura descomprimiéndolo en ' . $this->get_spa_hosting_dir() . ').',
-                    'error'
+                    'Falló preparando la API nueva, ANTES de tocar el SPA: ni el SPA ni la API que atienden se '
+                    . 'tocaron. Reanudá con resume_from_step=upload_spa cuando se arregle la causa.',
+                    'info'
                 );
             }
         } catch (\Throwable $ignorado) {
@@ -458,6 +591,41 @@ class DeploymentService
     }
 
     /**
+     * Qué secuencia de etapas corre esta pasada, desde cuál, y si es la del en el lugar con los
+     * seeders adentro del mantenimiento (misión `un-solo-frente`, 14/10/2026).
+     *
+     * - Rotación: `$steps`, como siempre. (Un prefijo de reanudación en mantenimiento se ignora.)
+     * - En el lugar, sin reanudación o reanudando una etapa del pre-cierre: SECUENCIA_EN_EL_LUGAR.
+     * - En el lugar, `en_mantenimiento:<etapa>` (lo manda `deploy/start` al reanudar run_seeders o
+     *   run_commands después de un fallo adentro de la ventana): SECUENCIA_EN_EL_LUGAR desde esa etapa.
+     * - En el lugar, `run_seeders` / `run_commands` a secas (start-post-closure, retry-commands) o la
+     *   etapa final: SECUENCIA_POST_CIERRE_EN_EL_LUGAR.
+     *
+     * @param  string|null  $resume_from_step
+     * @return array{0: array<int, string>, 1: string|null, 2: bool}  [secuencia, desde, en_ventana]
+     */
+    private function resolver_secuencia($resume_from_step): array
+    {
+        $desde = ($resume_from_step === null || $resume_from_step === '') ? null : (string) $resume_from_step;
+
+        $en_mantenimiento = false;
+        if ($desde !== null && strpos($desde, self::PREFIJO_REANUDACION_EN_MANTENIMIENTO) === 0) {
+            $desde            = substr($desde, strlen(self::PREFIJO_REANUDACION_EN_MANTENIMIENTO));
+            $en_mantenimiento = true;
+        }
+
+        if (! $this->es_en_el_lugar()) {
+            return [$this->steps, $desde, false];
+        }
+
+        if ($en_mantenimiento || $desde === null || ! in_array($desde, self::SECUENCIA_POST_CIERRE_EN_EL_LUGAR, true)) {
+            return [self::SECUENCIA_EN_EL_LUGAR, $desde, true];
+        }
+
+        return [self::SECUENCIA_POST_CIERRE_EN_EL_LUGAR, $desde, false];
+    }
+
+    /**
      * Ejecuta las etapas en orden, respetando resume_from_step.
      * Tras cada etapa que corresponde a un paso del upgrade (timestamps), marca el campo en el modelo.
      *
@@ -466,19 +634,47 @@ class DeploymentService
      */
     private function execute_steps($resume_from_step = null)
     {
-        $started = ($resume_from_step === null || $resume_from_step === '');
+        list($secuencia, $desde, $en_ventana) = $this->resolver_secuencia($resume_from_step);
 
-        /* En el lugar, una reanudación desde una etapa que pisa algo exige un respaldo previo de este
-           mismo upgrade; y una desde adentro de la ventana de mantenimiento arranca con el cliente
-           (probablemente) abajo, por el `down` del intento anterior. */
-        $this->assert_respaldo_previo_si_reanuda_en_el_lugar($resume_from_step);
-        if ($this->es_en_el_lugar() && in_array($resume_from_step, ['sync_env_keys', 'sync_pusher_template', 'run_migrations'], true)) {
-            $this->mantenimiento_posible = true;
+        $this->en_ventana_de_mantenimiento = $en_ventana;
+        $started = ($desde === null);
+
+        if ($this->es_en_el_lugar()) {
+            /* 🔴 Si un intento anterior dejó el sistema en mantenimiento, se dice ANTES de cualquier
+               otra cosa, y esta corrida lo trata como tal hasta su propio `artisan up`. */
+            $this->avisar_si_ya_esta_en_mantenimiento();
+
+            if ($en_ventana && $desde === null) {
+                /* En el lugar, crons_supervisor_at / vps_supervisor_moved_at son del pipeline (los
+                   marca la pausa, no una persona). Un arranque limpio los limpia: si quedaran de un
+                   intento anterior, el reintento de comandos creería que este intento ya salió del
+                   mantenimiento. */
+                $this->upgrade->crons_supervisor_at     = null;
+                $this->upgrade->vps_supervisor_moved_at = null;
+                $this->upgrade->save();
+            }
+
+            if (! $en_ventana && in_array($desde, ['run_seeders', 'run_commands'], true)) {
+                $this->log(
+                    $desde,
+                    'En el lugar: los seeders y comandos ya corrieron adentro del mantenimiento; lo que ya salió no se '
+                    . 'vuelve a correr.',
+                    'info'
+                );
+            }
         }
 
-        foreach ($this->steps as $step) {
+        /* Reanudar desde una etapa que pisa algo exige que este upgrade ya tenga su respaldo. */
+        $this->assert_respaldo_previo_si_reanuda($secuencia, $desde);
+
+        if ($this->es_en_el_lugar() && $desde === 'upload_api' && ! $this->mantenimiento_posible) {
+            /* Se reanuda la API con el SPA nuevo ya desplegado por el intento anterior. */
+            $this->spa_nuevo_con_api_vieja = true;
+        }
+
+        foreach ($secuencia as $step) {
             if (! $started) {
-                if ($step === $resume_from_step) {
+                if ($step === $desde) {
                     $started = true;
                 } else {
                     continue;
@@ -492,7 +688,7 @@ class DeploymentService
                     $this->step_compile_spa();
                     break;
                 case 'backup_in_place':
-                    // Sin timestamp propio: el resultado queda en la línea RESPALDO OK del log.
+                    // Sin timestamp propio: el resultado queda en el disco y en la línea RESPALDO OK.
                     $this->step_backup_in_place();
                     break;
                 case 'upload_spa':
@@ -532,6 +728,10 @@ class DeploymentService
                     $this->step_run_commands();
                     // Marca el paso "Comandos ejecutados" automáticamente.
                     $this->mark_upgrade_step_timestamp('comandos_ejecutados_at');
+                    if ($this->en_ventana_de_mantenimiento) {
+                        // En el lugar, adentro del mantenimiento: sigue al reinicio del worker y al up.
+                        break;
+                    }
                     // Pausa manual: espera botón para configurar URL/versión por defecto.
                     $this->step_pause_for_post_tasks();
                     return;
@@ -549,6 +749,46 @@ class DeploymentService
                     break;
             }
         }
+    }
+
+    /**
+     * En el lugar: si `storage/framework/down` ya existe al arrancar, lo dice en una línea propia y
+     * toma el sistema como en mantenimiento (misión `un-solo-frente`, 14/10/2026).
+     *
+     * Lo deja así un intento anterior que falló adentro de la ventana (o alguien a mano). Sin esta
+     * línea, un arranque limpio o una reanudación sobre un cliente ya abajo no lo diría en ningún
+     * lado, y un fallo antes del próximo `down` no avisaría que el cliente sigue en mantenimiento.
+     *
+     * Nunca frena: si el chequeo no se puede hacer, sigue como si no estuviera.
+     *
+     * @return void
+     */
+    private function avisar_si_ya_esta_en_mantenimiento(): void
+    {
+        try {
+            $archivo = rtrim($this->get_api_path(), '/') . '/storage/framework/down';
+            $salida  = $this->run_command(
+                'deployment',
+                'if [ -f ' . $this->posix_single_quote($archivo) . ' ]; then echo CC_YA_EN_MANTENIMIENTO; fi',
+                false
+            );
+        } catch (\Throwable $e) {
+            return;
+        }
+
+        if (strpos($salida, 'CC_YA_EN_MANTENIMIENTO') === false) {
+            return;
+        }
+
+        $this->mantenimiento_posible = true;
+
+        $this->log(
+            'deployment',
+            '🔴 El sistema del cliente YA ESTÁ EN MANTENIMIENTO al arrancar (storage/framework/down existe): lo dejó un '
+            . 'intento anterior de este despliegue, o alguien a mano. Esta corrida sigue y lo levanta recién con su '
+            . 'propio php artisan up, al terminar.',
+            'warning'
+        );
     }
 
     /**
@@ -683,37 +923,44 @@ class DeploymentService
     }
 
     /**
-     * Etapa: respaldo del sistema vivo del cliente ANTES de pisar nada, en un despliegue EN EL LUGAR
-     * (misión `un-solo-frente`, 14/10/2026).
+     * Etapa: respaldo del sistema vivo del cliente ANTES de pisar nada (misión `un-solo-frente`,
+     * 14/10/2026). Corre en el lugar y en la última rotación hacia el frente principal (`$respalda`).
      *
      * Por qué existe. Hasta el 14/10/2026 cada actualización subía a la carpeta que NO atendía y al
      * final rotaba: el respaldo era la carpeta vieja, intacta, y volver atrás era rotar de nuevo.
      * Lucas decidió dejar de rotar (desde que se actualiza por el admin no hubo un solo rollback), y
      * en el lugar esa red desaparece: upload_spa vacía el SPA que atiende, upload_api descomprime
-     * encima de la API viva y las migraciones cambian la base. Esta etapa es la red nueva.
+     * encima de la API viva y las migraciones cambian la base. Esta etapa es la red nueva. En la
+     * última rotación al principal también hace falta: las migraciones pegan sobre la misma base viva.
      *
      * Qué respalda, en `~/cc-respaldos/<carpeta>/<AAAAMMDD-HHMMSS>-upgrade-<id>/`:
-     *  - `api.tar.gz`: la carpeta de la API SIN `storage/` (los adjuntos e imágenes del cliente no
-     *    se tocan en un upgrade) ni `vendor/` (se reconstruye con el `composer.lock`, que sí viaja).
-     *    Con el `.env`, que es lo que más cuesta reconstruir.
-     *  - `spa.tar.gz`: la carpeta del SPA entera (incluido `config.js`).
+     *  - `api.tar.gz`: la carpeta de la API destino SIN `storage/` (los adjuntos e imágenes del
+     *    cliente no se tocan en un upgrade) ni `vendor/` (se reconstruye con el `composer.lock`, que
+     *    sí viaja). Con el `.env`, que es lo que más cuesta reconstruir.
+     *  - `spa.tar.gz`: la carpeta del SPA destino entera (incluido `config.js`).
      *  - `base.sql.gz`: `mysqldump --single-transaction --quick --no-tablespaces` de la base del
      *    frente, comprimido. Las credenciales salen del `.env` del frente y le llegan a mysqldump por
      *    un `--defaults-extra-file` con permisos 600, escrito por SFTP: 🔴 NUNCA en la línea de
      *    comandos, porque exec_ssh_session() loguea cada comando entero en `deployment_logs`, que se
      *    ve desde el panel y por `claude/*`. El archivo se borra al terminar, salga bien o mal.
      *
-     * Dónde: debajo del home del usuario con el que entra el pipeline (en el shared, la cuenta;
-     * en el VPS, root → `/root/cc-respaldos`), fuera de toda carpeta servida por web
-     * (assert_ruta_de_respaldo_fuera_de_la_web()). Se conservan los RESPALDOS_A_CONSERVAR últimos
-     * por carpeta, y los viejos se borran solo adentro de `cc-respaldos/<carpeta>/`.
+     * 🔴 A PRUEBA DE REINTENTOS, que es donde un respaldo en el lugar se rompe de verdad:
+     *  - Si en el disco ya hay un respaldo COMPLETO de ESTE upgrade, se REUSA y no se respalda de
+     *    nuevo: el primero es el estado previo bueno, y un segundo intento después de un fallo
+     *    adentro de la ventana respaldaría un sistema a medio actualizar.
+     *  - El respaldo se arma en `<dir>.parcial` y se renombra recién cuando pasó todas las
+     *    verificaciones: un nombre sin `.parcial` ES un respaldo completo. Los `.parcial` de otros
+     *    intentos (cortados) se borran antes de empezar.
+     *  - La retención es por upgrade (aplicar_retencion_de_respaldos()): nunca borra el de este
+     *    upgrade, y de los demás conserva solo el más reciente.
+     *
+     * Dónde: debajo del home del usuario con el que entra el pipeline (en el shared, la cuenta; en el
+     * VPS, root → `/root/cc-respaldos`), fuera de toda carpeta servida por web
+     * (assert_ruta_de_respaldo_fuera_de_la_web()).
      *
      * 🔴 Si cualquier parte del respaldo falla, la etapa lanza y el deployment queda `failed` ANTES
      * de tocar nada del cliente: upload_spa todavía no corrió. La retención es la única excepción:
      * es limpieza de respaldos viejos, y si falla el respaldo nuevo igual está completo (warning).
-     *
-     * En una rotación no hace nada y lo dice: la carpeta destino no atiende, y la que atiende queda
-     * intacta como siempre.
      *
      * ⚠️ Cliente en base compartida (`shared_database_group_id`): el dump es de la base ENTERA, con
      * los comercios hermanos adentro. Se loguea el tamaño y la duración para que se vea.
@@ -722,11 +969,11 @@ class DeploymentService
      */
     private function step_backup_in_place()
     {
-        if (! $this->es_en_el_lugar()) {
+        if (! $this->respalda) {
             $this->log(
                 'backup_in_place',
-                'Rotación: la API destino no es la que está atendiendo, así que no hay código vivo que respaldar (la '
-                . 'carpeta activa queda intacta). No aplica.',
+                'Rotación hacia una carpeta que no es la activa ni el frente principal: no hay código vivo ni última '
+                . 'rotación que respaldar (la carpeta activa queda intacta). No aplica.',
                 'info'
             );
 
@@ -741,40 +988,59 @@ class DeploymentService
 
         $api_path = $this->get_api_path();
         $spa_dir  = $this->get_spa_hosting_dir();
-        $carpeta  = $this->carpeta_del_respaldo();
-        $home     = $this->home_del_usuario_ssh();
-        $base     = $home . '/' . self::CARPETA_DE_RESPALDOS . '/' . $carpeta;
-        $dir      = $base . '/' . now()->format('Ymd-His') . '-upgrade-' . (int) $this->upgrade->id;
+        $base     = $this->base_de_respaldos();
 
-        $this->assert_ruta_de_respaldo_fuera_de_la_web($dir, $home);
+        $existente = $this->respaldo_completo_de_este_upgrade($base);
+        if ($existente !== null) {
+            $this->ruta_del_respaldo = $existente;
+            $this->log(
+                'backup_in_place',
+                self::MARCA_RESPALDO_OK . $existente . ' — se REUSA el respaldo de este upgrade que dejó un intento '
+                . 'anterior: es el estado previo bueno, y respaldar de nuevo guardaría un sistema que puede estar a medio '
+                . 'actualizar. No se respalda de nuevo.',
+                'success'
+            );
+            $this->borrar_respaldos_parciales($base);
+            $this->aplicar_retencion_de_respaldos($base);
 
-        $this->log('backup_in_place', 'En el lugar: se respalda el sistema vivo ANTES de tocar nada, en ' . $dir);
+            return;
+        }
 
-        $this->borrar_credenciales_huerfanas($base);
+        $dir     = $base . '/' . now()->format('Ymd-His') . '-upgrade-' . (int) $this->upgrade->id;
+        $parcial = $dir . self::SUFIJO_PARCIAL;
+
+        $this->assert_ruta_de_respaldo_fuera_de_la_web($parcial, $base);
+
+        $this->log(
+            'backup_in_place',
+            ($this->es_en_el_lugar()
+                ? 'En el lugar: se respalda el sistema vivo ANTES de tocar nada, en '
+                : 'Última rotación al frente principal: se respalda antes de tocar nada (las migraciones pegan sobre la '
+                    . 'base viva), en ')
+            . $dir . ' (se arma en ' . basename($parcial) . ' y se renombra al terminar)'
+        );
+
+        $this->borrar_respaldos_parciales($base);
 
         /* umask 077: el directorio (y los intermedios que cree) nace 700. Lo que va adentro —el
            `.env` en el tar, el dump, el archivo de credenciales— no lo puede leer nadie más. */
-        $this->run_command('backup_in_place', 'umask 077 && mkdir -p ' . $this->posix_single_quote($dir) . ' 2>&1');
+        $this->run_command('backup_in_place', 'umask 077 && mkdir -p ' . $this->posix_single_quote($parcial) . ' 2>&1');
 
-        $api_tar = $dir . '/api.tar.gz';
         /* `--anchored` antes de los `--exclude`: excluye `./storage` y `./vendor` de la RAÍZ de la
            API y no cualquier carpeta que se llame igual más abajo. */
+        $this->tar_remoto($api_path, $parcial . '/api.tar.gz', '--anchored --exclude=./storage --exclude=./vendor ');
+        $api_bytes = $this->verificar_gzip_remoto($parcial . '/api.tar.gz');
+
+        $this->tar_remoto($spa_dir, $parcial . '/spa.tar.gz', '');
+        $spa_bytes = $this->verificar_gzip_remoto($parcial . '/spa.tar.gz');
+
+        $dump = $this->respaldar_base($parcial);
+
+        /* Recién ahora, con las tres partes verificadas, el respaldo pasa a ser completo. */
         $this->run_command(
             'backup_in_place',
-            'cd ' . $this->posix_single_quote($api_path)
-            . ' && tar --anchored --exclude=./storage --exclude=./vendor -czf ' . $this->posix_single_quote($api_tar)
-            . ' . 2>&1'
+            'mv ' . $this->posix_single_quote($parcial) . ' ' . $this->posix_single_quote($dir) . ' 2>&1'
         );
-        $api_bytes = $this->verificar_gzip_remoto($api_tar);
-
-        $spa_tar = $dir . '/spa.tar.gz';
-        $this->run_command(
-            'backup_in_place',
-            'cd ' . $this->posix_single_quote($spa_dir) . ' && tar -czf ' . $this->posix_single_quote($spa_tar) . ' . 2>&1'
-        );
-        $spa_bytes = $this->verificar_gzip_remoto($spa_tar);
-
-        $dump = $this->respaldar_base($dir);
 
         $this->ruta_del_respaldo = $dir;
 
@@ -793,6 +1059,21 @@ class DeploymentService
         );
 
         $this->aplicar_retencion_de_respaldos($base);
+    }
+
+    /**
+     * `~/cc-respaldos/<carpeta>` de la API destino, absoluta y validada.
+     *
+     * @return string
+     * @throws \RuntimeException
+     */
+    private function base_de_respaldos(): string
+    {
+        $base = $this->home_del_usuario_ssh() . '/' . self::CARPETA_DE_RESPALDOS . '/' . $this->carpeta_del_respaldo();
+
+        $this->assert_ruta_de_respaldo_fuera_de_la_web($base . '/x', $base);
+
+        return $base;
     }
 
     /**
@@ -845,28 +1126,27 @@ class DeploymentService
     }
 
     /**
-     * 🔴 Frena si el directorio del respaldo no está debajo de `~/cc-respaldos/` o si cae adentro de
-     * algo que el servidor web sirve. Un respaldo con el `.env` y el dump de la base adentro de
+     * 🔴 Frena si una ruta de respaldo no está debajo de `~/cc-respaldos/<carpeta>/` o si cae adentro
+     * de algo que el servidor web sirve. Un respaldo con el `.env` y el dump de la base adentro de
      * `public_html`, `htdocs` o `public/` es la base del cliente descargable por HTTP.
      *
-     * @param  string  $dir
-     * @param  string  $home
+     * @param  string  $ruta
+     * @param  string  $base  `~/cc-respaldos/<carpeta>`
      * @return void
      * @throws \RuntimeException
      */
-    private function assert_ruta_de_respaldo_fuera_de_la_web(string $dir, string $home): void
+    private function assert_ruta_de_respaldo_fuera_de_la_web(string $ruta, string $base): void
     {
-        $raiz = $home . '/' . self::CARPETA_DE_RESPALDOS . '/';
-
-        if (strpos($dir, $raiz) !== 0 || strpos($dir, '..') !== false) {
-            throw new \RuntimeException('No se puede respaldar: la ruta ' . $dir . ' no está debajo de ' . $raiz . '.');
+        if (strpos($ruta, $base . '/') !== 0 || strpos($ruta, '..') !== false
+            || strpos($base, '/' . self::CARPETA_DE_RESPALDOS . '/') === false) {
+            throw new \RuntimeException('No se puede respaldar: la ruta ' . $ruta . ' no está debajo de ' . $base . '/.');
         }
 
-        $segmentos = explode('/', trim($dir, '/'));
+        $segmentos = explode('/', trim($ruta, '/'));
         foreach (['public_html', 'htdocs', 'public', 'domains', 'www'] as $servido) {
             if (in_array($servido, $segmentos, true)) {
                 throw new \RuntimeException(
-                    'No se puede respaldar: la ruta ' . $dir . ' pasa por "' . $servido . '", que es una carpeta servida '
+                    'No se puede respaldar: la ruta ' . $ruta . ' pasa por "' . $servido . '", que es una carpeta servida '
                     . 'por web. No se tocó nada del cliente.'
                 );
             }
@@ -874,26 +1154,150 @@ class DeploymentService
     }
 
     /**
-     * Borra archivos de credenciales de mysqldump que haya dejado un respaldo cortado a la mitad (el
-     * job muerto por timeout en pleno dump no llega a su limpieza). Solo busca ese nombre exacto, un
-     * nivel adentro de cada respaldo de esta carpeta. Nunca frena la etapa.
+     * Lo que hay en `~/cc-respaldos/<carpeta>/`: respaldos completos (`nombre => ['fecha', 'upgrade_id']`)
+     * y parciales (nombres).
      *
-     * @param  string  $base  `~/cc-respaldos/<carpeta>`
-     * @return void
+     * @param  string  $base
+     * @return array{completos: array<string, array{fecha: string, upgrade_id: int}>, parciales: array<int, string>}
      */
-    private function borrar_credenciales_huerfanas(string $base): void
+    private function respaldos_en_disco(string $base): array
     {
-        $this->run_command(
+        $salida = $this->run_command(
             'backup_in_place',
-            'if [ -d ' . $this->posix_single_quote($base) . ' ]; then find ' . $this->posix_single_quote($base)
-            . ' -mindepth 2 -maxdepth 2 -type f -name ' . $this->posix_single_quote(self::ARCHIVO_DE_CREDENCIALES_DEL_DUMP)
-            . ' -delete; fi; echo CC_LIMPIEZA_OK',
+            'if [ -d ' . $this->posix_single_quote($base) . ' ]; then ls -1 ' . $this->posix_single_quote($base) . '; fi',
             false
         );
+
+        $completos = [];
+        $parciales = [];
+        foreach (preg_split('/\r?\n/', trim($salida)) as $linea) {
+            $linea         = trim($linea);
+            $coincidencias = [];
+            if (preg_match(self::PATRON_DE_RESPALDO, $linea, $coincidencias) === 1) {
+                $completos[$linea] = ['fecha' => $coincidencias[1], 'upgrade_id' => (int) $coincidencias[2]];
+            } elseif (preg_match(self::PATRON_DE_RESPALDO_PARCIAL, $linea) === 1) {
+                $parciales[] = $linea;
+            }
+        }
+
+        ksort($completos, SORT_STRING);
+
+        return ['completos' => $completos, 'parciales' => $parciales];
     }
 
     /**
-     * Verifica un `.tar.gz`/`.sql.gz` remoto (`gzip -t`) y devuelve su tamaño en bytes.
+     * El respaldo COMPLETO de ESTE upgrade que hay en el disco (el más viejo, si hubiera más de uno:
+     * es el estado previo al primer intento), con sus tres archivos presentes y no vacíos. Null si no
+     * hay ninguno.
+     *
+     * @param  string  $base
+     * @return string|null  Ruta absoluta.
+     */
+    private function respaldo_completo_de_este_upgrade(string $base)
+    {
+        $propios = [];
+        foreach ($this->respaldos_en_disco($base)['completos'] as $nombre => $datos) {
+            if ($datos['upgrade_id'] === (int) $this->upgrade->id) {
+                $propios[] = $nombre;
+            }
+        }
+
+        foreach ($propios as $nombre) {
+            $dir    = $base . '/' . $nombre;
+            $salida = $this->run_command(
+                'backup_in_place',
+                'test -s ' . $this->posix_single_quote($dir . '/api.tar.gz')
+                . ' && test -s ' . $this->posix_single_quote($dir . '/spa.tar.gz')
+                . ' && test -s ' . $this->posix_single_quote($dir . '/base.sql.gz')
+                . ' && echo CC_RESPALDO_COMPLETO',
+                false
+            );
+
+            if (strpos($salida, 'CC_RESPALDO_COMPLETO') !== false) {
+                return $dir;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Borra los `.parcial` de `~/cc-respaldos/<carpeta>/`: respaldos de intentos que se cortaron (con
+     * el archivo de credenciales de mysqldump adentro, si el corte fue en pleno dump). Cada ruta se
+     * valida antes del `rm -rf`. Nunca frena.
+     *
+     * @param  string  $base
+     * @return void
+     */
+    private function borrar_respaldos_parciales(string $base): void
+    {
+        try {
+            foreach ($this->respaldos_en_disco($base)['parciales'] as $nombre) {
+                $ruta = $base . '/' . $nombre;
+                if (dirname($ruta) !== $base || preg_match(self::PATRON_DE_RESPALDO_PARCIAL, basename($ruta)) !== 1) {
+                    continue;
+                }
+                $this->run_command('backup_in_place', 'rm -rf -- ' . $this->posix_single_quote($ruta) . ' 2>&1', false);
+                $this->log('backup_in_place', 'Respaldo a medio hacer de un intento anterior, borrado: ' . $nombre . '.');
+            }
+        } catch (\Throwable $e) {
+            $this->log(
+                'backup_in_place',
+                'No se pudieron borrar los respaldos a medio hacer de ' . $base . ': ' . $this->truncate_for_log($e->getMessage(), 300),
+                'warning'
+            );
+        }
+    }
+
+    /**
+     * `tar -czf` de una carpeta del cliente, que está VIVA mientras se lee.
+     *
+     * Con `--warning=no-file-changed` y aceptando el código 1 de GNU tar ("algún archivo cambió
+     * mientras se leía"): un sistema que factura escribe en `public/afip/ws/*.xml` en cualquier
+     * momento, y un respaldo que falla por eso frenaría el despliegue por nada (el archivo que cambió
+     * quedó igual, en alguna de sus dos versiones). El código 2 —error de verdad— sigue frenando. El
+     * código se lee del propio comando (`echo CC_TAR_EXIT=$?`) para no depender de cómo reporta el
+     * exit status cada servidor.
+     *
+     * @param  string  $origen   Carpeta a empaquetar.
+     * @param  string  $destino  Archivo `.tar.gz`.
+     * @param  string  $opciones Opciones extra antes de `-czf` (con espacio al final, o '').
+     * @return void
+     * @throws \RuntimeException
+     */
+    private function tar_remoto(string $origen, string $destino, string $opciones): void
+    {
+        /* Si el `cd` falla, el código es 98 y no el 1 del `cd`, que se confundiría con el aviso de tar. */
+        $salida = $this->run_command(
+            'backup_in_place',
+            'if cd ' . $this->posix_single_quote($origen) . '; then tar --warning=no-file-changed ' . $opciones . '-czf '
+            . $this->posix_single_quote($destino) . ' . 2>&1; echo CC_TAR_EXIT=$?; else echo CC_TAR_EXIT=98; fi',
+            false
+        );
+
+        $coincidencias = [];
+        if (preg_match('/CC_TAR_EXIT=(\d+)/', $salida, $coincidencias) !== 1) {
+            throw new \RuntimeException('No se pudo confirmar el respaldo de ' . $origen . ' (tar no devolvió su código). '
+                . 'No se tocó nada del cliente.');
+        }
+
+        $codigo = (int) $coincidencias[1];
+
+        if ($codigo === 1) {
+            $this->log(
+                'backup_in_place',
+                'tar avisó que algún archivo de ' . $origen . ' cambió mientras se leía (el sistema está vivo): se acepta, '
+                . 'el respaldo queda con alguna de las dos versiones de ese archivo.',
+                'info'
+            );
+        } elseif ($codigo !== 0) {
+            throw new \RuntimeException('El respaldo de ' . $origen . ' falló (tar salió con ' . $codigo . '). No se tocó '
+                . 'nada del cliente. Salida: ' . $this->truncate_for_log($salida, 400));
+        }
+    }
+
+    /**
+     * Verifica un `.tar.gz` remoto (`gzip -t`) y devuelve su tamaño en bytes.
      *
      * @param  string  $archivo
      * @return int
@@ -930,7 +1334,17 @@ class DeploymentService
      * `mysqldump | gzip` el shell devuelve el de gzip, y `pipefail` no está garantizado en el sh del
      * hosting compartido.
      *
-     * @param  string  $dir  Directorio del respaldo.
+     * `--column-statistics=0` va solo si el binario lo conoce (un cliente MySQL 8 contra un servidor
+     * MariaDB falla sin él; un mysqldump de MariaDB falla CON él). Se detecta guardando el `--help`
+     * en una variable y mirándolo con `case`: 🔴 nunca con `| grep -q`, que bajo `pipefail` da falsos
+     * negativos al azar por el SIGPIPE (medido en la otra pieza de esta misión). No se agregan
+     * `--routines` ni `--events`: en el shared el usuario de la base puede no tener permiso, y
+     * frenaría todos los respaldos.
+     *
+     * La verificación es de UNA pasada: `gzip -dc | tail -n 1` con el estado de gzip capturado. Si
+     * gzip falla a la mitad, la última línea es la marca CC_GZIP_FALLO y no `-- Dump completed`.
+     *
+     * @param  string  $dir  Directorio del respaldo (el `.parcial`).
      * @return array{archivo: string, bytes: int, base: string, segundos: int}
      * @throws \RuntimeException
      */
@@ -949,7 +1363,8 @@ class DeploymentService
             throw new \RuntimeException('No se puede respaldar la base: el .env del frente dice DB_CONNECTION=' . $conexion
                 . ' y el respaldo sabe hacer solo mysqldump. No se tocó nada del cliente.');
         }
-        if ($base === '' || $usuario === '' || preg_match('/^[A-Za-z0-9_$-]{1,64}$/', $base) !== 1) {
+        /* El nombre no puede empezar con `-`: mysqldump lo leería como una opción. */
+        if ($base === '' || $usuario === '' || preg_match('/^[A-Za-z0-9_$][A-Za-z0-9_$-]{0,63}$/', $base) !== 1) {
             throw new \RuntimeException('No se puede respaldar la base: al .env del frente le falta DB_DATABASE o '
                 . 'DB_USERNAME, o el nombre de la base no es válido. No se tocó nada del cliente.');
         }
@@ -972,11 +1387,14 @@ class DeploymentService
 
             $this->log('backup_in_place', 'Respaldando la base ' . $base . ' (mysqldump --single-transaction)...');
 
-            /* --defaults-extra-file tiene que ser la PRIMERA opción de mysqldump. */
+            /* --defaults-extra-file tiene que ser la PRIMERA opción de mysqldump. `$CC_CS` va sin
+               comillas a propósito: vacío, no agrega nada. */
             $salida = $this->run_command(
                 'backup_in_place',
-                '{ mysqldump --defaults-extra-file=' . $this->posix_single_quote($credenciales)
-                . ' --single-transaction --quick --no-tablespaces --default-character-set=utf8mb4 '
+                'CC_AYUDA=$(mysqldump --help 2>/dev/null); case "$CC_AYUDA" in *column-statistics*) '
+                . 'CC_CS=--column-statistics=0 ;; *) CC_CS= ;; esac; '
+                . '{ mysqldump --defaults-extra-file=' . $this->posix_single_quote($credenciales)
+                . ' --single-transaction --quick --no-tablespaces --default-character-set=utf8mb4 $CC_CS '
                 . $this->posix_single_quote($base) . '; echo $? > ' . $this->posix_single_quote($estado) . '; } | gzip > '
                 . $this->posix_single_quote($archivo) . ' && cat ' . $this->posix_single_quote($estado)
                 . ' && rm -f ' . $this->posix_single_quote($estado)
@@ -1001,15 +1419,22 @@ class DeploymentService
                 . 'credenciales de la base (' . $credenciales . '): borralo a mano. No se tocó nada del cliente.');
         }
 
-        $bytes = $this->verificar_gzip_remoto($archivo);
-
-        $cola = $this->run_command(
+        /* Una sola pasada: la última línea del dump (o la marca si gzip falló) y el tamaño. */
+        $verificacion = $this->run_command(
             'backup_in_place',
-            'gzip -dc ' . $this->posix_single_quote($archivo) . ' | tail -n 1'
+            '{ gzip -dc ' . $this->posix_single_quote($archivo) . ' || echo CC_GZIP_FALLO; } | tail -n 1; wc -c < '
+            . $this->posix_single_quote($archivo)
         );
-        if (strpos($cola, '-- Dump completed') === false) {
-            throw new \RuntimeException('El dump de la base no termina en "-- Dump completed": quedó cortado. No se tocó '
-                . 'nada del cliente.');
+
+        $lineas = preg_split('/\r?\n/', trim($verificacion));
+        $bytes  = (int) trim((string) end($lineas));
+
+        if (strpos($verificacion, 'CC_GZIP_FALLO') !== false || strpos($verificacion, '-- Dump completed') === false) {
+            throw new \RuntimeException('El dump de la base no termina en "-- Dump completed" o el gzip está roto: quedó '
+                . 'cortado. No se tocó nada del cliente.');
+        }
+        if ($bytes <= 0) {
+            throw new \RuntimeException('El dump de la base quedó vacío. No se tocó nada del cliente.');
         }
 
         return [
@@ -1021,7 +1446,7 @@ class DeploymentService
     }
 
     /**
-     * Lee el `.env` de la API destino (en el lugar, es el del frente que atiende).
+     * Lee el `.env` de la API destino.
      *
      * Por EnvSshService —que abre su propia sesión y parsea el archivo en el admin— y no con un
      * `cat` por la sesión del pipeline: exec_ssh_session() loguea la SALIDA de cada comando, y un
@@ -1171,11 +1596,16 @@ class DeploymentService
     }
 
     /**
-     * Deja los RESPALDOS_A_CONSERVAR respaldos más nuevos de esta carpeta y borra los demás.
+     * Retención por UPGRADE en `~/cc-respaldos/<carpeta>/` (misión `un-solo-frente`, 14/10/2026).
      *
-     * 🔴 Borra SOLO entradas de `~/cc-respaldos/<carpeta>/` cuyo nombre es exactamente el de un
-     * respaldo (PATRON_DE_RESPALDO), y cada ruta se arma y se valida acá antes del `rm -rf`. Nunca
-     * borra la carpeta del cliente ni `cc-respaldos/`.
+     * 🔴 Nunca borra el respaldo del upgrade en curso, y de los demás upgrades conserva solo el más
+     * reciente: o sea, queda el actual más el anterior. Una retención "los dos más nuevos" a secas se
+     * comía el primer respaldo de este upgrade con dos reintentos, que es justo el que importa (el
+     * estado previo bueno).
+     *
+     * Borra SOLO entradas cuyo nombre es exactamente el de un respaldo completo (PATRON_DE_RESPALDO),
+     * y cada ruta se arma y se valida acá antes del `rm -rf`. Nunca borra la carpeta del cliente ni
+     * `cc-respaldos/` (los `.parcial` los limpia borrar_respaldos_parciales()).
      *
      * Nunca frena: el respaldo de este despliegue ya está completo cuando corre esto. Si falla, queda
      * un warning y los respaldos viejos siguen ahí ocupando lugar.
@@ -1186,22 +1616,28 @@ class DeploymentService
     private function aplicar_retencion_de_respaldos(string $base): void
     {
         try {
-            $salida = $this->run_command('backup_in_place', 'ls -1 ' . $this->posix_single_quote($base) . ' 2>&1');
+            $completos = $this->respaldos_en_disco($base)['completos'];
+            $actual    = (int) $this->upgrade->id;
 
-            $respaldos = [];
-            foreach (preg_split('/\r?\n/', trim($salida)) as $linea) {
-                $linea = trim($linea);
-                if (preg_match(self::PATRON_DE_RESPALDO, $linea) === 1) {
-                    $respaldos[] = $linea;
+            /* El más reciente de OTRO upgrade (los nombres empiezan con la fecha: el orden alfabético es
+               el cronológico, y respaldos_en_disco() ya los devuelve ordenados). */
+            $anterior = null;
+            foreach ($completos as $nombre => $datos) {
+                if ($datos['upgrade_id'] !== $actual) {
+                    $anterior = $nombre;
                 }
             }
 
-            /* AAAAMMDD-HHMMSS: el orden alfabético es el cronológico. */
-            sort($respaldos, SORT_STRING);
-            $a_borrar = array_slice($respaldos, 0, max(0, count($respaldos) - self::RESPALDOS_A_CONSERVAR));
+            $a_borrar = [];
+            foreach ($completos as $nombre => $datos) {
+                if ($datos['upgrade_id'] === $actual || $nombre === $anterior) {
+                    continue;
+                }
+                $a_borrar[] = $nombre;
+            }
 
-            foreach ($a_borrar as $respaldo) {
-                $ruta = $base . '/' . $respaldo;
+            foreach ($a_borrar as $nombre) {
+                $ruta = $base . '/' . $nombre;
 
                 if (strpos($ruta, '/' . self::CARPETA_DE_RESPALDOS . '/') === false
                     || preg_match(self::PATRON_DE_RESPALDO, basename($ruta)) !== 1
@@ -1214,8 +1650,8 @@ class DeploymentService
 
             $this->log(
                 'backup_in_place',
-                'Retención: se conservan los ' . self::RESPALDOS_A_CONSERVAR . ' respaldos más nuevos de ' . $base
-                . ' (borrados: ' . count($a_borrar) . ').',
+                'Retención: se conservan el respaldo de este upgrade y el del upgrade anterior ('
+                . ($anterior === null ? 'no hay' : $anterior) . ') en ' . $base . ' (borrados: ' . count($a_borrar) . ').',
                 'info'
             );
         } catch (\Throwable $e) {
@@ -1229,63 +1665,52 @@ class DeploymentService
     }
 
     /**
-     * 🔴 En el lugar, reanudar desde una etapa que PISA algo del cliente exige que este upgrade ya
-     * tenga un respaldo exitoso en sus logs. Sin esto, un `resume_from_step=upload_spa` después de un
-     * respaldo fallido saltearía el respaldo y pisaría el sistema vivo sin red.
+     * 🔴 Reanudar desde una etapa que PISA algo del cliente exige que este upgrade ya tenga su
+     * respaldo completo EN EL DISCO. Sin esto, un `resume_from_step=upload_spa` después de un respaldo
+     * fallido saltearía el respaldo y pisaría el sistema vivo sin red.
      *
-     * Los logs del intento anterior se conservan en una reanudación (lo garantiza deploy/start), así
-     * que la línea MARCA_RESPALDO_OK de backup_in_place, si existe, es de este mismo upgrade. Si no
-     * existe, se frena antes de cualquier etapa y se dice desde dónde reanudar.
+     * Aplica cuando el despliegue se respalda (`$respalda`) y la reanudación es del pre-cierre,
+     * posterior a `backup_in_place`. No aplica al post-cierre ni a la etapa final.
      *
-     * @param  string|null  $resume_from_step
+     * Se mira el disco y no `deployment_logs`: un `deploy/start` limpio borra los logs, y el respaldo
+     * sigue estando. De paso deja la ruta en `$ruta_del_respaldo` para las líneas de mantenimiento.
+     *
+     * @param  array<int, string>  $secuencia
+     * @param  string|null         $desde
      * @return void
      * @throws \RuntimeException
      */
-    private function assert_respaldo_previo_si_reanuda_en_el_lugar($resume_from_step): void
+    private function assert_respaldo_previo_si_reanuda(array $secuencia, $desde): void
     {
-        if (! $this->es_en_el_lugar() || ! in_array($resume_from_step, self::ETAPAS_QUE_PISAN, true)) {
+        if (! $this->respalda || $desde === null) {
             return;
         }
 
-        $ruta = $this->ruta_del_respaldo_en_los_logs();
+        $posicion_respaldo = array_search('backup_in_place', $secuencia, true);
+        $posicion_desde    = array_search($desde, $secuencia, true);
+        $posicion_pausa    = array_search('pause_for_crons', $secuencia, true);
+
+        if ($posicion_respaldo === false || $posicion_desde === false || $posicion_pausa === false
+            || $posicion_desde <= $posicion_respaldo || $posicion_desde > $posicion_pausa) {
+            return;
+        }
+
+        $ruta = $this->respaldo_completo_de_este_upgrade($this->base_de_respaldos());
 
         if ($ruta === null) {
+            /* La línea "Etapa que falló" tiene que recomendar reanudar desde el respaldo, no desde acá. */
+            $this->etapa_en_curso = 'backup_in_place';
+
             throw new \RuntimeException(
-                'Despliegue en el lugar: no se puede reanudar desde ' . $resume_from_step . ' porque este upgrade no tiene '
-                . 'un respaldo exitoso (backup_in_place) en sus logs, y esa etapa pisa el sistema vivo del cliente. Reanudá '
-                . 'con resume_from_step=backup_in_place. No se tocó nada.'
+                'No se puede reanudar desde ' . $desde . ': este upgrade no tiene un respaldo completo en el disco del '
+                . 'cliente (~/' . self::CARPETA_DE_RESPALDOS . '/), y esa etapa pisa el sistema. Reanudá con '
+                . 'resume_from_step=backup_in_place. No se tocó nada.'
             );
         }
 
         $this->ruta_del_respaldo = $ruta;
-        $this->log('backup_in_place', 'Reanudación desde ' . $resume_from_step . ': se usa el respaldo ya hecho de este '
-            . 'upgrade, en ' . $ruta . '.', 'info');
-    }
-
-    /**
-     * Directorio del último respaldo exitoso de este upgrade, leído de su línea MARCA_RESPALDO_OK.
-     *
-     * @return string|null
-     */
-    private function ruta_del_respaldo_en_los_logs()
-    {
-        $linea = DeploymentLog::where('client_version_upgrade_id', $this->upgrade->id)
-            ->where('step', 'backup_in_place')
-            ->where('level', 'success')
-            ->where('line', 'like', self::MARCA_RESPALDO_OK . '%')
-            ->orderByDesc('id')
-            ->value('line');
-
-        if ($linea === null) {
-            return null;
-        }
-
-        $coincidencias = [];
-        if (preg_match('/^' . preg_quote(self::MARCA_RESPALDO_OK, '/') . '(\S+)/u', (string) $linea, $coincidencias) !== 1) {
-            return null;
-        }
-
-        return $coincidencias[1];
+        $this->log('backup_in_place', 'Reanudación desde ' . $desde . ': se usa el respaldo de este upgrade que está en el '
+            . 'disco, en ' . $ruta . '.', 'info');
     }
 
     /**
@@ -1312,6 +1737,13 @@ class DeploymentService
      */
     private function step_upload_spa()
     {
+        /* En el lugar (misión `un-solo-frente`): la API nueva se baja, se verifica y se SUBE al hosting
+           ANTES de tocar el SPA vivo. Si GitHub falla acá, no se tocó nada; y entre el SPA nuevo y el
+           `down` de upload_api queda solo descomprimir, no una descarga. */
+        if ($this->es_en_el_lugar() && ! $this->api_subida_al_hosting) {
+            $this->preparar_api_en_el_hosting('upload_spa');
+        }
+
         $local_zip          = $this->local_spa_zip_path();
         $spa_build_path     = $this->builds_spa_path();
         $vino_del_artefacto = is_file($local_zip);
@@ -1363,6 +1795,8 @@ class DeploymentService
         $this->log('upload_spa', 'ZIP subido al hosting');
 
         $this->reconnect_hosting_ssh();
+        /* En el lugar, desde acá hasta config.js el SPA que atiende está vaciándose y rellenándose. */
+        $this->spa_vaciandose = $this->es_en_el_lugar();
         $this->exec_hosting_ssh(
             'upload_spa',
             $this->build_spa_hosting_deploy_shell()
@@ -1370,6 +1804,10 @@ class DeploymentService
         $this->log('upload_spa', 'SPA desplegado en public_html (contenido anterior reemplazado)', 'success');
 
         $this->write_spa_runtime_config('upload_spa');
+
+        $this->spa_vaciandose = false;
+        /* En el lugar, hasta el `down` de upload_api el cliente tiene el SPA nuevo con la API vieja. */
+        $this->spa_nuevo_con_api_vieja = $this->es_en_el_lugar();
 
         if (is_file($local_zip)) {
             unlink($local_zip);
@@ -1388,8 +1826,75 @@ class DeploymentService
     /**
      * Etapa: despliegue de la API en el hosting del cliente.
      *
-     * Dos vías para conseguir el zip (misión `actualizar-sin-el-vps`, 9/9/2026), una sola para
-     * desplegarlo (deploy_api_zip_to_hosting()):
+     * En una ROTACIÓN, lo de siempre: conseguir el zip (conseguir_zip_de_la_api(), artefacto del
+     * release o VPS de builds) y desplegarlo (deploy_api_zip_to_hosting()).
+     *
+     * EN EL LUGAR (misión `un-solo-frente`, 14/10/2026) el zip ya lo subió upload_spa antes de tocar
+     * el SPA vivo (preparar_api_en_el_hosting()), así que acá queda `artisan down` + `unzip` +
+     * `composer install` (reemplazar_api_en_el_hosting()). Si la corrida reanuda desde acá, el zip se
+     * sube primero, todavía sin tocar la API que atiende.
+     *
+     * @return void
+     */
+    private function step_upload_api()
+    {
+        $zip_name = 'api_' . $this->upgrade->uuid . '.zip';
+
+        if ($this->es_en_el_lugar()) {
+            /* En el lugar la API ya la subió upload_spa, antes de tocar el SPA. Si esta corrida reanuda
+               desde acá, se sube ahora (todavía sin tocar la API que atiende). */
+            if (! $this->api_subida_al_hosting) {
+                $this->preparar_api_en_el_hosting('upload_api');
+            }
+
+            $this->reemplazar_api_en_el_hosting($zip_name);
+
+            return;
+        }
+
+        $this->conseguir_zip_de_la_api('upload_api', function ($local_zip) use ($zip_name) {
+            $this->deploy_api_zip_to_hosting($local_zip, $zip_name);
+        });
+    }
+
+    /**
+     * En el lugar: baja el zip de la API nueva, lo verifica y lo SUBE al hosting del cliente, sin
+     * descomprimirlo (misión `un-solo-frente`, 14/10/2026).
+     *
+     * Lo llama upload_spa ANTES de tocar el SPA vivo: si GitHub, la descarga o la subida fallan, el
+     * cliente sigue entero con lo de siempre. Y deja para upload_api solo el `down` + `unzip` +
+     * `composer`, así el tramo con el SPA nuevo y la API vieja es lo más corto posible.
+     *
+     * @param  string  $step  Etapa de log (upload_spa, o upload_api si se reanuda desde ahí).
+     * @return void
+     */
+    private function preparar_api_en_el_hosting(string $step): void
+    {
+        $zip_name = 'api_' . $this->upgrade->uuid . '.zip';
+
+        $this->conseguir_zip_de_la_api($step, function ($local_zip) use ($zip_name, $step) {
+            $this->subir_zip_de_la_api_al_hosting($local_zip, $zip_name, $step);
+
+            if (is_file($local_zip)) {
+                unlink($local_zip);
+            }
+        });
+
+        $this->api_subida_al_hosting = true;
+
+        $this->log(
+            $step,
+            'En el lugar: la API nueva quedó bajada, verificada y subida al hosting (sin descomprimir) antes de tocar '
+            . 'el SPA que atiende.',
+            'success'
+        );
+    }
+
+    /**
+     * Consigue el zip local de la API y se lo pasa a `$con_el_zip` (el cuerpo de siempre de
+     * step_upload_api(), con la etapa de log como parámetro).
+     *
+     * Dos vías para conseguir el zip (misión `actualizar-sin-el-vps`, 9/9/2026):
      *
      *  1. **Artefacto del release.** Si el release `v{version}` de `empresa-api` trae
      *     `empresa-api-v{version}.zip` (el repo en la raíz, CON `vendor/`, sin `.git`/`.env`/
@@ -1403,9 +1908,14 @@ class DeploymentService
      * 🔴 Igual que en step_compile_spa(): tampoco un error de GitHub distinto de "no hay
      * release/asset" manda el build al VPS en silencio.
      *
+     * `$con_el_zip` se llama exactamente donde antes se llamaba deploy_api_zip_to_hosting(): en una
+     * rotación el orden de lo que se manda no cambió (misión `un-solo-frente`, 14/10/2026).
+     *
+     * @param  string    $step
+     * @param  callable  $con_el_zip  Recibe la ruta del zip local.
      * @return void
      */
-    private function step_upload_api()
+    private function conseguir_zip_de_la_api(string $step, callable $con_el_zip): void
     {
         $tag        = $this->version_tag();
         $zip_name   = 'api_' . $this->upgrade->uuid . '.zip';
@@ -1417,23 +1927,23 @@ class DeploymentService
         if ($asset !== null) {
             $this->ensure_local_deployments_dir();
             $bytes = $this->release_artifacts()->download_asset($asset, $local_zip);
-            $this->assert_local_zip_file($local_zip, $bytes, 'upload_api');
-            $this->assert_zip_contains_root_file($local_zip, 'artisan', 'upload_api');
+            $this->assert_local_zip_file($local_zip, $bytes, $step);
+            $this->assert_zip_contains_root_file($local_zip, 'artisan', $step);
             $this->log(
-                'upload_api',
+                $step,
                 "Artefacto {$asset_name} bajado de GitHub ({$bytes} bytes): no se empaqueta en el VPS de builds",
                 'success'
             );
 
-            $this->deploy_api_zip_to_hosting($local_zip, $zip_name);
+            $con_el_zip($local_zip);
 
             return;
         }
 
-        $this->assert_build_en_vps_permitido('upload_api', $asset_name, $tag, 'empresa-api');
+        $this->assert_build_en_vps_permitido($step, $asset_name, $tag, 'empresa-api');
 
         $this->log(
-            'upload_api',
+            $step,
             "Sin artefacto {$asset_name} en el release {$tag} de empresa-api, y DEPLOY_PERMITIR_BUILD_EN_VPS "
             . 'esta prendida: se empaqueta en el VPS de builds'
         );
@@ -1441,24 +1951,24 @@ class DeploymentService
         $this->connect_build_vps();
 
         $api_build_path = $this->builds_api_path();
-        $this->log('upload_api', "Preparando versión {$tag} en VPS de builds");
+        $this->log($step, "Preparando versión {$tag} en VPS de builds");
         $this->exec_build_ssh(
-            'upload_api',
+            $step,
             'cd ' . escapeshellarg($api_build_path) . ' && git fetch --tags 2>&1'
         );
 
         $checkout_output = $this->exec_build_ssh(
-            'upload_api',
+            $step,
             'cd ' . escapeshellarg($api_build_path) . ' && git checkout ' . escapeshellarg($tag) . ' 2>&1'
         );
-        $this->log('upload_api', $this->truncate_for_log($checkout_output));
+        $this->log($step, $this->truncate_for_log($checkout_output));
 
-        $this->log('upload_api', 'Corriendo composer install en VPS (sin scripts de artisan; sin .env en build)...');
+        $this->log($step, 'Corriendo composer install en VPS (sin scripts de artisan; sin .env en build)...');
         $this->exec_build_ssh(
-            'upload_api',
+            $step,
             $this->build_composer_install_command($api_build_path, true)
         );
-        $this->log('upload_api', 'composer install en VPS completado', 'success');
+        $this->log($step, 'composer install en VPS completado', 'success');
 
         $api_zip_remote = $api_build_path . '/' . $zip_name;
         $this->reconnect_build_vps();
@@ -1470,25 +1980,26 @@ class DeploymentService
             . " --exclude='database/seeders/articles/*' --exclude='database/seeders/truvari/*'"
             . " --exclude='database/seeders/subcategories/*' --exclude='database/seeders/sales/*'"
             . " 2>&1";
-        $this->exec_build_ssh('upload_api', $zip_command, true, true);
-        $api_zip_bytes = $this->verify_zip_on_vps($api_zip_remote, 'upload_api');
-        $this->log('upload_api', "API empaquetada ({$api_zip_bytes} bytes en VPS)");
+        $this->exec_build_ssh($step, $zip_command, true, true);
+        $api_zip_bytes = $this->verify_zip_on_vps($api_zip_remote, $step);
+        $this->log($step, "API empaquetada ({$api_zip_bytes} bytes en VPS)");
 
         $this->ensure_local_deployments_dir();
 
         $sftp_build = $this->open_sftp_session('vps');
-        $this->sftp_download_file($sftp_build, $api_zip_remote, $local_zip, $api_zip_bytes, 'upload_api');
-        $this->log('upload_api', 'ZIP descargado al servidor de admin');
+        $this->sftp_download_file($sftp_build, $api_zip_remote, $local_zip, $api_zip_bytes, $step);
+        $this->log($step, 'ZIP descargado al servidor de admin');
 
-        $this->deploy_api_zip_to_hosting($local_zip, $zip_name);
+        $con_el_zip($local_zip);
 
         $this->reconnect_build_vps();
         $this->exec_build_ssh(
-            'upload_api',
+            $step,
             'rm -f ' . escapeshellarg($api_build_path . '/' . $zip_name)
         );
-        $this->log('upload_api', 'Archivos temporales eliminados');
+        $this->log($step, 'Archivos temporales eliminados');
     }
+
 
     /**
      * Etapa: completa el `.env` del frente DESTINO con las claves que el frente ACTIVO tiene y a
@@ -2063,12 +2574,6 @@ class DeploymentService
             true
         );
         $this->log('run_migrations', 'Migraciones completadas', 'success');
-
-        /* En el lugar, el sistema estaba en mantenimiento desde upload_api: con el código nuevo y la
-           base migrada, vuelve a atender. */
-        if ($this->es_en_el_lugar()) {
-            $this->sacar_de_mantenimiento($api_path);
-        }
     }
 
     /**
@@ -2141,6 +2646,18 @@ class DeploymentService
             $version_seeder = $update_seeder->version_seeder;
             if ($version_seeder === null) {
                 $this->log('run_seeders', "UpdateSeeder #{$update_seeder->id} sin version_seeder asociado", 'error');
+                continue;
+            }
+
+            /* En el lugar (misión `un-solo-frente`) los seeders corren adentro del mantenimiento, y el
+               post-cierre —o una reanudación— no vuelve a correr los que ya salieron. En una rotación
+               queda como siempre. */
+            if ($this->es_en_el_lugar() && $update_seeder->status === 'exitoso') {
+                $this->log(
+                    'run_seeders',
+                    "Seeder ya ejecutado (omitido): {$version_seeder->seeder_class}",
+                    'info'
+                );
                 continue;
             }
 
@@ -2424,18 +2941,22 @@ class DeploymentService
     /**
      * Etapa: pausa manual para confirmación de crons.
      *
-     * EN EL LUGAR (misión `un-solo-frente`, 14/10/2026) no hay frente que mudar: los crons (shared)
-     * y el worker de supervisor (VPS) ya apuntan a esta carpeta, que es la que sigue atendiendo. Se
-     * marca solo el paso que el post-cierre exige —`crons_supervisor_at` en el shared,
-     * `vps_supervisor_moved_at` en el VPS— para que no espere una intervención manual que no hay que
-     * hacer, y se dice en el log. La pausa se mantiene igual: el post-cierre (seeders y comandos) sigue
-     * arrancando aparte, con su gate de horario.
+     * EN EL LUGAR (misión `un-solo-frente`, 14/10/2026), primero el `artisan up`: es el final de la
+     * ventana de mantenimiento (migraciones, seeders, comandos y reinicio del worker ya corrieron).
+     * Después, no hay frente que mudar: los crons (shared) y el worker de supervisor (VPS) ya apuntan
+     * a esta carpeta, que es la que sigue atendiendo. Se marca solo el paso que el post-cierre exige
+     * —`crons_supervisor_at` en el shared, `vps_supervisor_moved_at` en el VPS— para que no espere una
+     * intervención manual que no hay que hacer, y se dice en el log. La pausa se mantiene: el
+     * post-cierre del en el lugar encuentra los seeders y comandos ya corridos y no vuelve a correrlos.
      *
      * @return void
      */
     private function step_pause_for_crons()
     {
         if ($this->es_en_el_lugar()) {
+            /* El `up` va acá: después de migraciones, seeders, comandos y el reinicio del worker. */
+            $this->sacar_de_mantenimiento($this->get_api_path());
+
             $campo = $this->get_hosting_credential_type() === 'vps' ? 'vps_supervisor_moved_at' : 'crons_supervisor_at';
 
             if (empty($this->upgrade->{$campo})) {
@@ -2445,8 +2966,8 @@ class DeploymentService
             $this->log(
                 'pause_for_crons',
                 'En el lugar: no hay frente que mudar (los crons y el worker ya apuntan a esta carpeta). Se marca '
-                . $campo . ' solo, para que el post-cierre no espere un paso manual. Esperando el post-cierre (seeders y '
-                . 'comandos, con el negocio cerrado).',
+                . $campo . ' solo, para que el post-cierre no espere un paso manual. Los seeders y comandos ya corrieron '
+                . 'adentro del mantenimiento: el post-cierre no los vuelve a correr.',
                 'info'
             );
         } else {
@@ -4347,12 +4868,16 @@ class DeploymentService
     }
 
     /**
-     * Segunda mitad de step_upload_api(), común a las dos vías: sube el zip al hosting, lo
-     * descomprime encima de la API destino, borra el zip remoto, corre `composer install` en el
-     * hosting y borra el zip local.
+     * Segunda mitad de step_upload_api() en una ROTACIÓN, común a las dos vías: sube el zip al
+     * hosting, lo descomprime encima de la API destino, borra el zip remoto, corre `composer install`
+     * en el hosting y borra el zip local.
      *
      * Con el `vendor/` del artefacto adentro del zip, ese `composer install` es un no-op rápido;
      * sin él (vía vieja, que lo excluye), instala como siempre.
+     *
+     * Desde la misión `un-solo-frente` (14/10/2026) es la suma de subir_zip_de_la_api_al_hosting() y
+     * reemplazar_api_en_el_hosting(), que el en el lugar usa por separado; en una rotación se manda
+     * lo mismo y en el mismo orden que antes.
      *
      * @param  string  $local_zip  Zip local ya verificado.
      * @param  string  $zip_name   Nombre del zip en el hosting (`api_<uuid>.zip`).
@@ -4360,19 +4885,50 @@ class DeploymentService
      */
     private function deploy_api_zip_to_hosting(string $local_zip, string $zip_name): void
     {
-        $api_path = $this->get_api_path();
+        $this->subir_zip_de_la_api_al_hosting($local_zip, $zip_name, 'upload_api');
+
+        $this->reemplazar_api_en_el_hosting($zip_name);
+
+        if (is_file($local_zip)) {
+            unlink($local_zip);
+        }
+    }
+
+    /**
+     * Sube el zip de la API a la carpeta de la API destino, sin descomprimirlo.
+     *
+     * @param  string  $local_zip
+     * @param  string  $zip_name
+     * @param  string  $step
+     * @return void
+     */
+    private function subir_zip_de_la_api_al_hosting(string $local_zip, string $zip_name, string $step): void
+    {
+        $api_path   = $this->get_api_path();
         $remote_zip = "{$api_path}/{$zip_name}";
         /* Usar la credencial correcta según hosting_type (shared_hosting o vps) */
         $sftp_hosting = $this->open_sftp_session($this->get_hosting_credential_type());
-        $this->sftp_upload_file($sftp_hosting, $local_zip, $remote_zip, 'upload_api');
-        $this->log('upload_api', 'ZIP subido al hosting');
+        $this->sftp_upload_file($sftp_hosting, $local_zip, $remote_zip, $step);
+        $this->log($step, 'ZIP subido al hosting');
+    }
+
+    /**
+     * Descomprime el zip ya subido encima de la API destino y corre `composer install`. En el lugar,
+     * con `artisan down` justo antes del `unzip`.
+     *
+     * @param  string  $zip_name
+     * @return void
+     */
+    private function reemplazar_api_en_el_hosting(string $zip_name): void
+    {
+        $api_path = $this->get_api_path();
 
         // Reconecta SSH al hosting (sesión inicial puede estar inactiva tras operaciones largas en VPS/SFTP).
         $this->reconnect_hosting_ssh();
 
         /* En el lugar, el `unzip` de abajo pisa la API que está atendiendo: el sistema entra en
-           mantenimiento justo antes (y no al comienzo de upload_api, que todavía baja el artefacto de
-           GitHub: si eso falla, el cliente no tiene por qué haber quedado abajo). */
+           mantenimiento justo antes (el zip ya está subido, así que no hay ninguna descarga en el
+           medio que pueda dejarlo abajo de más). */
         if ($this->es_en_el_lugar()) {
             $this->poner_en_mantenimiento($api_path);
         }
@@ -4395,27 +4951,29 @@ class DeploymentService
             true
         );
         $this->log('upload_api', 'API lista en el hosting', 'success');
-
-        if (is_file($local_zip)) {
-            unlink($local_zip);
-        }
     }
 
     /**
      * `php artisan down` sobre la API que está atendiendo, justo antes de reemplazarla, en un
      * despliegue EN EL LUGAR (misión `un-solo-frente`, 14/10/2026).
      *
-     * Por qué: entre el `unzip` de la API y el final de las migraciones, el cliente tendría código
-     * nuevo atendiendo contra una base vieja, o a medio migrar. Un 503 es mejor que eso. El
-     * sistema sale de mantenimiento al final de step_run_migrations() (sacar_de_mantenimiento()).
+     * Por qué: desde el `unzip` de la API hasta que terminan migraciones, seeders y comandos, el
+     * cliente tendría código nuevo atendiendo contra una base vieja, a medio migrar o sin los datos
+     * que siembran los seeders. Un 503 es mejor que eso. El sistema sale de mantenimiento al comienzo
+     * de step_pause_for_crons() (sacar_de_mantenimiento()).
      *
-     * 🔴 Deja una línea `warning` con el comando para levantarlo y la ruta del respaldo APENAS
-     * entra en mantenimiento, no solo cuando algo falla: si el job muere por timeout entre el `down`
-     * y el `up`, el catch de run() no corre, y esa línea es la única que queda diciendo que el
-     * cliente quedó abajo y cómo se sale.
+     * 🔴 Deja una línea `warning` APENAS entra en mantenimiento, no solo cuando algo falla: si el job
+     * muere por timeout adentro de la ventana, el catch de run() no corre, y esa línea es la única que
+     * queda diciendo que el cliente quedó abajo, que NO se levanta a mano sin terminar el despliegue y
+     * dónde está el respaldo.
      *
      * Si el `down` falla, lanza: es mejor no reemplazar la API que reemplazarla con el sistema
      * atendiendo.
+     *
+     * ⚠️ En el VPS corre como root, igual que el `migrate` de siempre: no hay un ayudante que corra
+     * artisan como el usuario del sitio con su PHP (vps_site_user() solo da el nombre, lo usa el
+     * chown de la instalación). `storage/framework/down` queda de root con permisos 644, que php-fpm
+     * del sitio puede leer, y el `up` (también como root) lo borra.
      *
      * @param  string  $api_path
      * @return void
@@ -4431,25 +4989,30 @@ class DeploymentService
             true
         );
 
-        $this->mantenimiento_posible = true;
+        $this->mantenimiento_posible   = true;
+        $this->spa_nuevo_con_api_vieja = false;
 
         $this->log(
             'upload_api',
-            '🔴 Sistema del cliente EN MANTENIMIENTO desde ahora (php artisan down). Sale con php artisan up al final de '
-            . 'run_migrations. Si el despliegue se corta antes, se levanta por SSH con: ' . $this->comando_para_levantar()
-            . '. Respaldo de este despliegue: '
-            . ($this->ruta_del_respaldo === null ? 'sin dato en esta corrida (mirá la línea "' . self::MARCA_RESPALDO_OK
-                . '" de backup_in_place)' : $this->ruta_del_respaldo) . '.',
+            '🔴 Sistema del cliente EN MANTENIMIENTO desde ahora (php artisan down). Sale con php artisan up recién al '
+            . 'final del despliegue, después de migraciones, seeders y comandos. 🔴 NO lo levantes a mano sin terminar el '
+            . 'despliegue: si se corta, reanudá con resume_from_step=<la etapa que falló> (GET claude/upgrades/'
+            . (int) $this->upgrade->id . ' la dice en siguiente_accion). Respaldo de este despliegue: '
+            . ($this->ruta_del_respaldo === null
+                ? 'sin dato en esta corrida (mirá ~/' . self::CARPETA_DE_RESPALDOS . '/<carpeta>/ en el servidor)'
+                : $this->ruta_del_respaldo)
+            . '. Para levantarlo a mano solo después de volver atrás con el respaldo: ' . $this->comando_para_levantar() . '.',
             'warning'
         );
     }
 
     /**
-     * `php artisan up` al final de step_run_migrations(), en un despliegue EN EL LUGAR.
+     * `php artisan up` al comienzo de step_pause_for_crons(), en un despliegue EN EL LUGAR: después de
+     * migraciones, seeders, comandos y el reinicio del worker.
      *
-     * Corre también en una reanudación desde cualquier etapa de la ventana (incluida
-     * `resume_from_step=run_migrations`), que es justamente la forma de terminar un despliegue que
-     * quedó en mantenimiento: `artisan up` sobre un sistema que ya estaba arriba no hace nada.
+     * Corre también en cualquier reanudación de la ventana, que es justamente la forma de terminar un
+     * despliegue que quedó en mantenimiento: `artisan up` sobre un sistema que ya estaba arriba no
+     * hace nada.
      *
      * Si el `up` falla, lanza: el despliegue queda `failed` con la línea de mantenimiento de run(),
      * en vez de seguir hasta la pausa con el cliente abajo y el panel diciendo `paused`.
@@ -4459,16 +5022,19 @@ class DeploymentService
      */
     private function sacar_de_mantenimiento(string $api_path): void
     {
-        $this->log('run_migrations', 'En el lugar: migraciones terminadas, se saca el sistema del cliente de mantenimiento.');
+        $this->log(
+            'pause_for_crons',
+            'En el lugar: migraciones, seeders y comandos terminados, se saca el sistema del cliente de mantenimiento.'
+        );
 
         $this->run_command(
-            'run_migrations',
+            'pause_for_crons',
             'cd ' . $this->posix_single_quote($api_path) . ' && php artisan up --no-ansi 2>&1'
         );
 
         $this->mantenimiento_posible = false;
 
-        $this->log('run_migrations', 'Sistema del cliente fuera de mantenimiento (php artisan up).', 'success');
+        $this->log('pause_for_crons', 'Sistema del cliente fuera de mantenimiento (php artisan up).', 'success');
     }
 
     /**
