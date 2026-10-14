@@ -911,7 +911,7 @@ return [
             'frenos'       => [],
         ],
         'GET api/claude/upgrades/{id}' => [
-            'para_que'     => 'Estado detallado de un upgrade: el endpoint de poleo. Trae la salud calculada (deployment_stale, jobs en cola) y la siguiente acción sugerida. Desde el 14/10/2026 trae también upgrade.modo (en_el_lugar | rotacion), upgrade.frente_principal_client_api_id y target_client_api.es_el_frente_principal.',
+            'para_que'     => 'Estado detallado de un upgrade: el endpoint de poleo. Trae la salud calculada (deployment_stale, jobs en cola) y la siguiente acción sugerida. Desde el 14/10/2026 trae también upgrade.modo (en_el_lugar | rotacion; null en un upgrade completed, porque su destino ya pasó a ser el activo), upgrade.frente_principal_client_api_id y target_client_api.es_el_frente_principal.',
             'escribe'      => false,
             'peligrosidad' => 'lectura',
             'frenos'       => [],

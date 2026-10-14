@@ -531,6 +531,21 @@ class DeployEnElLugarPorClaudeTest extends TestCase
         $this->assertStringContainsString('EN EL LUGAR', $get['siguiente_accion']['motivo']);
     }
 
+    /**
+     * Un upgrade `completed` ya promovió su destino a activo: su modo no se puede reconstruir contra
+     * el activo de hoy (toda rotación terminada se leería "en el lugar"), y viaja null.
+     */
+    public function test_un_upgrade_completado_no_inventa_el_modo(): void
+    {
+        $e       = $this->escenario('principal');
+        $upgrade = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'completed']);
+
+        $get = $this->getJson('/api/claude/upgrades/' . $upgrade->id, $this->headers())->assertStatus(200)->json();
+
+        $this->assertNull($get['upgrade']['modo']);
+        $this->assertSame((int) $e['principal']->id, $get['upgrade']['frente_principal_client_api_id']);
+    }
+
     /** El lote crea hacia el frente principal de cada cliente y dice el modo de cada uno. */
     public function test_el_lote_va_al_principal_de_cada_cliente_y_dice_el_modo(): void
     {

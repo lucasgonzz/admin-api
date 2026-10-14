@@ -1922,9 +1922,14 @@ class ClaudeClientOpsController extends Controller
 
         /* Misión `un-solo-frente` (14/10/2026): en qué modo va este upgrade y cuál es el frente
            principal del cliente. Campos nuevos y aditivos; los lee también la respuesta de la
-           creación real, que es este mismo payload. */
+           creación real, que es este mismo payload.
+           ⚠️ El modo se calcula contra la API activa de HOY, que es la que mira el pipeline mientras
+           corre. Un upgrade `completed` ya promovió su destino a activo, así que cualquier rotación
+           terminada se leería como "en el lugar": para ese estado viaja null, que es honesto. */
         $frente_principal_id = $cliente === null ? null : $cliente->resolver_frente_principal_client_api_id();
-        $modo                = $cliente === null ? null : $cliente->modo_de_despliegue_hacia($fila['target_client_api_id']);
+        $modo                = ($cliente === null || $fila['deployment_status'] === 'completed')
+            ? null
+            : $cliente->modo_de_despliegue_hacia($fila['target_client_api_id']);
         if ($target_api !== null) {
             $target_api['es_el_frente_principal'] = $target_api['id'] === $frente_principal_id;
         }
