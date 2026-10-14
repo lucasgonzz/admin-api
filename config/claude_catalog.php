@@ -911,7 +911,7 @@ return [
             'frenos'       => [],
         ],
         'GET api/claude/upgrades/{id}' => [
-            'para_que'     => 'Estado detallado de un upgrade: el endpoint de poleo. Trae la salud calculada (deployment_stale, jobs en cola) y la siguiente acción sugerida.',
+            'para_que'     => 'Estado detallado de un upgrade: el endpoint de poleo. Trae la salud calculada (deployment_stale, jobs en cola) y la siguiente acción sugerida. Desde el 14/10/2026 trae también upgrade.modo (en_el_lugar | rotacion), upgrade.frente_principal_client_api_id y target_client_api.es_el_frente_principal.',
             'escribe'      => false,
             'peligrosidad' => 'lectura',
             'frenos'       => [],
@@ -926,13 +926,13 @@ return [
         /* ---------------------------------------------------------- Clientes y versiones: escritura */
 
         'POST api/claude/upgrades/preview' => [
-            'para_que'     => 'Candidatas de versión entre la versión actual de un cliente y la versión destino, con las que el panel marcaría por defecto.',
+            'para_que'     => 'Candidatas de versión entre la versión actual de un cliente y la versión destino, con las que el panel marcaría por defecto. Trae también frente_principal_client_api_id (la API destino por defecto), active_client_api_id y modo: en_el_lugar si el cliente ya atiende desde su frente principal, rotacion si atiende desde el otro (la última rotación al principal).',
             'escribe'      => false,
             'peligrosidad' => 'lectura',
             'frenos'       => [],
         ],
         'POST api/claude/upgrades' => [
-            'para_que'     => 'Crea UN ClientVersionUpgrade con las versiones confirmadas y sus UpdateSeeder y UpdateCommand. No arranca ningún deployment.',
+            'para_que'     => 'Crea UN ClientVersionUpgrade con las versiones confirmadas y sus UpdateSeeder y UpdateCommand. No arranca ningún deployment. La simulación trae modo y frente_principal_client_api_id; la creación real, upgrade.modo (es el payload de GET claude/upgrades/{id}).',
             'escribe'      => true,
             'peligrosidad' => 'media',
             'frenos'       => [
@@ -954,7 +954,7 @@ return [
                 ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Sin dry_run=false explícito NO crea nada.'],
                 ['nombre' => 'confirm_client_name', 'obligatorio' => false, 'validacion' => 'nullable|string|max:190 — obligatorio cuando dry_run=false', 'que_es' => 'El nombre exacto del cliente. El rechazo NO revela cuál era el correcto.'],
                 ['nombre' => 'confirm_version_count', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:1 — obligatorio cuando dry_run=false', 'que_es' => 'Cantidad exacta de versiones a confirmar. La simulación la devuelve.'],
-                ['nombre' => 'target_client_api_id', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:1', 'que_es' => 'API destino del deployment. Tiene que ser del mismo cliente. Si no viene, la resuelve el servicio.'],
+                ['nombre' => 'target_client_api_id', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:1', 'que_es' => 'API destino del deployment. Tiene que ser del mismo cliente. Si no viene, es el FRENTE PRINCIPAL del cliente (desde el 14/10/2026: ya no "la que no es la activa"). Si el cliente atiende desde su principal, eso es un despliegue en el lugar; si atiende desde el otro, es la última rotación al principal.'],
                 ['nombre' => 'notes', 'obligatorio' => false, 'validacion' => 'nullable|string', 'que_es' => 'Notas de la actualización.'],
                 ['nombre' => 'scheduled_date', 'obligatorio' => false, 'validacion' => 'nullable|date_format:Y-m-d', 'que_es' => 'Fecha planificada. No dispara nada: es informativa.'],
             ],
@@ -974,7 +974,8 @@ return [
                 'Un cliente raro (versión fuera de rango, sin ClientApi, con un deployment en curso) queda omitido con el motivo escrito y NO voltea el lote entero.',
                 'La versión destino tiene que estar en status "published", igual que en el alta de a uno.',
                 'client_ids[] y el selector por versión (from_version_id / from_version) son excluyentes: los dos juntos, o ninguno, es 422.',
-                '🔴 NO arranca ningún deployment. El gate de horario y allow_deploy_to_active_api son por cliente: veinte clientes son veinte jornadas distintas y no hay lote posible ahí.',
+                '🔴 NO arranca ningún deployment. El gate de horario (del post-cierre, y del deploy/start cuando va en el lugar) y allow_deploy_to_active_api son por cliente: veinte clientes son veinte jornadas distintas y no hay lote posible ahí.',
+                'La API destino de cada cliente es su frente principal (el mismo default que el alta de a uno): cada candidato trae modo, en_el_lugar o rotacion.',
                 '🔴 Y crear NO es actualizar: completar cada actualización son cinco pasos por cliente y uno de ellos es MANUAL (mover los crons en Hostinger). La respuesta los devuelve en `pasos_para_completar`. Ver limitaciones_conocidas.',
             ],
             'parametros'   => [
@@ -992,7 +993,7 @@ return [
             ],
         ],
         'POST api/claude/upgrades/{id}/deploy/start' => [
-            'para_que'     => 'Arranca el pipeline PRE-CIERRE: compila la SPA, la sube, sube la API, completa el .env del frente destino con las claves que le faltan respecto del frente activo (sync_env_keys, desde el 10/9/2026 y para cualquier versión destino: agrega las que faltan o están vacías, nunca pisa un valor, y aparta las propias del frente como URL/DOMAIN/PREFIX/COOKIE/STATEFUL/APP_NAME salvo las compartidas de la lista explícita; lo apartado se nombra en el log), corre las migraciones y frena esperando los crons. Se puede correr con el negocio abierto porque no toca el sistema en uso.',
+            'para_que'     => 'Arranca el pipeline PRE-CIERRE: compila la SPA, la sube, sube la API, completa el .env del frente destino con las claves que le faltan respecto del frente activo (sync_env_keys, desde el 10/9/2026 y para cualquier versión destino: agrega las que faltan o están vacías, nunca pisa un valor, y aparta las propias del frente como URL/DOMAIN/PREFIX/COOKIE/STATEFUL/APP_NAME salvo las compartidas de la lista explícita; lo apartado se nombra en el log), corre las migraciones y frena esperando los crons. En una ROTACIÓN (destino que no es la activa) se puede correr con el negocio abierto porque no toca el sistema en uso. 🔴 EN EL LUGAR (destino = activa = frente principal, desde el 14/10/2026) sí lo toca: antes de pisar nada respalda código, SPA y base en ~/cc-respaldos/<carpeta>/ del servidor (etapa backup_in_place; si falla, el deployment queda failed sin haber tocado nada), pone el sistema en mantenimiento (php artisan down) justo antes de reemplazar la API y lo saca (php artisan up) al terminar las migraciones, y en pause_for_crons marca solo crons_supervisor_at (shared) o vps_supervisor_moved_at (VPS) porque no hay frente que mudar. La respuesta trae modo y frente_principal_client_api_id.',
             'escribe'      => true,
             'peligrosidad' => 'alta',
             'frenos'       => [
@@ -1001,7 +1002,10 @@ return [
                 /* Estaba en el código (ClaudeUpgradeOpsController, el `empty($upgrade->target_client_api_id)`)
                    y no acá. Es un 422 que frena el arranque, o sea un freno. */
                 'Exige target_client_api_id cargado en el upgrade: sin API destino no arranca y devuelve 422 sin encolar nada.',
-                'allow_deploy_to_active_api: si la API destino es la que está en producción, hay que pedirlo explícito.',
+                '🔴 Destino = API activa = frente principal (en el lugar): pasa SIN allow_deploy_to_active_api pero con el GATE DE HORARIO del post-cierre (la jornada de hoy tiene que haber terminado; sin_configurar también rechaza). Se saltea con force + force_reason, que queda en el log diario.',
+                'Destino = API activa pero NO el frente principal (el cliente atiende desde su frente 2): 422 salvo allow_deploy_to_active_api=true. Lo que corresponde es crear el upgrade hacia el frente principal: es la última rotación.',
+                'allow_deploy_to_active_api=true se sigue aceptando siempre (compatibilidad): con ella el start pasa sin gate, como antes, y deja una línea en el log diario.',
+                'En el lugar, resume_from_step desde una etapa posterior al respaldo (upload_spa a run_migrations) exige que el upgrade tenga un respaldo exitoso en sus logs; si no, el job falla sin tocar nada y hay que reanudar desde backup_in_place.',
                 'Encola con onConnection("database"): nunca corre el pipeline SSH adentro del request.',
                 '⚠️ BORRA los logs del intento anterior, igual que el botón del panel — SALVO que mandes resume_from_step, que justamente los conserva. Si querés el log de un intento fallido, leelo ANTES de reintentar sin resume_from_step.',
                 '🔴 Desde la 4.0.23 el SPA y la API se BAJAN del release de GitHub (assets empresa-spa-v{version}-dist.zip y empresa-api-v{version}.zip). Si el asset no está, la etapa FALLA: ya NO se compila en el VPS de builds (decisión de Lucas, 9/9/2026). El mensaje del error dice qué archivo buscó y en qué tag. La salida de emergencia es DEPLOY_PERMITIR_BUILD_EN_VPS=true en el .env del admin, y se saca después.',
@@ -1009,12 +1013,14 @@ return [
             'parametros'   => [
                 ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; acepta id numérico o uuid', 'que_es' => 'El upgrade a arrancar.'],
                 ['nombre' => 'confirm_client_name', 'obligatorio' => true, 'validacion' => 'required|string|max:190', 'que_es' => 'El nombre exacto del cliente del upgrade. El rechazo NO revela cuál era el correcto.'],
-                ['nombre' => 'allow_deploy_to_active_api', 'obligatorio' => false, 'validacion' => 'nullable|boolean', 'que_es' => '🔴 Sólo hace falta si la API destino ES la activa en producción (pasa cuando el cliente tiene una sola ClientApi). Sin esto, ese caso es 422.'],
-                ['nombre' => 'resume_from_step', 'obligatorio' => false, 'validacion' => 'nullable|in:compile_spa,upload_spa,upload_api,sync_env_keys,run_migrations — 422 si el valor no está en esa lista, y 422 si el deployment anterior NO quedó failed', 'que_es' => 'REANUDA un pre-cierre fallado desde esa etapa en vez de rehacerlo entero, y CONSERVA los logs del intento anterior. Sirve cuando el corte fue de una etapa sola (el release todavía no tenía su asset, se cayó el SSH al escribir config.js): reanudar por la etapa equivocada vuelve a bajar y desplegar el SPA por nada. sync_env_keys es la etapa que completa el .env del destino desde el activo (nunca falla el deploy: si no pudo, deja un warning en el log con el motivo); reanudar desde ahí sirve cuando la API ya está subida y lo que se quiere es volver a completar el .env antes de migrar. La respuesta trae desde_etapa. Nunca llega al post-cierre: el pipeline corta igual en pause_for_crons.'],
+                ['nombre' => 'allow_deploy_to_active_api', 'obligatorio' => false, 'validacion' => 'nullable|boolean', 'que_es' => '🔴 Desde el 14/10/2026 sólo hace falta si la API destino ES la activa y NO es el frente principal del cliente (atiende desde su frente 2). Sin esto, ese caso es 422. Para el en el lugar sobre el principal no hace falta (lo cuida el gate de horario); si viene en true igual se acepta, y el start pasa sin gate.'],
+                ['nombre' => 'resume_from_step', 'obligatorio' => false, 'validacion' => 'nullable|in:compile_spa,backup_in_place,upload_spa,upload_api,sync_env_keys,sync_pusher_template,run_migrations — 422 si el valor no está en esa lista, y 422 si el deployment anterior NO quedó failed', 'que_es' => 'REANUDA un pre-cierre fallado desde esa etapa en vez de rehacerlo entero, y CONSERVA los logs del intento anterior. Sirve cuando el corte fue de una etapa sola (el release todavía no tenía su asset, se cayó el SSH al escribir config.js): reanudar por la etapa equivocada vuelve a bajar y desplegar el SPA por nada. sync_env_keys es la etapa que completa el .env del destino desde el activo (nunca falla el deploy: si no pudo, deja un warning en el log con el motivo); reanudar desde ahí sirve cuando la API ya está subida y lo que se quiere es volver a completar el .env antes de migrar. backup_in_place (en el lugar) sirve cuando falló el respaldo y se arregló la causa. En el lugar, run_migrations es la forma de terminar un despliegue que quedó en mantenimiento: vuelve a migrar y termina con php artisan up. La respuesta trae desde_etapa. Nunca llega al post-cierre: el pipeline corta igual en pause_for_crons.'],
+                ['nombre' => 'force', 'obligatorio' => false, 'validacion' => 'nullable|boolean', 'que_es' => '🔴 Sólo cuenta en un despliegue EN EL LUGAR: saltea el gate de horario (pisa el código vivo con el negocio abierto). Exige force_reason. En una rotación se ignora.'],
+                ['nombre' => 'force_reason', 'obligatorio' => false, 'validacion' => 'nullable|string|max:500 — obligatorio con force=true en el lugar, mínimo 10 caracteres', 'que_es' => 'Por qué se saltea el gate. Queda como warning en el log diario cuando el gate hubiera rechazado.'],
             ],
         ],
         'POST api/claude/upgrades/{id}/mark-crons' => [
-            'para_que'     => '🔴 SÓLO REGISTRA QUE UN HUMANO YA MOVIÓ LOS CRONS: escribe (o borra) crons_supervisor_at, que es el timestamp de esa confirmación. MARCARLO NO MUEVE NADA. Mover los crons y el supervisor del cliente es entrar al panel de Hostinger y hacerlo a mano, y es el paso por el que ninguna actualización de empresa se completa sin una persona. Marcar sin haberlos movido habilita el post-cierre igual y deja al cliente con los crons apuntando a la instancia vieja.',
+            'para_que'     => '🔴 SÓLO REGISTRA QUE UN HUMANO YA MOVIÓ LOS CRONS: escribe (o borra) crons_supervisor_at, que es el timestamp de esa confirmación. MARCARLO NO MUEVE NADA. Mover los crons y el supervisor del cliente es entrar al panel de Hostinger y hacerlo a mano, y es el paso por el que ninguna actualización de empresa se completa sin una persona. Marcar sin haberlos movido habilita el post-cierre igual y deja al cliente con los crons apuntando a la instancia vieja. En un despliegue EN EL LUGAR (desde el 14/10/2026) no hay crons que mover: el pipeline marca crons_supervisor_at solo al llegar a la pausa, y este endpoint no hace falta.',
             'escribe'      => true,
             'peligrosidad' => 'media',
             'frenos'       => [
@@ -1054,7 +1060,7 @@ return [
             'frenos'       => [
                 'confirm_client_name exacto, sin revelar el nombre correcto cuando falla.',
                 'El deployment tiene que estar en paused: no arranca sobre cualquier estado.',
-                'crons_supervisor_at tiene que estar marcado. ⚠️ Que esté marcado NO significa que los crons se hayan movido: mark-crons sólo registra que alguien dice que sí.',
+                'crons_supervisor_at tiene que estar marcado (vps_supervisor_moved_at si la API destino es VPS). ⚠️ Que esté marcado NO significa que los crons se hayan movido: mark-crons sólo registra que alguien dice que sí. En el lugar lo marca el pipeline, porque no hay nada que mover.',
                 'Gate de horario: si el negocio está abierto, o si no tiene horarios cargados, no arranca. Se saltea sólo con force y un force_reason de al menos 10 caracteres, que queda en el log diario.',
                 'Encola con onConnection("database"): nunca corre el pipeline SSH adentro del request.',
             ],
@@ -1493,8 +1499,8 @@ return [
         /* 🔴 Esta es la limitación más cara del bloque entero y hasta hoy no estaba acá: vivía sólo
            en el `para_que` de mark-crons, que es donde menos se la busca. Un lote de veinte
            actualizaciones NO es "actualizar veinte clientes". */
-        '🔴 NINGUNA ACTUALIZACIÓN DE EMPRESA SE COMPLETA SIN INTERVENCIÓN HUMANA. Completar una son CINCO pasos por cliente: deploy/start → MOVER LOS CRONS Y EL SUPERVISOR A MANO EN EL PANEL DE HOSTINGER → mark-crons → deploy/start-post-closure → deploy/configure-system. El paso 2 NO tiene endpoint y no lo va a tener: mark-crons sólo REGISTRA que una persona ya lo hizo. Además el paso 4 sólo corre con ESE negocio cerrado, así que cada cliente tiene su propia ventana horaria. Para veinte clientes: ~80 llamadas HTTP, 20 intervenciones manuales y 20 momentos distintos.',
-        'Ninguna ruta claude/* arranca un deployment en lote. El gate de horario y allow_deploy_to_active_api son por cliente, así que después de POST claude/upgrades/batch hay que llamar deploy/start uno por uno. Y crear el lote es sólo el primero de los cinco pasos de arriba: POST claude/upgrades/batch deja actualizaciones creadas, no clientes actualizados.',
+        '🔴 NINGUNA ROTACIÓN DE EMPRESA SE COMPLETA SIN INTERVENCIÓN HUMANA. Completar una son CINCO pasos por cliente: deploy/start → MOVER LOS CRONS Y EL SUPERVISOR A MANO EN EL PANEL DE HOSTINGER → mark-crons → deploy/start-post-closure → deploy/configure-system. El paso 2 NO tiene endpoint y no lo va a tener: mark-crons sólo REGISTRA que una persona ya lo hizo. Además el paso 4 sólo corre con ESE negocio cerrado, así que cada cliente tiene su propia ventana horaria. Para veinte clientes: ~80 llamadas HTTP, 20 intervenciones manuales y 20 momentos distintos. Desde el 14/10/2026 (un solo frente por cliente) la actualización EN EL LUGAR no tiene los pasos 2 y 3 —no hay frente que mudar y el pipeline marca los crons solo—, pero su deploy/start lleva el mismo gate de horario que el paso 4.',
+        'Ninguna ruta claude/* arranca un deployment en lote. El gate de horario (del post-cierre, y del deploy/start en el lugar) y allow_deploy_to_active_api son por cliente, así que después de POST claude/upgrades/batch hay que llamar deploy/start uno por uno. Y crear el lote es sólo el primero de los cinco pasos de arriba: POST claude/upgrades/batch deja actualizaciones creadas, no clientes actualizados.',
         'La instalación INICIAL de una tienda tiene UNA sola ruta, POST claude/ecommerce/installs (decisión de Lucas, 2/10/2026), con dry_run por defecto y sólo sobre una tienda registrada y en pending. La instalación del ERP de un cliente nuevo es POST claude/implementations/{id}/install (misión implementar-cliente, 5/10/2026), con dry_run por defecto y solo con el token de Hostinger del admin: es otra tabla (client_installations) y otro job que el de la tienda.',
         '🔴 El user setup de una implementación NO se puede re-aplicar por claude/*: del otro lado arranca con migrate:fresh --force y le vacía la base al cliente. POST claude/implementations/{id}/user-setup no tiene forzar —un force es 422— y con user_setup_executed_at lleno es 422 sin vuelta; si de verdad hace falta, se hace desde el panel, con una persona mirando.',
         '🔴 Mientras una implementación está abierta (status in_progress), TODO lo que el cliente le escribe al número de WhatsApp del sistema cae al hilo de la implementación y no llega a soporte ni al asistente, y en modo manual ese hilo no contesta. GET claude/implementations/{id} lo mide en `entrantes.sin_responder`; avanzar desde la etapa 8 (POST .../advance) cierra la implementación y libera el WhatsApp.',
