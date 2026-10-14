@@ -353,6 +353,41 @@ class Client extends Model
     }
 
     /**
+     * Advertencia cuando la API destino no es ni el frente principal ni la activa: una rotación
+     * hacia el frente secundario (misión `un-solo-frente`, 14/10/2026). Null en cualquier otro caso.
+     *
+     * No frena nada: es un campo aditivo de las respuestas de `claude/upgrades*` (preview, creación
+     * en seco y real, start). Desde la decisión del 14/10 lo normal es el principal (en el lugar, o
+     * la última rotación hacia él); mandar al 2 a un cliente que atiende desde el 1 es justo lo que
+     * la decisión vino a dejar de hacer, y tiene que verse aunque se permita.
+     *
+     * @param  int|string|null  $target_client_api_id
+     * @return string|null
+     */
+    public function advertencia_de_frente_secundario($target_client_api_id)
+    {
+        if ($target_client_api_id === null || $target_client_api_id === '') {
+            return null;
+        }
+
+        $principal_id = $this->resolver_frente_principal_client_api_id();
+        $target_id    = (int) $target_client_api_id;
+
+        if ($principal_id === null || $target_id === $principal_id) {
+            return null;
+        }
+
+        if ($this->active_client_api_id !== null && $target_id === (int) $this->active_client_api_id) {
+            return null;
+        }
+
+        return 'La API destino (' . $target_id . ') no es el frente principal del cliente (' . $principal_id . ') ni la '
+            . 'que está atendiendo: es una rotación hacia el frente secundario, contra la decisión del 14/10/2026 de '
+            . 'actualizar siempre sobre el frente principal. Lo que corresponde es target_client_api_id=' . $principal_id
+            . '. No frena nada.';
+    }
+
+    /**
      * Modo de un despliegue de este cliente hacia una ClientApi: `en_el_lugar` si es la ACTIVA,
      * `rotacion` si no (misión `un-solo-frente`, 14/10/2026).
      *

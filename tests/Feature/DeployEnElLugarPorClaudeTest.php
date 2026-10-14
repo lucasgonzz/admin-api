@@ -570,6 +570,282 @@ class DeployEnElLugarPorClaudeTest extends TestCase
         $this->assertSame((int) $e['principal']->id, $get['upgrade']['frente_principal_client_api_id']);
     }
 
+    /* ==========================================================================================
+     | 5) Correcciones tras los verificadores (14/10/2026)
+     |========================================================================================= */
+
+    /**
+     * Horario partido de todos los días (dos rangos).
+     *
+     * @param  Client  $client
+     * @param  array<int, array<int, string>>  $rangos
+     * @return void
+     */
+    private function horario_partido(Client $client, array $rangos): void
+    {
+        $dia            = new ClientScheduleDay();
+        $dia->client_id = $client->id;
+        $dia->day_key   = 'todos';
+        $dia->save();
+
+        foreach ($rangos as $orden => $par) {
+            $rango                         = new ClientScheduleRange();
+            $rango->client_schedule_day_id = $dia->id;
+            $rango->start_time             = $par[0];
+            $rango->end_time               = $par[1];
+            $rango->sort_order             = $orden;
+            $rango->save();
+        }
+    }
+
+    /**
+     * Momento del martes 25/8/2026, hora de la app.
+     *
+     * @param  string  $hora
+     * @return Carbon
+     */
+    private function a_las(string $hora): Carbon
+    {
+        return Carbon::parse('2026-08-25 ' . $hora . ':00', config('app.timezone'));
+    }
+
+    /**
+     * 🔴 La MADRUGADA: a las 02:00 con horario 09–18 el negocio todavía no abrió y faltan 7 horas
+     * para la primera apertura: el start en el lugar entra sin force (es cuando Lucas decidió
+     * actualizar). A las 08:30 faltan 30 minutos: 422, y el cuerpo dice cuántos faltan.
+     */
+    public function test_la_madrugada_pasa_sin_force_y_cerca_de_abrir_no(): void
+    {
+        Queue::fake();
+
+        $e = $this->escenario('principal');
+        $this->horario($e['client'], '09:00', '18:00');
+        $upgrade = $this->crear_upgrade($e, $e['principal']);
+
+        Carbon::setTestNow($this->a_las('08:30'));
+        $rechazo = $this->start($upgrade)->assertStatus(422)->json();
+        $this->assertSame(30, $rechazo['minutos_hasta_la_apertura']);
+        $this->assertSame(120, $rechazo['minimo_requerido']);
+        Queue::assertNothingPushed();
+        $this->assertNull($upgrade->refresh()->deployment_status);
+
+        Carbon::setTestNow($this->a_las('02:00'));
+        $cuerpo = $this->start($upgrade)->assertStatus(202)->json();
+
+        $this->assertSame('en_el_lugar', $cuerpo['modo']);
+        $this->assertSame(420, $cuerpo['gate_de_horario_madrugada']['minutos_hasta_la_apertura']);
+        $this->assertArrayNotHasKey('gate_de_horario_salteado', $cuerpo);
+        Queue::assertPushed(RunDeploymentJob::class, function ($job) {
+            return $job->connection === 'database';
+        });
+    }
+
+    /**
+     * 🔴 Un RECESO de horario partido sigue rechazando aunque falten más de 2 horas para reabrir:
+     * puede haber gente trabajando adentro. 13:00 con 08–12 / 16–20 → 422.
+     */
+    public function test_un_receso_entre_turnos_sigue_rechazando(): void
+    {
+        Queue::fake();
+        Carbon::setTestNow($this->a_las('13:00'));
+
+        $e = $this->escenario('principal');
+        $this->horario_partido($e['client'], [['08:00', '12:00'], ['16:00', '20:00']]);
+        $upgrade = $this->crear_upgrade($e, $e['principal']);
+
+        $cuerpo = $this->start($upgrade)->assertStatus(422)->json();
+
+        $this->assertStringContainsString('HUECO ENTRE TURNOS', $cuerpo['error']);
+        Queue::assertNothingPushed();
+    }
+
+    /**
+     * 🔴 Una REANUDACIÓN en el lugar no pasa por el gate: a las 08:30 (que rechazaría un arranque
+     * limpio) reanudar desde upload_api encola igual.
+     */
+    public function test_una_reanudacion_en_el_lugar_no_pasa_por_el_gate(): void
+    {
+        Queue::fake();
+        Carbon::setTestNow($this->a_las('08:30'));
+
+        $e = $this->escenario('principal');
+        $this->horario($e['client'], '09:00', '18:00');
+        $upgrade = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed']);
+
+        $cuerpo = $this->start($upgrade, ['resume_from_step' => 'upload_api'])->assertStatus(202)->json();
+
+        $this->assertSame('upload_api', $cuerpo['desde_etapa']);
+        $this->assertStringContainsString('reanudación', $cuerpo['gate_de_horario']);
+    }
+
+    /**
+     * En el lugar, reanudar los seeders es terminar la ventana de mantenimiento: el job recibe la
+     * etapa con el prefijo. En una rotación, la misma etapa es post-cierre y sale con el 422 de
+     * validación de siempre.
+     */
+    public function test_reanudar_los_seeders_solo_en_el_lugar_y_con_el_prefijo(): void
+    {
+        Queue::fake();
+        Carbon::setTestNow($this->mediodia());
+
+        $e       = $this->escenario('principal');
+        $upgrade = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed']);
+
+        $cuerpo = $this->start($upgrade, ['resume_from_step' => 'run_seeders'])->assertStatus(202)->json();
+        $this->assertSame('run_seeders', $cuerpo['desde_etapa']);
+
+        $etapas = [];
+        Queue::assertPushed(RunDeploymentJob::class, function ($job) use (&$etapas) {
+            $etapas[] = $this->etapa_del_job($job);
+
+            return true;
+        });
+        $this->assertSame(['en_mantenimiento:run_seeders'], $etapas);
+
+        $rotacion = $this->escenario('segundo');
+        $otro     = $this->crear_upgrade($rotacion, $rotacion['principal'], ['deployment_status' => 'failed']);
+
+        $error = $this->postJson('/api/claude/upgrades/' . $otro->id . '/deploy/start', [
+            'confirm_client_name' => self::NOMBRE,
+            'resume_from_step'    => 'run_seeders',
+        ], $this->headers())->assertStatus(422)->json();
+
+        $this->assertSame('parámetros inválidos', $error['error']);
+        $this->assertArrayHasKey('resume_from_step', $error['errores']);
+    }
+
+    /**
+     * La advertencia de rotación al frente secundario (destino que no es ni el principal ni el
+     * activo) viaja en preview, simulación, creación y start. No frena.
+     */
+    public function test_la_rotacion_al_frente_secundario_lleva_advertencia_y_no_frena(): void
+    {
+        Queue::fake();
+        Carbon::setTestNow($this->mediodia());
+
+        $e = $this->escenario('principal');
+
+        $preview = $this->postJson('/api/claude/upgrades/preview', [
+            'client_id'            => $e['client']->id,
+            'to_version_id'        => $e['to']->id,
+            'target_client_api_id' => $e['segundo']->id,
+        ], $this->headers())->assertStatus(200)->json();
+        $this->assertSame('rotacion', $preview['modo']);
+        $this->assertStringContainsString('frente secundario', $preview['advertencia_frente_secundario']);
+
+        $default = $this->postJson('/api/claude/upgrades/preview', [
+            'client_id'     => $e['client']->id,
+            'to_version_id' => $e['to']->id,
+        ], $this->headers())->assertStatus(200)->json();
+        $this->assertNull($default['advertencia_frente_secundario']);
+
+        $base = [
+            'client_id'             => $e['client']->id,
+            'to_version_id'         => $e['to']->id,
+            'confirmed_version_ids' => [$e['to']->id],
+            'target_client_api_id'  => $e['segundo']->id,
+        ];
+
+        $seco = $this->postJson('/api/claude/upgrades', $base, $this->headers())->assertStatus(200)->json();
+        $this->assertNotNull($seco['advertencia_frente_secundario']);
+
+        $real = $this->postJson('/api/claude/upgrades', array_merge($base, [
+            'dry_run'               => false,
+            'confirm_version_count' => 1,
+            'confirm_client_name'   => self::NOMBRE,
+        ]), $this->headers())->assertStatus(201)->json();
+        $this->assertNotNull($real['upgrade']['advertencia_frente_secundario']);
+
+        $start = $this->start(ClientVersionUpgrade::find($real['upgrade']['id']))->assertStatus(202)->json();
+        $this->assertSame('rotacion', $start['modo']);
+        $this->assertNotNull($start['advertencia_frente_secundario']);
+    }
+
+    /**
+     * El post-cierre de un upgrade en el lugar no pasa por el gate (no vuelve a correr nada): con el
+     * negocio abierto encola igual.
+     */
+    public function test_el_post_cierre_en_el_lugar_no_pasa_por_el_gate(): void
+    {
+        Queue::fake();
+        Carbon::setTestNow($this->mediodia());
+
+        $e = $this->escenario('principal');
+        $this->horario($e['client'], '09:00', '18:00');
+        $upgrade = $this->crear_upgrade($e, $e['principal'], [
+            'deployment_status'   => 'paused',
+            'crons_supervisor_at' => now(),
+        ]);
+
+        $cuerpo = $this->postJson('/api/claude/upgrades/' . $upgrade->id . '/deploy/start-post-closure', [
+            'confirm_client_name' => self::NOMBRE,
+        ], $this->headers())->assertStatus(202)->json();
+
+        $this->assertSame('en_el_lugar', $cuerpo['modo']);
+        $this->assertStringContainsString('no aplica', $cuerpo['gate_de_horario']);
+    }
+
+    /**
+     * En el lugar, el reintento de comandos sobre un despliegue que no llegó al `artisan up` (sin la
+     * marca de la pausa) es 422 y manda a deploy/start con resume_from_step=run_commands.
+     */
+    public function test_el_reintento_de_comandos_en_el_lugar_sin_llegar_al_up_rechaza(): void
+    {
+        Queue::fake();
+        Carbon::setTestNow($this->a_las('23:00'));
+
+        $e = $this->escenario('principal');
+        $this->horario($e['client'], '09:00', '18:00');
+        $upgrade = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed']);
+
+        $comando                  = new \App\Models\VersionCommand();
+        $comando->version_id      = $e['to']->id;
+        $comando->command         = 'php artisan algo:que-fallo';
+        $comando->execution_order = 1;
+        $comando->save();
+
+        \App\Models\UpdateCommand::create([
+            'client_version_upgrade_id' => $upgrade->id,
+            'version_command_id'        => $comando->id,
+            'status'                    => 'fallido',
+        ]);
+
+        $cuerpo = $this->postJson('/api/claude/upgrades/' . $upgrade->id . '/deploy/retry-commands', [
+            'confirm_client_name' => self::NOMBRE,
+        ], $this->headers())->assertStatus(422)->json();
+
+        $this->assertStringContainsString('resume_from_step=run_commands', $cuerpo['ayuda']);
+        Queue::assertNothingPushed();
+    }
+
+    /**
+     * Un upgrade en el lugar `failed`: siguiente_accion recomienda reanudar desde la etapa que falló
+     * (la línea con marca fija del pipeline), no un start limpio.
+     */
+    public function test_un_fallo_en_el_lugar_recomienda_reanudar_desde_la_etapa_que_fallo(): void
+    {
+        $e       = $this->escenario('principal');
+        $upgrade = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed']);
+
+        DeploymentLog::create([
+            'client_version_upgrade_id' => $upgrade->id,
+            'step'                      => 'upload_api',
+            'level'                     => 'error',
+            'line'                      => \App\Services\DeploymentService::MARCA_ETAPA_QUE_FALLO . 'upload_api. Causa: x',
+        ]);
+        DeploymentLog::create([
+            'client_version_upgrade_id' => $upgrade->id,
+            'step'                      => 'vencimiento',
+            'level'                     => 'error',
+            'line'                      => 'El job terminó fallado: x. El estado ya estaba escrito.',
+        ]);
+
+        $get = $this->getJson('/api/claude/upgrades/' . $upgrade->id, $this->headers())->assertStatus(200)->json();
+
+        $this->assertSame('upload_api', $get['siguiente_accion']['resume_from_step']);
+        $this->assertStringContainsString('resume_from_step=upload_api', $get['siguiente_accion']['motivo']);
+    }
+
     /** El lote crea hacia el frente principal de cada cliente y dice el modo de cada uno. */
     public function test_el_lote_va_al_principal_de_cada_cliente_y_dice_el_modo(): void
     {
