@@ -405,32 +405,12 @@ class DemoExtendidaHastaElFinDelDiaTest extends TestCase
      * dinámica nueva) quede afuera de la automatización de ingreso, y que un flexible manual de la
      * dinámica actual SÍ siga adentro -- se re-cubre sobre el mecanismo nuevo en
      * tests/Feature/CheckDemoIngresoTimeoutTest.php.
-     */
-
-    /**
-     * 8ter. Y por el mismo motivo, agendar por WhatsApp no le puede APAGAR ese checkbox a un lead de
-     *       la dinámica actual: si se lo apagara, volvería a reservar ventana de closer automática
-     *       — el "bloqueo fantasma" que el fix del 2/7/2026 eliminó.
      *
-     * @return void
+     * Actualización 14/10/2026 (misión demo-solo-experiencia-nueva): la dinámica actual se retiró,
+     * así que la segunda mitad (el flexible manual de un lead actual) dejó de existir y se sacó
+     * también de CheckDemoIngresoTimeoutTest, junto con el 8ter de este archivo (agendar no pisa
+     * el flag manual de un lead actual). Queda la primera mitad: la ventana extendida excluida.
      */
-    public function test_agendar_no_pisa_el_flag_manual_de_un_lead_actual(): void
-    {
-        Carbon::setTestNow($this->momento_base());
-
-        $demo = $this->crear_demo();
-        $lead = $this->crear_lead();
-        $lead->demo_experiencia = Lead::EXPERIENCIA_ACTUAL;
-        $lead->demo_flexible    = true;
-        $lead->save();
-
-        $this->service()->aplicar($lead, $this->paquete($demo, '2026-08-20', '10:00', false));
-
-        $this->assertTrue(
-            (bool) $lead->refresh()->demo_flexible,
-            'El agendamiento apagó el flag manual de un lead de la dinámica actual.'
-        );
-    }
 
     /**
      * 9. Un inicio desde el cual no entra una demo completa antes de las 23:59 no admite ventana

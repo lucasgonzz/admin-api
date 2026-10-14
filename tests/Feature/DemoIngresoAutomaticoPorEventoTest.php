@@ -144,30 +144,6 @@ class DemoIngresoAutomaticoPorEventoTest extends TestCase
     }
 
     /**
-     * Defensa por dinámica: un lead que no usa la dinámica nueva no puede llegar acá por HTTP (el
-     * middleware del canal ya lo rechaza con 401 -- DemoEventosKey), pero el propio método tiene su
-     * guardia redundante. Se prueba llamando al método directo, igual que documenta su PHPDoc.
-     */
-    public function test_defensa_por_dinamica_un_lead_actual_no_se_toca_aunque_se_llame_directo(): void
-    {
-        $lead                   = $this->crear_lead('demo_agendada');
-        $lead->demo_experiencia = Lead::EXPERIENCIA_ACTUAL;
-        $lead->save();
-
-        $controller = new class extends DemoEventosController {
-            public function avanzar_publico(Lead $lead): void
-            {
-                $this->avanzar_pipeline_por_ingreso_real($lead);
-            }
-        };
-        $controller->avanzar_publico($lead);
-
-        $lead->refresh();
-        $this->assertSame('demo_agendada', $lead->status);
-        $this->assertFalse((bool) $lead->demo_ingreso_confirmado);
-    }
-
-    /**
      * Segunda llegada del evento sobre un lead ya confirmado (reentrada real, o el mismo evento
      * reenviado con otro uuid): no repite el timestamp de confirmación. Es la única señal
      * verificable sin salir a Google Calendar / WhatsApp real (ninguno de los dos tiene fixture de

@@ -45,7 +45,7 @@ class CheckDemoIngresoTimeoutTest extends TestCase
         $lead->uuid                      = (string) Str::uuid();
         $lead->contact_name              = 'Lead de prueba';
         $lead->status                    = 'demo_agendada';
-        $lead->demo_experiencia          = Lead::EXPERIENCIA_ACTUAL;
+        $lead->demo_experiencia          = Lead::EXPERIENCIA_NUEVA;
         $lead->demo_date                 = $demo_datetime->copy();
         $lead->demo_start_time           = $demo_datetime->format('H:i');
         $lead->automatizaciones_demo_activas = true;
@@ -145,31 +145,6 @@ class CheckDemoIngresoTimeoutTest extends TestCase
         $lead->refresh();
         $this->assertSame('demo_pendiente_de_ingreso', $lead->status);
         $this->assertNull($lead->demo_id, 'El no-show libera la instancia.');
-    }
-
-    /**
-     * 🔴 `demo_flexible` es una columna PREEXISTENTE (2/7/2026) que significa "no reservar ventana
-     * de closer" y que Lucas marca a mano desde el panel -- no es lo mismo que la ventana extendida
-     * de la dinámica nueva. Un lead de la dinámica ACTUAL con ese checkbox marcado tiene que seguir
-     * cayendo en el timeout igual que uno sin marcar: la exclusión pide las DOS condiciones
-     * (demo_flexible Y demo_experiencia='nueva'), no alcanza con la primera sola. Mismo caso que
-     * protegía el extinto CheckDemoIngress, re-cubierto acá sobre el mecanismo nuevo.
-     */
-    public function test_flexible_manual_de_un_lead_actual_no_queda_excluido(): void
-    {
-        $this->fijar_timeout(15);
-        $inicio = Carbon::parse('2026-09-04 10:00:00', 'America/Argentina/Buenos_Aires');
-        $lead   = $this->crear_lead_candidato($inicio);
-        $lead->demo_flexible    = true;
-        $lead->demo_experiencia = Lead::EXPERIENCIA_ACTUAL;
-        $lead->save();
-
-        Carbon::setTestNow($inicio->copy()->addMinutes(20));
-
-        $this->artisan('leads:check-demo-ingreso-timeout')->assertExitCode(0);
-
-        $lead->refresh();
-        $this->assertSame('demo_pendiente_de_ingreso', $lead->status);
     }
 
     /**

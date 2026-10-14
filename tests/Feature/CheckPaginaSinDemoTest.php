@@ -213,12 +213,15 @@ class CheckPaginaSinDemoTest extends TestCase
     }
 
     /**
-     * (7) No son candidatos: con turno asignado, en otro estado del pipeline, con la dinámica actual
-     *     o marcado como "no recibe mensajes".
+     * (7) No son candidatos: con turno asignado, en otro estado del pipeline, marcado como "no
+     *     recibe mensajes" o con las automatizaciones apagadas.
+     *
+     *     (El caso "con la dinámica actual" se sacó el 14/10/2026, misión
+     *     demo-solo-experiencia-nueva: esa dinámica está retirada y ya no hay leads que la usen.)
      *
      * @return void
      */
-    public function test_con_turno_otro_estado_dinamica_actual_o_sin_recibir_mensajes_no_es_candidato(): void
+    public function test_con_turno_otro_estado_o_sin_recibir_mensajes_no_es_candidato(): void
     {
         $espia = $this->espiar_whatsapp();
 
@@ -232,10 +235,6 @@ class CheckPaginaSinDemoTest extends TestCase
         $nuevo->status = 'nuevo';
         $nuevo->save();
 
-        $actual                   = $this->crear_lead('5493519999995');
-        $actual->demo_experiencia = Lead::EXPERIENCIA_ACTUAL;
-        $actual->save();
-
         $bloqueado                        = $this->crear_lead('5493519999994');
         $bloqueado->no_recibe_mensajes_at = Carbon::now()->subDay();
         $bloqueado->save();
@@ -245,7 +244,7 @@ class CheckPaginaSinDemoTest extends TestCase
         $apagado->automatizaciones_demo_activas = false;
         $apagado->save();
 
-        foreach ([$con_turno, $nuevo, $actual, $bloqueado, $apagado] as $lead) {
+        foreach ([$con_turno, $nuevo, $bloqueado, $apagado] as $lead) {
             $this->mensaje($lead, 'lead', Carbon::now()->subMinutes(200));
             $this->mensaje($lead, 'sistema', Carbon::now()->subMinutes(190));
             $this->apertura($lead, Carbon::now()->subMinutes(130));

@@ -21,7 +21,9 @@ class ConfirmarIngresoYMarcarNoIngresoTest extends TestCase
     use DatabaseTransactions;
 
     /**
-     * Lead de dinámica actual en demo_agendada, listo para las dos acciones.
+     * Lead en demo_agendada, listo para las dos acciones. Con la dinámica nueva, que desde el
+     * 14/10/2026 es la única (antes el estado de partida era la dinámica 'actual', hoy retirada:
+     * lo que prueban estos tests no depende de la dinámica).
      *
      * @return Lead
      */
@@ -31,7 +33,7 @@ class ConfirmarIngresoYMarcarNoIngresoTest extends TestCase
         $lead->uuid             = (string) Str::uuid();
         $lead->contact_name     = 'Lead de prueba';
         $lead->status            = 'demo_agendada';
-        $lead->demo_experiencia = Lead::EXPERIENCIA_ACTUAL;
+        $lead->demo_experiencia = Lead::EXPERIENCIA_NUEVA;
         $lead->save();
 
         return $lead->refresh();
