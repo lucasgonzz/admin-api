@@ -50,7 +50,7 @@ class ProgresoDelMailTest extends BaseDelMailDeImplementacion
 
         // Y el nombre de cada etapa es el que ve el comerciante, no el del panel.
         foreach (['Conocemos tu negocio', 'Instalamos tu sistema', 'Recibimos tu información', 'Cargamos tu catálogo',
-                  'Te entregamos el sistema', 'Terminamos tu catálogo', 'Facturación electrónica', 'Cerramos la implementación'] as $nombre) {
+                  'Te entregamos el sistema', 'Terminamos tu catálogo', 'Facturación electrónica', 'Seguimos con soporte'] as $nombre) {
             $this->assertStringContainsString($nombre, $html);
         }
     }

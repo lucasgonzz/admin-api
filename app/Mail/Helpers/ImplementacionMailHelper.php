@@ -47,7 +47,7 @@ class ImplementacionMailHelper
         5 => 'Te entregamos el sistema',
         6 => 'Terminamos tu catálogo',
         7 => 'Facturación electrónica',
-        8 => 'Cerramos la implementación',
+        8 => 'Seguimos con soporte',
     ];
 
     /**

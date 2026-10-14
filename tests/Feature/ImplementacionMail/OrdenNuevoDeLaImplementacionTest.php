@@ -239,7 +239,7 @@ class OrdenNuevoDeLaImplementacionTest extends BaseDelMailDeImplementacion
 
     /**
      * 3. La línea de progreso sale en TODOS los mails: ninguno nombra la videollamada, y la etapa 8 se
-     * llama "Cerramos la implementación". La 6 es "Terminamos tu catálogo" (los tutoriales salen en la
+     * llama "Seguimos con soporte". La 6 es "Terminamos tu catálogo" (los tutoriales salen en la
      * entrega). En la HTML y en el texto.
      *
      * @return void
@@ -256,7 +256,7 @@ class OrdenNuevoDeLaImplementacionTest extends BaseDelMailDeImplementacion
 
             foreach (['html' => $mail['html'], 'texto' => $mail['texto']] as $version => $contenido) {
                 $this->assertStringNotContainsStringIgnoringCase('videollamada', $contenido, $hito . ' (' . $version . ')');
-                $this->assertStringContainsString('Cerramos la implementación', $contenido, $hito . ' (' . $version . ')');
+                $this->assertStringContainsString('Seguimos con soporte', $contenido, $hito . ' (' . $version . ')');
                 $this->assertStringContainsString('Terminamos tu catálogo', $contenido, $hito . ' (' . $version . ')');
                 $this->assertStringNotContainsString('Tu equipo y los tutoriales', $contenido, $hito . ' (' . $version . ')');
             }
