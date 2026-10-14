@@ -37,6 +37,11 @@ return [
     // entra desde su sistema una vez y no tiene que volver a hacerlo en esa compu.
     'sesion_dias' => 365,
 
+    // Cuánto vive una sesión de SOLO LECTURA (el pase de un login maestro: soporte mirando como el
+    // dueño). Mucho más corta que la normal: soporte entra a mirar un rato, y una sesión así no tiene por
+    // qué quedar abierta un año en el navegador de nadie.
+    'sesion_soporte_horas' => 12,
+
     // Cuánto vive el link personal del dueño. Es reutilizable hasta vencer (lo abre en la compu y en
     // el celular); vencido, el panel genera otro.
     'link_dias' => 90,

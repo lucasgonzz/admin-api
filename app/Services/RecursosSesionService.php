@@ -47,6 +47,13 @@ use Illuminate\Support\Str;
  * no se crea ni se completa nada. El `empresa-api` ya lo filtra por su `USER_ID`; esto es la segunda
  * reja, del lado del admin.
  *
+ * LOGIN MAESTRO = SOLO LECTURA (misión centro-recursos-soporte-y-tema, 14/10/2026). Si el cliente
+ * contesta el canje con `soporte: true` (el pase lo emitió un login maestro: soporte entrando como el
+ * dueño), la sesión que se abre es de SOLO LECTURA y vence a las `sesion_soporte_horas`: se ve el avance
+ * del dueño, pero no se guarda nada a su nombre (`recursos.escritura` corta las rutas que escriben) y
+ * tampoco se toca la ficha del dueño (nombre, mail, `es_dueno`, `ultimo_ingreso_at`). Un canje sin
+ * `soporte` (un `empresa-api` viejo no lo manda) es una sesión normal, exactamente como antes.
+ *
  * Errores (contrato C2): `cliente_no_encontrado`, `pase_invalido` (el cliente dijo que no: 404 —incluido
  * el 404 de ruta de un cliente con versión vieja—, 422, el pase no tiene forma de pase, o el usuario no
  * es de este dueño) y `cliente_no_responde` (no se le pudo preguntar o contestó otra cosa).
@@ -77,7 +84,7 @@ class RecursosSesionService
      * @param mixed $pase Lo que mandó la página.
      * @param mixed $api  La URL base del `empresa-api` que emitió el pase, tal como vino.
      *
-     * @return array{ok: bool, error?: string, token?: string, usuario?: RecursosUsuario}
+     * @return array{ok: bool, error?: string, token?: string, usuario?: RecursosUsuario, solo_lectura?: bool}
      */
     public function por_pase($pase, $api): array
     {
@@ -116,12 +123,16 @@ class RecursosSesionService
             return ['ok' => false, 'error' => 'pase_invalido'];
         }
 
-        $usuario = $this->usuario_del_pase($client, $canje['user']);
+        // Contrato C3: `soporte` ausente = false. Solo un `true` estricto abre una sesión de solo lectura.
+        $soporte = isset($canje['soporte']) && $canje['soporte'] === true;
+
+        $usuario = $this->usuario_del_pase($client, $canje['user'], $soporte);
 
         return [
-            'ok'      => true,
-            'token'   => $this->crear_sesion($usuario),
-            'usuario' => $usuario,
+            'ok'           => true,
+            'token'        => $this->crear_sesion($usuario, $soporte),
+            'usuario'      => $usuario,
+            'solo_lectura' => $soporte,
         ];
     }
 
@@ -168,20 +179,32 @@ class RecursosSesionService
      * Crea una sesión para el usuario y devuelve el token en claro (lo único que se devuelve en
      * claro; en la base queda el sha256).
      *
+     * Una sesión de SOLO LECTURA (pase de login maestro) vence a las `sesion_soporte_horas` en vez de
+     * a los `sesion_dias`, y es la única que escribe la columna `solo_lectura`: una sesión normal se
+     * crea exactamente igual que antes (la columna queda en su default `false`).
+     *
      * @param RecursosUsuario $usuario
+     * @param bool            $solo_lectura
      *
      * @return string
      */
-    public function crear_sesion(RecursosUsuario $usuario): string
+    public function crear_sesion(RecursosUsuario $usuario, bool $solo_lectura = false): string
     {
         $token = Str::random(64);
 
-        RecursosSesion::create([
+        $datos = [
             'recursos_usuario_id' => $usuario->id,
             'token_hash'          => hash('sha256', $token),
             'expires_at'          => now()->addDays((int) config('recursos.sesion_dias', 365)),
             'last_used_at'        => now(),
-        ]);
+        ];
+
+        if ($solo_lectura) {
+            $datos['expires_at']   = now()->addHours((int) config('recursos.sesion_soporte_horas', 12));
+            $datos['solo_lectura'] = true;
+        }
+
+        RecursosSesion::create($datos);
 
         return $token;
     }
@@ -393,7 +416,7 @@ class RecursosSesionService
      * @param array<int, array{client: Client, client_api: ClientApi|null}> $candidatos
      * @param string                                                       $pase
      *
-     * @return array{ok: bool, error?: string, user?: array<string, mixed>}
+     * @return array{ok: bool, error?: string, user?: array<string, mixed>, soporte?: bool}
      */
     protected function canjear(array $candidatos, string $pase): array
     {
@@ -444,7 +467,7 @@ class RecursosSesionService
      * @param string $pase
      * @param Client $para_el_log
      *
-     * @return array{ok: bool, status: int, error?: string, user?: array<string, mixed>}
+     * @return array{ok: bool, status: int, error?: string, user?: array<string, mixed>, soporte?: bool}
      */
     protected function pedir_canje(string $url, string $clave, string $pase, Client $para_el_log): array
     {
@@ -494,7 +517,17 @@ class RecursosSesionService
             return ['ok' => false, 'status' => $status, 'error' => 'cliente_no_responde'];
         }
 
-        return ['ok' => true, 'status' => $status, 'user' => $user];
+        // `soporte` es opcional (contrato C3): un `empresa-api` viejo no lo manda y eso es `false`. Solo un
+        // `true` booleano cuenta; "true", 1 o cualquier otra cosa se lee como sesión normal.
+        $soporte = false;
+
+        try {
+            $soporte = $response->json('soporte') === true;
+        } catch (\Throwable $e) {
+            $soporte = false;
+        }
+
+        return ['ok' => true, 'status' => $status, 'user' => $user, 'soporte' => $soporte];
     }
 
     /**
@@ -544,12 +577,20 @@ class RecursosSesionService
      * COMPLETA el id a esa fila en vez de crear otra: es la misma persona, y su avance tiene que estar
      * en un solo lugar.
      *
+     * 🔴 En modo SOPORTE (pase de login maestro) NO se escribe nada sobre un usuario que ya existe: ni
+     * nombre, ni mail, ni `es_dueno`, ni `ultimo_ingreso_at`, ni se le completa el `empresa_user_id` a la
+     * fila que generó el panel. Es soporte mirando: la ficha del dueño queda como estaba (el panel del
+     * admin lee `ultimo_ingreso_at` como "cuándo entró el cliente"). Si no existe ninguna fila se crea con
+     * los datos del sistema y `ultimo_ingreso_at` en null —el panel ya admite null: así nace la fila del
+     * link personal—.
+     *
      * @param Client               $client
-     * @param array<string, mixed> $user   `{id, name, email, owner_id}` del contrato C3.
+     * @param array<string, mixed> $user    `{id, name, email, owner_id}` del contrato C3.
+     * @param bool                 $soporte El pase vino de un login maestro.
      *
      * @return RecursosUsuario
      */
-    protected function usuario_del_pase(Client $client, array $user): RecursosUsuario
+    protected function usuario_del_pase(Client $client, array $user, bool $soporte = false): RecursosUsuario
     {
         $empresa_user_id = (int) $user['id'];
         $es_dueno        = ! isset($user['owner_id']) || $user['owner_id'] === null || (int) $user['owner_id'] === 0;
@@ -568,6 +609,12 @@ class RecursosSesionService
                 ->first();
         }
 
+        if ($soporte && $usuario instanceof RecursosUsuario) {
+            $usuario->setRelation('client', $client);
+
+            return $usuario;
+        }
+
         if (! $usuario instanceof RecursosUsuario) {
             $usuario = new RecursosUsuario();
             $usuario->client_id = $client->id;
@@ -582,7 +629,11 @@ class RecursosSesionService
         $usuario->empresa_user_id   = $empresa_user_id;
         $usuario->nombre            = mb_substr($nombre, 0, 255, 'UTF-8');
         $usuario->es_dueno          = $es_dueno;
-        $usuario->ultimo_ingreso_at = now();
+
+        // En soporte llegamos acá solo con una fila NUEVA: nace sin "último ingreso" (nadie entró de verdad).
+        if (! $soporte) {
+            $usuario->ultimo_ingreso_at = now();
+        }
 
         if ($email !== null) {
             $usuario->email = $email;

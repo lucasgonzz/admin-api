@@ -72,6 +72,8 @@ class Kernel extends HttpKernel
         // 🔴 NO es Sanctum a propósito: un token del centro no puede entrar al panel. Ver RecursosSesion.
         'recursos.sesion' => \App\Http\Middleware\RecursosSesion::class,
         'recursos.sesion.opcional' => \App\Http\Middleware\RecursosSesionOpcional::class,
+        // Corta con 403 `solo_lectura` las rutas que escriben cuando la sesión es de login maestro. Va después de `recursos.sesion`.
+        'recursos.escritura' => \App\Http\Middleware\RecursosEscritura::class,
         // Limitador propio del centro: cubetas por grupo de rutas, por IP o por token del centro.
         'recursos.throttle' => \App\Http\Middleware\RecursosThrottle::class,
     ];

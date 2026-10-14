@@ -13,6 +13,7 @@ use Illuminate\Http\Request;
  * Entrar y salir del centro de recursos (contrato C2 de la misión centro-de-recursos-clientes):
  *
  *   POST recursos/sesion/pase  {pase, api} → {token, usuario} · 422 {error: cliente_no_encontrado | pase_invalido | cliente_no_responde}
+ *                                            (`usuario.solo_lectura: true` SOLO si el pase vino de un login maestro; ausente = false)
  *   POST recursos/sesion/link  {t}         → {token, usuario} · 422 {error: link_invalido}
  *   POST recursos/salir        (con sesión) → {ok: true}
  *
@@ -93,9 +94,16 @@ class RecursosSesionController extends Controller
             return response()->json(['error' => $resultado['error']], 422);
         }
 
+        $usuario = $resultado['usuario']->para_si_mismo();
+
+        // Solo cuando es true: ausente = false, así la forma no cambia para nadie más (contrato C2).
+        if (! empty($resultado['solo_lectura'])) {
+            $usuario['solo_lectura'] = true;
+        }
+
         return response()->json([
             'token'   => $resultado['token'],
-            'usuario' => $resultado['usuario']->para_si_mismo(),
+            'usuario' => $usuario,
         ]);
     }
 }

@@ -201,12 +201,18 @@ Route::prefix('recursos')
 
         Route::middleware(['recursos.throttle:60,1,escritura,token', 'recursos.sesion'])->group(function () {
             Route::get('yo', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'yo_json']);
-            Route::post('progreso', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'progreso_json']);
-            Route::post('votos', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'votos_json']);
-            Route::post('preguntas', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'preguntas_json']);
-            Route::post('preguntas/{id}/me-gusta', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'me_gusta_json']);
-            Route::post('encuestas', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'encuestas_json']);
             Route::post('salir', [\App\Http\Controllers\Api\RecursosSesionController::class, 'salir_json']);
+
+            /* Lo que ESCRIBE. Una sesión de solo lectura (el pase de un login maestro) da 403 `solo_lectura`
+               acá; `yo` y `salir` quedan afuera a propósito: soporte puede leer y puede salir. Va adentro del
+               grupo de arriba, así el limitador y la sesión corren antes que `recursos.escritura`. */
+            Route::middleware('recursos.escritura')->group(function () {
+                Route::post('progreso', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'progreso_json']);
+                Route::post('votos', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'votos_json']);
+                Route::post('preguntas', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'preguntas_json']);
+                Route::post('preguntas/{id}/me-gusta', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'me_gusta_json']);
+                Route::post('encuestas', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'encuestas_json']);
+            });
         });
     });
 

@@ -8,6 +8,7 @@ use App\Models\RecursosEncuesta;
 use App\Models\RecursosPregunta;
 use App\Models\RecursosPreguntaMeGusta;
 use App\Models\RecursosProgreso;
+use App\Models\RecursosSesion as RecursosSesionModelo;
 use App\Models\RecursosUsuario;
 use App\Models\RecursosVideo;
 use App\Models\RecursosVoto;
@@ -185,8 +186,17 @@ class RecursosPaginaController extends Controller
             ->values()
             ->all();
 
+        $yo = $usuario->para_si_mismo();
+
+        // Solo cuando la sesión es de solo lectura (login maestro): ausente = false (contrato C2).
+        $sesion = $request->attributes->get(RecursosSesion::ATRIBUTO_SESION);
+
+        if ($sesion instanceof RecursosSesionModelo && $sesion->solo_lectura) {
+            $yo['solo_lectura'] = true;
+        }
+
         return response()->json([
-            'usuario'           => $usuario->para_si_mismo(),
+            'usuario'           => $yo,
             'progreso'          => (object) $progreso,
             'votos'             => (object) $votos,
             'encuestas'         => $encuestas,
