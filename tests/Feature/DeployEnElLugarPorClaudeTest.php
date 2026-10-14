@@ -532,6 +532,30 @@ class DeployEnElLugarPorClaudeTest extends TestCase
     }
 
     /**
+     * En el lugar, pausado después del pre-cierre, la siguiente acción es el post-cierre y no
+     * mark-crons: el pipeline ya marcó el paso (en el VPS, vps_supervisor_moved_at, que es el que
+     * mira el post-cierre).
+     */
+    public function test_en_el_lugar_pausado_la_siguiente_accion_es_el_post_cierre(): void
+    {
+        $e       = $this->escenario('principal');
+        $upgrade = $this->crear_upgrade($e, $e['principal'], [
+            'deployment_status'       => 'paused',
+            'vps_supervisor_moved_at' => now(),
+        ]);
+
+        $get = $this->getJson('/api/claude/upgrades/' . $upgrade->id, $this->headers())->assertStatus(200)->json();
+
+        $this->assertStringContainsString('deploy/start-post-closure', $get['siguiente_accion']['endpoint']);
+        $this->assertStringContainsString('EN EL LUGAR', $get['siguiente_accion']['motivo']);
+
+        /* Una rotación pausada sin crons marcados sigue mandando a mark-crons, como siempre. */
+        $rotacion = $this->crear_upgrade($e, $e['segundo'], ['deployment_status' => 'paused']);
+        $get_rot  = $this->getJson('/api/claude/upgrades/' . $rotacion->id, $this->headers())->assertStatus(200)->json();
+        $this->assertStringContainsString('mark-crons', $get_rot['siguiente_accion']['endpoint']);
+    }
+
+    /**
      * Un upgrade `completed` ya promovió su destino a activo: su modo no se puede reconstruir contra
      * el activo de hoy (toda rotación terminada se leería "en el lugar"), y viaja null.
      */

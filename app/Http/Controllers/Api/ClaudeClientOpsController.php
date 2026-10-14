@@ -2610,6 +2610,20 @@ class ClaudeClientOpsController extends Controller
         }
 
         if ($deployment_status === 'paused') {
+            /* En el lugar (misión `un-solo-frente`) no hay crons ni supervisor que mudar: el pipeline
+               marca solo el paso al llegar a la pausa (crons_supervisor_at en el shared,
+               vps_supervisor_moved_at en el VPS). Mandar a mark-crons acá sería mandar a un paso
+               manual que no existe, y en el VPS ni siquiera es el campo que mira el post-cierre. */
+            if ($modo === Client::MODO_EN_EL_LUGAR) {
+                return [
+                    'endpoint' => $post_closure,
+                    'motivo'   => 'Despliegue EN EL LUGAR: no hay crons ni supervisor que mudar y el pipeline ya marcó '
+                        . 'el paso solo. Falta arrancar las tareas post-cierre, que corren seeders y comandos sobre el '
+                        . 'sistema en uso: solo se ejecutan con el negocio CERRADO. Mirá `horario_cliente.estado_ahora` '
+                        . 'antes de llamar.',
+                ];
+            }
+
             if ($crons_supervisor_at === null) {
                 return [
                     'endpoint' => $mark_crons,
@@ -2685,10 +2699,12 @@ class ClaudeClientOpsController extends Controller
         if ($modo === Client::MODO_EN_EL_LUGAR) {
             return [
                 'endpoint' => $start,
-                'motivo'   => 'El deployment nunca arrancó y va EN EL LUGAR: la API destino es la activa (el frente '
-                    . 'principal). El pre-cierre respalda código, SPA y base (backup_in_place), pisa el código que está '
-                    . 'atendiendo y deja el sistema en mantenimiento hasta que terminan las migraciones: por eso el start '
-                    . 'tiene el mismo gate de horario que el post-cierre. Mirá `horario_cliente.estado_ahora` antes de llamar.',
+                'motivo'   => 'El deployment nunca arrancó y va EN EL LUGAR: la API destino es la activa. El pre-cierre '
+                    . 'respalda código, SPA y base (backup_in_place), pisa el código que está atendiendo y deja el sistema '
+                    . 'en mantenimiento hasta que terminan las migraciones: por eso, si la destino es el frente principal '
+                    . '(upgrade.frente_principal_client_api_id), el start tiene el mismo gate de horario que el post-cierre; '
+                    . 'si no lo es, el start la rechaza salvo allow_deploy_to_active_api y lo que corresponde es la última '
+                    . 'rotación al principal. Mirá `horario_cliente.estado_ahora` antes de llamar.',
             ];
         }
 
