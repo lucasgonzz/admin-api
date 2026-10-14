@@ -423,8 +423,10 @@ Route::middleware('claude.task.key')
            🔴 Estas nueve rutas crean actualizaciones sobre clientes REALES y arrancan deployments
            por SSH que pueden dejar un negocio sin sistema. Los frenos de las OCHO que viven en
            ClaudeUpgradeOpsController son confirm_client_name (en todas ellas), dry_run por defecto
-           al crear, allow_deploy_to_active_api, el gate de horario del post-cierre —que también
-           lleva retry-commands— y el umbral destructivo de expire-stuck.
+           al crear, allow_deploy_to_active_api (desde el 14/10/2026 solo para una destino activa
+           que NO es el frente principal), el gate de horario del post-cierre —que también lleva
+           retry-commands, y deploy/start cuando va en el lugar— y el umbral destructivo de
+           expire-stuck.
            🔴 La novena, `upgrades/batch`, es la excepción y por eso se aclara aparte: vive en
            ClaudeUpgradeBatchController y NO usa confirm_client_name, porque en un lote de veinte no
            hay UN nombre que confirmar. Su equivalente es confirm_client_count + confirm_token.
@@ -433,8 +435,9 @@ Route::middleware('claude.task.key')
            capture si mañana se agrega un POST claude/upgrades/{id} a secas. */
         Route::post('upgrades/preview', 'Api\ClaudeUpgradeOpsController@preview_json');
         /* Alta EN LOTE, pegada a `preview` y ANTES que cualquier ruta con {id}, por lo mismo que
-           aquélla. 🔴 Sólo CREA actualizaciones: no arranca ningún deployment, porque el gate de
-           horario y allow_deploy_to_active_api son por cliente. Los frenos (tope de 25, dry_run por
+           aquélla. 🔴 Sólo CREA actualizaciones (hacia el frente principal de cada cliente): no
+           arranca ningún deployment, porque el gate de horario y allow_deploy_to_active_api son
+           por cliente. Los frenos (tope de 25, dry_run por
            defecto, confirm_client_count y confirm_token) están en ClaudeUpgradeBatchController. */
         Route::post('upgrades/batch', 'Api\ClaudeUpgradeBatchController@store_batch_json');
         Route::post('upgrades', 'Api\ClaudeUpgradeOpsController@store_json');

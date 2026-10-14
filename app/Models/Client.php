@@ -103,7 +103,25 @@ class Client extends Model
         'ecommerce_api_url',
         'ecommerce_spa_path',
         'ecommerce_api_path',
+        'frente_principal_client_api_id',
     ];
+
+    /**
+     * Modo de un despliegue cuya API destino ES la activa: se reemplaza el código que está
+     * atendiendo (misión `un-solo-frente`, 14/10/2026). Ver modo_de_despliegue_hacia().
+     *
+     * @var string
+     */
+    const MODO_EN_EL_LUGAR = 'en_el_lugar';
+
+    /**
+     * Modo de un despliegue cuya API destino NO es la activa: se sube a la otra carpeta y al final
+     * se rota. Incluye la última rotación de un cliente que hoy atiende desde su frente 2 hacia el
+     * principal.
+     *
+     * @var string
+     */
+    const MODO_ROTACION = 'rotacion';
 
     function scopeWithAll($query) {
         // Se agrega 'client_ecommerce' (eager load) para que los accessors
@@ -165,6 +183,232 @@ class Client extends Model
     public function getEcommerceApiPathAttribute()
     {
         return $this->client_ecommerce ? $this->client_ecommerce->manual_api_path() : '';
+    }
+
+    /**
+     * Id de la ClientApi que es el FRENTE PRINCIPAL del cliente (accessor:
+     * frente_principal_client_api_id), o null.
+     *
+     * 🔴 Devuelve null si `client_apis` NO está cargada, y es a propósito: este accessor viaja en
+     * `$appends`, o sea en TODA serialización de un cliente —el listado completo del panel, los
+     * clientes anidados en upgrades, instalaciones y tiendas—. Si cargara la relación por su cuenta
+     * sería una consulta por cliente serializado. Los que necesitan el dato (la ficha del cliente
+     * que lee el formulario de actualizaciones, vía scopeWithAll()) ya traen la relación cargada, y
+     * ahí sale gratis. El que necesite el frente principal SIEMPRE usa
+     * resolver_frente_principal_client_api_id(), que sí carga lo que falta.
+     *
+     * Campo nuevo y opcional del contrato con admin-spa (misión `un-solo-frente`, 14/10/2026): un SPA
+     * viejo lo ignora, y uno nuevo sin el campo cae al comportamiento de siempre.
+     *
+     * @return int|null
+     */
+    public function getFrentePrincipalClientApiIdAttribute()
+    {
+        if (! $this->relationLoaded('client_apis')) {
+            return null;
+        }
+
+        return self::frente_principal_entre($this->client_apis);
+    }
+
+    /**
+     * Id del frente principal del cliente, cargando `client_apis` si hace falta. Null si el cliente
+     * no tiene ninguna ClientApi.
+     *
+     * Es la puerta de entrada a la regla para todo el que no esté serializando: el destino por
+     * defecto de una actualización (ClientVersionUpgradeCreationService), el freno del
+     * `deploy/start` y las respuestas de `claude/upgrades*`.
+     *
+     * @return int|null
+     */
+    public function resolver_frente_principal_client_api_id()
+    {
+        $this->loadMissing('client_apis');
+
+        return self::frente_principal_entre($this->client_apis);
+    }
+
+    /**
+     * 🔴 LA REGLA DEL FRENTE PRINCIPAL, Y ES LA ÚNICA COPIA QUE HAY EN EL ADMIN (misión
+     * `un-solo-frente`, 14/10/2026).
+     *
+     * Decisión de Lucas del 14/10/2026: se deja de rotar entre las dos carpetas de cada cliente. Un
+     * cliente que atiende desde su frente 1 se actualiza ahí mismo, en el lugar; uno que atiende
+     * desde el 2 se lleva al 1 una última vez. Para eso hace falta saber cuál de las dos ClientApi es
+     * "el 1", y la base no lo dice en ningún lado: hay que deducirlo.
+     *
+     * La regla, medida contra el admin de producción el 14/10/2026 (53 clientes, 115 ClientApi):
+     *
+     *  1. Si hay una sola ClientApi, esa.
+     *  2. La que tiene el nombre de carpeta que es PREFIJO ESTRICTO del de la otra: `fenix` /
+     *     `fenix-prueba`, `golonorte` / `golonorte2`, `innovate` / `innovate-2`, `demo2` / `demo22`.
+     *     El nombre de carpeta es `vps_path` en el VPS y `path` sin el `/api` final en el shared
+     *     (nombre_de_carpeta_del_frente()).
+     *  3. Si el prefijo no decide (`colman-beta` / `lucasgonzalez2`), la de MENOR id.
+     *
+     * 🔴 "La de menor id" sola NO sirve, y por eso es el último recurso y no la regla: en golonorte
+     * (cliente 15, VPS) la 73 es `golonorte2` y la 74 es `golonorte`. Con menor id a secas, el
+     * "frente 1" de ese cliente sería su carpeta 2.
+     *
+     * Con más de dos ClientApi (quedan altas duplicadas viejas) la regla 2 se generaliza así: el
+     * principal es la ÚNICA cuyo nombre es prefijo estricto de algún otro y que no tiene, a su vez,
+     * otro nombre como prefijo estricto. Si hay cero o más de una así, decide la regla 3. Con dos
+     * ClientApi es exactamente la regla del plan.
+     *
+     * Es estática y pura (entra una colección, sale un id) para poder probarla sin base y para que
+     * el accessor la use sobre la relación ya cargada sin disparar ninguna consulta.
+     *
+     * @param  iterable  $client_apis  ClientApi del cliente (colección o array).
+     * @return int|null  Null si no hay ninguna.
+     */
+    public static function frente_principal_entre($client_apis)
+    {
+        $nombres = [];
+        foreach ($client_apis as $client_api) {
+            if ($client_api === null || $client_api->id === null) {
+                continue;
+            }
+            $nombres[(int) $client_api->id] = self::nombre_de_carpeta_del_frente($client_api);
+        }
+
+        if (count($nombres) === 0) {
+            return null;
+        }
+
+        if (count($nombres) === 1) {
+            $ids = array_keys($nombres);
+
+            return (int) $ids[0];
+        }
+
+        $candidatos = [];
+        foreach ($nombres as $id => $nombre) {
+            if ($nombre === '') {
+                continue;
+            }
+
+            $es_prefijo_de_otro = false;
+            $tiene_un_prefijo   = false;
+            foreach ($nombres as $otro_id => $otro) {
+                if ($otro_id === $id || $otro === '') {
+                    continue;
+                }
+                if (self::es_prefijo_estricto($nombre, $otro)) {
+                    $es_prefijo_de_otro = true;
+                }
+                if (self::es_prefijo_estricto($otro, $nombre)) {
+                    $tiene_un_prefijo = true;
+                }
+            }
+
+            if ($es_prefijo_de_otro && ! $tiene_un_prefijo) {
+                $candidatos[] = (int) $id;
+            }
+        }
+
+        if (count($candidatos) === 1) {
+            return $candidatos[0];
+        }
+
+        return (int) min(array_keys($nombres));
+    }
+
+    /**
+     * Nombre de la carpeta de un frente, tal como lo compara frente_principal_entre().
+     *
+     * - VPS: `vps_path` (es el nombre del sitio de CloudPanel: `golonorte`, `golonorte2`). El `path`
+     *   de una ClientApi de VPS puede venir vacío o con un resto del shared, y no se mira.
+     * - shared_hosting: `path` sin barras de los bordes y sin el `/api` final (`colman/api` →
+     *   `colman`).
+     *
+     * En minúsculas, para que una diferencia de mayúsculas cargada a mano no rompa el prefijo.
+     *
+     * @param  ClientApi  $client_api
+     * @return string  '' si no hay nada cargado.
+     */
+    public static function nombre_de_carpeta_del_frente($client_api)
+    {
+        $hosting_type = $client_api->hosting_type ? (string) $client_api->hosting_type : 'shared_hosting';
+
+        if ($hosting_type === 'vps') {
+            return mb_strtolower(trim((string) $client_api->vps_path, "/ \t"));
+        }
+
+        $path = trim((string) $client_api->path, "/ \t");
+        $path = (string) preg_replace('#/api$#i', '', $path);
+
+        return mb_strtolower(trim($path, "/ \t"));
+    }
+
+    /**
+     * ¿$corto es prefijo ESTRICTO de $largo? (`golonorte` de `golonorte2` sí; de sí mismo, no).
+     *
+     * @param  string  $corto
+     * @param  string  $largo
+     * @return bool
+     */
+    private static function es_prefijo_estricto($corto, $largo)
+    {
+        return strlen($corto) < strlen($largo) && strpos($largo, $corto) === 0;
+    }
+
+    /**
+     * Advertencia cuando la API destino no es ni el frente principal ni la activa: una rotación
+     * hacia el frente secundario (misión `un-solo-frente`, 14/10/2026). Null en cualquier otro caso.
+     *
+     * No frena nada: es un campo aditivo de las respuestas de `claude/upgrades*` (preview, creación
+     * en seco y real, start). Desde la decisión del 14/10 lo normal es el principal (en el lugar, o
+     * la última rotación hacia él); mandar al 2 a un cliente que atiende desde el 1 es justo lo que
+     * la decisión vino a dejar de hacer, y tiene que verse aunque se permita.
+     *
+     * @param  int|string|null  $target_client_api_id
+     * @return string|null
+     */
+    public function advertencia_de_frente_secundario($target_client_api_id)
+    {
+        if ($target_client_api_id === null || $target_client_api_id === '') {
+            return null;
+        }
+
+        $principal_id = $this->resolver_frente_principal_client_api_id();
+        $target_id    = (int) $target_client_api_id;
+
+        if ($principal_id === null || $target_id === $principal_id) {
+            return null;
+        }
+
+        if ($this->active_client_api_id !== null && $target_id === (int) $this->active_client_api_id) {
+            return null;
+        }
+
+        return 'La API destino (' . $target_id . ') no es el frente principal del cliente (' . $principal_id . ') ni la '
+            . 'que está atendiendo: es una rotación hacia el frente secundario, contra la decisión del 14/10/2026 de '
+            . 'actualizar siempre sobre el frente principal. Lo que corresponde es target_client_api_id=' . $principal_id
+            . '. No frena nada.';
+    }
+
+    /**
+     * Modo de un despliegue de este cliente hacia una ClientApi: `en_el_lugar` si es la ACTIVA,
+     * `rotacion` si no (misión `un-solo-frente`, 14/10/2026).
+     *
+     * Un cliente sin `active_client_api_id` cae en `rotacion`: no hay ninguna carpeta que se sepa
+     * que está atendiendo, así que no hay código vivo que pisar.
+     *
+     * @param  int|string|null  $target_client_api_id
+     * @return string|null  Null si no hay API destino.
+     */
+    public function modo_de_despliegue_hacia($target_client_api_id)
+    {
+        if ($target_client_api_id === null || $target_client_api_id === '') {
+            return null;
+        }
+
+        if ($this->active_client_api_id !== null
+            && (int) $target_client_api_id === (int) $this->active_client_api_id) {
+            return self::MODO_EN_EL_LUGAR;
+        }
+
+        return self::MODO_ROTACION;
     }
 
     /**
