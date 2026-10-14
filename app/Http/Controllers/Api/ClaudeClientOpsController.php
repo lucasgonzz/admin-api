@@ -125,9 +125,11 @@ class ClaudeClientOpsController extends Controller
      * activo). Y el 18/9/2026 (misión `pusher-app-produccion-vs-desarrollo`): `sync_pusher_template`
      * (fuerza `PUSHER_*` desde la plantilla, al revés que `sync_env_keys`). Un candado en
      * SincronizacionDeClavesDelEnvEntreFrentesTest compara estas dos listas contra `$steps` para
-     * que la próxima etapa nueva no vuelva a quedar sin replicar.
+     * que la próxima etapa nueva no vuelva a quedar sin replicar. Y el 14/10/2026 (misión
+     * `un-solo-frente`): `backup_in_place`, que respalda código, SPA y base antes de un despliegue
+     * EN EL LUGAR (en una rotación dice que no aplica y sigue).
      */
-    const PIPELINE_PRE_CIERRE  = ['compile_spa', 'upload_spa', 'upload_api', 'sync_env_keys', 'sync_pusher_template', 'run_migrations', 'restart_queue_workers', 'pause_for_crons'];
+    const PIPELINE_PRE_CIERRE  = ['compile_spa', 'backup_in_place', 'upload_spa', 'upload_api', 'sync_env_keys', 'sync_pusher_template', 'run_migrations', 'restart_queue_workers', 'pause_for_crons'];
     const PIPELINE_POST_CIERRE = ['run_seeders', 'run_commands', 'update_default_version', 'complete'];
 
     /** Valores válidos de `client_version_upgrades.deployment_status` (null = nunca arrancó). */
