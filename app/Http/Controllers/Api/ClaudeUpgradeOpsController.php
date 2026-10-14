@@ -1089,25 +1089,19 @@ class ClaudeUpgradeOpsController extends Controller
         /* 🔴 En el lugar (misión `un-solo-frente`, 14/10/2026), un comando que falló ADENTRO de la
            ventana de mantenimiento dejó al cliente abajo: este endpoint correría el comando y pausaría
            sin el `artisan up`. Lo que termina el despliegue es deploy/start con
-           resume_from_step=run_commands. Se distingue por la marca de la pausa del en el lugar
-           (crons_supervisor_at / vps_supervisor_moved_at): la pone el pipeline recién DESPUÉS del
-           `up`, y un arranque limpio la borra. */
-        if ($client->modo_de_despliegue_hacia($upgrade->target_client_api_id) === Client::MODO_EN_EL_LUGAR) {
-            $hosting_destino = optional($upgrade->target_client_api)->hosting_type;
-            $marca_de_pausa  = $hosting_destino === 'vps' ? $upgrade->vps_supervisor_moved_at : $upgrade->crons_supervisor_at;
-
-            if (empty($marca_de_pausa)) {
-                return $this->error_422(
-                    'Despliegue en el lugar que no llegó al `artisan up`: el cliente puede estar en mantenimiento, y este '
-                        . 'reintento correría el comando sin levantarlo. No se encoló nada.',
-                    [
-                        'modo'  => Client::MODO_EN_EL_LUGAR,
-                        'ayuda' => 'POST claude/upgrades/' . (int) $upgrade->id . '/deploy/start con '
-                            . 'resume_from_step=run_commands: reintenta los comandos adentro del mantenimiento y termina con '
-                            . 'php artisan up.',
-                    ]
-                );
-            }
+           resume_from_step=run_commands. La misma guarda tiene el botón del panel
+           (DeploymentService::en_el_lugar_sin_llegar_al_up()). */
+        if (DeploymentService::en_el_lugar_sin_llegar_al_up($upgrade)) {
+            return $this->error_422(
+                'Despliegue en el lugar que no llegó al `artisan up`: el cliente puede estar en mantenimiento, y este '
+                    . 'reintento correría el comando sin levantarlo. No se encoló nada.',
+                [
+                    'modo'  => Client::MODO_EN_EL_LUGAR,
+                    'ayuda' => 'POST claude/upgrades/' . (int) $upgrade->id . '/deploy/start con '
+                        . 'resume_from_step=run_commands: reintenta los comandos adentro del mantenimiento y termina con '
+                        . 'php artisan up.',
+                ]
+            );
         }
 
         /* 🔴 El freno que el panel NO tiene. Ver el docblock de este método. */

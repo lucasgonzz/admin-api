@@ -355,6 +355,15 @@ class DeploymentService
     const MARCA_ETAPA_QUE_FALLO = 'Etapa que falló: ';
 
     /**
+     * Comienzo de la línea que se deja al ARRANCAR cada etapa que corre con el sistema del cliente en
+     * mantenimiento (desde el `down` hasta el `up`). Es el respaldo de MARCA_ETAPA_QUE_FALLO cuando el
+     * job muere por timeout adentro de la ventana: ahí el catch de run() no corre y la etapa que falló
+     * no queda escrita, pero la última "Etapa en curso" sí. La leen `siguiente_accion` de
+     * `GET claude/upgrades/{id}` y las líneas de mantenimiento de una corrida siguiente.
+     */
+    const MARCA_ETAPA_EN_CURSO = 'Etapa en curso: ';
+
+    /**
      * Archivo de opciones con el que `mysqldump` lee las credenciales de la base. Vive adentro del
      * directorio del respaldo (permisos 700) con permisos 600, y se borra al terminar el dump, salga
      * bien o mal.
@@ -517,7 +526,11 @@ class DeploymentService
         }
 
         try {
-            $etapa    = $this->etapa_en_curso === null ? 'deployment' : $this->etapa_en_curso;
+            $etapa = $this->etapa_en_curso;
+            if ($etapa === null) {
+                $etapa = self::ultima_etapa_en_curso_en_los_logs((int) $this->upgrade->id);
+            }
+            $etapa    = $etapa === null ? 'deployment' : $etapa;
             $causa    = $this->truncate_for_log($e->getMessage(), 300);
             $respaldo = $this->ruta_del_respaldo === null
                 ? 'sin dato en esta corrida (mirá ~/' . self::CARPETA_DE_RESPALDOS . '/<carpeta>/ en el servidor)'
@@ -683,6 +696,10 @@ class DeploymentService
 
             $this->etapa_en_curso = $step;
 
+            if ($this->es_en_el_lugar() && $this->mantenimiento_posible) {
+                $this->log($step, self::MARCA_ETAPA_EN_CURSO . $step . ' (con el sistema del cliente en mantenimiento).');
+            }
+
             switch ($step) {
                 case 'compile_spa':
                     $this->step_compile_spa();
@@ -782,13 +799,69 @@ class DeploymentService
 
         $this->mantenimiento_posible = true;
 
+        $ultima = self::ultima_etapa_en_curso_en_los_logs((int) $this->upgrade->id);
+
         $this->log(
             'deployment',
             '🔴 El sistema del cliente YA ESTÁ EN MANTENIMIENTO al arrancar (storage/framework/down existe): lo dejó un '
             . 'intento anterior de este despliegue, o alguien a mano. Esta corrida sigue y lo levanta recién con su '
-            . 'propio php artisan up, al terminar.',
+            . 'propio php artisan up, al terminar.'
+            . ($ultima === null ? '' : ' La última etapa que arrancó con el sistema abajo fue ' . $ultima . '.'),
             'warning'
         );
+    }
+
+    /**
+     * La última etapa que arrancó con el sistema del cliente en mantenimiento, según la línea
+     * MARCA_ETAPA_EN_CURSO de `deployment_logs` de ese upgrade (o null). Es el respaldo de la etapa que
+     * falló cuando el job murió sin poder escribirla (timeout).
+     *
+     * Pública y estática porque la usa también `GET claude/upgrades/{id}` (siguiente_accion): una
+     * sola lectura de la marca.
+     *
+     * @param  int  $upgrade_id
+     * @return string|null
+     */
+    public static function ultima_etapa_en_curso_en_los_logs(int $upgrade_id)
+    {
+        $etapa = DeploymentLog::where('client_version_upgrade_id', $upgrade_id)
+            ->where('line', 'like', self::MARCA_ETAPA_EN_CURSO . '%')
+            ->orderByDesc('id')
+            ->value('step');
+
+        return $etapa === null ? null : (string) $etapa;
+    }
+
+    /**
+     * ¿Este upgrade va EN EL LUGAR y su despliegue no llegó al `artisan up`? (misión `un-solo-frente`,
+     * 14/10/2026).
+     *
+     * Se mira la marca que deja la pausa del en el lugar recién DESPUÉS del `up`
+     * (`crons_supervisor_at` en el shared, `vps_supervisor_moved_at` en el VPS); un arranque limpio la
+     * borra. Sin ella, el cliente puede estar en mantenimiento, y un reintento de comandos (el de
+     * `claude/*` o el botón del panel) correría el comando y pausaría sin levantarlo. Lo que termina el
+     * despliegue es reanudarlo desde la etapa que falló.
+     *
+     * Estática y en un solo lugar porque la usan los dos reintentos de comandos: dos copias de un
+     * freno se desincronizan.
+     *
+     * @param  ClientVersionUpgrade  $upgrade
+     * @return bool
+     */
+    public static function en_el_lugar_sin_llegar_al_up(ClientVersionUpgrade $upgrade): bool
+    {
+        $upgrade->loadMissing('client', 'target_client_api');
+
+        $client = $upgrade->client;
+        if ($client === null
+            || $client->modo_de_despliegue_hacia($upgrade->target_client_api_id) !== Client::MODO_EN_EL_LUGAR) {
+            return false;
+        }
+
+        $es_vps = optional($upgrade->target_client_api)->hosting_type === 'vps';
+        $marca  = $es_vps ? $upgrade->vps_supervisor_moved_at : $upgrade->crons_supervisor_at;
+
+        return empty($marca);
     }
 
     /**
@@ -5004,6 +5077,10 @@ class DeploymentService
             . '. Para levantarlo a mano solo después de volver atrás con el respaldo: ' . $this->comando_para_levantar() . '.',
             'warning'
         );
+
+        /* Desde acá upload_api corre con el sistema abajo: si el job muere en el unzip o en el
+           composer, esta es la línea que dice desde dónde reanudar. */
+        $this->log('upload_api', self::MARCA_ETAPA_EN_CURSO . 'upload_api (con el sistema del cliente en mantenimiento).');
     }
 
     /**

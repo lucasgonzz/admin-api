@@ -1061,6 +1061,69 @@ class RespaldoYMantenimientoEnElLugarTest extends TestCase
         $this->assertSame('paused', (string) $e['upgrade']->fresh()->deployment_status);
     }
 
+    /**
+     * 🔴 Cada etapa que arranca con el sistema en mantenimiento deja su "Etapa en curso" (desde el
+     * `down` adentro de upload_api hasta el `up` de pause_for_crons), y ninguna antes del `down`. Es lo
+     * que queda si el job muere por timeout adentro de la ventana.
+     */
+    public function test_cada_etapa_adentro_del_mantenimiento_deja_su_etapa_en_curso(): void
+    {
+        $e = $this->escenario();
+        $this->artefactos_en_github($e['to']);
+        $this->respaldo_en_disco($e);
+
+        $error = $this->correr($this->servicio($e['upgrade']), 'upload_api');
+        $this->assertNull($error, $error === null ? '' : $error->getMessage());
+
+        $etapas = DeploymentLog::where('client_version_upgrade_id', $e['upgrade']->id)
+            ->where('line', 'like', DeploymentService::MARCA_ETAPA_EN_CURSO . '%')
+            ->orderBy('id')
+            ->pluck('step')
+            ->all();
+
+        $this->assertSame(
+            ['upload_api', 'sync_env_keys', 'sync_pusher_template', 'run_migrations', 'run_seeders', 'run_commands',
+                'restart_queue_workers', 'pause_for_crons'],
+            $etapas
+        );
+        $this->assertSame('pause_for_crons', DeploymentService::ultima_etapa_en_curso_en_los_logs((int) $e['upgrade']->id));
+
+        /* La de upload_api va DESPUÉS del down, no antes. */
+        $logs = $this->logs($e['upgrade']);
+        $this->assertLessThan(
+            strpos($logs, DeploymentService::MARCA_ETAPA_EN_CURSO . 'upload_api'),
+            strpos($logs, 'EN MANTENIMIENTO desde ahora')
+        );
+    }
+
+    /**
+     * Si el intento anterior murió sin dejar la etapa que falló (timeout) y el sistema quedó abajo, la
+     * corrida siguiente lo dice nombrando la última "Etapa en curso".
+     */
+    public function test_ya_en_mantenimiento_nombra_la_ultima_etapa_en_curso(): void
+    {
+        $e = $this->escenario();
+        $this->respaldo_en_disco($e);
+        $this->ssh->responder('storage/framework/down', 'CC_YA_EN_MANTENIMIENTO');
+
+        DeploymentLog::create([
+            'client_version_upgrade_id' => $e['upgrade']->id,
+            'step'                      => 'run_seeders',
+            'level'                     => 'info',
+            'line'                      => DeploymentService::MARCA_ETAPA_EN_CURSO . 'run_seeders (con el sistema del cliente en mantenimiento).',
+            'created_at'                => now(),
+        ]);
+
+        $this->correr($this->servicio($e['upgrade']), DeploymentService::PREFIJO_REANUDACION_EN_MANTENIMIENTO . 'run_seeders');
+
+        $linea = DeploymentLog::where('client_version_upgrade_id', $e['upgrade']->id)
+            ->where('line', 'like', '%YA ESTÁ EN MANTENIMIENTO%')
+            ->value('line');
+
+        $this->assertNotNull($linea);
+        $this->assertStringContainsString('La última etapa que arrancó con el sistema abajo fue run_seeders', $linea);
+    }
+
     /* ==========================================================================================
      | 4) Lo demás que cambia en el lugar
      |========================================================================================= */

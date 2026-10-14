@@ -7,6 +7,7 @@ use App\Jobs\RunDeploymentJob;
 use App\Models\Client;
 use App\Models\ClientApi;
 use App\Models\ClientVersionUpgrade;
+use App\Services\DeploymentService;
 use Illuminate\Http\Request;
 
 /**
@@ -224,6 +225,18 @@ class DeploymentController extends BaseController
         if (! $has_retryable_command) {
             return response()->json([
                 'message' => 'No hay comandos automatizados pendientes o fallidos para reintentar.',
+            ], 422);
+        }
+
+        /* 🔴 Misión `un-solo-frente` (14/10/2026): en el lugar, un comando que falló ADENTRO de la
+           ventana de mantenimiento dejó al cliente abajo, y este reintento correría el comando y
+           pausaría sin el `artisan up`. Misma guarda que `claude/upgrades/{id}/deploy/retry-commands`. */
+        if (DeploymentService::en_el_lugar_sin_llegar_al_up($upgrade)) {
+            return response()->json([
+                'message' => 'Este despliegue va en el lugar y no llegó al artisan up: el cliente puede estar en '
+                    . 'mantenimiento, y reintentar acá correría los comandos sin levantarlo. Terminá el despliegue '
+                    . 'reanudándolo desde la etapa que falló (POST claude/upgrades/' . (int) $upgrade->id
+                    . '/deploy/start con resume_from_step).',
             ], 422);
         }
 

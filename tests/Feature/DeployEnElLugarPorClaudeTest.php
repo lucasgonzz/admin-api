@@ -846,6 +846,75 @@ class DeployEnElLugarPorClaudeTest extends TestCase
         $this->assertStringContainsString('resume_from_step=upload_api', $get['siguiente_accion']['motivo']);
     }
 
+    /**
+     * Si el job murió por timeout adentro de la ventana no hay "Etapa que falló": siguiente_accion usa
+     * la última "Etapa en curso" y lo dice.
+     */
+    public function test_sin_etapa_que_fallo_se_reanuda_desde_la_ultima_etapa_en_curso(): void
+    {
+        $e       = $this->escenario('principal');
+        $upgrade = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed']);
+
+        foreach (['run_migrations', 'run_commands'] as $etapa) {
+            DeploymentLog::create([
+                'client_version_upgrade_id' => $upgrade->id,
+                'step'                      => $etapa,
+                'level'                     => 'info',
+                'line'                      => \App\Services\DeploymentService::MARCA_ETAPA_EN_CURSO . $etapa . ' (con el sistema del cliente en mantenimiento).',
+            ]);
+        }
+
+        $get = $this->getJson('/api/claude/upgrades/' . $upgrade->id, $this->headers())->assertStatus(200)->json();
+
+        $this->assertSame('run_commands', $get['siguiente_accion']['resume_from_step']);
+        $this->assertStringContainsString('timeout', $get['siguiente_accion']['motivo']);
+    }
+
+    /**
+     * 🔴 El botón del PANEL "reintentar comandos" tiene la misma guarda: en el lugar, sin llegar al
+     * `artisan up`, 422 y nada encolado. Con la marca de la pausa (ya pasó el up), encola como siempre.
+     */
+    public function test_el_reintento_de_comandos_del_panel_en_el_lugar_sin_llegar_al_up_rechaza(): void
+    {
+        Queue::fake();
+
+        $admin           = new \App\Models\Admin();
+        $admin->name     = 'Admin un solo frente';
+        $admin->email    = 'admin+' . Str::random(6) . '@test.local';
+        $admin->password = bcrypt('secret');
+        $admin->save();
+        \Laravel\Sanctum\Sanctum::actingAs($admin);
+
+        $e       = $this->escenario('principal');
+        $upgrade = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed']);
+
+        $comando                  = new \App\Models\VersionCommand();
+        $comando->version_id      = $e['to']->id;
+        $comando->command         = 'php artisan algo:que-fallo';
+        $comando->execution_order = 1;
+        $comando->save();
+
+        \App\Models\UpdateCommand::create([
+            'client_version_upgrade_id' => $upgrade->id,
+            'version_command_id'        => $comando->id,
+            'status'                    => 'fallido',
+        ]);
+
+        $cuerpo = $this->postJson('/api/admin/update/' . $upgrade->id . '/deploy/retry-commands')->assertStatus(422)->json();
+
+        $this->assertStringContainsString('artisan up', $cuerpo['message']);
+        Queue::assertNothingPushed();
+        $this->assertSame('failed', (string) $upgrade->refresh()->deployment_status);
+
+        /* Con la marca de la pausa (el up ya pasó), el botón funciona como siempre. */
+        $upgrade->update(['crons_supervisor_at' => now()]);
+
+        $this->postJson('/api/admin/update/' . $upgrade->id . '/deploy/retry-commands')->assertStatus(200);
+        Queue::assertPushed(RunDeploymentJob::class, function ($job) {
+            return $job->connection === 'database';
+        });
+    }
+
     /** El lote crea hacia el frente principal de cada cliente y dice el modo de cada uno. */
     public function test_el_lote_va_al_principal_de_cada_cliente_y_dice_el_modo(): void
     {

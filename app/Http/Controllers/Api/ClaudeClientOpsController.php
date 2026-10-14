@@ -1944,6 +1944,7 @@ class ClaudeClientOpsController extends Controller
            con marca fija que deja DeploymentService (no `logs.ultimo_error`, que suele ser la línea
            de cierre de RunDeploymentJob::failed()). */
         $etapa_que_fallo = null;
+        $etapa_en_curso  = false;
         if ($modo === Client::MODO_EN_EL_LUGAR && $this->texto_o_null($fila['deployment_status']) === 'failed') {
             $linea = DB::table('deployment_logs')
                 ->where('client_version_upgrade_id', $upgrade_id)
@@ -1951,6 +1952,13 @@ class ClaudeClientOpsController extends Controller
                 ->orderBy('id', 'desc')
                 ->value('step');
             $etapa_que_fallo = ($linea === null || $linea === 'deployment') ? null : (string) $linea;
+
+            /* Si el job murió por timeout adentro de la ventana, no hay "Etapa que falló": queda la
+               última "Etapa en curso" que el pipeline dejó al arrancar cada etapa con el sistema abajo. */
+            if ($etapa_que_fallo === null) {
+                $etapa_que_fallo = DeploymentService::ultima_etapa_en_curso_en_los_logs($upgrade_id);
+                $etapa_en_curso  = $etapa_que_fallo !== null;
+            }
         }
         if ($target_api !== null) {
             $target_api['es_el_frente_principal'] = $target_api['id'] === $frente_principal_id;
@@ -2025,7 +2033,8 @@ class ClaudeClientOpsController extends Controller
                 (bool) $salud['deployment_stale'],
                 (int) $salud['vencimiento_minutos'],
                 $modo,
-                $etapa_que_fallo
+                $etapa_que_fallo,
+                $etapa_en_curso
             ),
             'generado_a_las' => Carbon::now($tz)->toIso8601String(),
         ], 200);
@@ -2585,6 +2594,8 @@ class ClaudeClientOpsController extends Controller
      * @param string|null $modo                   `en_el_lugar` | `rotacion` (misión `un-solo-frente`).
      * @param string|null $etapa_que_fallo        En el lugar y `failed`: la etapa que falló, para
      *                                            recomendar `resume_from_step` (null si no se sabe).
+     * @param bool        $etapa_en_curso         True si esa etapa sale de la última "Etapa en curso"
+     *                                            (el job murió sin dejar la que falló).
      *
      * @return array<string, mixed>
      */
@@ -2596,7 +2607,8 @@ class ClaudeClientOpsController extends Controller
         $deployment_stale = false,
         $vencimiento_minutos = null,
         $modo = null,
-        $etapa_que_fallo = null
+        $etapa_que_fallo = null,
+        $etapa_en_curso = false
     ) {
         $start            = 'POST claude/upgrades/' . $upgrade_id . '/deploy/start';
         $mark_crons       = 'POST claude/upgrades/' . $upgrade_id . '/mark-crons';
@@ -2692,7 +2704,11 @@ class ClaudeClientOpsController extends Controller
                 return [
                     'endpoint'         => $start,
                     'resume_from_step' => $etapa_que_fallo,
-                    'motivo'           => 'Despliegue EN EL LUGAR fallado en ' . $etapa_que_fallo . ': corregí la causa y '
+                    'motivo'           => ($etapa_en_curso
+                        ? 'El job no dejó la etapa que falló (lo más probable: murió por timeout); la última que arrancó '
+                            . 'con el sistema en mantenimiento fue ' . $etapa_que_fallo . '. '
+                        : '')
+                        . 'Despliegue EN EL LUGAR fallado en ' . $etapa_que_fallo . ': corregí la causa y '
                         . 'reanudá con resume_from_step=' . $etapa_que_fallo . ' (no pasa por el gate de horario; si el '
                         . 'cliente quedó en mantenimiento, termina el despliegue y hace php artisan up). No lo levantes a '
                         . 'mano. Mirá GET claude/upgrades/' . $upgrade_id . '/logs: la línea "QUEDÓ EN MANTENIMIENTO" o '
