@@ -38,14 +38,20 @@ use Illuminate\Validation\ValidationException;
  *     equivocado, y un id numérico no tiene ninguna redundancia; el nombre sí.
  *  2. `dry_run` — por defecto `true` en la creación. Para crear de verdad hace falta además
  *     `confirm_version_count` igual a la cantidad exacta de versiones que se van a confirmar.
- *  3. `allow_deploy_to_active_api` — el `start` rechaza desplegar sobre la API ACTIVA en
- *     producción salvo que venga el flag explícito. La API destino por defecto PUEDE ser la
- *     activa cuando el cliente tiene una sola `ClientApi`.
+ *  3. El destino ACTIVO en el `start` — reescrito el 14/10/2026 (misión `un-solo-frente`), cuando
+ *     Lucas decidió dejar de rotar de carpeta en cada actualización. Desplegar sobre la API ACTIVA
+ *     ya no es la excepción sino el caso normal, y el freno distingue dos casos:
+ *       - la activa ES el frente principal del cliente → se actualiza EN EL LUGAR, sin bandera,
+ *         pero con el gate de horario de abajo (el pre-cierre pisa el código que está atendiendo);
+ *       - la activa NO es el principal (un cliente que atiende desde su frente 2) → sigue pidiendo
+ *         `allow_deploy_to_active_api=true`: lo que corresponde ahí es la última rotación al 1.
+ *     `allow_deploy_to_active_api=true` se sigue aceptando siempre (la skill vieja la manda), y con
+ *     ella el `start` hace lo que hacía antes: pasa sin gate.
  *  4. Gate de horario — el post-cierre solo corre cuando la JORNADA DE HOY YA TERMINÓ, que no es
  *     lo mismo que "el negocio está cerrado en este instante": a las 14:00 de un 8–13 / 16–21 está
  *     cerrado y reabre a las 16. `abierto` rechaza, `sin_configurar` TAMBIÉN rechaza (no se asume
  *     que un cliente sin horarios cargados esté cerrado), y también rechaza cuando el próximo
- *     cierre del día cae hoy.
+ *     cierre del día cae hoy. Desde el 14/10/2026 el mismo gate cuida el `start` EN EL LUGAR.
  *
  * 🔴 Todo freno que rechaza devuelve 422 y no escribe absolutamente nada: ni estado, ni log, ni
  * job encolado.
@@ -125,8 +131,35 @@ class ClaudeUpgradeOpsController extends Controller
      * `sync_pusher_template` (misión `pusher-app-produccion-vs-desarrollo`, 18/9/2026) entra por lo
      * mismo, inmediatamente después: fuerza `PUSHER_APP_ID/KEY/SECRET/CLUSTER` desde la plantilla
      * `is_common`, al revés que `sync_env_keys` (ver DeploymentService::step_sync_pusher_template()).
+     *
+     * `backup_in_place` (misión `un-solo-frente`, 14/10/2026) va entre `compile_spa` y `upload_spa`:
+     * en un despliegue EN EL LUGAR respalda código, SPA y base antes de pisar nada (en una rotación
+     * dice que no aplica y sigue). Reanudar desde ahí sirve cuando el respaldo falló (disco lleno,
+     * credenciales de la base) y se arregló la causa. ⚠️ Con "en el lugar", el pipeline no deja
+     * reanudar desde una etapa POSTERIOR al respaldo si este upgrade no tiene un respaldo exitoso
+     * en sus logs (ver DeploymentService::assert_respaldo_previo_si_reanuda_en_el_lugar()).
      */
-    const ETAPAS_REANUDABLES_DEL_PRE_CIERRE = ['compile_spa', 'upload_spa', 'upload_api', 'sync_env_keys', 'sync_pusher_template', 'run_migrations'];
+    const ETAPAS_REANUDABLES_DEL_PRE_CIERRE = ['compile_spa', 'backup_in_place', 'upload_spa', 'upload_api', 'sync_env_keys', 'sync_pusher_template', 'run_migrations'];
+
+    /**
+     * Textos del gate de horario cuando cuida el post-cierre (o el reintento de comandos). Son los
+     * de siempre, byte por byte: `rechazo_del_gate_de_horario()` los recibe por parámetro desde que
+     * el mismo gate cuida también el `start` en el lugar, y estos son el default.
+     */
+    const TEXTOS_DEL_GATE_POST_CIERRE = [
+        'abierto'   => 'las tareas post-cierre corren seeders y comandos sobre el sistema en uso',
+        'por_abrir' => 'Las tareas post-cierre lo agarrarían con el negocio por abrir.',
+    ];
+
+    /**
+     * Textos del gate de horario cuando cuida un `start` EN EL LUGAR (misión `un-solo-frente`,
+     * 14/10/2026): lo que se arriesga no son seeders sino el código vivo.
+     */
+    const TEXTOS_DEL_GATE_EN_EL_LUGAR = [
+        'abierto'   => 'un despliegue EN EL LUGAR reemplaza el código que está atendiendo y deja el sistema en '
+            . 'mantenimiento mientras sube la API y corre las migraciones',
+        'por_abrir' => 'El despliegue en el lugar lo agarraría con el negocio por abrir.',
+    ];
 
     /**
      * Etapa del reintento de comandos. Mismo string que despacha el botón del panel en
@@ -198,6 +231,11 @@ class ClaudeUpgradeOpsController extends Controller
             ];
         }
 
+        /* Misión `un-solo-frente` (14/10/2026): el preview dice también ADÓNDE iría la actualización
+           por defecto y en qué modo. Campos nuevos y aditivos: un consumidor viejo no los mira. */
+        $frente_principal_id = $client->resolver_frente_principal_client_api_id();
+        $modo                = $client->modo_de_despliegue_hacia($frente_principal_id);
+
         return response()->json([
             'client'       => ['id' => (int) $client->id, 'name' => $client->name],
             'from_version' => $from === null ? null : ['id' => (int) $from->id, 'version' => $from->version],
@@ -207,6 +245,10 @@ class ClaudeUpgradeOpsController extends Controller
             'nota'         => '`default_checked` es la SUGERENCIA del panel (troncal sí, hotfix no, destino siempre), '
                 . 'no una decisión tomada. 🔴 `confirmed_version_ids` no tiene fallback: para crear la actualización hay '
                 . 'que nombrar una por una las versiones que van, mirando esta lista.',
+            'active_client_api_id'           => $client->active_client_api_id === null ? null : (int) $client->active_client_api_id,
+            'frente_principal_client_api_id' => $frente_principal_id,
+            'modo'                           => $modo,
+            'nota_modo'                      => $this->nota_del_modo($modo),
         ], 200);
     }
 
@@ -279,11 +321,19 @@ class ClaudeUpgradeOpsController extends Controller
         /* Freno 2, primera mitad: sin `dry_run=false` explícito esto NO escribe nada. */
         $dry_run = $request->filled('dry_run') ? $request->boolean('dry_run') : true;
         if ($dry_run) {
+            $crearia = $this->previsualizar_creacion($service, $client, $to, $confirmed_ids, $request);
+            $destino = $crearia['target_client_api'];
+            $modo    = $client->modo_de_despliegue_hacia($destino === null ? null : $destino['id']);
+
             return response()->json([
                 'dry_run' => true,
-                'crearia' => $this->previsualizar_creacion($service, $client, $to, $confirmed_ids, $request),
+                'crearia' => $crearia,
                 'nota'    => 'No se creó NADA. Para crear de verdad, repetí la misma llamada con dry_run=false, '
                     . 'confirm_version_count=' . $cantidad . ' y confirm_client_name con el nombre exacto del cliente.',
+                /* Misión `un-solo-frente` (14/10/2026): campos nuevos y aditivos. */
+                'modo'                           => $modo,
+                'frente_principal_client_api_id' => $client->resolver_frente_principal_client_api_id(),
+                'nota_modo'                      => $this->nota_del_modo($modo),
             ], 200);
         }
 
@@ -334,13 +384,25 @@ class ClaudeUpgradeOpsController extends Controller
      |============================================================================================= */
 
     /**
-     * Arranca el pipeline PRE-CIERRE: compile_spa → upload_spa → upload_api → sync_env_keys →
-     * run_migrations → restart_queue_workers → pause_for_crons.
+     * Arranca el pipeline PRE-CIERRE: compile_spa → backup_in_place → upload_spa → upload_api →
+     * sync_env_keys → sync_pusher_template → run_migrations → restart_queue_workers → pause_for_crons.
      *
-     * 🔴 Acá NO hay gate de horario, y es a propósito: el pre-cierre es exactamente lo que se hace
-     * con el negocio abierto, porque sube el código a la API DESTINO, que no es la que atiende.
-     * Poner un gate sería impedir el uso normal. Sí se informa el horario del cliente, como
-     * contexto.
+     * 🔴 En una ROTACIÓN acá NO hay gate de horario, y es a propósito: el pre-cierre sube el código
+     * a la API DESTINO, que no es la que atiende, así que se puede correr con el negocio abierto.
+     * Sí se informa el horario del cliente, como contexto.
+     *
+     * 🔴 EN EL LUGAR (destino = activa = frente principal, misión `un-solo-frente`, 14/10/2026) SÍ
+     * hay gate, el mismo del post-cierre (aplicar_gate_de_horario(): misma regla, mismo `force` +
+     * `force_reason`, misma constancia en el log diario). Con la rotación, reemplazar el código pasaba
+     * en la carpeta que no atendía; en el lugar, `upload_spa` pisa el SPA vivo y `upload_api` deja el
+     * sistema en mantenimiento hasta que terminan las migraciones. Eso no se hace con el local
+     * abierto. La destino activa que NO es el principal sigue pidiendo `allow_deploy_to_active_api`
+     * (ver el bloque "Freno 3" del cuerpo), y la bandera sigue valiendo en los dos casos: con ella
+     * el `start` pasa sin gate, como pasaba antes, y queda una línea en el log diario.
+     *
+     * La respuesta trae `modo` (`en_el_lugar` | `rotacion`) y `frente_principal_client_api_id`, y en
+     * el lugar un bloque `en_el_lugar` que dice qué va a hacer el pipeline (respaldo, mantenimiento,
+     * crons). Campos nuevos y aditivos.
      *
      * Dos modos, según venga o no `resume_from_step` (misión `actualizar-sin-el-vps`, 9/9/2026):
      *
@@ -365,6 +427,8 @@ class ClaudeUpgradeOpsController extends Controller
             'confirm_client_name'        => 'required|string|max:190',
             'allow_deploy_to_active_api' => 'nullable|boolean',
             'resume_from_step'           => 'nullable|string|in:' . implode(',', self::ETAPAS_REANUDABLES_DEL_PRE_CIERRE),
+            'force'                      => 'nullable|boolean',
+            'force_reason'               => 'nullable|string|max:500',
         ]);
         if ($invalido !== null) {
             return $invalido;
@@ -414,22 +478,87 @@ class ClaudeUpgradeOpsController extends Controller
             return $this->error_422('El upgrade no tiene API destino configurada (target_client_api_id). No se encoló nada.');
         }
 
-        /* Freno 3: la API destino por defecto PUEDE ser la activa en producción cuando el cliente
-           tiene una sola ClientApi. Desplegar ahí es desplegar encima de la instancia viva. */
-        $es_la_activa = $client->active_client_api_id !== null
-            && ((int) $upgrade->target_client_api_id) === ((int) $client->active_client_api_id);
+        /*
+         * Freno 3: desplegar sobre la API ACTIVA es desplegar encima de la instancia que atiende.
+         *
+         * 🔴 Reescrito el 14/10/2026 (misión `un-solo-frente`). Hasta ese día el default de la
+         * creación era "la que no es la activa" y caer sobre la activa era un accidente (un cliente
+         * con una sola ClientApi): se frenaba siempre, salvo la bandera. Desde que Lucas decidió
+         * dejar de rotar, el default es el FRENTE PRINCIPAL y la activa-que-es-el-principal es el
+         * caso NORMAL. Quedan dos casos y se tratan distinto:
+         *
+         *  - activa Y principal → EN EL LUGAR. Pasa sin bandera, pero con el gate de horario del
+         *    post-cierre: acá el pre-cierre pisa el código vivo. El respaldo y el mantenimiento los
+         *    hace el pipeline (DeploymentService), así que valen también para el panel.
+         *  - activa pero NO principal (el cliente atiende desde su frente 2) → sigue pidiendo la
+         *    bandera: actualizar el 2 en el lugar va contra la decisión del 14/10, y lo que
+         *    corresponde es la última rotación hacia el principal.
+         *
+         * `allow_deploy_to_active_api=true` se sigue aceptando en los dos casos, por compatibilidad
+         * con la skill vieja (que la manda con el OK de Lucas): con ella el start pasa como pasaba
+         * antes, sin gate, y queda una línea en el log diario.
+         */
+        $target_id           = (int) $upgrade->target_client_api_id;
+        $active_id           = $client->active_client_api_id === null ? null : (int) $client->active_client_api_id;
+        $es_la_activa        = $active_id !== null && $target_id === $active_id;
+        $frente_principal_id = $client->resolver_frente_principal_client_api_id();
+        $es_el_principal     = $frente_principal_id !== null && $target_id === $frente_principal_id;
+        $modo                = $client->modo_de_despliegue_hacia($target_id);
+        $con_bandera         = $this->pidio_en_true($request, 'allow_deploy_to_active_api');
 
-        if ($es_la_activa && ! $this->pidio_en_true($request, 'allow_deploy_to_active_api')) {
-            return $this->error_422(
-                'La API destino de este upgrade ES la API ACTIVA en producción del cliente: el deployment iría encima '
-                    . 'de la instancia que está atendiendo. No se encoló nada.',
-                [
-                    'target_client_api_id' => (int) $upgrade->target_client_api_id,
-                    'active_client_api_id' => (int) $client->active_client_api_id,
-                    'ayuda'                => 'Si es a propósito, repetí con allow_deploy_to_active_api=true. Si no, '
-                        . 'corregí la API destino del upgrade antes de arrancar.',
-                ]
+        $contexto_del_destino = [
+            'modo'                           => $modo,
+            'target_client_api_id'           => $target_id,
+            'active_client_api_id'           => $active_id,
+            'frente_principal_client_api_id' => $frente_principal_id,
+        ];
+
+        $gate = ['rechazo' => null, 'salteado' => null];
+
+        if ($es_la_activa && ! $con_bandera) {
+            if (! $es_el_principal) {
+                return $this->error_422(
+                    'La API destino de este upgrade ES la API ACTIVA del cliente, pero NO es su frente principal: '
+                        . 'el cliente hoy atiende desde su frente 2. Desde el 14/10/2026 no se actualiza el frente 2 en el '
+                        . 'lugar: se hace una última rotación hacia el frente principal y de ahí en adelante se actualiza '
+                        . 'siempre ahí. No se encoló nada.',
+                    array_merge($contexto_del_destino, [
+                        'ayuda' => $frente_principal_id === null
+                            ? 'El cliente no tiene un frente principal resoluble. Revisá sus ClientApi con GET '
+                                . 'claude/clients/' . (int) $client->id . '?include=apis.'
+                            : 'Creá la actualización hacia el frente principal (POST claude/upgrades con '
+                                . 'target_client_api_id=' . $frente_principal_id . ', o sin target_client_api_id: ya es el '
+                                . 'default) y arrancá esa: es la última rotación, del 2 al 1. Si de verdad hay que pisar el '
+                                . 'frente 2, repetí con allow_deploy_to_active_api=true.',
+                    ])
+                );
+            }
+
+            $gate = $this->aplicar_gate_de_horario(
+                $request,
+                $client,
+                $upgrade,
+                'el pre-cierre en el lugar',
+                self::TEXTOS_DEL_GATE_EN_EL_LUGAR,
+                $contexto_del_destino
             );
+            if ($gate['rechazo'] !== null) {
+                return $gate['rechazo'];
+            }
+        }
+
+        if ($es_la_activa && $con_bandera) {
+            /* La bandera dejó pasar algo que sin ella hubiera tenido gate (el principal) o 422 (el
+               frente 2). No es un salteo con `force`, pero tampoco puede pasar sin rastro. */
+            Log::channel('daily')->warning('[claude/upgrades] deploy/start sobre la API ACTIVA con allow_deploy_to_active_api=true.', [
+                'client_id'                      => (int) $client->id,
+                'upgrade_id'                     => (int) $upgrade->id,
+                'modo'                           => $modo,
+                'target_client_api_id'           => $target_id,
+                'frente_principal_client_api_id' => $frente_principal_id,
+                'es_el_frente_principal'         => $es_el_principal,
+                'resume_from_step'               => $etapa_de_reanudacion,
+            ]);
         }
 
         if ($etapa_de_reanudacion === null) {
@@ -463,9 +592,24 @@ class ClaudeUpgradeOpsController extends Controller
             : 'Se conservaron los logs del intento anterior: el pipeline se reanuda desde ' . $etapa_de_reanudacion
                 . ' y lo que sigue se agrega a continuación en GET claude/upgrades/' . (int) $upgrade->id . '/logs.';
 
+        /* Misión `un-solo-frente` (14/10/2026): campos nuevos y aditivos. */
+        $respuesta['modo']                           = $modo;
+        $respuesta['frente_principal_client_api_id'] = $frente_principal_id;
+
+        if ($modo === Client::MODO_EN_EL_LUGAR) {
+            $respuesta['en_el_lugar'] = $this->que_hace_el_pipeline_en_el_lugar();
+        }
+
+        if ($gate['salteado'] !== null) {
+            $respuesta['gate_de_horario_salteado'] = $gate['salteado'];
+        }
+
         if ($es_la_activa) {
-            $respuesta['advertencia'] = 'Se desplegó sobre la API ACTIVA en producción porque vino '
-                . 'allow_deploy_to_active_api=true.';
+            $respuesta['advertencia'] = $con_bandera
+                ? 'Se desplegó sobre la API ACTIVA en producción porque vino allow_deploy_to_active_api=true.'
+                : 'Se despliega EN EL LUGAR sobre el frente principal, que es la API ACTIVA: el pipeline respalda '
+                    . 'código, SPA y base antes de tocar nada, y deja el sistema en mantenimiento desde que reemplaza la '
+                    . 'API hasta que terminan las migraciones.';
         }
 
         return response()->json($respuesta, 202);
@@ -1205,15 +1349,29 @@ class ClaudeUpgradeOpsController extends Controller
      * ⚠️ El texto del log incluye `$donde` para poder distinguir después cuál de los dos se salteó.
      * Para el post-cierre queda idéntico al que este controlador viene escribiendo desde el 24/8.
      *
-     * @param Request              $request Request entrante (force, force_reason).
-     * @param Client               $client  Cliente del upgrade, con horarios cargados.
-     * @param ClientVersionUpgrade $upgrade Upgrade involucrado.
-     * @param string               $donde   Nombre de la operación, para el log ('el post-cierre'…).
+     * Desde el 14/10/2026 (misión `un-solo-frente`) tiene un TERCER llamador: el `deploy/start` EN EL
+     * LUGAR, que pisa el código vivo y por eso hace la misma pregunta. Para no tener dos frenos, ese
+     * llamador pasa sus propios `$textos` (lo que se arriesga no son seeders sino el código que
+     * atiende) y un `$detalle_extra` (modo, destino, activa y frente principal) que viaja en el 422.
+     * Con los defaults, el post-cierre y el reintento de comandos responden byte por byte lo mismo.
+     *
+     * @param Request               $request       Request entrante (force, force_reason).
+     * @param Client                $client        Cliente del upgrade, con horarios cargados.
+     * @param ClientVersionUpgrade  $upgrade       Upgrade involucrado.
+     * @param string                $donde         Nombre de la operación, para el log ('el post-cierre'…).
+     * @param array<string, string> $textos        TEXTOS_DEL_GATE_POST_CIERRE | TEXTOS_DEL_GATE_EN_EL_LUGAR.
+     * @param array<string, mixed>  $detalle_extra Campos que se suman al cuerpo del 422 del gate.
      *
      * @return array{rechazo: \Illuminate\Http\JsonResponse|null, salteado: array<string, mixed>|null}
      */
-    private function aplicar_gate_de_horario(Request $request, Client $client, ClientVersionUpgrade $upgrade, $donde)
-    {
+    private function aplicar_gate_de_horario(
+        Request $request,
+        Client $client,
+        ClientVersionUpgrade $upgrade,
+        $donde,
+        array $textos = self::TEXTOS_DEL_GATE_POST_CIERRE,
+        array $detalle_extra = []
+    ) {
         $tz       = $this->timezone();
         $ahora    = Carbon::now($tz);
         $resolver = app(ClientScheduleResolver::class);
@@ -1224,14 +1382,17 @@ class ClaudeUpgradeOpsController extends Controller
          * hoy?". Un `estado_en()` de instante deja pasar el hueco del mediodía y el rato de antes
          * de abrir, y en los dos casos el negocio reabre con las tareas a medio correr.
          */
-        $rechazo_del_gate = $this->rechazo_del_gate_de_horario($resolver, $client, $ahora, $tz, $estado);
+        $rechazo_del_gate = $this->rechazo_del_gate_de_horario($resolver, $client, $ahora, $tz, $estado, $textos);
 
         $forzado = $this->pidio_en_true($request, 'force');
 
         if (! $forzado) {
             if ($rechazo_del_gate !== null) {
                 return [
-                    'rechazo'  => $this->error_422($rechazo_del_gate['mensaje'], $rechazo_del_gate['detalle']),
+                    'rechazo'  => $this->error_422(
+                        $rechazo_del_gate['mensaje'],
+                        array_merge($rechazo_del_gate['detalle'], $detalle_extra)
+                    ),
                     'salteado' => null,
                 ];
             }
@@ -1246,10 +1407,10 @@ class ClaudeUpgradeOpsController extends Controller
                 'rechazo' => $this->error_422(
                     'force_reason es obligatorio cuando force es true, y tiene que tener al menos '
                         . self::FORCE_REASON_MINIMO . ' caracteres. No se encoló nada.',
-                    [
+                    array_merge([
                         'ayuda' => 'El motivo queda registrado en el log del sistema junto con el estado de horario que '
                             . 'se salteó. Un freno que se saltea sin dejar rastro no es un freno.',
-                    ]
+                    ], $detalle_extra)
                 ),
                 'salteado' => null,
             ];
@@ -1460,10 +1621,11 @@ class ClaudeUpgradeOpsController extends Controller
     /**
      * API destino que quedaría en el upgrade, con el aviso de si es la ACTIVA en producción.
      *
-     * 🔴 `resolve_default_target_client_api_id()` devuelve la única ClientApi del cliente cuando hay
-     * una sola, y esa única es la activa: un upgrade creado sin `target_client_api_id` explícito
-     * puede apuntar a producción. Acá se ve antes de crear nada; el freno que lo detiene está en el
-     * `start`.
+     * 🔴 Desde el 14/10/2026 (misión `un-solo-frente`) `resolve_default_target_client_api_id()`
+     * devuelve el FRENTE PRINCIPAL del cliente, así que un upgrade creado sin `target_client_api_id`
+     * explícito apunta a la activa en el caso normal (cliente que atiende desde su frente 1): eso es
+     * un despliegue EN EL LUGAR. Acá se ve antes de crear nada, con `es_el_frente_principal` y el
+     * aviso de qué va a pedir el `start` en cada caso.
      *
      * @param ClientVersionUpgradeCreationService $service Servicio de creación.
      * @param Client                              $client  Cliente destino.
@@ -1503,13 +1665,65 @@ class ClaudeUpgradeOpsController extends Controller
         $payload['origen']     = $origen;
         $payload['es_la_activa'] = $client->active_client_api_id !== null
             && $payload['id'] === (int) $client->active_client_api_id;
+        $payload['es_el_frente_principal'] = $payload['id'] === $client->resolver_frente_principal_client_api_id();
 
-        if ($payload['es_la_activa']) {
-            $payload['advertencia'] = '🔴 Esta es la API ACTIVA en producción del cliente. El `start` la va a rechazar '
-                . 'salvo que venga allow_deploy_to_active_api=true.';
+        if ($payload['es_la_activa'] && $payload['es_el_frente_principal']) {
+            $payload['advertencia'] = '🔴 Esta es la API ACTIVA en producción del cliente y es su frente principal: la '
+                . 'actualización va EN EL LUGAR. El `start` la deja pasar sin allow_deploy_to_active_api, pero con el gate '
+                . 'de horario (jornada de hoy terminada, o force + force_reason), y el pipeline respalda y pone el sistema '
+                . 'en mantenimiento.';
+        } elseif ($payload['es_la_activa']) {
+            $payload['advertencia'] = '🔴 Esta es la API ACTIVA en producción del cliente y NO es su frente principal. El '
+                . '`start` la va a rechazar salvo que venga allow_deploy_to_active_api=true: lo que corresponde es la '
+                . 'última rotación hacia el frente principal.';
         }
 
         return $payload;
+    }
+
+    /**
+     * Texto que acompaña `modo` en el preview y en la creación en seco (misión `un-solo-frente`,
+     * 14/10/2026): qué significa y qué va a pedir el `start`.
+     *
+     * @param string|null $modo `en_el_lugar` | `rotacion` | null.
+     *
+     * @return string|null
+     */
+    private function nota_del_modo($modo)
+    {
+        if ($modo === Client::MODO_EN_EL_LUGAR) {
+            return 'en_el_lugar: el destino es la API ACTIVA y es el frente principal. El `deploy/start` no pide '
+                . 'allow_deploy_to_active_api pero sí el gate de horario (la jornada de hoy terminada, o force + '
+                . 'force_reason). El pipeline respalda código, SPA y base antes de tocar nada (backup_in_place) y deja el '
+                . 'sistema en mantenimiento desde upload_api hasta el final de run_migrations.';
+        }
+
+        if ($modo === Client::MODO_ROTACION) {
+            return 'rotacion: el destino no es la API activa. El `deploy/start` corre sin gate (sube a una carpeta que no '
+                . 'atiende) y al final el cliente pasa a atender desde el destino. Si el destino es el frente principal y el '
+                . 'cliente hoy atiende desde el 2, es la última rotación: de ahí en adelante se actualiza en el lugar.';
+        }
+
+        return null;
+    }
+
+    /**
+     * Bloque `en_el_lugar` de la respuesta del `start`: lo que el pipeline va a hacer distinto.
+     *
+     * @return array<string, string>
+     */
+    private function que_hace_el_pipeline_en_el_lugar()
+    {
+        return [
+            'respaldo'      => 'Antes de pisar nada, la etapa backup_in_place respalda el código de la API (sin storage/ '
+                . 'ni vendor/), el SPA y la base del cliente en ~/cc-respaldos/<carpeta>/ del servidor, fuera de toda carpeta '
+                . 'servida por web. Si el respaldo falla, el deployment queda `failed` sin haber tocado nada del cliente.',
+            'mantenimiento' => 'El sistema queda en `php artisan down` desde que se reemplaza la API (upload_api) hasta que '
+                . 'terminan las migraciones (run_migrations), que termina con `php artisan up`. Si algo falla en el medio queda '
+                . 'en mantenimiento, y el log dice cómo levantarlo y dónde está el respaldo.',
+            'crons'         => 'No hay frente que mudar: pause_for_crons marca solo crons_supervisor_at (shared) o '
+                . 'vps_supervisor_moved_at (VPS) y el post-cierre arranca sin el paso manual. El post-cierre sigue con su gate.',
+        ];
     }
 
     /**
@@ -1537,12 +1751,20 @@ class ClaudeUpgradeOpsController extends Controller
      * @param Carbon                 $ahora    Instante evaluado, ya en $tz.
      * @param string                 $tz       Timezone del gate.
      * @param string                 $estado   Estado del negocio en ese instante.
+     * @param array<string, string>  $textos   Qué se arriesga, para los mensajes (ver
+     *                                         TEXTOS_DEL_GATE_POST_CIERRE). La regla no cambia.
      *
      * @return array<string, mixed>|null Null si el gate deja pasar; si no,
      *                                   ['motivo_del_gate', 'mensaje', 'detalle'].
      */
-    private function rechazo_del_gate_de_horario(ClientScheduleResolver $resolver, Client $client, Carbon $ahora, $tz, $estado)
-    {
+    private function rechazo_del_gate_de_horario(
+        ClientScheduleResolver $resolver,
+        Client $client,
+        Carbon $ahora,
+        $tz,
+        $estado,
+        array $textos = self::TEXTOS_DEL_GATE_POST_CIERRE
+    ) {
         if ($estado === ClientScheduleResolver::ESTADO_SIN_CONFIGURAR) {
             return [
                 'motivo_del_gate' => 'sin_configurar',
@@ -1561,8 +1783,8 @@ class ClaudeUpgradeOpsController extends Controller
         if ($estado === ClientScheduleResolver::ESTADO_ABIERTO) {
             return [
                 'motivo_del_gate' => 'abierto',
-                'mensaje'         => 'El negocio del cliente está ABIERTO en este momento: las tareas post-cierre corren '
-                    . 'seeders y comandos sobre el sistema en uso. No se encoló nada.',
+                'mensaje'         => 'El negocio del cliente está ABIERTO en este momento: ' . $textos['abierto']
+                    . '. No se encoló nada.',
                 'detalle'         => $this->detalle_del_gate($resolver, $client, $ahora, $tz, $estado),
             ];
         }
@@ -1604,7 +1826,7 @@ class ClaudeUpgradeOpsController extends Controller
 
         $mensaje = $todavia_no_abrio
             ? 'El negocio del cliente TODAVÍA NO ABRIÓ hoy: abre a las ' . $primera . ' y su jornada recién termina a las '
-                . $hoy['cierre_del_dia'] . '. Las tareas post-cierre lo agarrarían con el negocio por abrir. No se encoló nada.'
+                . $hoy['cierre_del_dia'] . '. ' . $textos['por_abrir'] . ' No se encoló nada.'
             : 'El negocio del cliente está en el HUECO ENTRE TURNOS: reabre a las '
                 . ($reapertura === null ? '—' : $reapertura) . ' y su jornada recién termina a las '
                 . $hoy['cierre_del_dia'] . '. Estar cerrado ahora no significa que la jornada haya terminado. No se encoló nada.';

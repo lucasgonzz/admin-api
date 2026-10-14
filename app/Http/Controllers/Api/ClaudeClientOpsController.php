@@ -424,12 +424,16 @@ class ClaudeClientOpsController extends Controller
                     . 'revela el nombre correcto: si lo revelara dejaría de ser un freno y sería un formulario a completar.',
                 'dry_run' => 'POST claude/upgrades viene con dry_run=true por defecto. Con dry_run=false hace falta además '
                     . '`confirm_version_count` igual a la cantidad exacta de versiones que se van a confirmar.',
-                'allow_deploy_to_active_api' => 'POST .../deploy/start rechaza con 422 si la API destino es la API ACTIVA '
-                    . 'en producción, salvo que venga este flag explícito. La API destino por defecto puede ser la activa '
-                    . 'cuando el cliente tiene una sola ClientApi.',
+                'allow_deploy_to_active_api' => 'Desde el 14/10/2026 (un solo frente por cliente) la API destino por '
+                    . 'defecto es el FRENTE PRINCIPAL del cliente, que en el caso normal es la activa: eso es un despliegue '
+                    . 'EN EL LUGAR, y POST .../deploy/start lo deja pasar SIN este flag pero con el gate de horario. El flag '
+                    . 'solo hace falta si la destino es la activa y NO es el frente principal (un cliente que atiende desde '
+                    . 'su frente 2): ahí lo que corresponde es la última rotación al principal. Si viene en true, se sigue '
+                    . 'aceptando y el start pasa sin gate, como antes.',
                 'gate_de_horario' => 'POST .../deploy/start-post-closure exige que el negocio esté CERRADO. Con `abierto` '
                     . 'devuelve 422; con `sin_configurar` TAMBIÉN devuelve 422 (no se asume que esté cerrado). Se saltea '
-                    . 'con force=true + force_reason, y eso queda registrado en el log diario.',
+                    . 'con force=true + force_reason, y eso queda registrado en el log diario. El mismo gate cuida POST '
+                    . '.../deploy/start cuando el modo es `en_el_lugar`.',
             ],
 
             'limites' => [
@@ -1915,6 +1919,16 @@ class ClaudeClientOpsController extends Controller
 
         $horario = ['estado_ahora' => null, 'proximo_cierre' => null, 'proximo_cierre_motivo' => null, 'timezone' => $tz];
         $cliente = $this->cargar_cliente_con_horarios((int) $fila['client_id']);
+
+        /* Misión `un-solo-frente` (14/10/2026): en qué modo va este upgrade y cuál es el frente
+           principal del cliente. Campos nuevos y aditivos; los lee también la respuesta de la
+           creación real, que es este mismo payload. */
+        $frente_principal_id = $cliente === null ? null : $cliente->resolver_frente_principal_client_api_id();
+        $modo                = $cliente === null ? null : $cliente->modo_de_despliegue_hacia($fila['target_client_api_id']);
+        if ($target_api !== null) {
+            $target_api['es_el_frente_principal'] = $target_api['id'] === $frente_principal_id;
+        }
+
         if ($cliente !== null) {
             $resolver = $this->resolvedor();
             $ahora    = Carbon::now($tz);
@@ -1956,6 +1970,8 @@ class ClaudeClientOpsController extends Controller
                 'target_client_api' => $target_api,
                 'from_version'      => $fila['from_version'],
                 'to_version'        => $fila['to_version'],
+                'modo'                           => $modo,
+                'frente_principal_client_api_id' => $frente_principal_id,
             ],
             'steps'    => $steps,
             'seeders'  => $this->conteos_de_seeders($upgrade_id),
@@ -1979,7 +1995,8 @@ class ClaudeClientOpsController extends Controller
                 $fila['crons_supervisor_at'],
                 $fila['comandos_ejecutados_at'],
                 (bool) $salud['deployment_stale'],
-                (int) $salud['vencimiento_minutos']
+                (int) $salud['vencimiento_minutos'],
+                $modo
             ),
             'generado_a_las' => Carbon::now($tz)->toIso8601String(),
         ], 200);
@@ -2536,6 +2553,8 @@ class ClaudeClientOpsController extends Controller
      * @param string|null $comandos_ejecutados_at Cuándo se ejecutaron los comandos.
      * @param bool        $deployment_stale       `salud.deployment_stale` ya calculado.
      * @param int|null    $vencimiento_minutos    Umbral destructivo, en minutos.
+     * @param string|null $modo                   `en_el_lugar` | `rotacion` (misión `un-solo-frente`):
+     *                                            cambia el texto del arranque, no el endpoint.
      *
      * @return array<string, mixed>
      */
@@ -2545,7 +2564,8 @@ class ClaudeClientOpsController extends Controller
         $crons_supervisor_at,
         $comandos_ejecutados_at,
         $deployment_stale = false,
-        $vencimiento_minutos = null
+        $vencimiento_minutos = null,
+        $modo = null
     ) {
         $start            = 'POST claude/upgrades/' . $upgrade_id . '/deploy/start';
         $mark_crons       = 'POST claude/upgrades/' . $upgrade_id . '/mark-crons';
@@ -2654,6 +2674,16 @@ class ClaudeClientOpsController extends Controller
                 'endpoint' => $start,
                 'motivo'   => 'El deployment ya terminó. Volver a llamar a start correría el pipeline entero de nuevo: '
                     . 'no hace falta ninguna acción salvo que quieras reejecutarlo a propósito.',
+            ];
+        }
+
+        if ($modo === Client::MODO_EN_EL_LUGAR) {
+            return [
+                'endpoint' => $start,
+                'motivo'   => 'El deployment nunca arrancó y va EN EL LUGAR: la API destino es la activa (el frente '
+                    . 'principal). El pre-cierre respalda código, SPA y base (backup_in_place), pisa el código que está '
+                    . 'atendiendo y deja el sistema en mantenimiento hasta que terminan las migraciones: por eso el start '
+                    . 'tiene el mismo gate de horario que el post-cierre. Mirá `horario_cliente.estado_ahora` antes de llamar.',
             ];
         }
 
