@@ -31,6 +31,12 @@ class ImplementacionMailHelper
      * 3 Recolección de archivos, 4 Migración de datos, 5 Entrega del sistema, 6 Capacitación,
      * 7 Vinculación ARCA/AFIP, 8 Videollamada de capacitación.
      *
+     * La 6 y la 8 cambiaron de nombre con el orden nuevo de `/implementar` (Lucas, 14/10/2026). Antes
+     * eran "Tu equipo y los tutoriales" y "Videollamada de cierre". Los tutoriales ahora salen en la
+     * entrega (etapa 5), y en la 6 se termina el catálogo —categorías, fotos y descripciones—, que es
+     * cuando salen los mails de categorías y de fotos. Y la videollamada no se nombra salvo que el
+     * cliente la pida: esta línea sale en TODOS los mails, así que la 8 no puede nombrarla.
+     *
      * @var array<int, string>
      */
     const ETAPAS = [
@@ -39,9 +45,9 @@ class ImplementacionMailHelper
         3 => 'Recibimos tu información',
         4 => 'Cargamos tu catálogo',
         5 => 'Te entregamos el sistema',
-        6 => 'Tu equipo y los tutoriales',
+        6 => 'Terminamos tu catálogo',
         7 => 'Facturación electrónica',
-        8 => 'Videollamada de cierre',
+        8 => 'Cerramos la implementación',
     ];
 
     /**
@@ -196,7 +202,22 @@ class ImplementacionMailHelper
                         . '—tus precios, tu stock, cómo vendés y quiénes forman tu equipo— necesitamos que completes un formulario corto.',
                 ];
 
+            case 'instalando':
+                /*
+                 * Al completar el formulario (orden nuevo, 14/10/2026): la instalación recién arranca y el
+                 * pedido de archivos sale en paralelo. Dice que ESTAMOS instalando, nunca que quedó instalado:
+                 * eso se le dice recién en la entrega, con su información adentro.
+                 */
+                return [
+                    'asunto'    => 'Recibimos tu formulario: ya estamos instalando tu sistema',
+                    'preheader' => 'Mientras lo instalamos, ya podés mandarnos tu información para cargarlo.',
+                    'titular'   => 'Ya estamos instalando tu sistema.',
+                    'intro'     => 'Recibimos tu formulario y estamos instalando tu sistema con lo que nos contaste. '
+                        . 'Para ir ganando tiempo, ya podés mandarnos la información que necesitamos para cargarlo.',
+                ];
+
             case 'instalado':
+                // La skill ya no lo manda (dice «ya está instalado» antes de la entrega): queda por compatibilidad.
                 return [
                     'asunto'    => 'Tu sistema ya está instalado',
                     'preheader' => 'Ahora necesitamos la información de tu negocio para cargarla.',
@@ -267,12 +288,18 @@ class ImplementacionMailHelper
                 ];
 
             default:
-                // 'listo'. El servicio ya rechazó cualquier otro hito antes de llegar acá.
+                /*
+                 * 'listo', la entrega. El servicio ya rechazó cualquier otro hito antes de llegar acá.
+                 *
+                 * Desde el orden nuevo (14/10/2026) la entrega sale con la primera tanda de artículos y sus fotos:
+                 * puede que el cliente todavía tenga artículos por mandar y que ARCA siga pendiente. Por eso no
+                 * dice "terminamos de cargar" ni "listo para facturar" (antes decía las dos cosas).
+                 */
                 return [
                     'asunto'    => 'Tu sistema está listo',
-                    'preheader' => 'Terminamos de cargar tu información. Ya podés operar con ComercioCity.',
+                    'preheader' => 'Cargamos tu información: ya podés entrar y empezar a trabajar con ComercioCity.',
                     'titular'   => 'Todo listo para operar.',
-                    'intro'     => 'Terminamos de cargar tu información y tu sistema ya está listo para vender, comprar y facturar con tus datos reales.',
+                    'intro'     => 'Cargamos tu información y tu sistema ya está listo para que empieces a trabajar con tus datos reales.',
                 ];
         }
     }
@@ -508,7 +535,7 @@ class ImplementacionMailHelper
                 return self::vista_del_listo($datos, (string) $contexto['recursos_url']);
 
             default:
-                // bienvenida e instalado no llevan datos propios.
+                // bienvenida, instalando e instalado no llevan datos propios.
                 return [];
         }
     }
@@ -598,7 +625,9 @@ class ImplementacionMailHelper
     }
 
     /**
-     * El bloque del mail "listo": el resumen de lo que quedó cargado y el botón de los tutoriales.
+     * El bloque del mail "listo" (la entrega): el resumen de lo que quedó cargado y el botón de los
+     * tutoriales. La tarjeta de acceso no necesita nada de acá: la arma la vista con la dirección del
+     * sistema, y usuario y contraseña son texto fijo (el mail NUNCA lleva la contraseña).
      *
      * Del resumen salen solo los rubros que vinieron con un número mayor que cero: "0 proveedores"
      * en una lista de lo que quedó cargado es ruido, no información.

@@ -1,18 +1,29 @@
 {{--
-  Hito "listo": el sistema está listo para operar.
+  Hito "listo": la entrega. El sistema del cliente, con sus artículos y sus fotos ya cargados.
+
+  Desde el orden nuevo de `/implementar` (Lucas, 14/10/2026) es la PRIMERA vez que el cliente escucha
+  que su sistema está instalado, y sale con la primera tanda de artículos: puede que todavía le queden
+  artículos por mandar y que ARCA siga pendiente.
 
   Lleva el resumen de lo que quedó cargado (solo los rubros que vinieron con un número mayor que
-  cero), el botón para entrar al sistema, el botón secundario con los tutoriales, lo que sigue
-  (videollamada, ARCA y soporte) y el agradecimiento.
+  cero), la tarjeta para entrar (la de `partials/tarjeta_de_acceso`: dirección, usuario = documento y
+  contraseña = la del WhatsApp; el mail NUNCA lleva la contraseña), el botón para entrar al sistema, el
+  botón secundario con los tutoriales (el centro de recursos sale recién acá), lo que sigue (terminar
+  el catálogo, ARCA y soporte) y el agradecimiento.
 
-  Variables de este hito: $resumen (numero y leyenda de cada rubro) y $recursos_url. Hereda de
-  `hito.blade.php`: $font y $url_sistema.
+  🔴 La videollamada no se nombra: es la regla de Lucas del 14/10/2026 (solo si el cliente la pide, y
+  eso no es un mail). Antes era el primer renglón de "lo que sigue".
+
+  Variables de este hito: $resumen (numero y leyenda de cada rubro), $recursos_url y $con_arca. Hereda
+  de `hito.blade.php`: $font, $url_sistema y $direccion_sistema.
 --}}
 @php
-    // Lo que sigue después de que el sistema queda listo. Constantes de este mismo archivo, salvo la línea de ARCA: va solo si
-    // aplica ($con_arca; `datos.arca: false` la saca). A un cliente que no factura electrónicamente no se le dice que se la conectamos.
+    // Lo que sigue después de la entrega. Constantes de este mismo archivo, salvo la línea de ARCA: va solo si aplica
+    // ($con_arca; `datos.arca: false` la saca). A un cliente que no factura electrónicamente no se le dice que se la conectamos.
+    // La primera vale tanto si le quedan artículos por mandar como si no ("las que falten"), y tanto si sus artículos ya traían
+    // categorías como si no.
     $lo_que_sigue = array_values(array_filter([
-        'Una videollamada con vos y tu equipo para resolver dudas y dejarlos operando.',
+        'Cuando tengamos todos tus artículos, terminamos tu catálogo: las categorías, las fotos y las descripciones que falten.',
         $con_arca ? 'Conectamos la facturación electrónica con ARCA.' : null,
         'Soporte por WhatsApp, siempre con una persona del otro lado.',
     ]));
@@ -37,6 +48,15 @@
   </td>
 </tr>
 @endif
+@if($url_sistema !== '')
+<tr>
+  <td class="cc-lado" style="padding:{{ count($resumen) > 0 ? '28' : '36' }}px 48px 0 48px;">
+    <p style="margin:0;font-family:{!! $font !!};font-size:12px;line-height:16px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#566078;">Cómo entrar</p>
+    {{-- La tarjeta de accesos: dirección, usuario y contraseña. En teléfono cada par se apila --}}
+    @include('emails.implementacion.partials.tarjeta_de_acceso', ['margen' => 14])
+  </td>
+</tr>
+@endif
 <tr>
   <td class="cc-lado" style="padding:28px 48px 0 48px;">
     @if($url_sistema !== '')
@@ -51,6 +71,9 @@
         </td>
       </tr>
     </table>
+    @if($url_sistema !== '')
+      <p style="margin:14px 0 0 0;font-family:{!! $font !!};font-size:14px;line-height:22px;color:#566078;">Cuando entres, cambiá la contraseña desde la configuración.</p>
+    @endif
   </td>
 </tr>
 <tr>

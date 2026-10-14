@@ -562,13 +562,26 @@ class ClaudeImplementationOpsController extends Controller
         $api       = $client->active_client_api;
         $resolutor = new ClientEmpresaApiUrlResolver();
 
+        /*
+         * Qué sistemas contrató (`contract_sistemas`, keys de `CotizadorSettings::SISTEMAS`), para que la
+         * skill sepa sola si le toca el paso de la tienda online (misión mails-implementacion-orden-nuevo,
+         * 14/10/2026). `null` = el contrato no lo dice (un contrato anterior a la modalidad, o sin cargar):
+         * ahí `tienda_contratada` también es null y se le pregunta a Lucas. Un "no" se dice solo con la
+         * lista cargada y sin `ecommerce`.
+         */
+        $sistemas = is_array($client->contract_sistemas) && count($client->contract_sistemas) > 0
+            ? array_values(array_map('strval', $client->contract_sistemas))
+            : null;
+
         $bloque = [
-            'id'           => (int) $client->id,
-            'name'         => $client->name,
-            'company_name' => $client->company_name,
-            'slug'         => $client->slug,
-            'user_id'      => $client->user_id === null ? null : (int) $client->user_id,
-            'is_active'    => (bool) $client->is_active,
+            'id'                => (int) $client->id,
+            'name'              => $client->name,
+            'company_name'      => $client->company_name,
+            'slug'              => $client->slug,
+            'user_id'           => $client->user_id === null ? null : (int) $client->user_id,
+            'is_active'         => (bool) $client->is_active,
+            'contract_sistemas' => $sistemas,
+            'tienda_contratada' => $sistemas === null ? null : in_array('ecommerce', $sistemas, true),
             'sistema'      => [
                 'spa_url'              => $this->vacio_a_null($resolutor->resolve_spa_url($client)),
                 'api_url'              => $this->vacio_a_null($resolutor->resolve_base_url($client)),

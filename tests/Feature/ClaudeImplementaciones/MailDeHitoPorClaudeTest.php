@@ -125,6 +125,7 @@ class MailDeHitoPorClaudeTest extends BaseDeImplementaciones
 
         return [
             'bienvenida' => [],
+            'instalando' => [],
             'instalado'  => [],
             'acceso'     => ['articulos' => 1280],
             'imagenes'   => ['con_foto' => 900, 'total' => 1280, 'a_revisar' => 40],
@@ -317,7 +318,7 @@ class MailDeHitoPorClaudeTest extends BaseDeImplementaciones
     }
 
     /**
-     * Los seis hitos se arman en el dry-run con datos válidos, cada uno con su asunto.
+     * Los siete hitos se arman en el dry-run con datos válidos, cada uno con su asunto.
      *
      * @return void
      */
@@ -326,6 +327,7 @@ class MailDeHitoPorClaudeTest extends BaseDeImplementaciones
         $e        = $this->escenario();
         $asuntos  = [
             'bienvenida' => 'Arrancamos con la implementación de tu sistema',
+            'instalando' => 'Recibimos tu formulario: ya estamos instalando tu sistema',
             'instalado'  => 'Tu sistema ya está instalado',
             'acceso'     => 'Ya podés entrar a tu sistema',
             'imagenes'   => 'Las fotos de tu catálogo',
@@ -662,7 +664,7 @@ class MailDeHitoPorClaudeTest extends BaseDeImplementaciones
     }
 
     /**
-     * Cada uno de los seis hitos se manda de verdad con datos válidos y deja su fila.
+     * Cada uno de los siete hitos se manda de verdad con datos válidos y deja su fila.
      *
      * @return void
      */
@@ -675,8 +677,8 @@ class MailDeHitoPorClaudeTest extends BaseDeImplementaciones
             $this->mail($e['implementacion'], $this->real($hito, ['datos' => $d]))->assertStatus(200)->assertJsonPath('enviado', true);
         }
 
-        Mail::assertSent(ImplementacionMail::class, 6);
-        $this->assertSame(6, $this->filas_de_mails());
+        Mail::assertSent(ImplementacionMail::class, 7);
+        $this->assertSame(7, $this->filas_de_mails());
     }
 
     /* ------------------------------------------------------------------------------------------
