@@ -1030,8 +1030,17 @@ class DeploymentService
     /**
      * La etapa desde la que se reanuda un despliegue fallado, según sus logs (misión `un-solo-frente`,
      * 14/10/2026): la MÁS RECIENTE entre la última línea MARCA_ETAPA_QUE_FALLO y la última
-     * MARCA_ETAPA_EN_CURSO de una ventana que no se cerró con el `up` (el job murió por timeout sin
-     * escribir la que falló). Null si no hay ninguna.
+     * MARCA_ETAPA_EN_CURSO (el job murió por timeout sin escribir la que falló). Null si no hay
+     * ninguna.
+     *
+     * 🔴 Solo cuentan las líneas POSTERIORES al último `up` exitoso (MARCA_FUERA_DE_MANTENIMIENTO):
+     * lo de antes es de una ventana que ya se terminó. Medido por el verificador: un intento falla en
+     * upload_api, se reanuda, pasa el `up`, y el job muere por timeout en un comando (sin escribir la
+     * que falló); leyendo el fallo viejo, `siguiente_accion` recomendaba reanudar desde upload_api sin
+     * gate y `deploy/start` lo aceptaba a las 12:00 —`down`, unzip y migraciones con el negocio
+     * abierto—, y rechazaba la salida legítima (los comandos) por posterior. Si hubo un `up` y después
+     * no quedó ninguna línea, la etapa es `run_commands`: lo único que corre con el cliente arriba
+     * antes de la pausa.
      *
      * Una sola lectura para los dos que la necesitan: `siguiente_accion` (qué recomendar) y
      * `deploy/start` (no aceptar una etapa posterior). Si leyeran distinto, uno recomendaría lo que el
@@ -1039,36 +1048,71 @@ class DeploymentService
      *
      * @param  int                 $upgrade_id
      * @param  array<int, string>  $excluir  Etapas de MARCA_ETAPA_QUE_FALLO que no cuentan.
-     * @return array{etapa: string, de_etapa_en_curso: bool}|null
+     * @return array{etapa: string, de_etapa_en_curso: bool, sin_linea_despues_del_up: bool}|null
      */
     public static function etapa_que_fallo_segun_los_logs(int $upgrade_id, array $excluir = ['deployment'])
     {
+        $ultimo_up = self::id_del_ultimo_up_en_los_logs($upgrade_id);
+
         $fallo = DeploymentLog::where('client_version_upgrade_id', $upgrade_id)
             ->where('line', 'like', self::MARCA_ETAPA_QUE_FALLO . '%')
             ->whereNotIn('step', $excluir)
+            ->where('id', '>', $ultimo_up)
             ->orderByDesc('id')
             ->first(['id', 'step']);
 
         $en_curso = DeploymentLog::where('client_version_upgrade_id', $upgrade_id)
             ->where('line', 'like', self::MARCA_ETAPA_EN_CURSO . '%')
+            ->where('id', '>', $ultimo_up)
             ->orderByDesc('id')
             ->first(['id', 'step']);
 
-        if ($en_curso !== null) {
-            $cerrada = DeploymentLog::where('client_version_upgrade_id', $upgrade_id)
-                ->where('id', '>', $en_curso->id)
-                ->where('line', 'like', self::MARCA_FUERA_DE_MANTENIMIENTO . '%')
-                ->exists();
-            if ($cerrada) {
-                $en_curso = null;
-            }
-        }
-
         if ($en_curso !== null && ($fallo === null || (int) $en_curso->id > (int) $fallo->id)) {
-            return ['etapa' => (string) $en_curso->step, 'de_etapa_en_curso' => true];
+            return ['etapa' => (string) $en_curso->step, 'de_etapa_en_curso' => true, 'sin_linea_despues_del_up' => false];
         }
 
-        return $fallo === null ? null : ['etapa' => (string) $fallo->step, 'de_etapa_en_curso' => false];
+        if ($fallo !== null) {
+            return ['etapa' => (string) $fallo->step, 'de_etapa_en_curso' => false, 'sin_linea_despues_del_up' => false];
+        }
+
+        return $ultimo_up > 0
+            ? ['etapa' => 'run_commands', 'de_etapa_en_curso' => false, 'sin_linea_despues_del_up' => true]
+            : null;
+    }
+
+    /**
+     * Id de la última línea de `up` exitoso (MARCA_FUERA_DE_MANTENIMIENTO) de ese upgrade, o 0.
+     *
+     * @param  int  $upgrade_id
+     * @return int
+     */
+    private static function id_del_ultimo_up_en_los_logs(int $upgrade_id): int
+    {
+        return (int) DeploymentLog::where('client_version_upgrade_id', $upgrade_id)
+            ->where('line', 'like', self::MARCA_FUERA_DE_MANTENIMIENTO . '%')
+            ->max('id');
+    }
+
+    /**
+     * ¿Una reanudación de este upgrade puede saltear el gate? Sí solo si sus logs dicen que tocó el
+     * sistema vivo (sistema_vivo_tocado_segun_los_logs(), también la marca heredada) y NO hubo un
+     * `up` exitoso después de la última de esas marcas: con el cliente ya arriba, reanudar no termina
+     * nada que esté abajo, y vuelve a tocar el sistema en uso (misión `un-solo-frente`, 14/10/2026).
+     *
+     * @param  int  $upgrade_id
+     * @return bool
+     */
+    public static function sistema_tocado_y_sin_levantar_segun_los_logs(int $upgrade_id): bool
+    {
+        $ultima_marca = (int) DeploymentLog::where('client_version_upgrade_id', $upgrade_id)
+            ->where('line', 'like', self::MARCA_SISTEMA_TOCADO . '%')
+            ->max('id');
+
+        if ($ultima_marca === 0) {
+            return false;
+        }
+
+        return self::id_del_ultimo_up_en_los_logs($upgrade_id) < $ultima_marca;
     }
 
     /**

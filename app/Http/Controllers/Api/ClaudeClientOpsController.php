@@ -1948,7 +1948,7 @@ class ClaudeClientOpsController extends Controller
         $etapa_en_curso  = false;
         $sistema_tocado  = false;
         if ($modo === Client::MODO_EN_EL_LUGAR && $this->texto_o_null($fila['deployment_status']) === 'failed') {
-            $sistema_tocado = DeploymentService::sistema_vivo_tocado_segun_los_logs($upgrade_id);
+            $sistema_tocado = DeploymentService::sistema_tocado_y_sin_levantar_segun_los_logs($upgrade_id);
 
             /* La MISMA lectura que usa deploy/start para no aceptar una etapa posterior: la más reciente
                entre "Etapa que falló" y la "Etapa en curso" de una ventana que no se cerró (el job murió
@@ -2748,12 +2748,19 @@ class ClaudeClientOpsController extends Controller
             }
 
             if ($etapa_que_fallo === 'run_commands') {
+                /* También cuando el job murió DESPUÉS del `up` sin dejar línea (timeout en un comando):
+                   DeploymentService::etapa_que_fallo_segun_los_logs() devuelve run_commands, porque lo
+                   anterior al `up` es de una ventana que ya terminó. */
                 return [
                     'endpoint'        => $retry_commands,
                     'gate_de_horario' => $gate_de_los_comandos,
-                    'motivo'          => 'Despliegue EN EL LUGAR fallado en un comando: los comandos corren con el sistema '
-                        . 'ARRIBA, así que el cliente está atendiendo. Corregí la causa y reintentá los comandos (no borra '
-                        . 'ningún log). ⚠️ Corre sobre el sistema en uso: fuera de la ventana del gate contesta 422.',
+                    'motivo'          => 'Despliegue EN EL LUGAR fallado en un comando (o cortado después del artisan up): '
+                        . 'los comandos corren con el sistema ARRIBA, así que el cliente está atendiendo. Corregí la causa y '
+                        . 'reintentá los comandos (no borra ningún log). ⚠️ Corre sobre el sistema en uso: fuera de la '
+                        . 'ventana del gate contesta 422.',
+                    'alternativa'     => 'Si retry-commands contesta que no hay comandos para reintentar (ya salieron todos), '
+                        . 'lo que falta es el cierre: ' . $configure_system . '. Reanudar desde una etapa anterior al up '
+                        . 'volvería a bajar el sistema y lleva el gate.',
                 ];
             }
 

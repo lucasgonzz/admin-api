@@ -1114,6 +1114,67 @@ class DeployEnElLugarPorClaudeTest extends TestCase
     }
 
     /**
+     * 🔴 Cuarta pasada del verificador: un fallo viejo ANTES del `up` (upload_api o run_migrations),
+     * después una reanudación que pasó el `up` y murió por timeout en un comando, sin escribir la
+     * etapa que falló. El cliente está arriba: a las 12:00, reanudar desde la etapa vieja da 422 (el
+     * gate aplica, porque hubo un `up` después de la marca), siguiente_accion lleva a retry-commands
+     * con gate, y reanudar run_commands ya no se rechaza por "posterior" (de madrugada, 202).
+     */
+    public function test_un_fallo_viejo_antes_del_up_no_manda_despues_del_up(): void
+    {
+        foreach (['upload_api', 'run_migrations'] as $fallo_viejo) {
+            Queue::fake();
+            Carbon::setTestNow($this->mediodia());
+
+            $e = $this->escenario('principal');
+            $this->horario($e['client'], '09:00', '18:00');
+            $upgrade = $this->crear_upgrade($e, $e['principal'], [
+                'deployment_status'   => 'failed',
+                'crons_supervisor_at' => now(),
+            ]);
+
+            /* Intento 1: tocó, desplegó el SPA y falló en la etapa vieja, adentro de la ventana. */
+            $this->marcar_tocado($upgrade);
+            $this->spa_reemplazado($upgrade);
+            $this->fallo_en($upgrade, $fallo_viejo);
+
+            /* Reanudación: terminó la ventana (up) y murió por timeout en un comando, sin línea. */
+            DeploymentLog::create([
+                'client_version_upgrade_id' => $upgrade->id,
+                'step'                      => 'run_seeders',
+                'level'                     => 'info',
+                'line'                      => \App\Services\DeploymentService::MARCA_ETAPA_EN_CURSO . 'run_seeders (con el sistema del cliente en mantenimiento).',
+            ]);
+            DeploymentLog::create([
+                'client_version_upgrade_id' => $upgrade->id,
+                'step'                      => 'restart_queue_workers',
+                'level'                     => 'success',
+                'line'                      => \App\Services\DeploymentService::MARCA_FUERA_DE_MANTENIMIENTO . ' (php artisan up).',
+            ]);
+
+            $resuelta = \App\Services\DeploymentService::etapa_que_fallo_segun_los_logs((int) $upgrade->id);
+            $this->assertSame('run_commands', $resuelta['etapa'], 'Fallo viejo en ' . $fallo_viejo);
+            $this->assertFalse(\App\Services\DeploymentService::sistema_tocado_y_sin_levantar_segun_los_logs((int) $upgrade->id));
+
+            $get = $this->getJson('/api/claude/upgrades/' . $upgrade->id, $this->headers())->assertStatus(200)->json();
+            $this->assertStringEndsWith('/deploy/retry-commands', $get['siguiente_accion']['endpoint'], 'Fallo viejo en ' . $fallo_viejo);
+            $this->assertArrayNotHasKey('resume_from_step', $get['siguiente_accion']);
+            $this->assertStringContainsString('regla del en el lugar', $get['siguiente_accion']['gate_de_horario']);
+
+            /* 12:00, negocio abierto: reanudar desde la etapa vieja lleva el gate y rechaza. */
+            $rechazo = $this->start($upgrade, ['resume_from_step' => $fallo_viejo])->assertStatus(422)->json();
+            $this->assertSame('abierto', $rechazo['estado_ahora'], 'Fallo viejo en ' . $fallo_viejo);
+            Queue::assertNothingPushed();
+            $this->assertSame('failed', (string) $upgrade->refresh()->deployment_status);
+
+            /* La salida legítima (los comandos) no es "posterior": de madrugada, con gate, pasa. */
+            Carbon::setTestNow($this->a_las('02:00'));
+            $cuerpo = $this->start($upgrade, ['resume_from_step' => 'run_commands'])->assertStatus(202)->json();
+            $this->assertStringStartsWith('aplicado', $cuerpo['gate_de_horario']);
+        }
+    }
+
+    /**
      * 🔴 3. El reintento de comandos de claude/* en el lugar usa la regla del en el lugar: la madrugada
      * pasa (con el gate viejo del post-cierre daba "todavía no abrió"), un receso entre turnos no. Y
      * siguiente_accion, al recomendarlo, dice que lleva ese gate.

@@ -638,7 +638,7 @@ class ClaudeUpgradeOpsController extends Controller
                pausa corren con el cliente ya arriba, sobre el sistema en uso, y llevan el gate. */
             $sistema_tocado = $etapa_de_reanudacion !== null
                 && DeploymentService::etapa_antes_del_up($etapa_de_reanudacion)
-                && DeploymentService::sistema_vivo_tocado_segun_los_logs((int) $upgrade->id);
+                && DeploymentService::sistema_tocado_y_sin_levantar_segun_los_logs((int) $upgrade->id);
 
             if (! $sistema_tocado) {
                 $despues_del_up = $etapa_de_reanudacion !== null
@@ -731,7 +731,7 @@ class ClaudeUpgradeOpsController extends Controller
                 if (! DeploymentService::etapa_antes_del_up($etapa_de_reanudacion)) {
                     $respuesta['gate_de_horario'] = 'aplicado: es una reanudación en el lugar de una etapa posterior al '
                         . 'artisan up (los comandos o la pausa), que corre con el cliente ya arriba, sobre el sistema en uso.';
-                } elseif (DeploymentService::sistema_vivo_tocado_segun_los_logs((int) $upgrade->id)) {
+                } elseif (DeploymentService::sistema_tocado_y_sin_levantar_segun_los_logs((int) $upgrade->id)) {
                     $respuesta['gate_de_horario'] = 'no aplica: es una reanudación en el lugar y este upgrade ya tocó el '
                         . 'sistema vivo (el gate frena la salida limpia, no la terminación). Quedó en el log diario.';
                 } else {
