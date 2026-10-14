@@ -74,7 +74,9 @@ class RecursosPaginaController extends Controller
     /**
      * GET recursos/videos/{codigo} — `{video, preguntas}`: el video del catálogo con su transcripción,
      * y las preguntas visibles para quien pide (respondidas de todos; con sesión, además las propias sin
-     * responder). Con sesión, marca como vistas las respuestas a sus preguntas de este video.
+     * responder). Con sesión, marca como vistas las respuestas a sus preguntas de este video —salvo en una
+     * sesión de SOLO LECTURA (login maestro): ahí es soporte mirando, no el autor, y marcarlas le
+     * apagaría al dueño el aviso de "respuesta nueva" sin que la haya leído—.
      *
      * @param Request $request
      * @param string  $codigo
@@ -102,7 +104,11 @@ class RecursosPaginaController extends Controller
 
         $mios = $this->me_gusta_de($usuario_id, $preguntas->pluck('id')->all());
 
-        if ($usuario_id !== null) {
+        $sesion = $request->attributes->get(RecursosSesion::ATRIBUTO_SESION);
+
+        $solo_lectura = $sesion instanceof RecursosSesionModelo && $sesion->solo_lectura;
+
+        if ($usuario_id !== null && ! $solo_lectura) {
             // El autor ya vio la respuesta: deja de figurar en `respuestas_nuevas` de `yo`.
             RecursosPregunta::where('recursos_video_id', $video->id)
                 ->where('recursos_usuario_id', $usuario_id)

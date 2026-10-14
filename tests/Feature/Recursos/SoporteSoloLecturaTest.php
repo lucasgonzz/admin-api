@@ -263,6 +263,63 @@ class SoporteSoloLecturaTest extends BaseDelCentroDeRecursos
         $this->assertSame(0, RecursosSesion::where('token_hash', hash('sha256', $token))->count());
     }
 
+    /**
+     * 🔴 `GET videos/{codigo}` parece lectura pero, con sesión, marca como vistas las respuestas a las
+     * preguntas del usuario (`vista_por_autor_at`). Si lo hiciera una sesión de soporte, el dueño
+     * perdería el aviso de "respuesta nueva" sin haberla leído: es una escritura a su nombre.
+     */
+    public function test_ver_un_video_en_soporte_no_marca_como_vistas_las_respuestas_del_dueno(): void
+    {
+        $video  = $this->crear_video('T1.1');
+        $client = $this->crear_cliente('api-tornillo.test');
+
+        $dueno = RecursosUsuario::create([
+            'client_id'       => $client->id,
+            'empresa_user_id' => 123,
+            'nombre'          => 'Marcela Gómez',
+            'es_dueno'        => true,
+        ]);
+
+        $pregunta = RecursosPregunta::create([
+            'recursos_video_id' => $video->id, 'recursos_usuario_id' => $dueno->id,
+            'texto' => '¿Se puede importar desde Excel?', 'respuesta' => 'Sí, desde Listado → Importar.', 'respondido_at' => now(),
+        ]);
+
+        $this->assertNull($pregunta->fresh()->vista_por_autor_at);
+
+        Http::fake([self::URL_CANJE => $this->canje_con(123, true)]);
+
+        $canje = $this->canjear_pase();
+        $canje->assertStatus(200);
+        Http::assertSentCount(1);
+
+        $token = (string) $canje->json('token');
+        $this->assertSame(true, $canje->json('usuario.solo_lectura'));
+
+        // Soporte ve el video y las preguntas del dueño (es lectura)...
+        $video_json = $this->getJson('/api/recursos/videos/T1.1', $this->con_sesion($token));
+        $video_json->assertStatus(200);
+        $this->assertSame([$pregunta->id], array_column($video_json->json('preguntas'), 'id'));
+        $this->assertTrue($video_json->json('preguntas.0.es_mia'));
+
+        // ...pero no marca nada: la respuesta sigue "nueva" para el dueño, en la base y en `yo`.
+        $this->assertNull($pregunta->fresh()->vista_por_autor_at);
+
+        $yo = $this->getJson('/api/recursos/yo', $this->con_sesion($token))->assertStatus(200)->json();
+        $this->assertSame([['codigo' => 'T1.1', 'pregunta_id' => $pregunta->id]], $yo['respuestas_nuevas']);
+
+        // Control: el MISMO pedido con una sesión normal del mismo usuario sí la marca. Así el resultado de
+        // arriba es por la sesión de solo lectura y no porque el pedido no llegara a esa parte del código.
+        $token_normal = (new \App\Services\RecursosSesionService())->crear_sesion($dueno);
+
+        $this->getJson('/api/recursos/videos/T1.1', $this->con_sesion($token_normal))->assertStatus(200);
+
+        $this->assertNotNull($pregunta->fresh()->vista_por_autor_at);
+
+        $yo = $this->getJson('/api/recursos/yo', $this->con_sesion($token_normal))->assertStatus(200)->json();
+        $this->assertSame([], $yo['respuestas_nuevas']);
+    }
+
     /* ------------------------------------------------------------------------------------------
      | La ficha del dueño no se toca
      |----------------------------------------------------------------------------------------- */
