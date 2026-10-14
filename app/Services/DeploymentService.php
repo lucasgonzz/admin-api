@@ -217,9 +217,10 @@ class DeploymentService
     private $respalda = false;
 
     /**
-     * True si esta corrida sigue la secuencia PRE-CIERRE del en el lugar, la que corre seeders y
-     * comandos adentro de la ventana de mantenimiento (resolver_secuencia()). False en el post-cierre
-     * del en el lugar (que encuentra todo ya corrido) y en cualquier rotación.
+     * True si esta corrida sigue la secuencia PRE-CIERRE del en el lugar, la que corre los seeders
+     * adentro de la ventana de mantenimiento, hace el `artisan up` y después corre los comandos
+     * (resolver_secuencia()). False en el post-cierre del en el lugar (que encuentra todo ya corrido)
+     * y en cualquier rotación.
      *
      * @var bool
      */
@@ -279,14 +280,31 @@ class DeploymentService
     private $etapa_en_curso = null;
 
     /**
+     * True cuando esta corrida ya dejó la marca de sistema tocado (marcar_sistema_tocado()).
+     *
+     * @var bool
+     */
+    private $tocado_marcado = false;
+
+    /**
+     * True cuando esta corrida ya verificó que el sistema no quedó en mantenimiento antes de cerrar
+     * el upgrade (assert_sistema_arriba_antes_de_cerrar()).
+     *
+     * @var bool
+     */
+    private $cierre_verificado = false;
+
+    /**
      * Secuencia PRE-CIERRE de un despliegue EN EL LUGAR (misión `un-solo-frente`, 14/10/2026).
      *
-     * 🔴 Distinta de `$steps` en un punto: los seeders y los comandos corren ADENTRO de la ventana
-     * de mantenimiento, antes del `artisan up` (que va al comienzo de pause_for_crons). Con la
-     * rotación el código nuevo no atendía hasta configure-system, así que los seeders podían esperar
-     * al post-cierre; en el lugar el código nuevo atiende desde el `up`, y lo haría con los datos que
-     * los seeders todavía no cargaron. `$steps` no se toca: es la lista que replican el panel y
-     * `claude/*`, y la de toda rotación.
+     * 🔴 Distinta de `$steps`: los SEEDERS corren ADENTRO de la ventana de mantenimiento, antes del
+     * `artisan up`; con la rotación el código nuevo no atendía hasta configure-system, y en el lugar
+     * atiende desde el `up`, con los datos que los seeders tienen que haber cargado. El `up` va al
+     * final de restart_queue_workers (execute_steps()), y los COMANDOS corren DESPUÉS, con el sistema
+     * arriba: un comando que falla de madrugada no deja al negocio caído hasta que alguien reanude, y
+     * un comando que le pegue por HTTP a la propia API o espere la cola no falla por el 503 (decisión
+     * del 14/10, tercera tanda). Si un comando falla, el camino es el reintento de comandos. `$steps`
+     * no se toca: es la lista que replican el panel y `claude/*`, y la de toda rotación.
      *
      * Ninguna etapa entre el `down` (upload_api) y el `up` le pega por HTTP al empresa-api del
      * cliente: todo es SSH, SFTP y artisan (un HTTP a una API en `down` contesta 503). Medido el
@@ -303,24 +321,26 @@ class DeploymentService
         'sync_pusher_template',
         'run_migrations',
         'run_seeders',
-        'run_commands',
         'restart_queue_workers',
+        'run_commands',
         'pause_for_crons',
     ];
 
     /**
      * Secuencia POST-CIERRE de un despliegue en el lugar: lo que corre cuando `start-post-closure`
-     * (o el reintento de comandos) despacha desde `run_seeders`. Los seeders y comandos ya corrieron
-     * adentro del mantenimiento y no se vuelven a correr (los ya `exitoso` se omiten), así que es un
-     * no-op que deja el upgrade en `paused_post_tasks`, igual que una rotación.
+     * despacha desde `run_seeders` (o el reintento de comandos desde `run_commands`). Los seeders ya
+     * corrieron en mantenimiento y los comandos con el sistema arriba: lo ya `exitoso` no se vuelve a
+     * correr, así que es un no-op (o el reintento del comando que falló) que deja el upgrade en
+     * `paused_post_tasks`, igual que una rotación.
      *
      * @var array<int, string>
      */
     const SECUENCIA_POST_CIERRE_EN_EL_LUGAR = ['run_seeders', 'run_commands', 'update_default_version', 'complete'];
 
     /**
-     * Prefijo con el que `deploy/start` le pide al job reanudar `run_seeders` o `run_commands` ADENTRO
-     * de la ventana de mantenimiento (en el lugar, después de un fallo en esas etapas). Sin prefijo,
+     * Prefijo con el que `deploy/start` le pide al job reanudar `run_seeders` o `run_commands` en la
+     * secuencia PRE-CIERRE del en el lugar (después de un fallo en esas etapas: los seeders, adentro de
+     * la ventana; los comandos, ya con el sistema arriba, siguen a la pausa). Sin prefijo,
      * esas dos etapas son el post-cierre (start-post-closure, retry-commands): con el mismo nombre
      * no habría forma de distinguir "terminá el despliegue y levantá el sistema" de "corré el
      * post-cierre y pausá".
@@ -362,6 +382,41 @@ class DeploymentService
      * `GET claude/upgrades/{id}` y las líneas de mantenimiento de una corrida siguiente.
      */
     const MARCA_ETAPA_EN_CURSO = 'Etapa en curso: ';
+
+    /**
+     * Comienzo de la línea que se deja justo ANTES del primer comando que modifica el sistema vivo
+     * del cliente en este upgrade (en el lugar: el despliegue del SPA; en la última rotación al
+     * principal: las migraciones, que pegan sobre la base viva). Es lo que distingue "falló sin tocar
+     * nada" de "falló con el sistema tocado": la lee `deploy/start` (una reanudación saltea el gate
+     * solo si el sistema quedó tocado) y `siguiente_accion`. En una reanudación los logs se
+     * conservan; un start limpio los borra, y por eso la misma marca queda también en el disco
+     * (ARCHIVO_TOCADO, adentro del respaldo).
+     */
+    const MARCA_SISTEMA_TOCADO = 'Sistema vivo tocado: ';
+
+    /** Archivo que se deja en la carpeta del respaldo cuando este upgrade tocó el sistema vivo. */
+    const ARCHIVO_TOCADO = 'TOCADO';
+
+    /** Comienzo de la línea del `artisan up` exitoso: cierra la ventana de mantenimiento en los logs. */
+    const MARCA_FUERA_DE_MANTENIMIENTO = 'Sistema del cliente fuera de mantenimiento';
+
+    /**
+     * Etapas en las que un despliegue en el lugar falla con el sistema vivo ya tocado: desde el
+     * despliegue del SPA (con la marca de tocado) hasta el `up` del final de restart_queue_workers.
+     * Fallar en una de ellas se reanuda desde esa etapa; `siguiente_accion` las usa para elegir la
+     * rama del en el lugar. run_commands corre con el sistema arriba y NO está.
+     *
+     * @var array<int, string>
+     */
+    const ETAPAS_CON_EL_SISTEMA_TOCADO = [
+        'upload_spa',
+        'upload_api',
+        'sync_env_keys',
+        'sync_pusher_template',
+        'run_migrations',
+        'run_seeders',
+        'restart_queue_workers',
+    ];
 
     /**
      * Archivo de opciones con el que `mysqldump` lee las credenciales de la base. Vive adentro del
@@ -441,7 +496,7 @@ class DeploymentService
      * punto por donde nace la sesión que ejecuta los comandos contra el hosting del cliente, y un test
      * la reemplaza por un doble para poder afirmar QUÉ comandos se mandan y en qué orden (el respaldo
      * antes de pisar nada, `artisan down` antes de descomprimir la API, `artisan up` después de
-     * migraciones, seeders y comandos) sin abrir ningún socket. El cuerpo es el que tenía connect().
+     * migraciones y seeders, y los comandos después del `up`) sin abrir ningún socket. El cuerpo es el que tenía connect().
      *
      * @param  ClientSshCredential  $credential
      * @return SSH2
@@ -498,7 +553,8 @@ class DeploymentService
      * Después, según dónde quedó el cliente:
      *
      *  - 🔴 Falló con el sistema en mantenimiento (entre el `artisan down` de upload_api y el
-     *    `artisan up` de pause_for_crons, o con el `down` heredado de un intento anterior): QUEDÓ EN
+     *    `artisan up` del final de restart_queue_workers, o con el `down` heredado de un intento
+     *    anterior): QUEDÓ EN
      *    MANTENIMIENTO. Es a propósito —mejor un 503 que código nuevo atendiendo contra una base a
      *    medio migrar o a medio sembrar—, y la línea dice que NO se levanta a mano, desde qué etapa se
      *    reanuda (la que falló: reanudar desde run_migrations después de un fallo en upload_api
@@ -537,6 +593,19 @@ class DeploymentService
                 : $this->ruta_del_respaldo;
 
             $this->log($etapa, self::MARCA_ETAPA_QUE_FALLO . $etapa . '. Causa: ' . $causa, 'error');
+
+            if ($this->mantenimiento_posible && in_array($etapa, ['update_default_version', 'complete'], true)) {
+                $this->log(
+                    $etapa,
+                    '🔴 NO SE CERRÓ EL UPGRADE: el sistema del cliente está EN MANTENIMIENTO (php artisan down). Terminá '
+                    . 'primero el despliegue en el lugar reanudándolo desde la etapa de la ventana que falló (la dice '
+                    . 'siguiente_accion); recién con el sistema arriba se corre configure-system. Respaldo: ' . $respaldo
+                    . '. Causa: ' . $causa,
+                    'error'
+                );
+
+                return;
+            }
 
             if ($this->mantenimiento_posible) {
                 $this->log(
@@ -605,12 +674,13 @@ class DeploymentService
 
     /**
      * Qué secuencia de etapas corre esta pasada, desde cuál, y si es la del en el lugar con los
-     * seeders adentro del mantenimiento (misión `un-solo-frente`, 14/10/2026).
+     * seeders adentro del mantenimiento y los comandos después del `up` (misión `un-solo-frente`,
+     * 14/10/2026).
      *
      * - Rotación: `$steps`, como siempre. (Un prefijo de reanudación en mantenimiento se ignora.)
      * - En el lugar, sin reanudación o reanudando una etapa del pre-cierre: SECUENCIA_EN_EL_LUGAR.
      * - En el lugar, `en_mantenimiento:<etapa>` (lo manda `deploy/start` al reanudar run_seeders o
-     *   run_commands después de un fallo adentro de la ventana): SECUENCIA_EN_EL_LUGAR desde esa etapa.
+     *   run_commands después de un fallo en esas etapas): SECUENCIA_EN_EL_LUGAR desde esa etapa.
      * - En el lugar, `run_seeders` / `run_commands` a secas (start-post-closure, retry-commands) o la
      *   etapa final: SECUENCIA_POST_CIERRE_EN_EL_LUGAR.
      *
@@ -670,9 +740,25 @@ class DeploymentService
             if (! $en_ventana && in_array($desde, ['run_seeders', 'run_commands'], true)) {
                 $this->log(
                     $desde,
-                    'En el lugar: los seeders y comandos ya corrieron adentro del mantenimiento; lo que ya salió no se '
-                    . 'vuelve a correr.',
+                    'En el lugar: los seeders ya corrieron en mantenimiento y los comandos con el sistema arriba; lo que '
+                    . 'ya salió no se vuelve a correr.',
                     'info'
+                );
+            }
+
+            /* 🔴 Las etapas que siguen al `up` (los comandos y la pausa) no arrancan con el sistema en
+               mantenimiento: correrían los comandos con el cliente abajo, o pausarían (y marcarían el
+               paso del `up`) sin levantarlo. Se frena sin tocar nada, y la línea de la etapa que falló
+               nombra la última etapa de la ventana, que es desde donde se termina. */
+            if ($en_ventana && $this->mantenimiento_posible && in_array($desde, ['run_commands', 'pause_for_crons'], true)) {
+                $ultima               = self::ultima_etapa_en_curso_en_los_logs((int) $this->upgrade->id);
+                $this->etapa_en_curso = $ultima === null ? 'restart_queue_workers' : $ultima;
+
+                throw new \RuntimeException(
+                    'No se reanuda desde ' . $desde . ' con el sistema del cliente EN MANTENIMIENTO '
+                    . '(storage/framework/down): esa etapa va después del php artisan up. Reanudá desde la etapa de la '
+                    . 'ventana que falló (' . $this->etapa_en_curso . ' si no hay otra): termina el despliegue y lo '
+                    . 'levanta. No se tocó nada.'
                 );
             }
         }
@@ -732,6 +818,11 @@ class DeploymentService
                     break;
                 case 'restart_queue_workers':
                     $this->step_restart_queue_workers();
+                    if ($this->en_ventana_de_mantenimiento) {
+                        /* En el lugar, fin de la ventana: migraciones y seeders listos, worker
+                           reiniciado. Los comandos corren después, con el sistema arriba. */
+                        $this->sacar_de_mantenimiento($this->get_api_path());
+                    }
                     break;
                 case 'pause_for_crons':
                     $this->step_pause_for_crons();
@@ -746,13 +837,15 @@ class DeploymentService
                     // Marca el paso "Comandos ejecutados" automáticamente.
                     $this->mark_upgrade_step_timestamp('comandos_ejecutados_at');
                     if ($this->en_ventana_de_mantenimiento) {
-                        // En el lugar, adentro del mantenimiento: sigue al reinicio del worker y al up.
+                        // En el lugar, ya con el sistema arriba: sigue a la pausa (las marcas ya están).
                         break;
                     }
                     // Pausa manual: espera botón para configurar URL/versión por defecto.
                     $this->step_pause_for_post_tasks();
                     return;
                 case 'update_default_version':
+                    /* En el lugar, el upgrade no se cierra con el sistema en mantenimiento. */
+                    $this->assert_sistema_arriba_antes_de_cerrar();
                     $this->step_update_default_version();
                     // Solo marca "Sistema configurado" si el paso terminó en éxito real. Si degradó a
                     // manual_required, el timestamp queda sin marcar para que se vea pendiente en el
@@ -762,10 +855,119 @@ class DeploymentService
                     }
                     break;
                 case 'complete':
+                    $this->assert_sistema_arriba_antes_de_cerrar();
                     $this->step_complete();
                     break;
             }
         }
+    }
+
+    /**
+     * En el lugar: antes de update_default_version / complete, si `storage/framework/down` existe, se
+     * lanza SIN completar (misión `un-solo-frente`, 14/10/2026).
+     *
+     * Medido por el verificador: `configure-system` sobre un `failed` en el lugar con el cliente en
+     * `down` dejaba el upgrade `completed`/`terminada` sin `up`, movía `current_version_id` y
+     * disparaba el mail al dueño anunciando una versión que no estaba atendiendo. Los dos
+     * `configure-system` (panel y `claude/*`) ya rechazan ese caso con 422; esto es la red de abajo,
+     * adentro del job, mirando el disco. Si el chequeo mismo no se puede hacer, también lanza: no se
+     * cierra lo que no se pudo verificar.
+     *
+     * @return void
+     * @throws \RuntimeException
+     */
+    private function assert_sistema_arriba_antes_de_cerrar(): void
+    {
+        if (! $this->es_en_el_lugar() || $this->cierre_verificado) {
+            return;
+        }
+
+        if ($this->sistema_en_mantenimiento_en_disco()) {
+            throw new \RuntimeException(
+                'No se cierra el upgrade: el sistema del cliente está EN MANTENIMIENTO (storage/framework/down). '
+                . 'Terminá primero el despliegue en el lugar reanudándolo desde la etapa que falló (siguiente_accion '
+                . 'de GET claude/upgrades/' . (int) $this->upgrade->id . '); recién con el sistema arriba se configura.'
+            );
+        }
+
+        $this->cierre_verificado = true;
+    }
+
+    /**
+     * ¿Existe `storage/framework/down` en la API destino? Lanza si el chequeo no se puede hacer.
+     *
+     * @return bool
+     */
+    private function sistema_en_mantenimiento_en_disco(): bool
+    {
+        $archivo = rtrim($this->get_api_path(), '/') . '/storage/framework/down';
+        $salida  = $this->run_command(
+            'deployment',
+            'if [ -f ' . $this->posix_single_quote($archivo) . ' ]; then echo CC_YA_EN_MANTENIMIENTO; else echo CC_SIN_MANTENIMIENTO; fi',
+            false
+        );
+
+        if (strpos($salida, 'CC_YA_EN_MANTENIMIENTO') !== false) {
+            return true;
+        }
+        if (strpos($salida, 'CC_SIN_MANTENIMIENTO') !== false) {
+            return false;
+        }
+
+        throw new \RuntimeException('No se pudo confirmar si el sistema del cliente está en mantenimiento.');
+    }
+
+    /**
+     * Deja la marca de que este upgrade TOCÓ el sistema vivo, justo antes del primer comando que lo
+     * modifica (misión `un-solo-frente`, 14/10/2026): el archivo ARCHIVO_TOCADO adentro de la carpeta
+     * del respaldo (con fecha y etapa) y la línea MARCA_SISTEMA_TOCADO.
+     *
+     * 🔴 Si el archivo no se puede escribir, lanza ANTES de tocar nada: sin la marca, un start limpio
+     * posterior respaldaría de nuevo un sistema a medio actualizar creyendo que es el estado bueno.
+     *
+     * @param  string  $etapa
+     * @return void
+     */
+    private function marcar_sistema_tocado(string $etapa): void
+    {
+        if ($this->tocado_marcado) {
+            return;
+        }
+
+        if ($this->ruta_del_respaldo !== null) {
+            $this->run_command(
+                $etapa,
+                'printf ' . $this->posix_single_quote('%s %s\n') . ' ' . $this->posix_single_quote(now()->toIso8601String())
+                . ' ' . $this->posix_single_quote($etapa) . ' > '
+                . $this->posix_single_quote($this->ruta_del_respaldo . '/' . self::ARCHIVO_TOCADO) . ' 2>&1'
+            );
+        }
+
+        $this->tocado_marcado = true;
+
+        $this->log(
+            $etapa,
+            self::MARCA_SISTEMA_TOCADO . $etapa . '. Desde acá el sistema vivo del cliente queda modificado por este upgrade'
+            . ($this->ruta_del_respaldo === null ? '.' : ' (marca en ' . $this->ruta_del_respaldo . '/' . self::ARCHIVO_TOCADO . ').'),
+            'warning'
+        );
+    }
+
+    /**
+     * ¿El sistema vivo quedó tocado por este upgrade, según sus logs? Es la mitad de "¿quedó tocado?"
+     * que se puede mirar sin entrar al servidor: la usan `deploy/start` (el gate de una reanudación)
+     * y `siguiente_accion`. Adentro del job, step_backup_in_place() mira además el disco (la marca
+     * ARCHIVO_TOCADO del respaldo, o `storage/framework/down`), que sobrevive a un start limpio que
+     * borró los logs.
+     *
+     * @param  int  $upgrade_id
+     * @return bool
+     */
+    public static function sistema_vivo_tocado_segun_los_logs(int $upgrade_id): bool
+    {
+        return DeploymentLog::where('client_version_upgrade_id', $upgrade_id)
+            ->where('line', 'like', self::MARCA_SISTEMA_TOCADO . '%')
+            ->exists();
     }
 
     /**
@@ -783,17 +985,12 @@ class DeploymentService
     private function avisar_si_ya_esta_en_mantenimiento(): void
     {
         try {
-            $archivo = rtrim($this->get_api_path(), '/') . '/storage/framework/down';
-            $salida  = $this->run_command(
-                'deployment',
-                'if [ -f ' . $this->posix_single_quote($archivo) . ' ]; then echo CC_YA_EN_MANTENIMIENTO; fi',
-                false
-            );
+            $en_mantenimiento = $this->sistema_en_mantenimiento_en_disco();
         } catch (\Throwable $e) {
             return;
         }
 
-        if (strpos($salida, 'CC_YA_EN_MANTENIMIENTO') === false) {
+        if (! $en_mantenimiento) {
             return;
         }
 
@@ -824,12 +1021,23 @@ class DeploymentService
      */
     public static function ultima_etapa_en_curso_en_los_logs(int $upgrade_id)
     {
-        $etapa = DeploymentLog::where('client_version_upgrade_id', $upgrade_id)
+        $linea = DeploymentLog::where('client_version_upgrade_id', $upgrade_id)
             ->where('line', 'like', self::MARCA_ETAPA_EN_CURSO . '%')
             ->orderByDesc('id')
-            ->value('step');
+            ->first(['id', 'step']);
 
-        return $etapa === null ? null : (string) $etapa;
+        if ($linea === null) {
+            return null;
+        }
+
+        /* Si después de esa línea hubo un `artisan up`, la ventana se cerró: un timeout posterior (en
+           los comandos, el post-cierre o configure) no fue "con el sistema en mantenimiento". */
+        $up_posterior = DeploymentLog::where('client_version_upgrade_id', $upgrade_id)
+            ->where('id', '>', $linea->id)
+            ->where('line', 'like', self::MARCA_FUERA_DE_MANTENIMIENTO . '%')
+            ->exists();
+
+        return $up_posterior ? null : (string) $linea->step;
     }
 
     /**
@@ -1063,20 +1271,40 @@ class DeploymentService
         $spa_dir  = $this->get_spa_hosting_dir();
         $base     = $this->base_de_respaldos();
 
+        /* 🔴 Se reusa un respaldo de este upgrade SOLO si el sistema vivo ya fue tocado (la marca
+           TOCADO en ese respaldo, o el sistema en mantenimiento): ahí respaldar de nuevo guardaría un
+           sistema a medio actualizar. Si no se tocó nada, el estado vivo de AHORA es el estado previo
+           bueno —un respaldo de este upgrade de hace días puede estar viejo— y se respalda de nuevo; el
+           viejo queda para la retención. */
         $existente = $this->respaldo_completo_de_este_upgrade($base);
-        if ($existente !== null) {
-            $this->ruta_del_respaldo = $existente;
+        $motivo    = null;
+        if ($existente !== null && $existente['tocado']) {
+            $motivo = 'este upgrade ya tocó el sistema vivo (marca ' . self::ARCHIVO_TOCADO . ' en ese respaldo)';
+        } elseif ($existente !== null && $this->es_en_el_lugar() && $this->sistema_en_mantenimiento_en_disco()) {
+            $motivo = 'el sistema está en mantenimiento (storage/framework/down): un intento anterior ya lo tocó';
+        }
+
+        if ($motivo !== null) {
+            $this->ruta_del_respaldo = $existente['ruta'];
             $this->log(
                 'backup_in_place',
-                self::MARCA_RESPALDO_OK . $existente . ' — se REUSA el respaldo de este upgrade que dejó un intento '
-                . 'anterior: es el estado previo bueno, y respaldar de nuevo guardaría un sistema que puede estar a medio '
-                . 'actualizar. No se respalda de nuevo.',
+                self::MARCA_RESPALDO_OK . $existente['ruta'] . ' — se REUSA el respaldo de este upgrade porque ' . $motivo
+                . ': es el estado previo bueno, y respaldar de nuevo guardaría un sistema a medio actualizar.',
                 'success'
             );
             $this->borrar_respaldos_parciales($base);
             $this->aplicar_retencion_de_respaldos($base);
 
             return;
+        }
+
+        if ($existente !== null) {
+            $this->log(
+                'backup_in_place',
+                'Hay un respaldo de este upgrade de un intento anterior (' . $existente['ruta'] . '), pero ese intento no '
+                . 'llegó a tocar el sistema vivo: el estado de ahora es el bueno y se respalda de nuevo. El viejo queda para '
+                . 'la retención.'
+            );
         }
 
         $dir     = $base . '/' . now()->format('Ymd-His') . '-upgrade-' . (int) $this->upgrade->id;
@@ -1259,12 +1487,14 @@ class DeploymentService
     }
 
     /**
-     * El respaldo COMPLETO de ESTE upgrade que hay en el disco (el más viejo, si hubiera más de uno:
-     * es el estado previo al primer intento), con sus tres archivos presentes y no vacíos. Null si no
-     * hay ninguno.
+     * El respaldo COMPLETO de ESTE upgrade que hay en el disco, con sus tres archivos presentes y no
+     * vacíos, y si tiene la marca ARCHIVO_TOCADO. Null si no hay ninguno.
+     *
+     * Si hay más de uno, el preferido es el que tiene la marca (es el que estaba en uso cuando este
+     * upgrade tocó el sistema vivo: el estado previo bueno); si ninguno la tiene, el más reciente.
      *
      * @param  string  $base
-     * @return string|null  Ruta absoluta.
+     * @return array{ruta: string, tocado: bool}|null
      */
     private function respaldo_completo_de_este_upgrade(string $base)
     {
@@ -1275,23 +1505,37 @@ class DeploymentService
             }
         }
 
+        $completo_mas_reciente = null;
+        $tocado_mas_reciente   = null;
+
         foreach ($propios as $nombre) {
             $dir    = $base . '/' . $nombre;
             $salida = $this->run_command(
                 'backup_in_place',
-                'test -s ' . $this->posix_single_quote($dir . '/api.tar.gz')
+                'if test -s ' . $this->posix_single_quote($dir . '/api.tar.gz')
                 . ' && test -s ' . $this->posix_single_quote($dir . '/spa.tar.gz')
                 . ' && test -s ' . $this->posix_single_quote($dir . '/base.sql.gz')
-                . ' && echo CC_RESPALDO_COMPLETO',
+                . '; then echo CC_RESPALDO_COMPLETO; if test -f ' . $this->posix_single_quote($dir . '/' . self::ARCHIVO_TOCADO)
+                . '; then echo CC_RESPALDO_TOCADO; fi; fi',
                 false
             );
 
-            if (strpos($salida, 'CC_RESPALDO_COMPLETO') !== false) {
-                return $dir;
+            if (strpos($salida, 'CC_RESPALDO_COMPLETO') === false) {
+                continue;
+            }
+
+            /* `$propios` viene ordenado por fecha: el último que pasa es el más reciente. */
+            $completo_mas_reciente = $dir;
+            if (strpos($salida, 'CC_RESPALDO_TOCADO') !== false) {
+                $tocado_mas_reciente = $dir;
             }
         }
 
-        return null;
+        if ($tocado_mas_reciente !== null) {
+            return ['ruta' => $tocado_mas_reciente, 'tocado' => true];
+        }
+
+        return $completo_mas_reciente === null ? null : ['ruta' => $completo_mas_reciente, 'tocado' => false];
     }
 
     /**
@@ -1768,7 +2012,8 @@ class DeploymentService
             return;
         }
 
-        $ruta = $this->respaldo_completo_de_este_upgrade($this->base_de_respaldos());
+        $existente = $this->respaldo_completo_de_este_upgrade($this->base_de_respaldos());
+        $ruta      = $existente === null ? null : $existente['ruta'];
 
         if ($ruta === null) {
             /* La línea "Etapa que falló" tiene que recomendar reanudar desde el respaldo, no desde acá. */
@@ -1868,6 +2113,10 @@ class DeploymentService
         $this->log('upload_spa', 'ZIP subido al hosting');
 
         $this->reconnect_hosting_ssh();
+        if ($this->es_en_el_lugar()) {
+            /* El primer comando que modifica el sistema vivo es el despliegue del SPA de abajo. */
+            $this->marcar_sistema_tocado('upload_spa');
+        }
         /* En el lugar, desde acá hasta config.js el SPA que atiende está vaciándose y rellenándose. */
         $this->spa_vaciandose = $this->es_en_el_lugar();
         $this->exec_hosting_ssh(
@@ -2640,6 +2889,11 @@ class DeploymentService
             $this->log('run_migrations', 'Caché limpiado', 'success');
         }
 
+        if ($this->respalda && ! $this->es_en_el_lugar()) {
+            /* Última rotación al principal: la carpeta destino no atiende, pero la base sí. */
+            $this->marcar_sistema_tocado('run_migrations');
+        }
+
         $this->log('run_migrations', 'Corriendo migraciones...');
         $this->run_command(
             'run_migrations',
@@ -3014,10 +3268,9 @@ class DeploymentService
     /**
      * Etapa: pausa manual para confirmación de crons.
      *
-     * EN EL LUGAR (misión `un-solo-frente`, 14/10/2026), primero el `artisan up`: es el final de la
-     * ventana de mantenimiento (migraciones, seeders, comandos y reinicio del worker ya corrieron).
-     * Después, no hay frente que mudar: los crons (shared) y el worker de supervisor (VPS) ya apuntan
-     * a esta carpeta, que es la que sigue atendiendo. Se marca solo el paso que el post-cierre exige
+     * EN EL LUGAR (misión `un-solo-frente`, 14/10/2026) el `artisan up` ya pasó (al final de
+     * restart_queue_workers) y los comandos ya corrieron con el sistema arriba. No hay frente que
+     * mudar: los crons (shared) y el worker de supervisor (VPS) ya apuntan a esta carpeta, que es la que sigue atendiendo. Se marca solo el paso que el post-cierre exige
      * —`crons_supervisor_at` en el shared, `vps_supervisor_moved_at` en el VPS— para que no espere una
      * intervención manual que no hay que hacer, y se dice en el log. La pausa se mantiene: el
      * post-cierre del en el lugar encuentra los seeders y comandos ya corridos y no vuelve a correrlos.
@@ -3027,9 +3280,8 @@ class DeploymentService
     private function step_pause_for_crons()
     {
         if ($this->es_en_el_lugar()) {
-            /* El `up` va acá: después de migraciones, seeders, comandos y el reinicio del worker. */
-            $this->sacar_de_mantenimiento($this->get_api_path());
-
+            /* El `up` ya pasó (final de restart_queue_workers) y las marcas también; si una
+               reanudación llega acá sin ellas, se ponen. */
             $campo = $this->get_hosting_credential_type() === 'vps' ? 'vps_supervisor_moved_at' : 'crons_supervisor_at';
 
             if (empty($this->upgrade->{$campo})) {
@@ -3039,8 +3291,9 @@ class DeploymentService
             $this->log(
                 'pause_for_crons',
                 'En el lugar: no hay frente que mudar (los crons y el worker ya apuntan a esta carpeta). Se marca '
-                . $campo . ' solo, para que el post-cierre no espere un paso manual. Los seeders y comandos ya corrieron '
-                . 'adentro del mantenimiento: el post-cierre no los vuelve a correr.',
+                . $campo . ' solo, para que el post-cierre no espere un paso manual. Los seeders (adentro del '
+                . 'mantenimiento) y los comandos (con el sistema arriba) ya corrieron: el post-cierre no los vuelve a '
+                . 'correr.',
                 'info'
             );
         } else {
@@ -5030,10 +5283,11 @@ class DeploymentService
      * `php artisan down` sobre la API que está atendiendo, justo antes de reemplazarla, en un
      * despliegue EN EL LUGAR (misión `un-solo-frente`, 14/10/2026).
      *
-     * Por qué: desde el `unzip` de la API hasta que terminan migraciones, seeders y comandos, el
-     * cliente tendría código nuevo atendiendo contra una base vieja, a medio migrar o sin los datos
-     * que siembran los seeders. Un 503 es mejor que eso. El sistema sale de mantenimiento al comienzo
-     * de step_pause_for_crons() (sacar_de_mantenimiento()).
+     * Por qué: desde el `unzip` de la API hasta que terminan migraciones y seeders, el cliente tendría
+     * código nuevo atendiendo contra una base vieja, a medio migrar o sin los datos que siembran los
+     * seeders. Un 503 es mejor que eso. El sistema sale de mantenimiento al final de
+     * restart_queue_workers (sacar_de_mantenimiento()); los comandos corren después, con el sistema
+     * arriba.
      *
      * 🔴 Deja una línea `warning` APENAS entra en mantenimiento, no solo cuando algo falla: si el job
      * muere por timeout adentro de la ventana, el catch de run() no corre, y esa línea es la única que
@@ -5067,8 +5321,9 @@ class DeploymentService
 
         $this->log(
             'upload_api',
-            '🔴 Sistema del cliente EN MANTENIMIENTO desde ahora (php artisan down). Sale con php artisan up recién al '
-            . 'final del despliegue, después de migraciones, seeders y comandos. 🔴 NO lo levantes a mano sin terminar el '
+            '🔴 Sistema del cliente EN MANTENIMIENTO desde ahora (php artisan down). Sale con php artisan up después de '
+            . 'las migraciones, los seeders y el reinicio del worker (los comandos corren después, con el sistema '
+            . 'arriba). 🔴 NO lo levantes a mano sin terminar el '
             . 'despliegue: si se corta, reanudá con resume_from_step=<la etapa que falló> (GET claude/upgrades/'
             . (int) $this->upgrade->id . ' la dice en siguiente_accion). Respaldo de este despliegue: '
             . ($this->ruta_del_respaldo === null
@@ -5084,8 +5339,8 @@ class DeploymentService
     }
 
     /**
-     * `php artisan up` al comienzo de step_pause_for_crons(), en un despliegue EN EL LUGAR: después de
-     * migraciones, seeders, comandos y el reinicio del worker.
+     * `php artisan up` al final de restart_queue_workers, en un despliegue EN EL LUGAR: después de
+     * migraciones, seeders y el reinicio del worker; los comandos corren después, con el sistema arriba.
      *
      * Corre también en cualquier reanudación de la ventana, que es justamente la forma de terminar un
      * despliegue que quedó en mantenimiento: `artisan up` sobre un sistema que ya estaba arriba no
@@ -5100,18 +5355,28 @@ class DeploymentService
     private function sacar_de_mantenimiento(string $api_path): void
     {
         $this->log(
-            'pause_for_crons',
-            'En el lugar: migraciones, seeders y comandos terminados, se saca el sistema del cliente de mantenimiento.'
+            'restart_queue_workers',
+            'En el lugar: migraciones y seeders terminados y worker reiniciado, se saca el sistema del cliente de '
+            . 'mantenimiento. Los comandos corren después, con el sistema arriba.'
         );
 
         $this->run_command(
-            'pause_for_crons',
+            'restart_queue_workers',
             'cd ' . $this->posix_single_quote($api_path) . ' && php artisan up --no-ansi 2>&1'
         );
 
         $this->mantenimiento_posible = false;
 
-        $this->log('pause_for_crons', 'Sistema del cliente fuera de mantenimiento (php artisan up).', 'success');
+        /* La marca del post-cierre va ACÁ, con el `up`, y no en la pausa: es lo que dice que el
+           despliegue llegó al `up` (en_el_lugar_sin_llegar_al_up()). Si después falla un comando, el
+           cliente está arriba y el reintento de comandos tiene que quedar permitido. */
+        $campo = $this->get_hosting_credential_type() === 'vps' ? 'vps_supervisor_moved_at' : 'crons_supervisor_at';
+        if (empty($this->upgrade->{$campo})) {
+            $this->upgrade->{$campo} = now();
+            $this->upgrade->save();
+        }
+
+        $this->log('restart_queue_workers', self::MARCA_FUERA_DE_MANTENIMIENTO . ' (php artisan up).', 'success');
     }
 
     /**

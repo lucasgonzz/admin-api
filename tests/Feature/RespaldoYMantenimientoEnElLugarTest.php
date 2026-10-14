@@ -36,12 +36,15 @@ use Tests\TestCase;
  *  1. 🔴 El respaldo arma los comandos esperados —tar de la API sin `storage/` ni `vendor/`, tar del
  *     SPA, mysqldump con `--single-transaction --quick --no-tablespaces`— en un `.parcial` que se
  *     renombra al final, y la contraseña de la base NO aparece en ningún comando ni log.
- *  2. 🔴 A prueba de reintentos: un respaldo completo de ESTE upgrade en el disco se reusa; los
- *     `.parcial` se borran; la retención nunca borra el de este upgrade y de los demás deja uno.
+ *  2. 🔴 A prueba de reintentos: un respaldo completo de ESTE upgrade en el disco se reusa SOLO si
+ *     ese upgrade ya tocó el sistema vivo (marca TOCADO, o el sistema en mantenimiento); si no, se
+ *     respalda de nuevo. Los `.parcial` se borran; la retención nunca borra el de este upgrade y de
+ *     los demás deja uno.
  *  3. 🔴 Si el respaldo falla, el deployment queda `failed` y nada del cliente se tocó.
  *  4. 🔴 En el lugar: la API se sube antes de tocar el SPA; `artisan down` antes del `unzip`;
- *     migraciones, seeders y comandos ADENTRO del mantenimiento; `artisan up` al final; el
- *     post-cierre no vuelve a correr nada. En una rotación, nada de eso.
+ *     migraciones y seeders ADENTRO del mantenimiento; `artisan up` después del reinicio del worker;
+ *     los comandos con el sistema arriba; el post-cierre no vuelve a correr nada; y el upgrade no se
+ *     cierra con el sistema en mantenimiento. En una rotación, nada de eso.
  *  5. Las líneas propias de cada fallo: en mantenimiento (recomienda la etapa que falló), SPA nuevo
  *     con API vieja, o nada tocado.
  */
@@ -265,6 +268,11 @@ class RespaldoYMantenimientoEnElLugarTest extends TestCase
 
         $servicio->ssh_doble  = $this->ssh;
         $servicio->sftp_doble = $this->sftp;
+
+        /* Por defecto el sistema NO está en mantenimiento. Va al final: las reglas del doble ganan
+           en orden de declaración, así que un test que lo pone en `down` lo declara antes. */
+        $this->ssh->responder('storage/framework/down', 'CC_SIN_MANTENIMIENTO');
+
         $servicio->connect();
 
         return $servicio;
@@ -350,16 +358,18 @@ class RespaldoYMantenimientoEnElLugarTest extends TestCase
      * un intento anterior, más lo que se pida.
      *
      * @param  array<string, mixed>  $e
-     * @param  array<int, string>    $otros  Otras entradas de la carpeta.
+     * @param  array<int, string>    $otros   Otras entradas de la carpeta.
+     * @param  bool                  $tocado  Si ese intento llegó a tocar el sistema vivo (la marca
+     *                                        TOCADO adentro del respaldo).
      * @return string  La ruta del respaldo de este upgrade.
      */
-    private function respaldo_en_disco(array $e, array $otros = []): string
+    private function respaldo_en_disco(array $e, array $otros = [], bool $tocado = true): string
     {
         $nombre = '20261013-020000-upgrade-' . $e['upgrade']->id;
 
         $this->ssh->responder('printf %s "$HOME"', self::HOME_SHARED);
         $this->ssh->responder('ls -1', implode("\n", array_merge($otros, [$nombre])));
-        $this->ssh->responder('CC_RESPALDO_COMPLETO', 'CC_RESPALDO_COMPLETO');
+        $this->ssh->responder('CC_RESPALDO_COMPLETO', 'CC_RESPALDO_COMPLETO' . ($tocado ? "\nCC_RESPALDO_TOCADO" : ''));
 
         return $this->base($e) . '/' . $nombre;
     }
@@ -689,8 +699,9 @@ class RespaldoYMantenimientoEnElLugarTest extends TestCase
      |========================================================================================= */
 
     /**
-     * 🔴 Si en el disco ya hay un respaldo completo de ESTE upgrade (un intento anterior), se reusa:
-     * no se vuelve a respaldar un sistema que puede estar a medio actualizar.
+     * 🔴 Si en el disco ya hay un respaldo completo de ESTE upgrade con la marca TOCADO (un intento
+     * anterior que llegó a tocar el sistema vivo), se reusa: no se vuelve a respaldar un sistema que
+     * puede estar a medio actualizar. La línea dice por qué.
      */
     public function test_un_respaldo_completo_de_este_upgrade_se_reusa_y_no_se_respalda_de_nuevo(): void
     {
@@ -705,6 +716,85 @@ class RespaldoYMantenimientoEnElLugarTest extends TestCase
         $this->assertSame([], $this->comandos_con('mkdir -p'));
         $this->assertSame([], $this->comandos_con('rm -rf'), 'Borró algo teniendo solo el respaldo de este upgrade.');
         $this->assertStringContainsString(DeploymentService::MARCA_RESPALDO_OK . $ruta . ' — se REUSA', $this->logs($e['upgrade']));
+        $this->assertStringContainsString('marca ' . DeploymentService::ARCHIVO_TOCADO, $this->logs($e['upgrade']));
+    }
+
+    /**
+     * 🔴 B. Un respaldo de este upgrade SIN la marca TOCADO (el intento anterior no llegó a tocar
+     * nada, por ejemplo falló compilando o preparando la API) NO se reusa: el estado vivo de ahora es
+     * el bueno —ese respaldo puede ser de hace días— y se respalda de nuevo. El viejo no se borra (es
+     * de este upgrade: queda para la retención).
+     */
+    public function test_un_respaldo_de_este_upgrade_sin_tocar_el_sistema_no_se_reusa(): void
+    {
+        $e    = $this->escenario();
+        $ruta = $this->respaldo_en_disco($e, [], false);
+        $this->servidor_sano();
+
+        $this->invocar($this->servicio($e['upgrade']), 'step_backup_in_place');
+
+        $nuevo = $this->dir_del_respaldo($e);
+        $this->assertNotEmpty($this->comandos_con('mysqldump --defaults-extra-file'), 'Tenía que respaldar de nuevo.');
+        $this->assertNotNull($this->ssh->posicion_de("mv '" . $nuevo . ".parcial' '" . $nuevo . "'"));
+        $this->assertSame([], $this->comandos_con("rm -rf -- '" . $ruta . "'"), 'Se borró el respaldo viejo de este upgrade.');
+
+        $logs = $this->logs($e['upgrade']);
+        $this->assertStringContainsString('no llegó a tocar el sistema vivo', $logs);
+        $this->assertStringContainsString(DeploymentService::MARCA_RESPALDO_OK . $nuevo . ' ', $logs);
+        $this->assertStringNotContainsString('se REUSA', $logs);
+    }
+
+    /**
+     * B. Sin la marca TOCADO pero con el sistema EN MANTENIMIENTO (`storage/framework/down`): un intento
+     * anterior ya lo tocó, y el respaldo de este upgrade se reusa diciendo por qué.
+     */
+    public function test_sin_la_marca_pero_en_mantenimiento_el_respaldo_se_reusa(): void
+    {
+        $e = $this->escenario();
+        $this->ssh->responder('storage/framework/down', 'CC_YA_EN_MANTENIMIENTO');
+        $ruta = $this->respaldo_en_disco($e, [], false);
+        $this->servidor_sano();
+
+        $this->invocar($this->servicio($e['upgrade']), 'step_backup_in_place');
+
+        $this->assertSame([], $this->comandos_con('mysqldump'));
+        $this->assertStringContainsString(
+            DeploymentService::MARCA_RESPALDO_OK . $ruta . ' — se REUSA el respaldo de este upgrade porque el sistema está en mantenimiento',
+            $this->logs($e['upgrade'])
+        );
+    }
+
+    /**
+     * 🔴 A. La marca de sistema tocado: en el lugar, la escribe upload_spa (archivo TOCADO en el
+     * respaldo y la línea "Sistema vivo tocado: upload_spa") JUSTO ANTES del primer comando que
+     * modifica el sistema vivo (vaciar el SPA), y una sola vez por corrida.
+     */
+    public function test_la_marca_de_sistema_tocado_va_antes_del_primer_comando_que_lo_modifica(): void
+    {
+        $e = $this->escenario();
+        $this->artefactos_en_github($e['to']);
+        $ruta = $this->respaldo_en_disco($e);
+        $this->spa_ya_bajado($e['upgrade']);
+
+        $this->assertFalse(DeploymentService::sistema_vivo_tocado_segun_los_logs((int) $e['upgrade']->id));
+
+        $error = $this->correr($this->servicio($e['upgrade']), 'upload_spa');
+        $this->assertNull($error, $error === null ? '' : $error->getMessage() . "\n" . $this->logs($e['upgrade']));
+
+        $marca = $this->ssh->posicion_de("> '" . $ruta . '/' . DeploymentService::ARCHIVO_TOCADO . "'");
+        $this->assertNotNull($marca, $this->ssh->todo());
+        $this->assertLessThan($this->ssh->posicion_de('find . -mindepth 1 -delete'), $marca);
+        $this->assertCount(1, $this->comandos_con("> '" . $ruta . '/' . DeploymentService::ARCHIVO_TOCADO . "'"), 'La marca se escribe una sola vez.');
+
+        $this->assertTrue(DeploymentService::sistema_vivo_tocado_segun_los_logs((int) $e['upgrade']->id));
+        $this->assertSame(
+            1,
+            DeploymentLog::where('client_version_upgrade_id', $e['upgrade']->id)
+                ->where('line', 'like', DeploymentService::MARCA_SISTEMA_TOCADO . 'upload_spa%')
+                ->count()
+        );
+
+        @unlink(storage_path('app/deployments/dist_' . $e['upgrade']->uuid . '.zip'));
     }
 
     /**
@@ -765,9 +855,9 @@ class RespaldoYMantenimientoEnElLugarTest extends TestCase
             '20261001-020000-upgrade-13',
             'notas-de-lucas',
         ]));
-        $this->ssh->responder('CC_RESPALDO_COMPLETO', 'CC_RESPALDO_COMPLETO');
+        $this->ssh->responder('CC_RESPALDO_COMPLETO', "CC_RESPALDO_COMPLETO\nCC_RESPALDO_TOCADO");
 
-        /* Dos reintentos: los dos reusan el respaldo de este upgrade. */
+        /* Dos reintentos: los dos reusan el respaldo de este upgrade (que ya tocó el sistema). */
         $this->invocar($this->servicio($e['upgrade']), 'step_backup_in_place');
         $this->invocar($this->servicio($e['upgrade']), 'step_backup_in_place');
 
@@ -833,8 +923,8 @@ class RespaldoYMantenimientoEnElLugarTest extends TestCase
 
     /**
      * 🔴 En el lugar, de upload_spa a la pausa: la API se sube ANTES de tocar el SPA; `artisan down`
-     * antes del unzip; migraciones, seeders y comandos adentro del mantenimiento; `artisan up` al
-     * final; la pausa marca los crons sola.
+     * antes del unzip; migraciones y seeders adentro del mantenimiento; `artisan up` después del
+     * reinicio del worker; los COMANDOS después del up (tercera tanda); la pausa marca los crons sola.
      */
     public function test_en_el_lugar_el_orden_completo_con_seeders_adentro_del_mantenimiento(): void
     {
@@ -878,8 +968,9 @@ class RespaldoYMantenimientoEnElLugarTest extends TestCase
         $this->assertLessThan($down, $vacia_spa, $this->ssh->todo());
         $this->assertLessThan($unzip, $down);
         $this->assertLessThan($seeder, $migrate);
-        $this->assertLessThan($comando, $seeder);
-        $this->assertLessThan($up, $comando, 'Los seeders y comandos corren ANTES del up.');
+        $this->assertLessThan($up, $seeder, 'Los seeders corren ANTES del up.');
+        $this->assertLessThan($comando, $up, 'Los comandos corren DESPUÉS del up, con el sistema arriba.');
+        $this->assertCount(1, $this->comandos_con('php artisan up'));
 
         /* Ninguna etapa entre el down y el up sale por HTTP al cliente (GitHub es antes). */
         Http::assertNotSent(function ($request) use ($e) {
@@ -1063,8 +1154,9 @@ class RespaldoYMantenimientoEnElLugarTest extends TestCase
 
     /**
      * 🔴 Cada etapa que arranca con el sistema en mantenimiento deja su "Etapa en curso" (desde el
-     * `down` adentro de upload_api hasta el `up` de pause_for_crons), y ninguna antes del `down`. Es lo
-     * que queda si el job muere por timeout adentro de la ventana.
+     * `down` adentro de upload_api hasta el `up` del final de restart_queue_workers), y ninguna antes
+     * del `down` ni después del `up`. Es lo que queda si el job muere por timeout adentro de la
+     * ventana; con el `up` hecho, la ventana se cerró y no hay etapa en curso que reanudar.
      */
     public function test_cada_etapa_adentro_del_mantenimiento_deja_su_etapa_en_curso(): void
     {
@@ -1082,11 +1174,12 @@ class RespaldoYMantenimientoEnElLugarTest extends TestCase
             ->all();
 
         $this->assertSame(
-            ['upload_api', 'sync_env_keys', 'sync_pusher_template', 'run_migrations', 'run_seeders', 'run_commands',
-                'restart_queue_workers', 'pause_for_crons'],
+            ['upload_api', 'sync_env_keys', 'sync_pusher_template', 'run_migrations', 'run_seeders',
+                'restart_queue_workers'],
             $etapas
         );
-        $this->assertSame('pause_for_crons', DeploymentService::ultima_etapa_en_curso_en_los_logs((int) $e['upgrade']->id));
+        $this->assertNull(DeploymentService::ultima_etapa_en_curso_en_los_logs((int) $e['upgrade']->id));
+        $this->assertStringContainsString(DeploymentService::MARCA_FUERA_DE_MANTENIMIENTO, $this->logs($e['upgrade']));
 
         /* La de upload_api va DESPUÉS del down, no antes. */
         $logs = $this->logs($e['upgrade']);
@@ -1142,18 +1235,149 @@ class RespaldoYMantenimientoEnElLugarTest extends TestCase
         $this->assertNotNull($this->ssh->posicion_de("if cd '/home/" . $e['carpeta'] . '/htdocs/' . $e['carpeta'] . ".comerciocity.com'; then tar"));
     }
 
-    /** En el VPS, la pausa en el lugar hace el up y marca vps_supervisor_moved_at. */
-    public function test_en_el_vps_la_pausa_hace_el_up_y_marca_el_supervisor(): void
+    /**
+     * En el VPS, el `up` (al final de restart_queue_workers) marca vps_supervisor_moved_at y no
+     * crons_supervisor_at; la pausa ya no vuelve a levantar nada.
+     */
+    public function test_en_el_vps_el_up_marca_el_supervisor_y_la_pausa_no_levanta_de_nuevo(): void
     {
         $e = $this->escenario('principal', 'principal', 'vps');
+        $this->respaldo_en_disco($e);
 
-        $this->invocar($this->servicio($e['upgrade']), 'step_pause_for_crons');
+        $error = $this->correr($this->servicio($e['upgrade']), 'restart_queue_workers');
+        $this->assertNull($error, $error === null ? '' : $error->getMessage() . "\n" . $this->logs($e['upgrade']));
 
         $upgrade = $e['upgrade']->fresh();
         $this->assertNotNull($this->ssh->posicion_de("cd '/home/api-" . $e['carpeta'] . "/empresa-api' && php artisan up"));
+        $this->assertCount(1, $this->comandos_con('php artisan up'));
         $this->assertSame('paused', (string) $upgrade->deployment_status);
         $this->assertNotNull($upgrade->vps_supervisor_moved_at);
         $this->assertNull($upgrade->crons_supervisor_at);
+    }
+
+    /**
+     * 🔴 E. Un comando que falla DESPUÉS del up deja al cliente ARRIBA: sin línea de mantenimiento,
+     * con la marca del up puesta, y el reintento de comandos (el del panel) habilitado; y
+     * siguiente_accion manda a retry-commands, no a reanudar.
+     */
+    public function test_un_comando_que_falla_despues_del_up_deja_al_cliente_arriba(): void
+    {
+        $e = $this->escenario();
+        $this->seeder_y_comando($e);
+        $this->artefactos_en_github($e['to']);
+        $this->respaldo_en_disco($e);
+        $this->spa_ya_bajado($e['upgrade']);
+        $this->ssh->responder('comando:de-la-ventana', 'Error: el comando falló', 1);
+
+        $error = $this->correr($this->servicio($e['upgrade']), 'upload_spa');
+        $this->assertNotNull($error);
+
+        $up      = $this->ssh->posicion_de('php artisan up');
+        $comando = $this->ssh->posicion_de('comando:de-la-ventana');
+        $this->assertNotNull($up, $this->ssh->todo());
+        $this->assertLessThan($comando, $up);
+        $this->assertCount(1, $this->comandos_con('php artisan down'));
+
+        $logs = $this->logs($e['upgrade']);
+        $this->assertStringNotContainsString('QUEDÓ EN MANTENIMIENTO', $logs);
+        $this->assertStringContainsString(DeploymentService::MARCA_ETAPA_QUE_FALLO . 'run_commands', $logs);
+        $this->assertNull(DeploymentService::ultima_etapa_en_curso_en_los_logs((int) $e['upgrade']->id));
+
+        $upgrade = $e['upgrade']->fresh();
+        $this->assertSame('failed', (string) $upgrade->deployment_status);
+        $this->assertNotNull($upgrade->crons_supervisor_at);
+        $this->assertFalse(DeploymentService::en_el_lugar_sin_llegar_al_up($upgrade));
+        $this->assertSame('fallido', UpdateCommand::where('client_version_upgrade_id', $upgrade->id)->value('status'));
+
+        /* siguiente_accion: el reintento de comandos, no reanudar. */
+        config(['services.claude_task_ingest.key' => 'clave-de-prueba-respaldo']);
+        $get = $this->getJson('/api/claude/upgrades/' . $upgrade->id, [
+            'X-Claude-Task-Key' => 'clave-de-prueba-respaldo',
+            'Accept'            => 'application/json',
+        ])->assertStatus(200)->json();
+        $this->assertStringEndsWith('/deploy/retry-commands', $get['siguiente_accion']['endpoint']);
+
+        /* Y el botón del panel lo acepta (la marca del up ya está). */
+        \Illuminate\Support\Facades\Queue::fake();
+        $admin           = new \App\Models\Admin();
+        $admin->name     = 'Admin respaldo';
+        $admin->email    = 'admin+' . Str::random(6) . '@test.local';
+        $admin->password = bcrypt('secret');
+        $admin->save();
+        \Laravel\Sanctum\Sanctum::actingAs($admin);
+
+        $this->postJson('/api/admin/update/' . $upgrade->id . '/deploy/retry-commands')->assertStatus(200);
+
+        @unlink(storage_path('app/deployments/dist_' . $e['upgrade']->uuid . '.zip'));
+    }
+
+    /**
+     * 🔴 E. Con el sistema en mantenimiento no se reanuda desde una etapa que va DESPUÉS del up (los
+     * comandos o la pausa): frena sin correr ningún comando ni marcar el paso del up, y la línea de la
+     * etapa que falló nombra la última etapa de la ventana.
+     */
+    public function test_con_el_sistema_abajo_no_se_reanudan_los_comandos_ni_la_pausa(): void
+    {
+        foreach (['run_commands', 'pause_for_crons'] as $desde) {
+            $this->ssh = new SshDelDeploymentFake();
+            $e         = $this->escenario();
+            $this->seeder_y_comando($e);
+            $this->respaldo_en_disco($e);
+            $this->ssh->responder('storage/framework/down', 'CC_YA_EN_MANTENIMIENTO');
+
+            DeploymentLog::create([
+                'client_version_upgrade_id' => $e['upgrade']->id,
+                'step'                      => 'run_seeders',
+                'level'                     => 'info',
+                'line'                      => DeploymentService::MARCA_ETAPA_EN_CURSO . 'run_seeders (con el sistema del cliente en mantenimiento).',
+                'created_at'                => now(),
+            ]);
+
+            $error = $this->correr($this->servicio($e['upgrade']), DeploymentService::PREFIJO_REANUDACION_EN_MANTENIMIENTO . $desde);
+
+            $this->assertNotNull($error, 'Desde ' . $desde);
+            $this->assertStringContainsString('EN MANTENIMIENTO', $error->getMessage());
+            $this->assertSame([], $this->comandos_con('comando:de-la-ventana'), 'Desde ' . $desde);
+            $this->assertSame([], $this->comandos_con('php artisan up'), 'Desde ' . $desde);
+
+            $upgrade = $e['upgrade']->fresh();
+            $this->assertNull($upgrade->crons_supervisor_at, 'Desde ' . $desde);
+            $this->assertSame('failed', (string) $upgrade->deployment_status);
+            $this->assertStringContainsString(DeploymentService::MARCA_ETAPA_QUE_FALLO . 'run_seeders', $this->logs($e['upgrade']));
+            $this->assertStringContainsString('resume_from_step=run_seeders', $this->logs($e['upgrade']));
+        }
+    }
+
+    /**
+     * 🔴 D. Adentro del job: con `storage/framework/down` presente, update_default_version NO cierra el
+     * upgrade (aunque tenga la marca del up): falla sin el PUT al cliente, sin mover current_version, y
+     * la línea dice que no se cerró.
+     */
+    public function test_el_job_no_cierra_el_upgrade_con_el_sistema_en_mantenimiento(): void
+    {
+        $e = $this->escenario();
+        $e['upgrade']->update(['deployment_status' => 'failed', 'crons_supervisor_at' => now()]);
+        $this->ssh->responder('storage/framework/down', 'CC_YA_EN_MANTENIMIENTO');
+        Http::fake();
+
+        $version_antes = (int) $e['client']->fresh()->current_version_id;
+
+        $error = $this->correr($this->servicio($e['upgrade']), 'update_default_version');
+
+        $this->assertNotNull($error);
+        $this->assertStringContainsString('EN MANTENIMIENTO', $error->getMessage());
+        Http::assertNothingSent();
+
+        $upgrade = $e['upgrade']->fresh();
+        $this->assertSame('failed', (string) $upgrade->deployment_status);
+        $this->assertNotSame('terminada', (string) $upgrade->status);
+        $this->assertSame($version_antes, (int) $e['client']->fresh()->current_version_id);
+        $this->assertStringContainsString('NO SE CERRÓ EL UPGRADE', $this->logs($e['upgrade']));
+
+        /* Lo mismo si se entra directo por complete. */
+        $error = $this->correr($this->servicio($e['upgrade']), 'complete');
+        $this->assertNotNull($error);
+        $this->assertSame('failed', (string) $e['upgrade']->fresh()->deployment_status);
     }
 
     /** Los sync de `.env` y de certificados AFIP son no-op explícitos: origen y destino son lo mismo. */

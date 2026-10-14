@@ -227,6 +227,80 @@ class DeployEnElLugarPorClaudeTest extends TestCase
         return $propiedad->getValue($job);
     }
 
+    /**
+     * Deja en los logs del upgrade la marca de que ya tocó el sistema vivo, como la escribe el
+     * pipeline (DeploymentService::marcar_sistema_tocado()).
+     *
+     * @param  ClientVersionUpgrade  $upgrade
+     * @param  string                $etapa
+     * @return void
+     */
+    private function marcar_tocado(ClientVersionUpgrade $upgrade, string $etapa = 'upload_spa'): void
+    {
+        DeploymentLog::create([
+            'client_version_upgrade_id' => $upgrade->id,
+            'step'                      => $etapa,
+            'level'                     => 'warning',
+            'line'                      => \App\Services\DeploymentService::MARCA_SISTEMA_TOCADO . $etapa
+                . '. Desde acá el sistema vivo del cliente queda modificado por este upgrade.',
+        ]);
+    }
+
+    /**
+     * Deja la línea "Etapa que falló: <etapa>" como la escribe el pipeline.
+     *
+     * @param  ClientVersionUpgrade  $upgrade
+     * @param  string                $etapa
+     * @return void
+     */
+    private function fallo_en(ClientVersionUpgrade $upgrade, string $etapa): void
+    {
+        DeploymentLog::create([
+            'client_version_upgrade_id' => $upgrade->id,
+            'step'                      => $etapa,
+            'level'                     => 'error',
+            'line'                      => \App\Services\DeploymentService::MARCA_ETAPA_QUE_FALLO . $etapa . '. Causa: x',
+        ]);
+    }
+
+    /**
+     * Un comando del upgrade en ese estado.
+     *
+     * @param  array<string, mixed>  $e
+     * @param  ClientVersionUpgrade  $upgrade
+     * @param  string                $estado
+     * @return void
+     */
+    private function comando_en(array $e, ClientVersionUpgrade $upgrade, string $estado): void
+    {
+        $comando                  = new \App\Models\VersionCommand();
+        $comando->version_id      = $e['to']->id;
+        $comando->command         = 'php artisan algo:que-fallo';
+        $comando->execution_order = 1;
+        $comando->save();
+
+        \App\Models\UpdateCommand::create([
+            'client_version_upgrade_id' => $upgrade->id,
+            'version_command_id'        => $comando->id,
+            'status'                    => $estado,
+        ]);
+    }
+
+    /**
+     * Admin del panel autenticado por Sanctum.
+     *
+     * @return void
+     */
+    private function como_admin_del_panel(): void
+    {
+        $admin           = new \App\Models\Admin();
+        $admin->name     = 'Admin un solo frente';
+        $admin->email    = 'admin+' . Str::random(6) . '@test.local';
+        $admin->password = bcrypt('secret');
+        $admin->save();
+        \Laravel\Sanctum\Sanctum::actingAs($admin);
+    }
+
     /* ==========================================================================================
      | 1) En el lugar sobre el frente principal
      |========================================================================================= */
@@ -660,8 +734,8 @@ class DeployEnElLugarPorClaudeTest extends TestCase
     }
 
     /**
-     * 🔴 Una REANUDACIÓN en el lugar no pasa por el gate: a las 08:30 (que rechazaría un arranque
-     * limpio) reanudar desde upload_api encola igual.
+     * 🔴 Una REANUDACIÓN en el lugar de un upgrade que YA TOCÓ el sistema vivo no pasa por el gate: a
+     * las 08:30 (que rechazaría un arranque limpio) reanudar desde upload_api encola igual.
      */
     public function test_una_reanudacion_en_el_lugar_no_pasa_por_el_gate(): void
     {
@@ -671,6 +745,7 @@ class DeployEnElLugarPorClaudeTest extends TestCase
         $e = $this->escenario('principal');
         $this->horario($e['client'], '09:00', '18:00');
         $upgrade = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed']);
+        $this->marcar_tocado($upgrade);
 
         $cuerpo = $this->start($upgrade, ['resume_from_step' => 'upload_api'])->assertStatus(202)->json();
 
@@ -690,6 +765,7 @@ class DeployEnElLugarPorClaudeTest extends TestCase
 
         $e       = $this->escenario('principal');
         $upgrade = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed']);
+        $this->marcar_tocado($upgrade);
 
         $cuerpo = $this->start($upgrade, ['resume_from_step' => 'run_seeders'])->assertStatus(202)->json();
         $this->assertSame('run_seeders', $cuerpo['desde_etapa']);
@@ -787,7 +863,8 @@ class DeployEnElLugarPorClaudeTest extends TestCase
 
     /**
      * En el lugar, el reintento de comandos sobre un despliegue que no llegó al `artisan up` (sin la
-     * marca de la pausa) es 422 y manda a deploy/start con resume_from_step=run_commands.
+     * marca que el pipeline pone con el up) es 422 y manda a deploy/start desde la etapa que falló
+     * (tercera tanda: los comandos corren después del up, así que no son esa etapa).
      */
     public function test_el_reintento_de_comandos_en_el_lugar_sin_llegar_al_up_rechaza(): void
     {
@@ -814,18 +891,20 @@ class DeployEnElLugarPorClaudeTest extends TestCase
             'confirm_client_name' => self::NOMBRE,
         ], $this->headers())->assertStatus(422)->json();
 
-        $this->assertStringContainsString('resume_from_step=run_commands', $cuerpo['ayuda']);
+        $this->assertStringContainsString('resume_from_step=<la etapa que falló>', $cuerpo['ayuda']);
         Queue::assertNothingPushed();
     }
 
     /**
-     * Un upgrade en el lugar `failed`: siguiente_accion recomienda reanudar desde la etapa que falló
-     * (la línea con marca fija del pipeline), no un start limpio.
+     * Un upgrade en el lugar `failed` con el sistema vivo ya tocado: siguiente_accion recomienda
+     * reanudar desde la etapa que falló (la línea con marca fija del pipeline), no un start limpio, y
+     * dice que el gate no aplica.
      */
     public function test_un_fallo_en_el_lugar_recomienda_reanudar_desde_la_etapa_que_fallo(): void
     {
         $e       = $this->escenario('principal');
         $upgrade = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed']);
+        $this->marcar_tocado($upgrade);
 
         DeploymentLog::create([
             'client_version_upgrade_id' => $upgrade->id,
@@ -844,18 +923,21 @@ class DeployEnElLugarPorClaudeTest extends TestCase
 
         $this->assertSame('upload_api', $get['siguiente_accion']['resume_from_step']);
         $this->assertStringContainsString('resume_from_step=upload_api', $get['siguiente_accion']['motivo']);
+        $this->assertStringStartsWith('no aplica', $get['siguiente_accion']['gate_de_horario']);
     }
 
     /**
      * Si el job murió por timeout adentro de la ventana no hay "Etapa que falló": siguiente_accion usa
-     * la última "Etapa en curso" y lo dice.
+     * la última "Etapa en curso" y lo dice. (Desde la tercera tanda la ventana termina con el reinicio
+     * del worker: los comandos ya no dejan "Etapa en curso".)
      */
     public function test_sin_etapa_que_fallo_se_reanuda_desde_la_ultima_etapa_en_curso(): void
     {
         $e       = $this->escenario('principal');
         $upgrade = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed']);
+        $this->marcar_tocado($upgrade);
 
-        foreach (['run_migrations', 'run_commands'] as $etapa) {
+        foreach (['run_migrations', 'run_seeders'] as $etapa) {
             DeploymentLog::create([
                 'client_version_upgrade_id' => $upgrade->id,
                 'step'                      => $etapa,
@@ -866,8 +948,153 @@ class DeployEnElLugarPorClaudeTest extends TestCase
 
         $get = $this->getJson('/api/claude/upgrades/' . $upgrade->id, $this->headers())->assertStatus(200)->json();
 
-        $this->assertSame('run_commands', $get['siguiente_accion']['resume_from_step']);
+        $this->assertSame('run_seeders', $get['siguiente_accion']['resume_from_step']);
         $this->assertStringContainsString('timeout', $get['siguiente_accion']['motivo']);
+    }
+
+    /* ==========================================================================================
+     | Tercera tanda (14/10/2026): sistema tocado, cierre con el sistema abajo, pendientes
+     |========================================================================================= */
+
+    /**
+     * 🔴 C. Una reanudación de un upgrade que NO tocó el sistema vivo es una salida limpia más: a las
+     * 12:00 con el negocio abierto, reanudar desde compile_spa o desde backup_in_place → 422 del gate,
+     * sin encolar nada. Con la marca "Sistema vivo tocado", reanudar desde una etapa posterior → 202.
+     */
+    public function test_una_reanudacion_sin_el_sistema_tocado_lleva_el_gate(): void
+    {
+        Queue::fake();
+        Carbon::setTestNow($this->mediodia());
+
+        $e = $this->escenario('principal');
+        $this->horario($e['client'], '09:00', '18:00');
+        $upgrade = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed']);
+
+        foreach (['compile_spa', 'backup_in_place'] as $etapa) {
+            $rechazo = $this->start($upgrade, ['resume_from_step' => $etapa])->assertStatus(422)->json();
+            $this->assertSame('abierto', $rechazo['estado_ahora'], 'Desde ' . $etapa);
+        }
+        Queue::assertNothingPushed();
+        $this->assertSame('failed', (string) $upgrade->refresh()->deployment_status);
+
+        $this->marcar_tocado($upgrade);
+
+        $cuerpo = $this->start($upgrade, ['resume_from_step' => 'upload_api'])->assertStatus(202)->json();
+        $this->assertSame('upload_api', $cuerpo['desde_etapa']);
+        $this->assertStringStartsWith('no aplica', $cuerpo['gate_de_horario']);
+        Queue::assertPushed(RunDeploymentJob::class, 1);
+    }
+
+    /**
+     * 🔴 D. configure-system sobre un `failed` en el lugar que no llegó al `artisan up` (sin la marca
+     * que el pipeline pone con el up): 422 en `claude/*` y en el panel, sin encolar ni tocar el estado.
+     * Con la marca (el up ya pasó), los dos encolan como siempre.
+     */
+    public function test_configure_system_en_el_lugar_sin_llegar_al_up_rechaza_en_los_dos(): void
+    {
+        Queue::fake();
+        Carbon::setTestNow($this->mediodia());
+
+        $e       = $this->escenario('principal');
+        $upgrade = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed']);
+
+        $claude = $this->postJson('/api/claude/upgrades/' . $upgrade->id . '/deploy/configure-system', [
+            'confirm_client_name' => self::NOMBRE,
+        ], $this->headers())->assertStatus(422)->json();
+        $this->assertStringContainsString('artisan up', $claude['error']);
+        $this->assertStringContainsString('resume_from_step', $claude['ayuda']);
+
+        $this->como_admin_del_panel();
+        $panel = $this->postJson('/api/admin/update/' . $upgrade->id . '/deploy/configure-system')->assertStatus(422)->json();
+        $this->assertStringContainsString('artisan up', $panel['message']);
+
+        Queue::assertNothingPushed();
+        $this->assertSame('failed', (string) $upgrade->refresh()->deployment_status);
+
+        /* Con la marca del up, los dos encolan la etapa final. */
+        $upgrade->update(['crons_supervisor_at' => now()]);
+
+        $this->postJson('/api/admin/update/' . $upgrade->id . '/deploy/configure-system')->assertStatus(200);
+        $upgrade->refresh()->update(['deployment_status' => 'failed']);
+        $ultima = $this->postJson('/api/claude/upgrades/' . $upgrade->id . '/deploy/configure-system', [
+            'confirm_client_name' => self::NOMBRE,
+        ], $this->headers());
+        $this->assertSame(202, $ultima->status(), (string) $ultima->getContent());
+
+        Queue::assertPushed(RunDeploymentJob::class, 2);
+    }
+
+    /**
+     * 🔴 F. El post-cierre en el lugar saltea el gate SOLO si no queda nada pendiente: con un comando
+     * pendiente (por ejemplo, un pre-cierre que lo hizo el admin viejo), a las 12:00 con el negocio
+     * abierto → 422 del gate de siempre.
+     */
+    public function test_el_post_cierre_en_el_lugar_con_pendientes_lleva_el_gate(): void
+    {
+        Queue::fake();
+        Carbon::setTestNow($this->mediodia());
+
+        $e = $this->escenario('principal');
+        $this->horario($e['client'], '09:00', '18:00');
+        $upgrade = $this->crear_upgrade($e, $e['principal'], [
+            'deployment_status'   => 'paused',
+            'crons_supervisor_at' => now(),
+        ]);
+        $this->comando_en($e, $upgrade, 'pendiente');
+
+        $this->postJson('/api/claude/upgrades/' . $upgrade->id . '/deploy/start-post-closure', [
+            'confirm_client_name' => self::NOMBRE,
+        ], $this->headers())->assertStatus(422);
+
+        Queue::assertNothingPushed();
+        $this->assertSame('paused', (string) $upgrade->refresh()->deployment_status);
+    }
+
+    /**
+     * 🔴 G. siguiente_accion en el lugar, según dónde falló:
+     *  - en el cierre (complete), con el up hecho → configure-system, no resume_from_step;
+     *  - en un comando (después del up) → retry-commands;
+     *  - en el respaldo, sin haber tocado nada → la rama `failed` de siempre (start), con el gate
+     *    aplicando y sin resume_from_step;
+     *  - en el cierre pero SIN el up (lo frenó la guarda del job) → la etapa de la ventana que falló
+     *    antes.
+     */
+    public function test_siguiente_accion_en_el_lugar_segun_donde_fallo(): void
+    {
+        $e = $this->escenario('principal');
+
+        $cierre = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed', 'crons_supervisor_at' => now()]);
+        $this->marcar_tocado($cierre);
+        $this->fallo_en($cierre, 'complete');
+
+        $get = $this->getJson('/api/claude/upgrades/' . $cierre->id, $this->headers())->assertStatus(200)->json();
+        $this->assertStringEndsWith('/deploy/configure-system', $get['siguiente_accion']['endpoint']);
+        $this->assertArrayNotHasKey('resume_from_step', $get['siguiente_accion']);
+        $this->assertStringNotContainsString('con el sistema en mantenimiento', $get['siguiente_accion']['motivo']);
+
+        $comando = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed', 'crons_supervisor_at' => now()]);
+        $this->marcar_tocado($comando);
+        $this->fallo_en($comando, 'run_commands');
+
+        $get = $this->getJson('/api/claude/upgrades/' . $comando->id, $this->headers())->assertStatus(200)->json();
+        $this->assertStringEndsWith('/deploy/retry-commands', $get['siguiente_accion']['endpoint']);
+        $this->assertArrayNotHasKey('resume_from_step', $get['siguiente_accion']);
+
+        $respaldo = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed']);
+        $this->fallo_en($respaldo, 'backup_in_place');
+
+        $get = $this->getJson('/api/claude/upgrades/' . $respaldo->id, $this->headers())->assertStatus(200)->json();
+        $this->assertStringEndsWith('/deploy/start', $get['siguiente_accion']['endpoint']);
+        $this->assertArrayNotHasKey('resume_from_step', $get['siguiente_accion']);
+        $this->assertStringStartsWith('aplica', $get['siguiente_accion']['gate_de_horario']);
+
+        $sin_up = $this->crear_upgrade($e, $e['principal'], ['deployment_status' => 'failed']);
+        $this->marcar_tocado($sin_up);
+        $this->fallo_en($sin_up, 'run_migrations');
+        $this->fallo_en($sin_up, 'update_default_version');
+
+        $get = $this->getJson('/api/claude/upgrades/' . $sin_up->id, $this->headers())->assertStatus(200)->json();
+        $this->assertSame('run_migrations', $get['siguiente_accion']['resume_from_step']);
     }
 
     /**
