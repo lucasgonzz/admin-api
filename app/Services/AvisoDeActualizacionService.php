@@ -193,9 +193,13 @@ class AvisoDeActualizacionService
     /**
      * Deja el aviso en `omitido` con el motivo escrito, sin mandar nada.
      *
-     * Sirve tanto para una fila nueva (todavía sin guardar) como para una `pendiente` que ya
-     * existía: en los dos casos queda en un estado terminal que `registrar()` no vuelve a abrir y
-     * que `aviso-actualizacion:reintentar` no levanta.
+     * Sirve para una fila nueva (todavía sin guardar) y para una que ya existía y todavía NO
+     * mandó el mail: en los dos casos queda en un estado terminal que `registrar()` no vuelve a
+     * abrir y que `aviso-actualizacion:reintentar` no levanta.
+     *
+     * 🔴 En una fila existente es un UPDATE condicional (mismo patrón que `reclamar()`) y no un
+     * `save()`: si un worker ya la reclamó (`enviando`) o ya mandó el mail entre que se leyó la
+     * fila y este punto, el UPDATE no afecta nada y no se pisa lo que salió.
      *
      * @param ClientUpgradeNotice $aviso
      *
@@ -203,9 +207,28 @@ class AvisoDeActualizacionService
      */
     private function omitir_por_implementacion(ClientUpgradeNotice $aviso): void
     {
-        $aviso->estado = ClientUpgradeNotice::ESTADO_OMITIDO;
-        $aviso->error  = 'El cliente está en implementación: todavía no recibió su sistema';
-        $aviso->save();
+        $motivo = 'El cliente está en implementación: todavía no recibió su sistema';
+
+        if ($aviso->exists) {
+            ClientUpgradeNotice::where('id', $aviso->id)
+                ->whereNull('mail_enviado_at')
+                ->whereIn('estado', [
+                    ClientUpgradeNotice::ESTADO_PENDIENTE,
+                    ClientUpgradeNotice::ESTADO_SIN_MAIL,
+                    ClientUpgradeNotice::ESTADO_SIN_NOVEDADES,
+                    ClientUpgradeNotice::ESTADO_ERROR,
+                ])
+                ->update([
+                    'estado' => ClientUpgradeNotice::ESTADO_OMITIDO,
+                    'error'  => $motivo,
+                ]);
+
+            $aviso->refresh();
+        } else {
+            $aviso->estado = ClientUpgradeNotice::ESTADO_OMITIDO;
+            $aviso->error  = $motivo;
+            $aviso->save();
+        }
 
         Log::channel('daily')->info('AvisoDeActualizacion: el cliente está en implementación, no se le avisa.', [
             'client_upgrade_notice_id'  => $aviso->id,
@@ -254,6 +277,16 @@ class AvisoDeActualizacionService
     {
         /* Un aviso omitido no debe nada: no hay nada que reintentar (ver ESTADO_OMITIDO). */
         if ($aviso->estado === ClientUpgradeNotice::ESTADO_OMITIDO) {
+            return $aviso;
+        }
+
+        /* 🔴 Este camino no pasa por `registrar()`, así que la regla se aplica también acá: un aviso
+           que quedó debiendo el mail (`sin_mail`, `error`, un `pendiente` que la cola nunca levantó)
+           y cuyo cliente después entró en implementación NO se manda. Si el mail ya salió
+           (`mail_enviado_at`), lo que falta es solo el WhatsApp de ese mismo aviso y sigue su curso. */
+        if ($aviso->mail_pendiente() && self::tiene_implementacion_abierta((int) $aviso->client_id)) {
+            $this->omitir_por_implementacion($aviso);
+
             return $aviso;
         }
 

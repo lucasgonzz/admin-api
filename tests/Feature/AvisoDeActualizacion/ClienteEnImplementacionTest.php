@@ -299,6 +299,81 @@ class ClienteEnImplementacionTest extends BaseDelAviso
     }
 
     /**
+     * 🔴 El hueco del reintento: el aviso quedó `sin_mail` (o `error`) cuando el cliente todavía no
+     * estaba en implementación, y DESPUÉS la abrió. El reintento a mano no pasa por `registrar()`
+     * y tiene que respetar la regla igual.
+     *
+     * @return void
+     */
+    public function test_reintentar_un_aviso_debiendo_el_mail_de_un_cliente_que_entro_en_implementacion_no_manda_nada()
+    {
+        Mail::fake();
+        Http::fake(['*contacto-dueno*' => Http::response('', 404)]);
+
+        $client  = $this->crear_cliente(['email' => null]);
+        $upgrade = $this->upgrade_con_novedad($client);
+        $upgrade->update(['status' => 'terminada']);
+        $this->servicio()->avisar($upgrade->fresh());
+
+        $aviso = ClientUpgradeNotice::where('client_version_upgrade_id', $upgrade->id)->first();
+        $this->assertSame(ClientUpgradeNotice::ESTADO_SIN_MAIL, $aviso->estado);
+
+        $this->abrir_implementacion($client, 'in_progress');
+
+        $this->assertSame(0, Artisan::call('aviso-actualizacion:reintentar', [
+            '--cliente' => $client->slug,
+            '--email'   => 'conseguido@ejemplo.test',
+            '--aplicar' => true,
+        ]));
+
+        $despues = $aviso->fresh();
+
+        $this->assertSame(ClientUpgradeNotice::ESTADO_OMITIDO, $despues->estado);
+        $this->assertNull($despues->mail_enviado_at);
+        Mail::assertNothingSent();
+        $this->assertSame(0, $this->whatsapp->cuantos_envios());
+
+        /* Lo mismo con un aviso que quedó en `error`, por el servicio. */
+        $otro         = $this->crear_cliente(['email' => 'otro@ejemplo.test']);
+        $upgrade_otro = $this->upgrade_con_novedad($otro);
+        $upgrade_otro->update(['status' => 'terminada']);
+        $aviso_error = ClientUpgradeNotice::where('client_version_upgrade_id', $upgrade_otro->id)->first();
+        $aviso_error->update(['estado' => ClientUpgradeNotice::ESTADO_ERROR, 'error' => 'se cayó']);
+        $this->abrir_implementacion($otro, 'in_progress');
+
+        $resultado = $this->servicio()->reintentar($aviso_error->fresh());
+
+        $this->assertSame(ClientUpgradeNotice::ESTADO_OMITIDO, $resultado->estado);
+        Mail::assertNothingSent();
+    }
+
+    /**
+     * Si el mail del aviso ya salió, la implementación abierta no lo da vuelta: lo que salió, salió.
+     *
+     * @return void
+     */
+    public function test_el_reintento_no_pisa_un_aviso_cuyo_mail_ya_salio()
+    {
+        Mail::fake();
+
+        $client  = $this->crear_cliente(['email' => 'dueno@ejemplo.test']);
+        $upgrade = $this->upgrade_con_novedad($client);
+        $upgrade->update(['status' => 'terminada']);
+        $this->servicio()->avisar($upgrade->fresh());
+
+        $aviso = ClientUpgradeNotice::where('client_version_upgrade_id', $upgrade->id)->first();
+        $this->assertSame(ClientUpgradeNotice::ESTADO_ENVIADO, $aviso->estado);
+
+        $this->abrir_implementacion($client, 'in_progress');
+
+        $resultado = $this->servicio()->reintentar($aviso->fresh());
+
+        $this->assertSame(ClientUpgradeNotice::ESTADO_ENVIADO, $resultado->estado);
+        $this->assertNotNull($resultado->mail_enviado_at);
+        Mail::assertSent(ClientVersionUpgradeMail::class, 1);
+    }
+
+    /**
      * Upgrade `pendiente` del cliente, con una versión que trae una novedad.
      *
      * @param Client $client
