@@ -133,7 +133,7 @@ class WhatsappConfigController extends Controller
                 ? ['required', 'string', 'max:255', 'regex:/(?:\D*\d){8,}/']
                 : 'nullable|string|max:255',
             'nombre'          => 'nullable|string|max:255',
-            'waba_id'         => 'nullable|string|max:255',
+            'waba_id'         => 'nullable|string|max:40',
             'usar_clave_del_principal' => 'sometimes|boolean',
             /* El interruptor de «número activo». Apagar el del asistente es la forma de volver atrás el
              * segundo número desde el panel (todo vuelve a salir y entrar por el principal). */

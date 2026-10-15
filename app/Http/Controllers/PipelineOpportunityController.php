@@ -32,8 +32,17 @@ use Illuminate\Http\Request;
  */
 class PipelineOpportunityController extends Controller
 {
-    /** Opciones del presenter para la forma de la ficha. */
-    const FORMA_FICHA = ['contacto' => true, 'pipeline' => 'completo'];
+    /**
+     * Opciones del presenter para la forma de la ficha.
+     *
+     * `llamada` entró con la misión embudo-lead-pipelines (13/10/2026): agrega la última
+     * `lead_calls` del sujeto (fecha, Meet, estado, resumen y transcripción). Va en esta constante
+     * —y no solo en `show_json`— a propósito: las cuatro respuestas que la usan devuelven UNA
+     * oportunidad, y son justo las que la SPA usa para repintar la ficha después de mover, de
+     * cambiar el responsable o de agregar una nota. Si el bloque de la videollamada viajara solo en
+     * el GET, moverse de etapa lo haría desaparecer de la pantalla hasta recargar.
+     */
+    const FORMA_FICHA = ['contacto' => true, 'pipeline' => 'completo', 'llamada' => true];
 
     /**
      * #13 `GET pipeline-opportunities?client_id=` o `?lead_id=` — las oportunidades de un cliente o

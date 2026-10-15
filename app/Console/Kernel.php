@@ -80,6 +80,29 @@ class Kernel extends ConsoleKernel
 
         $schedule->command('leads:check-followups')->everyTwoHours();
 
+        /* Estado de las plantillas de WhatsApp en Meta (misión plantillas-meta-y-leads-humano,
+         * 13/10/2026).
+         *
+         * Cada hora porque Meta dice que revisa «hasta 24 horas» y no manda ningún webhook de
+         * estado de plantilla: el proxy de Kapso no lo documenta y los dos webhooks que el admin
+         * recibe solo procesan `whatsapp.message.*` y `messages[].referral`. Sin este barrido una
+         * plantilla aprobada se queda en PENDING en el admin hasta que alguien la mire a mano — y
+         * mientras tanto el gate de `send-template` no la deja salir.
+         *
+         * Una pasada son una o dos llamadas HTTP para TODAS las plantillas (el listado viene
+         * paginado de 100 en 100 y hoy hay ~38), no una por fila: cada hora no cuesta nada.
+         *
+         * 🔴 `withoutOverlapping(50)` con el número puesto a mano, y no el default: el default de
+         * Laravel son 24 HORAS y éste es un comando horario, así que un proceso que muera sin
+         * liberar el mutex —OOM, reinicio, corte— dejaría el candado tomado un día entero y
+         * ninguna plantilla se sincronizaría en todo ese tiempo. Es el mismo razonamiento que ya
+         * está escrito arriba para `tokens:recolectar` y `ai-planes:sincronizar`. 50 minutos dan
+         * margen de sobra sobre una corrida que son dos llamadas HTTP y siguen siendo menos que el
+         * intervalo. */
+        $schedule->command('templates:sync-meta')
+            ->hourly()
+            ->withoutOverlapping(50);
+
         // Sincroniza desde GitHub identidad, system prompt y protocolo de WhatsApp a la BD.
         // Red de seguridad por si Lucas olvida apretar el botón manual del admin.
         $schedule->command('agent-prompts:sync')->everyTenMinutes();

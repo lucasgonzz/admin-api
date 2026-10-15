@@ -257,6 +257,32 @@ Route::middleware('claude.task.key')
         Route::get('metrics', 'Api\ClaudeLeadsAnalyticsController@metrics_json');
         Route::get('templates', 'Api\ClaudeLeadsAnalyticsController@templates_json');
 
+        /* Plantillas de WhatsApp EN META, por API y sin navegador (misión
+           `plantillas-meta-y-leads-humano`, 13/10/2026). Hasta hoy una plantilla nueva exigía que
+           alguien entrara a Meta Business Suite con la sesión de Lucas, así que `/leads` —que corre
+           de noche— podía proponer el texto y no tenerla nunca.
+           🔴 NO CONFUNDIR CON `POST claude/followup-templates`, que está abajo. Aquél REGISTRA en la
+           base una plantilla que YA está aprobada en Meta, y es idempotente a propósito. Éste la
+           CREA en Meta: escritura en el sistema de un tercero, con revisión humana de hasta 24 hs,
+           tope de 100 creaciones por hora por WABA y un nombre que después no se reusa. De ahí que
+           los frenos sean los de un endpoint peligroso y no los de un alta: dry_run por defecto, un
+           nombre ya registrado es 422 (no un upsert), la fila nace con `activa=false` y
+           `meta_status=PENDING`, y las reglas de formato de Meta se validan ANTES de salir a la red.
+           🔴 Y el `estado` se fuerza a `manual_*`: uno que coincida con un slug real del pipeline
+           haría que `LeadFollowupService` (cada 2 horas) le empiece a mandar esta plantilla sola a
+           todos los leads de ese estado. Allá se acepta cualquiera porque la convención corre por
+           cuenta de quien arma el payload; acá el payload lo arma una skill sin nadie mirando.
+           `templates/meta` va DESPUÉS de `templates` a secas y los dos conviven porque ninguno
+           tiene segmento variable; el `{name}` del refresh se restringe al mismo `^[a-z0-9_]+$` que
+           exige Meta, así que un nombre mal armado es 404 de Laravel y no llega al controlador.
+           El estado NO llega por webhook (Kapso no lo documenta y los dos webhooks del admin solo
+           procesan `whatsapp.message.*` y `messages[].referral`): se consulta con `refresh` o lo
+           trae el comando `templates:sync-meta`, que corre cada hora. */
+        Route::get('templates/meta', 'Api\ClaudeMetaTemplatesController@index_json');
+        Route::post('templates/meta', 'Api\ClaudeMetaTemplatesController@store_json');
+        Route::post('templates/meta/{name}/refresh', 'Api\ClaudeMetaTemplatesController@refresh_json')
+            ->where('name', '[a-z0-9_]+');
+
         /* Públicos personalizados para Meta armados con el pipeline (misión
            origen-del-lead-y-conversiones-meta): teléfono y mail en SHA-256, nunca en claro. */
         Route::get('audiencias', 'Api\ClaudeAudienciasController@index');
@@ -1061,6 +1087,10 @@ Route::prefix('admin')->group(function () {
         Route::post('task-notification/{id}/seen', [AdminTaskNotificationController::class, 'mark_seen_json']);
 
         // Soporte tipo bandeja estilo Front.
+        // Panel de inicio: los tres contadores (tickets sin responder, tickets abiertos hoy y leads
+        // sin responder), una consulta por tarjeta.
+        Route::get('inicio/tarjetas', [\App\Http\Controllers\Api\InicioController::class, 'tarjetas']);
+
         Route::get('support-ticket', [\App\Http\Controllers\Api\SupportTicketController::class, 'index']);
         Route::get('support-ticket/unread-badges', [\App\Http\Controllers\Api\SupportTicketController::class, 'unread_badges']);
         // Va antes de support-ticket/{id}: si no, {id} se come "whatsapp-contacts".

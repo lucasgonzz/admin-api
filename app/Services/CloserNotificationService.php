@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Admin;
 use App\Models\Lead;
+use Database\Seeders\PipelineLeadSeeder;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -62,6 +63,18 @@ class CloserNotificationService
         // Mensaje fijo en código por ahora (no editable desde admin en este prompt).
         $body = "{$referencia} confirmó la demo y está listo para la llamada. Subite cuando puedas.";
 
+        /* Link al tablero del embudo "Leads" (misión embudo-lead-pipelines, 13/10/2026): el aviso
+           llega al teléfono, así que tiene que poder abrir el lugar donde está la tarjeta.
+
+           🔴 Va por SLUG y no por id. El id del pipeline depende de en qué orden se sembró cada
+           base, así que un link con el id andaría en producción y en ninguna otra instalación —y
+           peor: en una base donde el orden salió distinto abriría el tablero equivocado sin avisar.
+           `Tablero.vue` resuelve `?pipeline=` por id o por slug. */
+        $tablero = $this->link_al_tablero();
+        if ($tablero !== null) {
+            $body .= "\n" . $tablero;
+        }
+
         $message_id = $this->whatsapp_send_service->send_text($phone, $body);
 
         if ($message_id === null) {
@@ -81,5 +94,24 @@ class CloserNotificationService
             'lead_id'   => $lead->id,
             'closer_id' => $closer->id,
         ]);
+    }
+
+    /**
+     * El link al tablero del embudo "Leads", o null si no hay URL de la SPA configurada.
+     *
+     * Mismo armado que `DemoScheduledWhatsappService` y `LeadEscalationWhatsappService`: la base
+     * sale de `services.admin_spa.url` y nunca se escribe el dominio a mano.
+     *
+     * @return string|null
+     */
+    private function link_al_tablero(): ?string
+    {
+        $base = rtrim(trim((string) config('services.admin_spa.url')), '/');
+
+        if ($base === '') {
+            return null;
+        }
+
+        return $base . '/pipelines/tablero?pipeline=' . PipelineLeadSeeder::SLUG;
     }
 }
