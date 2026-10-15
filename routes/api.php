@@ -1234,6 +1234,17 @@ Route::prefix('admin')->group(function () {
         Route::get('settings/implementation-serper-api-key-demo', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'get_serper_api_key_demo']);
         Route::put('settings/implementation-serper-api-key-demo', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_serper_api_key_demo']);
 
+        // Configuración de implementaciones: credenciales de PRUEBA de Zipnova y de Mercado Pago para las demos
+        // (misión credenciales-demo-zipnova-mp). Se guardan cifradas y NINGÚN GET devuelve el valor: solo el estado
+        // y la cola de 4. "probar" pega una lectura contra el servicio real, con tope de uso para que el botón no se
+        // pueda martillar.
+        Route::get('settings/implementation-zipnova-demo', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'get_zipnova_demo']);
+        Route::put('settings/implementation-zipnova-demo', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_zipnova_demo']);
+        Route::post('settings/implementation-zipnova-demo/probar', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'probar_zipnova_demo'])->middleware('throttle:20,1');
+        Route::get('settings/implementation-mercadopago-demo', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'get_mercadopago_demo']);
+        Route::put('settings/implementation-mercadopago-demo', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_mercadopago_demo']);
+        Route::post('settings/implementation-mercadopago-demo/probar', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'probar_mercadopago_demo'])->middleware('throttle:20,1');
+
         // Configuración de implementaciones: URL base del formulario público de configuración.
         Route::get('settings/implementation-form-url', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'get_form_url']);
         Route::put('settings/implementation-form-url', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_form_url']);
