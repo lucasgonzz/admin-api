@@ -3,7 +3,7 @@
   con su estado REAL al momento de mandar el mail.
 
   Variable: $progreso, armado por `ImplementacionMailHelper::progreso()`:
-    etapa_actual, porcentaje, barra y etapas (numero, nombre, estado, subpasos).
+    etapa_actual, total (cantidad de etapas), porcentaje, barra y etapas (numero, nombre, estado, subpasos).
   Estado de cada etapa: completada (círculo azul con tilde), en_curso (círculo con el punto de
   degradé y la etiqueta "En curso"), pendiente (anillo gris) y salteada (gris con guion y "no aplica").
   Los subpasos, si los hay, son los de la etapa 4 y salen debajo de su nombre.

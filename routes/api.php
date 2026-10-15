@@ -577,7 +577,7 @@ Route::middleware('claude.task.key')
            instancia. Es SINCRONO: estos comandos tardan segundos, no minutos. */
         Route::post('demo-commands', 'Api\ClaudeDemoOpsController@run_command_json');
 
-        /* Implementaciones de clientes nuevos (misión `implementar-cliente`, 5/10/2026): las ocho
+        /* Implementaciones de clientes nuevos (misión `implementar-cliente`, 5/10/2026): las siete
            etapas desde que un lead compra hasta que el sistema queda entregado, operadas desde la
            skill `/implementar` en vez de desde el panel. Todo vive en ClaudeImplementationOpsController.
            🔴 Hasta esta misión NO había ninguna ruta claude/* que operara implementaciones: lo único

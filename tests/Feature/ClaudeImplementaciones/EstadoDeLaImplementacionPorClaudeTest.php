@@ -256,6 +256,9 @@ class EstadoDeLaImplementacionPorClaudeTest extends BaseDeImplementaciones
      */
     public function test_los_nombres_de_las_siete_etapas_sin_catalogo_en_la_base(): void
     {
+        // Hermético: se vacía el catálogo para probar de verdad el respaldo, sea cual sea la base de testing.
+        \App\Models\ImplementationStageConfig::query()->delete();
+
         $e = $this->escenario();
 
         $etapas = $this->getJson('/api/claude/implementations/' . $e['implementacion']->id, $this->headers())->json('etapas');

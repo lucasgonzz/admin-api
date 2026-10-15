@@ -19,7 +19,7 @@ use Illuminate\Database\Seeder;
  * - Etapa 3: recolección de archivos (antes etapa 4)
  * - Etapa 4: migración de datos (antes etapa 5)
  * - Etapa 5: entrega del sistema (NUEVA)
- * - Etapas 6-7: sin cambio de número (capacitación, ARCA)
+ * - Etapas 6-7: sin cambio de número (hasta el 14/10/2026 capacitación y ARCA; desde el 15/10 catálogo y ARCA)
  *
  * 🔴 Desde el 15/10/2026 son SIETE etapas (`Implementation::ULTIMA_ETAPA`): la 6 pasó de «Capacitación» a
  * «Catálogo: categorías, imágenes y descripciones» (la capacitación es el centro de recursos que se entrega

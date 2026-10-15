@@ -215,6 +215,9 @@ class AvanceDeEtapaPorClaudeTest extends BaseDeImplementaciones
      */
     public function test_el_dry_run_de_la_etapa_6_apunta_a_la_7_y_no_cierra(): void
     {
+        // Hermético: los nombres tienen que salir del respaldo (`ETAPAS`) y no de lo que traiga la base de testing.
+        \App\Models\ImplementationStageConfig::query()->delete();
+
         $impl = $this->en_la_etapa(6);
 
         $respuesta = $this->avanzar($impl, ['etapa_actual' => 6]);
