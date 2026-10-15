@@ -4,26 +4,26 @@ namespace Tests\Feature\MailsDeLeadRechazados;
 
 use App\Mail\ComercioCityMail;
 use App\Mail\LeadDemoAccesoMail;
-use App\Mail\LeadDemoMail;
 use App\Mail\LeadProposalMail;
 use App\Models\Lead;
 use Illuminate\Mail\Mailable;
 use Illuminate\Support\Facades\Mail;
 
 /**
- * Los cuatro envíos de mail a un lead que dispara el panel de admin-spa (rutas `POST /api/admin/lead/{id}/...`),
+ * Los envíos de mail a un lead que dispara el panel de admin-spa (rutas `POST /api/admin/lead/{id}/...`),
  * cuando el servidor de correo RECHAZA la casilla.
  *
- * Son los puntos 3, 4, 5 y 6 de la misión mails-a-leads-rechazados-por-smtp (6/10/2026):
+ * Son los puntos 3, 4, 5 y 6 de la misión mails-a-leads-rechazados-por-smtp (6/10/2026); el 6 se
+ * SACÓ el 14/10/2026 (misión demo-solo-experiencia-nueva), porque la dinámica vieja está retirada:
  *
  *   3. `send-presentation-mail`          — la tarjeta de presentación.
  *   4. `send-followup-mail`              — el seguimiento post-reunión (Mail 2). Tenía un chequeo de rechazos
  *                                          que NUNCA corrió: `method_exists(Mail::getFacadeRoot(), 'failures')`
  *                                          da false, porque `failures()` le llega al `MailManager` por `__call`.
  *   5. `send-demo-mail`, dinámica nueva  — la carta de acceso.
- *   6. `send-demo-mail`, dinámica vieja  — el Mail 1 con credenciales.
+ *   6. (sacado) `send-demo-mail`, dinámica vieja — el Mail 1 con credenciales.
  *
- * Los cuatro hacían lo mismo: `Mail::to($lead->email)->send(...)` y, si no tiró, anotaban `*_mail_sent_at` y
+ * Los tres hacen lo mismo: `Mail::to($lead->email)->send(...)` y, si no tiró, anotaban `*_mail_sent_at` y
  * limpiaban `*_mail_last_error`. Con un 550 en el RCPT TO SwiftMailer no tira, así que la ficha mostraba
  * "Exitoso" para un mail que nunca salió.
  *
@@ -42,7 +42,7 @@ use Illuminate\Support\Facades\Mail;
 class EnviosDelPanelRechazadosTest extends BaseDeMailsDeLead
 {
     /**
-     * Los cuatro puntos del panel, para el data provider.
+     * Los puntos vigentes del panel, para el data provider.
      *
      * @return array<string, array<int, string>>
      */
@@ -52,7 +52,6 @@ class EnviosDelPanelRechazadosTest extends BaseDeMailsDeLead
             'punto 3: tarjeta de presentación'           => ['presentacion'],
             'punto 4: seguimiento (Mail 2)'              => ['seguimiento'],
             'punto 5: carta de acceso (dinámica nueva)'  => ['carta'],
-            'punto 6: Mail 1 (dinámica vieja)'           => ['mail_1'],
         ];
     }
 
@@ -107,20 +106,6 @@ class EnviosDelPanelRechazadosTest extends BaseDeMailsDeLead
                     'col_error'   => 'demo_mail_last_error',
                     'mailable'    => LeadDemoAccesoMail::class,
                     'prefijo'     => 'No se pudo enviar el mail de acceso a la demo: ',
-                ];
-
-            default:
-                return [
-                    'url'         => function (Lead $lead) {
-                        return '/api/admin/lead/' . $lead->id . '/send-demo-mail';
-                    },
-                    'armar'       => function (array $extra) {
-                        return $this->crear_lead_de_la_dinamica_vieja($extra);
-                    },
-                    'col_enviado' => 'demo_mail_sent_at',
-                    'col_error'   => 'demo_mail_last_error',
-                    'mailable'    => LeadDemoMail::class,
-                    'prefijo'     => 'No se pudo enviar el mail de demo: ',
                 ];
         }
     }

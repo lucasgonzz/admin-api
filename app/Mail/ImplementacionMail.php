@@ -11,7 +11,7 @@ use Illuminate\Support\HtmlString;
  * El mail de un hito de la implementación: lo que el cliente recibe en cada paso del arranque de su
  * sistema (misión implementar-cliente, 5/10/2026).
  *
- * Hay seis hitos —bienvenida, instalado, acceso, imagenes, categorias, listo— y los seis salen con
+ * Hay siete hitos —bienvenida, instalando, instalado, acceso, imagenes, categorias, listo— y todos salen con
  * el mismo diseño y la misma línea de progreso de las ocho etapas. El diseño es el del prototipo
  * aprobado y comparte lenguaje con la carta de acceso a la demo (`LeadDemoAccesoMail`): Geist,
  * tarjeta blanca de 560 px, azul y violeta de la marca, el degradé solo en el botón principal y el
@@ -33,7 +33,7 @@ class ImplementacionMail extends Mailable
     use Queueable;
     use SerializesModels;
 
-    /** @var string Hito del mail: bienvenida | instalado | acceso | imagenes | categorias | listo. */
+    /** @var string Hito del mail: bienvenida | instalando | instalado | acceso | imagenes | categorias | listo. */
     public $hito;
 
     /** @var string Asunto con el que sale. */

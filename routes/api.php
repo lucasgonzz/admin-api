@@ -170,6 +170,54 @@ Route::middleware('admin.inbound.key')
 
 /*
 |--------------------------------------------------------------------------
+| Centro de recursos para clientes (misión centro-de-recursos-clientes, 13/10/2026)
+|--------------------------------------------------------------------------
+| La API de la página pública `recursos.comerciocity.com` (contrato C2 del plan de la misión). Sin
+| sesión el video SE VE (catálogo público, decisión de Lucas); avance, votos, preguntas y encuesta
+| piden la sesión del centro.
+|
+| 🔴 La sesión del centro NO es Sanctum (`recursos.sesion`, ver App\Http\Middleware\RecursosSesion):
+| un token del centro no puede entrar a ninguna ruta del panel.
+|
+| 🔴 Sin `throttle:api` y con limitador propio (`recursos.throttle`, una cubeta por grupo): el `api`
+| es UNA cubeta por IP para todo /api, y una oficina con varios empleados mirando videos a la vez
+| (un avance cada ~10 s cada uno) se la comería entera. Topes del plan: catálogo y buscador 60/min
+| por IP, entrar 10/min por IP, lo que pide sesión 60/min por token.
+*/
+Route::prefix('recursos')
+    ->withoutMiddleware('throttle:api')
+    ->group(function () {
+        Route::get('catalogo', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'catalogo_json'])
+            ->middleware('recursos.throttle:60,1,catalogo,ip');
+        Route::get('buscar-indice', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'buscar_indice_json'])
+            ->middleware('recursos.throttle:60,1,buscar,ip');
+        Route::get('videos/{codigo}', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'video_json'])
+            ->middleware(['recursos.throttle:60,1,video,ip', 'recursos.sesion.opcional']);
+
+        Route::middleware('recursos.throttle:10,1,sesion,ip')->group(function () {
+            Route::post('sesion/pase', [\App\Http\Controllers\Api\RecursosSesionController::class, 'pase_json']);
+            Route::post('sesion/link', [\App\Http\Controllers\Api\RecursosSesionController::class, 'link_json']);
+        });
+
+        Route::middleware(['recursos.throttle:60,1,escritura,token', 'recursos.sesion'])->group(function () {
+            Route::get('yo', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'yo_json']);
+            Route::post('salir', [\App\Http\Controllers\Api\RecursosSesionController::class, 'salir_json']);
+
+            /* Lo que ESCRIBE. Una sesión de solo lectura (el pase de un login maestro) da 403 `solo_lectura`
+               acá; `yo` y `salir` quedan afuera a propósito: soporte puede leer y puede salir. Va adentro del
+               grupo de arriba, así el limitador y la sesión corren antes que `recursos.escritura`. */
+            Route::middleware('recursos.escritura')->group(function () {
+                Route::post('progreso', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'progreso_json']);
+                Route::post('votos', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'votos_json']);
+                Route::post('preguntas', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'preguntas_json']);
+                Route::post('preguntas/{id}/me-gusta', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'me_gusta_json']);
+                Route::post('encuestas', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'encuestas_json']);
+            });
+        });
+    });
+
+/*
+|--------------------------------------------------------------------------
 | Ingesta y consultas de Claude (protegidas por X-Claude-Task-Key)
 |--------------------------------------------------------------------------
 | Tres grupos de rutas, todas contra el mismo middleware:
@@ -222,6 +270,10 @@ Route::middleware('claude.task.key')
         Route::post('templates/meta', 'Api\ClaudeMetaTemplatesController@store_json');
         Route::post('templates/meta/{name}/refresh', 'Api\ClaudeMetaTemplatesController@refresh_json')
             ->where('name', '[a-z0-9_]+');
+
+        /* Públicos personalizados para Meta armados con el pipeline (misión
+           origen-del-lead-y-conversiones-meta): teléfono y mail en SHA-256, nunca en claro. */
+        Route::get('audiencias', 'Api\ClaudeAudienciasController@index');
 
         /* Alta en LOTE de plantillas de LEAD (followup_templates). Hermano de escritura de
            `templates` de arriba, en un controlador aparte porque no es análisis de lectura.
@@ -397,8 +449,10 @@ Route::middleware('claude.task.key')
            🔴 Estas nueve rutas crean actualizaciones sobre clientes REALES y arrancan deployments
            por SSH que pueden dejar un negocio sin sistema. Los frenos de las OCHO que viven en
            ClaudeUpgradeOpsController son confirm_client_name (en todas ellas), dry_run por defecto
-           al crear, allow_deploy_to_active_api, el gate de horario del post-cierre —que también
-           lleva retry-commands— y el umbral destructivo de expire-stuck.
+           al crear, allow_deploy_to_active_api (desde el 14/10/2026 solo para una destino activa
+           que NO es el frente principal), el gate de horario del post-cierre —que también lleva
+           retry-commands, y deploy/start cuando va en el lugar— y el umbral destructivo de
+           expire-stuck.
            🔴 La novena, `upgrades/batch`, es la excepción y por eso se aclara aparte: vive en
            ClaudeUpgradeBatchController y NO usa confirm_client_name, porque en un lote de veinte no
            hay UN nombre que confirmar. Su equivalente es confirm_client_count + confirm_token.
@@ -407,8 +461,9 @@ Route::middleware('claude.task.key')
            capture si mañana se agrega un POST claude/upgrades/{id} a secas. */
         Route::post('upgrades/preview', 'Api\ClaudeUpgradeOpsController@preview_json');
         /* Alta EN LOTE, pegada a `preview` y ANTES que cualquier ruta con {id}, por lo mismo que
-           aquélla. 🔴 Sólo CREA actualizaciones: no arranca ningún deployment, porque el gate de
-           horario y allow_deploy_to_active_api son por cliente. Los frenos (tope de 25, dry_run por
+           aquélla. 🔴 Sólo CREA actualizaciones (hacia el frente principal de cada cliente): no
+           arranca ningún deployment, porque el gate de horario y allow_deploy_to_active_api son
+           por cliente. Los frenos (tope de 25, dry_run por
            defecto, confirm_client_count y confirm_token) están en ClaudeUpgradeBatchController. */
         Route::post('upgrades/batch', 'Api\ClaudeUpgradeBatchController@store_batch_json');
         Route::post('upgrades', 'Api\ClaudeUpgradeOpsController@store_json');
@@ -566,12 +621,19 @@ Route::middleware('claude.task.key')
         Route::post('implementations/{id}/user-setup', 'Api\ClaudeImplementationOpsController@user_setup_json')
             ->whereNumber('id');
 
-        /* El MAIL de cada hito (bienvenida, instalado, acceso, imagenes, categorias, listo) al dueño del negocio, con la
+        /* El MAIL de cada hito (bienvenida, instalando, instalado, acceso, imagenes, categorias, listo) al dueño del negocio, con la
            línea de progreso de las ocho etapas. Síncrono, por el mailer `admin` (admin@comerciocity.com), y registrado en
            `implementation_mails`. El armado y el envío viven en ImplementacionMailService: acá solo están los frenos —
            lista blanca, datos validados por hito, dry_run por defecto y confirm_client_name— y la respuesta. */
         Route::post('implementations/{id}/mail', 'Api\ClaudeImplementationOpsController@mail_json')
             ->whereNumber('id');
+
+        /* Centro de recursos para clientes (misión centro-de-recursos-clientes, 13/10/2026). La carga del catálogo la
+           manda `publicar_centro.py` después de subir los videos a R2: upsert por `codigo` y, con desactivar_faltantes,
+           los que no vinieron quedan inactivos (nunca se borran: tienen avance). Borra la caché del catálogo público.
+           Solo filas del admin: no toca el sistema de ningún cliente. `resumen` son los totales, sin entrar al panel. */
+        Route::post('recursos/catalogo', [\App\Http\Controllers\Api\RecursosClaudeController::class, 'catalogo_json']);
+        Route::get('recursos/resumen', [\App\Http\Controllers\Api\RecursosClaudeController::class, 'resumen_json']);
     });
 
 /*
@@ -1198,6 +1260,17 @@ Route::prefix('admin')->group(function () {
         Route::get('settings/implementation-serper-api-key-demo', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'get_serper_api_key_demo']);
         Route::put('settings/implementation-serper-api-key-demo', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_serper_api_key_demo']);
 
+        // Configuración de implementaciones: credenciales de PRUEBA de Zipnova y de Mercado Pago para las demos
+        // (misión credenciales-demo-zipnova-mp). Se guardan cifradas y NINGÚN GET devuelve el valor: solo el estado
+        // y la cola de 4. "probar" pega una lectura contra el servicio real, con tope de uso para que el botón no se
+        // pueda martillar.
+        Route::get('settings/implementation-zipnova-demo', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'get_zipnova_demo']);
+        Route::put('settings/implementation-zipnova-demo', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_zipnova_demo']);
+        Route::post('settings/implementation-zipnova-demo/probar', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'probar_zipnova_demo'])->middleware('throttle:20,1');
+        Route::get('settings/implementation-mercadopago-demo', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'get_mercadopago_demo']);
+        Route::put('settings/implementation-mercadopago-demo', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_mercadopago_demo']);
+        Route::post('settings/implementation-mercadopago-demo/probar', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'probar_mercadopago_demo'])->middleware('throttle:20,1');
+
         // Configuración de implementaciones: URL base del formulario público de configuración.
         Route::get('settings/implementation-form-url', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'get_form_url']);
         Route::put('settings/implementation-form-url', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_form_url']);
@@ -1287,6 +1360,19 @@ Route::prefix('admin')->group(function () {
         Route::delete('pipeline-opportunities/{id}', [PipelineOpportunityController::class, 'destroy_json'])->whereNumber('id');
 
         Route::delete('pipeline-activities/{id}', [PipelineActivityController::class, 'destroy_json'])->whereNumber('id');
+
+        /* Centro de recursos para clientes (misión centro-de-recursos-clientes, 13/10/2026): el panel. Preguntas
+           (responder, ocultar y el borrador con IA), cómo le va a cada video (peor puntuados primero) y el avance de
+           cada cliente, con el link personal del dueño. A diferencia de la página, acá sí sale el nombre completo
+           del usuario y su cliente. */
+        Route::get('recursos/preguntas', [\App\Http\Controllers\Api\RecursosPanelController::class, 'preguntas_json']);
+        Route::put('recursos/preguntas/{id}', [\App\Http\Controllers\Api\RecursosPanelController::class, 'actualizar_pregunta_json'])->whereNumber('id');
+        Route::post('recursos/preguntas/{id}/borrador', [\App\Http\Controllers\Api\RecursosPanelController::class, 'borrador_json'])->whereNumber('id');
+        Route::get('recursos/videos', [\App\Http\Controllers\Api\RecursosPanelController::class, 'videos_json']);
+        Route::get('recursos/videos/{codigo}/mejoras', [\App\Http\Controllers\Api\RecursosPanelController::class, 'mejoras_json']);
+        Route::get('recursos/clientes', [\App\Http\Controllers\Api\RecursosPanelController::class, 'clientes_json']);
+        Route::get('recursos/clientes/{client_id}', [\App\Http\Controllers\Api\RecursosPanelController::class, 'cliente_json'])->whereNumber('client_id');
+        Route::post('recursos/clientes/{client_id}/link-dueno', [\App\Http\Controllers\Api\RecursosPanelController::class, 'link_dueno_json'])->whereNumber('client_id');
 
     });
 });

@@ -44,25 +44,6 @@ class DemoMediaUrlsEndpointTest extends TestCase
     }
 
     /**
-     * Lead de la dinámica que hoy corre en producción: no tiene instancia nueva que pregunte nada.
-     * Igual se le emite un token, que es el caso interesante — el token existe y sirve, y lo que lo
-     * corta es la dinámica.
-     *
-     * @return Lead
-     */
-    private function crear_lead_con_dinamica_actual(): Lead
-    {
-        $lead                     = new Lead();
-        $lead->uuid               = (string) Str::uuid();
-        $lead->contact_name       = 'Roberto Gómez';
-        $lead->demo_experiencia   = Lead::EXPERIENCIA_ACTUAL;
-        $lead->demo_eventos_token = Str::random(64);
-        $lead->save();
-
-        return $lead;
-    }
-
-    /**
      * Deja `demo_media` con exactamente las filas que le pasan, y nada más.
      *
      * Se vacía la tabla a propósito: `DemoMedia::url_por_slot()` devuelve TODA la tabla (los slots
@@ -154,22 +135,6 @@ class DemoMediaUrlsEndpointTest extends TestCase
         $this->sembrar_media(['1.1' => 'https://cdn.comerciocity.com/demo/1-1.mp4']);
 
         $respuesta = $this->pedir('un-token-que-no-existe')->assertStatus(401);
-
-        $this->assertSame('no autorizado', $respuesta->json('error'));
-        $this->assertNull($respuesta->json('media_urls'));
-    }
-
-    /**
-     * Un lead de la dinámica `actual` queda afuera aunque su token sea real y esté vigente. Es el
-     * rollback previsto de un piloto: volver al lead a la dinámica de producción apaga el canal
-     * entero, lectura incluida. Lo corta el middleware con `usa_experiencia_demo_nueva()`.
-     */
-    public function test_un_lead_de_la_dinamica_actual_devuelve_401(): void
-    {
-        $lead = $this->crear_lead_con_dinamica_actual();
-        $this->sembrar_media(['1.1' => 'https://cdn.comerciocity.com/demo/1-1.mp4']);
-
-        $respuesta = $this->pedir($lead->demo_eventos_token)->assertStatus(401);
 
         $this->assertSame('no autorizado', $respuesta->json('error'));
         $this->assertNull($respuesta->json('media_urls'));

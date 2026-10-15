@@ -80,7 +80,8 @@ class DemoSetupSinCorridasSolapadasTest extends TestCase
     /**
      * Lead agendado con la dinámica y el estado de setup que pida cada caso.
      *
-     * @param string      $experiencia Lead::EXPERIENCIA_NUEVA | Lead::EXPERIENCIA_ACTUAL.
+     * @param string      $experiencia Lead::EXPERIENCIA_NUEVA (desde el 14/10/2026 el modelo fuerza esa dinámica en cada guardado: la
+     *     dinámica ACTUAL está retirada y ya no se puede fabricar un lead en ella).
      * @param string      $setup       Valor inicial de `demo_setup_status`.
      * @param Carbon|null $last_run    Valor de `demo_setup_last_run_at`.
      *
@@ -217,7 +218,8 @@ class DemoSetupSinCorridasSolapadasTest extends TestCase
     /**
      * Cuenta los POST al endpoint del setup que dispara una corrida que termina en 500.
      *
-     * @param string $experiencia Lead::EXPERIENCIA_NUEVA | Lead::EXPERIENCIA_ACTUAL.
+     * @param string $experiencia Lead::EXPERIENCIA_NUEVA (desde el 14/10/2026 el modelo fuerza esa dinámica en cada guardado: la
+     *     dinámica ACTUAL está retirada y ya no se puede fabricar un lead en ella).
      *
      * @return int
      */
@@ -260,29 +262,6 @@ class DemoSetupSinCorridasSolapadasTest extends TestCase
             1,
             $this->disparos_de_una_corrida_con_500(Lead::EXPERIENCIA_NUEVA),
             'El endpoint que vacía la base no puede tener retry automático.'
-        );
-    }
-
-    /**
-     * 4bis. 🔴 Y el mismo caso para la dinámica ACTUAL, que es el que de verdad atrapa la regresión.
-     *
-     * Lo corrigió la verificación de esta misión. El test de arriba, solo, no protegía nada: la
-     * línea que se sacó era `->retry($lead->usa_experiencia_demo_nueva() ? 1 : config(...), 500)`,
-     * o sea que para un lead de la dinámica NUEVA ya daba `tries = 1`. Si alguien repone esa línea
-     * tal cual —un revert, que es el escenario más probable— el test de la dinámica nueva sigue
-     * verde y la regresión pasa igual.
-     *
-     * La dinámica actual es además la única cuyo comportamiento este branch cambió a propósito: es
-     * la que perdió los 2 intentos del default de `CLIENT_API_RETRIES`.
-     */
-    public function test_la_dinamica_actual_tampoco_reintenta_la_llamada_destructiva(): void
-    {
-        Carbon::setTestNow($this->momento_base());
-
-        $this->assertSame(
-            1,
-            $this->disparos_de_una_corrida_con_500(Lead::EXPERIENCIA_ACTUAL),
-            'Con el retry repuesto, acá salen 2 POST: la base que se vacía es la misma para las dos dinámicas.'
         );
     }
 
@@ -353,51 +332,6 @@ class DemoSetupSinCorridasSolapadasTest extends TestCase
             RunDemoSetupService::ESTADO_SIN_CONFIRMAR,
             (string) $sin_fecha->refresh()->demo_setup_status
         );
-    }
-
-    /**
-     * 7. 🔴 El criterio de dinámica es DISTINTO para cada estado, y a propósito.
-     *
-     *  - Un lead 'actual' en `sin_confirmar` vencido **sí** se destraba. Ese estado nació el
-     *    25/8/2026 y lo escribe `RunDemoSetupService` para las dos dinámicas (ni el timeout ni el
-     *    409 miran la dinámica del lead). Si el vencimiento lo barriera sólo para la nueva, un lead
-     *    'actual' quedaría colgado ahí para siempre: la fuga del 13/8/2026 otra vez.
-     *  - Un lead 'actual' en `ejecutandose` vencido **no** se toca. Ahí sí hay leads viejos parados,
-     *    y el criterio de aceptación de la misión 60 sigue valiendo: ningún lead con
-     *    `demo_experiencia` distinto de 'nueva' cambia de comportamiento en ningún camino.
-     *
-     * Si alguien "unifica" el filtro en cualquiera de las dos direcciones, este test se pone rojo.
-     */
-    public function test_el_criterio_de_dinamica_es_distinto_para_cada_estado(): void
-    {
-        Carbon::setTestNow($this->momento_base());
-
-        $actual_sin_confirmar = $this->crear_lead(
-            Lead::EXPERIENCIA_ACTUAL,
-            RunDemoSetupService::ESTADO_SIN_CONFIRMAR,
-            $this->ya_vencido()
-        );
-        $actual_ejecutandose = $this->crear_lead(
-            Lead::EXPERIENCIA_ACTUAL,
-            'ejecutandose',
-            $this->ya_vencido()
-        );
-
-        $this->artisan('leads:vencer-demo-setups-colgados')->assertExitCode(0);
-
-        $this->assertSame(
-            'fallido',
-            (string) $actual_sin_confirmar->refresh()->demo_setup_status,
-            'sin_confirmar se destraba para las dos dinámicas: nadie puede quedarse colgado ahí.'
-        );
-        $this->assertStringContainsString('seguía viva en la instancia', (string) $actual_sin_confirmar->demo_setup_last_error);
-
-        $this->assertSame(
-            'ejecutandose',
-            (string) $actual_ejecutandose->refresh()->demo_setup_status,
-            'ejecutandose sigue siendo sólo de la dinámica nueva, como desde la misión 60.'
-        );
-        $this->assertEmpty((string) $actual_ejecutandose->demo_setup_last_error);
     }
 
     /**

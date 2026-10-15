@@ -285,35 +285,6 @@ class OfertaFlexibleDeDemoTest extends TestCase
         $this->assertStringContainsString('por eso la apertura NO le pide una hora', $prompt);
     }
 
-    /**
-     * (7) Un lead de la dinámica ACTUAL no ve nada de esto, ni siquiera con el marcador sembrado en
-     *     los dos recursos. El gate que lo corta es el de la dinámica, no la ausencia del `.md`: por
-     *     eso acá el marcador está puesto en la v1 y en la v2.
-     *
-     * @return void
-     */
-    public function test_la_dinamica_actual_no_ve_nada_de_esto(): void
-    {
-        $this->sembrar_entorno_del_agente();
-        $this->sembrar_recurso_demo_agenda_v2($this->md_con_marcador());
-        $this->sembrar_recurso_demo_agenda_v1($this->md_con_marcador());
-
-        $lead = $this->crear_lead_de_la_dinamica_nueva();
-        $lead->demo_experiencia = Lead::EXPERIENCIA_ACTUAL;
-        $lead->save();
-        $this->crear_demo();
-
-        $prompt = $this->generar_y_capturar_el_prompt($lead->refresh());
-
-        $this->assertStringNotContainsString('OFERTA PRIMARIA', $prompt, 'La dinámica actual nunca tuvo bloque de oferta primaria.');
-        $this->assertStringNotContainsString('MATERIAL DE RESPALDO', $prompt);
-        $this->assertStringNotContainsString('oferta_flexible', $prompt);
-        $this->assertStringNotContainsString('La apertura de este mensaje es FLEXIBLE', $prompt);
-
-        /* Y lo que sí tiene sigue estando, byte a byte. */
-        $this->assertStringContainsString('DISPONIBILIDAD EN RANGOS LEGIBLES (usar ESTO para ofrecer horarios', $prompt);
-    }
-
     /* ------------------------------------------------------------------ */
     /* Montaje                                                             */
     /* ------------------------------------------------------------------ */

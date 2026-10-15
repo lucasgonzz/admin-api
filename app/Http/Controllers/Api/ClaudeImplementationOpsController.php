@@ -562,14 +562,38 @@ class ClaudeImplementationOpsController extends Controller
         $api       = $client->active_client_api;
         $resolutor = new ClientEmpresaApiUrlResolver();
 
+        /*
+         * Qué sistemas contrató (`contract_sistemas`, keys de `CotizadorSettings::SISTEMAS`), para que la
+         * skill sepa sola si le toca el paso de la tienda online (misión mails-implementacion-orden-nuevo,
+         * 14/10/2026). `null` = el contrato no lo dice (un contrato anterior a la modalidad, o sin cargar):
+         * ahí `tienda_contratada` también es null y se le pregunta a Lucas. Un "no" se dice solo con la
+         * lista cargada y sin `ecommerce`, y tampoco si el contrato cobra perfiles de ecommerce (el adicional
+         * de antes de la modalidad): ese caso híbrido es null, porque un "no" falso deja al cliente sin la
+         * tienda que paga. Solo cuentan las claves que son texto: cualquier otra cosa en el JSON se ignora.
+         */
+        $sistemas = is_array($client->contract_sistemas)
+            ? array_values(array_filter($client->contract_sistemas, 'is_string'))
+            : [];
+        $sistemas = count($sistemas) > 0 ? $sistemas : null;
+
+        if ($sistemas === null) {
+            $tienda_contratada = null;
+        } elseif (in_array('ecommerce', $sistemas, true)) {
+            $tienda_contratada = true;
+        } else {
+            $tienda_contratada = (int) $client->contract_perfiles_ecommerce > 0 ? null : false;
+        }
+
         $bloque = [
-            'id'           => (int) $client->id,
-            'name'         => $client->name,
-            'company_name' => $client->company_name,
-            'slug'         => $client->slug,
-            'user_id'      => $client->user_id === null ? null : (int) $client->user_id,
-            'is_active'    => (bool) $client->is_active,
-            'sistema'      => [
+            'id'                => (int) $client->id,
+            'name'              => $client->name,
+            'company_name'      => $client->company_name,
+            'slug'              => $client->slug,
+            'user_id'           => $client->user_id === null ? null : (int) $client->user_id,
+            'is_active'         => (bool) $client->is_active,
+            'contract_sistemas' => $sistemas,
+            'tienda_contratada' => $tienda_contratada,
+            'sistema'           => [
                 'spa_url'              => $this->vacio_a_null($resolutor->resolve_spa_url($client)),
                 'api_url'              => $this->vacio_a_null($resolutor->resolve_base_url($client)),
                 'path'                 => $api === null ? null : $api->path,
@@ -3881,9 +3905,10 @@ class ClaudeImplementationOpsController extends Controller
      |============================================================================================= */
 
     /**
-     * Manda (o simula) el mail de un hito de la implementación al dueño del negocio: bienvenida, sistema
-     * instalado, acceso, fotos, categorías o sistema listo. Cada uno lleva la línea de progreso con el
-     * estado real de las ocho etapas.
+     * Manda (o simula) el mail de un hito de la implementación al dueño del negocio: bienvenida, instalando
+     * (formulario recibido), sistema instalado y acceso (los dos de antes del 14/10/2026, por compatibilidad),
+     * fotos, categorías o listo (la entrega). Cada uno lleva la línea de progreso con el estado real de las
+     * ocho etapas.
      *
      * 🔴 ESTE ENDPOINT SOLO ARMA LA RESPUESTA Y PONE LOS FRENOS. El armado del mail, el envío, la casilla
      * y el registro viven en `ImplementacionMailService`: acá no hay ni una regla de qué dice cada mail ni

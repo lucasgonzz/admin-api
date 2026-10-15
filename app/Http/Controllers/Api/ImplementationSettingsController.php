@@ -5,9 +5,12 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Admin;
 use App\Models\AdminSetting;
+use App\Services\DemoCredentialsProbeService;
 use App\Services\ImplementationSettings;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 /**
  * Configuración del flujo de implementaciones: admin asignado por defecto,
@@ -38,7 +41,30 @@ class ImplementationSettingsController extends Controller
         'implementation_google_cuota_demo',
         'implementation_serper_api_key_default',
         'implementation_serper_api_key_demo',
+        // Credenciales de prueba de las demos (Zipnova y Mercado Pago): los cuerpos de show_all()
+        // las leen del memo, y sin esto serían cinco consultas más.
+        'implementation_zipnova_demo_api_token',
+        'implementation_zipnova_demo_api_secret',
+        'implementation_zipnova_demo_account_id',
+        'implementation_mercadopago_demo_access_token',
+        'implementation_mercadopago_demo_public_key',
     ];
+
+    /**
+     * Formato de una credencial que no se conoce: cualquier cosa sin espacios ni caracteres de
+     * control. Es lo que ataja el error de pegado típico (un salto de línea o un espacio en el
+     * medio), sin atarse a un largo o un alfabeto que Zipnova puede cambiar.
+     *
+     * @var string
+     */
+    const REGEX_CREDENCIAL_OPACA = '/^[^\s\x00-\x1F\x7F]+$/';
+
+    /**
+     * Mensaje de validación cuando una credencial de Zipnova trae espacios o saltos de línea.
+     *
+     * @var string
+     */
+    const MENSAJE_CREDENCIAL_OPACA = 'La credencial no puede tener espacios ni saltos de línea: revisá que se haya copiado entera y sin nada de más.';
 
     /**
      * Mensaje de validación cuando en un campo de Serper se pega una API key de Google.
@@ -82,6 +108,8 @@ class ImplementationSettingsController extends Controller
      *   implementation-google-cuota-demo      => { cuota: int }
      *   implementation-serper-api-key-default => { api_key: string }
      *   implementation-serper-api-key-demo    => { api_key: string }  (la guardada, sin caer a la de clientes)
+     *   implementation-zipnova-demo           => { cargada, api_token_cola, api_secret_cargado, account_id, ilegible }  (nunca el valor)
+     *   implementation-mercadopago-demo       => { cargada, access_token_cola, public_key_cola, public_key_cargada, tipo_access_token, ilegible }  (nunca el valor)
      *
      * Los valores salen de los mismos métodos que usan las rutas de a uno, así que los fallbacks
      * (15, 30, 60, 300, 100, cadena vacía) no están duplicados acá y no pueden desincronizarse.
@@ -110,6 +138,9 @@ class ImplementationSettingsController extends Controller
                 'implementation-google-cuota-demo'      => ['cuota' => ImplementationSettings::get_google_cuota_demo()],
                 'implementation-serper-api-key-default' => ['api_key' => ImplementationSettings::get_serper_api_key_default()],
                 'implementation-serper-api-key-demo'    => ['api_key' => ImplementationSettings::get_serper_api_key_demo_stored()],
+                // Credenciales de prueba de las demos: SOLO el estado y la cola, jamás el valor.
+                'implementation-zipnova-demo'           => ImplementationSettings::estado_zipnova_demo(),
+                'implementation-mercadopago-demo'       => ImplementationSettings::estado_mercadopago_demo(),
             ],
         ], 200);
     }
@@ -556,5 +587,207 @@ class ImplementationSettingsController extends Controller
         ]);
 
         return (string) ($validated['api_key'] ?? '');
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // Credenciales de PRUEBA de Zipnova y de Mercado Pago de las demos (misión cruzada
+    // credenciales-demo-zipnova-mp, 14/10/2026).
+    //
+    // 🔴 A diferencia de las claves de Serper de arriba, acá NINGÚN GET devuelve el valor: solo el
+    // estado (cargada o no) y la cola de 4 caracteres. Se guardan cifradas (ver el bloque de
+    // ImplementationSettings) y la pantalla nunca se rellena con lo guardado: se escribe una
+    // credencial nueva para reemplazarla, o se borra. Es lo que impide que un screenshot, la
+    // pestaña Red del navegador o un log del proxy contengan una credencial de pagos.
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Estado de las credenciales de Zipnova de las demos. Jamás devuelve el token ni el secret.
+     *
+     * @return JsonResponse { cargada, api_token_cola, api_secret_cargado, account_id, ilegible }
+     */
+    public function get_zipnova_demo(): JsonResponse
+    {
+        return response()->json(ImplementationSettings::estado_zipnova_demo(), 200);
+    }
+
+    /**
+     * Guarda, reemplaza o borra las credenciales de Zipnova de las demos.
+     *
+     * Cuerpo:
+     *  - api_token, api_secret: los valores NUEVOS. Ausente o null = se conserva lo guardado.
+     *  - account_id: opcional, numérico (el id de la cuenta de Zipnova). Ausente o null = se conserva.
+     *  - borrar: true = borra las tres y no mira el resto.
+     *
+     * Zipnova necesita token Y secret: si después de aplicar lo que llegó no quedan los dos
+     * cargados (la primera vez, o si lo guardado era ilegible), se rechaza con 422 en lugar de
+     * dejar un par a medias que el demo-setup ignoraría sin avisar. Una vez cargados los dos, se
+     * puede cambiar uno solo.
+     *
+     * Sin credenciales las demos siguen como siempre: el demo-setup no manda los campos y
+     * empresa-api usa lo que tenga en su .env (ZIPNOVA_DEMO_*).
+     *
+     * La respuesta es la misma que la del GET: nunca el valor.
+     *
+     * @param Request $request
+     *
+     * @return JsonResponse
+     */
+    public function update_zipnova_demo(Request $request): JsonResponse
+    {
+        $datos = $request->validate([
+            'borrar'     => ['sometimes', 'nullable', 'boolean'],
+            'api_token'  => ['bail', 'sometimes', 'nullable', 'string', 'max:255', 'regex:' . self::REGEX_CREDENCIAL_OPACA],
+            'api_secret' => ['bail', 'sometimes', 'nullable', 'string', 'max:255', 'regex:' . self::REGEX_CREDENCIAL_OPACA],
+            'account_id' => ['bail', 'sometimes', 'nullable', 'regex:/^[0-9]{1,20}$/'],
+        ], [
+            'api_token.regex'  => self::MENSAJE_CREDENCIAL_OPACA,
+            'api_secret.regex' => self::MENSAJE_CREDENCIAL_OPACA,
+            'account_id.regex' => 'El id de cuenta de Zipnova es un número.',
+        ]);
+
+        // Borrar gana sobre todo lo demás: vacía las tres keys y devuelve el estado (cargada: false).
+        if (! empty($datos['borrar'])) {
+            ImplementationSettings::borrar_credenciales(ImplementationSettings::KEYS_ZIPNOVA_DEMO);
+
+            return response()->json(ImplementationSettings::estado_zipnova_demo(), 200);
+        }
+
+        $api_token  = $datos['api_token'] ?? null;
+        $api_secret = $datos['api_secret'] ?? null;
+        $account_id = $datos['account_id'] ?? null;
+
+        // Un PUT que no trae nada para guardar es un error, no un borrado (para eso está `borrar`).
+        if ($api_token === null && $api_secret === null && $account_id === null) {
+            throw ValidationException::withMessages([
+                'api_token' => ['No se mandó ningún dato para guardar.'],
+            ]);
+        }
+
+        // Lo que quedaría cargado después de aplicar el PUT: lo nuevo, o lo que ya estaba.
+        $guardadas = ImplementationSettings::get_zipnova_demo_credenciales();
+        $token_final  = $api_token ?? $guardadas['api_token'];
+        $secret_final = $api_secret ?? $guardadas['api_secret'];
+
+        if ($token_final === '' || $secret_final === '') {
+            throw ValidationException::withMessages([
+                'api_token' => ['Zipnova necesita el API Token y el API Secret juntos: cargá los dos.'],
+            ]);
+        }
+
+        DB::transaction(function () use ($api_token, $api_secret, $account_id) {
+            if ($api_token !== null) {
+                AdminSetting::set(ImplementationSettings::KEYS_ZIPNOVA_DEMO['api_token'], ImplementationSettings::cifrar_credencial($api_token));
+            }
+
+            if ($api_secret !== null) {
+                AdminSetting::set(ImplementationSettings::KEYS_ZIPNOVA_DEMO['api_secret'], ImplementationSettings::cifrar_credencial($api_secret));
+            }
+
+            // El id de cuenta no es secreto: va en claro.
+            if ($account_id !== null) {
+                AdminSetting::set(ImplementationSettings::KEYS_ZIPNOVA_DEMO['account_id'], (string) $account_id);
+            }
+        });
+
+        return response()->json(ImplementationSettings::estado_zipnova_demo(), 200);
+    }
+
+    /**
+     * Prueba las credenciales de Zipnova cargadas contra Zipnova (GET /v2/accounts, solo lectura).
+     *
+     * Siempre responde 200 con el resultado de la prueba: que las credenciales no autentiquen es
+     * un RESULTADO, no un error de este endpoint.
+     *
+     * @param DemoCredentialsProbeService $probe
+     *
+     * @return JsonResponse { cargada, autentica, cuenta, motivo, aviso }
+     */
+    public function probar_zipnova_demo(DemoCredentialsProbeService $probe): JsonResponse
+    {
+        return response()->json($probe->probar_zipnova(), 200);
+    }
+
+    /**
+     * Estado de las credenciales de Mercado Pago de las demos. Jamás devuelve el access token completo.
+     *
+     * @return JsonResponse { cargada, access_token_cola, public_key_cola, public_key_cargada, tipo_access_token, ilegible }
+     */
+    public function get_mercadopago_demo(): JsonResponse
+    {
+        return response()->json(ImplementationSettings::estado_mercadopago_demo(), 200);
+    }
+
+    /**
+     * Guarda, reemplaza o borra las credenciales de Mercado Pago de las demos.
+     *
+     * Cuerpo: access_token y public_key (los valores NUEVOS; ausente o null = se conserva lo
+     * guardado) y borrar (true = borra las dos). Mismas reglas de par que Zipnova: tienen que quedar
+     * cargadas las dos. Formato: las credenciales de Mercado Pago empiezan con TEST- (de prueba) o
+     * APP_USR- (de producción), y siguen con al menos 20 caracteres.
+     *
+     * @param Request $request
+     *
+     * @return JsonResponse
+     */
+    public function update_mercadopago_demo(Request $request): JsonResponse
+    {
+        $datos = $request->validate([
+            'borrar'       => ['sometimes', 'nullable', 'boolean'],
+            'access_token' => ['bail', 'sometimes', 'nullable', 'string', 'max:255', 'regex:/^(TEST|APP_USR)-[A-Za-z0-9_-]{20,}$/'],
+            'public_key'   => ['bail', 'sometimes', 'nullable', 'string', 'max:255', 'regex:/^(TEST|APP_USR)-[A-Za-z0-9-]{20,}$/'],
+        ], [
+            'access_token.regex' => 'El Access Token de Mercado Pago empieza con TEST- (de prueba) o APP_USR- y tiene al menos 20 caracteres más, sin espacios.',
+            'public_key.regex'   => 'La Public Key de Mercado Pago empieza con TEST- (de prueba) o APP_USR- y tiene al menos 20 caracteres más, sin espacios.',
+        ]);
+
+        if (! empty($datos['borrar'])) {
+            ImplementationSettings::borrar_credenciales(ImplementationSettings::KEYS_MERCADOPAGO_DEMO);
+
+            return response()->json(ImplementationSettings::estado_mercadopago_demo(), 200);
+        }
+
+        $access_token = $datos['access_token'] ?? null;
+        $public_key   = $datos['public_key'] ?? null;
+
+        if ($access_token === null && $public_key === null) {
+            throw ValidationException::withMessages([
+                'access_token' => ['No se mandó ningún dato para guardar.'],
+            ]);
+        }
+
+        $guardadas    = ImplementationSettings::get_mercadopago_demo_credenciales();
+        $access_final = $access_token ?? $guardadas['access_token'];
+        $public_final = $public_key ?? $guardadas['public_key'];
+
+        if ($access_final === '' || $public_final === '') {
+            throw ValidationException::withMessages([
+                'access_token' => ['Mercado Pago necesita el Access Token y la Public Key juntos: cargá los dos.'],
+            ]);
+        }
+
+        DB::transaction(function () use ($access_token, $public_key) {
+            if ($access_token !== null) {
+                AdminSetting::set(ImplementationSettings::KEYS_MERCADOPAGO_DEMO['access_token'], ImplementationSettings::cifrar_credencial($access_token));
+            }
+
+            // La public key es pública por diseño: va en claro.
+            if ($public_key !== null) {
+                AdminSetting::set(ImplementationSettings::KEYS_MERCADOPAGO_DEMO['public_key'], $public_key);
+            }
+        });
+
+        return response()->json(ImplementationSettings::estado_mercadopago_demo(), 200);
+    }
+
+    /**
+     * Prueba el access token de Mercado Pago cargado contra Mercado Pago (GET /users/me, solo lectura).
+     *
+     * @param DemoCredentialsProbeService $probe
+     *
+     * @return JsonResponse { cargada, autentica, cuenta, motivo, aviso }
+     */
+    public function probar_mercadopago_demo(DemoCredentialsProbeService $probe): JsonResponse
+    {
+        return response()->json($probe->probar_mercadopago(), 200);
     }
 }

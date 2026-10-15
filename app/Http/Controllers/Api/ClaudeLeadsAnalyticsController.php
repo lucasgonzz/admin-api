@@ -11,6 +11,7 @@ use App\Models\LeadPipelineStatus;
 use App\Services\ClaudeLeadMetricsService;
 use App\Services\ClaudeLeadQueryService;
 use App\Services\LeadAiService;
+use App\Services\LeadOrigenService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -541,6 +542,17 @@ class ClaudeLeadsAnalyticsController extends Controller
             }
         }
 
+        /* Origen del lead: mismo criterio que el estado, un valor inválido devuelve la lista de
+           válidos en vez de un resultado vacío que parece un dato. */
+        $origen = ClaudeLeadQueryService::normalize_list($request->input('origen'));
+        foreach ($origen as $valor) {
+            if (! in_array($valor, LeadOrigenService::ORIGENES, true)) {
+                return $this->error_422('El origen "' . $valor . '" no existe.', [
+                    'origenes_validos' => LeadOrigenService::ORIGENES,
+                ]);
+            }
+        }
+
         $order_by  = $this->texto_con_default($request, 'order_by', 'id');
         $direction = $this->texto_con_default($request, 'order', 'asc');
         $limit     = ClaudeLeadQueryService::resolve_limit($request->input('limit'));
@@ -559,6 +571,7 @@ class ClaudeLeadsAnalyticsController extends Controller
 
         $filtros = [
             'status'               => $status,
+            'origen'               => $origen,
             'lead_ids'             => ClaudeLeadQueryService::normalize_int_list($request->input('lead_ids')),
             'created_from'         => ClaudeLeadQueryService::normalize_date_boundary($request->input('created_from'), false),
             'created_to'           => ClaudeLeadQueryService::normalize_date_boundary($request->input('created_to'), true),
@@ -1149,6 +1162,8 @@ class ClaudeLeadsAnalyticsController extends Controller
             'contract_usuarios_incluidos',
             'contract_usuarios_extra',
             'contract_perfiles_ecommerce',
+            // Plazo mínimo de la Suscripción (misión precios-dos-modalidades, 13/10/2026).
+            'contract_permanencia_meses',
         ];
         foreach ($enteros as $campo) {
             if (array_key_exists($campo, $lead) && $lead[$campo] !== null) {
@@ -1158,8 +1173,9 @@ class ClaudeLeadsAnalyticsController extends Controller
 
         /* El query builder devuelve las columnas JSON como string crudo (a diferencia de
            Eloquent, que las castea). Se decodifican acá para que la respuesta sea JSON de
-           verdad y no un string con JSON adentro. */
-        foreach (['contract_financiacion', 'contract_clausulas_particulares'] as $campo) {
+           verdad y no un string con JSON adentro. `contract_sistemas` (keys de los sistemas
+           contratados) es JSON desde la misión precios-dos-modalidades, 13/10/2026. */
+        foreach (['contract_financiacion', 'contract_clausulas_particulares', 'contract_sistemas'] as $campo) {
             if (array_key_exists($campo, $lead) && is_string($lead[$campo]) && $lead[$campo] !== '') {
                 $decoded = json_decode($lead[$campo], true);
                 if (json_last_error() === JSON_ERROR_NONE) {

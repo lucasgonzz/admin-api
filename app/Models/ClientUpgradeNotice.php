@@ -14,7 +14,7 @@ use Illuminate\Database\Eloquent\Model;
  * @property int         $client_version_upgrade_id Actualización que disparó el aviso.
  * @property int         $client_id                 Cliente al que se le avisó.
  * @property string|null $email                     Dirección a la que salió el mail.
- * @property string      $estado                    pendiente | enviando | enviado | sin_mail | sin_novedades | error
+ * @property string      $estado                    pendiente | enviando | enviado | sin_mail | sin_novedades | omitido | error
  * @property \Illuminate\Support\Carbon|null $dispatch_started_at Cuándo un worker reclamó este aviso.
  * @property string|null $whatsapp_message_id       wamid que devolvió Meta.
  * @property string|null $error                     Motivo legible, para `error` y para el WhatsApp que no salió.
@@ -73,6 +73,22 @@ class ClientUpgradeNotice extends Model
      * quién le avisamos?" la respuesta estaría mal.
      */
     const ESTADO_SIN_NOVEDADES = 'sin_novedades';
+
+    /**
+     * El aviso NO corresponde y no se mandó a propósito: el cliente tiene la implementación abierta
+     * (`implementations.status = in_progress`), o sea que todavía no recibió su sistema.
+     *
+     * 🔴 Desde el 14/10/2026 al cliente se le muestra el sistema UNA sola vez, en la entrega, ya con
+     * su información cargada. Antes de esa entrega se lo actualiza a la última versión, y un mail
+     * que dice "te actualizamos el sistema" a alguien que todavía no lo recibió no tiene sentido.
+     *
+     * Es terminal y está separado de `sin_mail`/`sin_novedades` a propósito: esos son avisos que
+     * quedaron DEBIENDO algo y `aviso-actualizacion:reintentar` los levanta; este no debe nada, y
+     * por eso el comando no lo levanta. Un reintento después de la entrega sería justo lo que no se
+     * quiere: le llegaría un "actualizamos tu sistema" por una actualización que él nunca vio. El
+     * motivo queda escrito en `error`.
+     */
+    const ESTADO_OMITIDO = 'omitido';
 
     /**
      * Falló de verdad: el mail reventó, o el aviso entero se cayó. El motivo queda en `error`.

@@ -754,6 +754,10 @@ class CobranzasMensualidadService
                 'cantidad_empleados'      => (int) $client->cantidad_empleados,
                 'tiene_ecommerce'         => (bool) $client->tiene_ecommerce,
                 'afip_cuit'               => $client->afip_cuit,
+                // Tilde "facturar a Consumidor Final (sin CUIT)": la fila lo necesita para que el
+                // confirm de "Emitir factura" diga a quién va a salir (misión
+                // mensualidad-consumidor-final, 13/10/2026).
+                'facturar_consumidor_final' => (bool) $client->facturar_consumidor_final,
                 // Teléfono del dueño, crudo tal como está cargado (misión cobranzas-mejoras,
                 // 18/9/2026): por si el frontend lo necesita para mostrarlo tal cual.
                 'phone'                   => $client->phone,

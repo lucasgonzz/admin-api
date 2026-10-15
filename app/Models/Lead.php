@@ -87,13 +87,20 @@ class Lead extends Model
         'closer_activo',
     ];
 
-    /** Dinámica de demo vigente en producción: Mail 1 con credenciales y videos por link. */
+    /**
+     * Dinámica de demo histórica: Mail 1 con credenciales y videos por link.
+     *
+     * 🔴 RETIRADA el 14/10/2026 (misión demo-solo-experiencia-nueva, decisión de Lucas): ningún
+     * lead puede estar en esta dinámica. La constante se conserva solo porque otros archivos y
+     * tests todavía la nombran; nada la puede volver a escribir (ver el hook `saving` de
+     * `booted()`) ni leer como vigente (ver `demo_experiencia_efectiva()`).
+     */
     public const EXPERIENCIA_ACTUAL = 'actual';
 
-    /** Dinámica nueva en construcción: página inmersiva, formulario, panel lateral y tour. */
+    /** Dinámica vigente de TODOS los leads: página inmersiva, formulario, panel lateral y tour. */
     public const EXPERIENCIA_NUEVA = 'nueva';
 
-    /** Valores válidos de la columna `demo_experiencia`. */
+    /** Valores históricos de la columna `demo_experiencia` (hoy el único vigente es 'nueva'). */
     public const EXPERIENCIAS = [self::EXPERIENCIA_ACTUAL, self::EXPERIENCIA_NUEVA];
 
     /** Perfil "dueño" del lead (§3.17): versión por defecto de la página inmersiva. */
@@ -136,14 +143,29 @@ class Lead extends Model
             if (empty($lead->address_3)) {
                 $lead->address_3 = 'Sucursal 3';
             }
+        });
 
-            // Dinámica de demo que le toca a este lead: se estampa al nacer, con el valor que
-            // tenga la setting global en ese momento, y no vuelve a cambiar solo. Ver el
-            // comentario de la migración: leer la setting en runtime le cambiaría el guion a
-            // leads que ya tienen demo agendada con la dinámica anterior.
-            if (empty($lead->demo_experiencia)) {
-                $lead->demo_experiencia = LeadDemoSettings::get_experiencia_default();
-            }
+        // 🔴 CANDADO TOTAL de la dinámica de demo (misión demo-solo-experiencia-nueva, 14/10/2026).
+        //
+        // Lucas retiró la dinámica 'actual': TODOS los leads, los que ya existen y los que nazcan,
+        // usan siempre la página de experiencia con su formulario, y pidió que no haya forma de
+        // que un lead no la use. Por eso el valor no se "estampa al nacer con la setting global"
+        // (como antes): se FUERZA a 'nueva' en cada guardado, creación incluida. Así ninguna
+        // escritura por Eloquent puede dejar la columna en 'actual', en null ni en un valor
+        // inventado: ni un `Lead::create(['demo_experiencia' => 'actual'])`, ni un controller viejo,
+        // ni el SPA anterior que todavía ofrecía la opción, ni un script de mantenimiento.
+        //
+        // Es la primera de tres capas, a propósito redundantes:
+        //  1. Este hook (escritura por Eloquent).
+        //  2. `demo_experiencia_efectiva()` (lectura): devuelve siempre 'nueva' sin mirar la
+        //     columna, así que un UPDATE directo que se salte este hook igual no cambia el
+        //     comportamiento del lead.
+        //  3. `LeadController::set_demo_experiencia_json` y `LeadDemoSettings` (puertas de la API
+        //     y de la configuración) rechazan o ignoran 'actual'.
+        // Solo se toca `demo_experiencia`. Los `DB::table()->update` directos no pasan por acá y no
+        // se tocan (los cubre la capa 2).
+        static::saving(function (Lead $lead) {
+            $lead->demo_experiencia = self::EXPERIENCIA_NUEVA;
         });
 
         // Auto-activación de la verificación de mensajes al ENTRAR a la ventana de verificación
@@ -374,6 +396,13 @@ class Lead extends Model
         // Cada cuántos meses se actualiza la mensualidad por IPC (misión modulo-cobranzas,
         // 18/9/2026). Int porque va al PDF en letras y se copia al cliente para hacer cuentas.
         'contract_meses_actualizacion'       => 'integer',
+
+        // Modalidad del contrato (misión precios-dos-modalidades, 13/10/2026). `contract_modalidad`
+        // no lleva cast: es texto ('licencia' | 'suscripcion' | null). Los sistemas contratados son
+        // un JSON de keys de CotizadorSettings::SISTEMAS, y el plazo mínimo de la Suscripción va a
+        // int porque el PDF lo escribe en letras con LeadContractPdfService::meses_en_letras().
+        'contract_sistemas'                  => 'array',
+        'contract_permanencia_meses'         => 'integer',
 
         // Foto de la cotización del sistema hecha desde la solapa Contrato (misión
         // cotizador-lead-mercado-pago, 22/9/2026): [{key, label, precio_usd, precio_ars}].
@@ -1016,6 +1045,17 @@ class Lead extends Model
     }
 
     /**
+     * Conversiones que se le mandaron (o se le van a mandar) a Meta por este lead, si vino de un
+     * anuncio Click-to-WhatsApp: una fila por evento. Ver MetaConversionesService.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function eventos_meta()
+    {
+        return $this->hasMany(LeadEventoMeta::class, 'lead_id')->orderBy('id');
+    }
+
+    /**
      * Mensajes de la conversación WhatsApp (lead, setter, sugerencias de Claude).
      *
      * @return \Illuminate\Database\Eloquent\Relations\HasMany
@@ -1368,21 +1408,24 @@ class Lead extends Model
     /**
      * Dinámica de demo efectiva de este lead (grupo 293, prompt 01).
      *
-     * Devuelve el valor de la columna `demo_experiencia` si es uno de los válidos
-     * (self::EXPERIENCIAS); en cualquier otro caso (null, string vacío, valor desconocido)
-     * devuelve self::EXPERIENCIA_ACTUAL. Este fallback es la regla de seguridad del interruptor:
-     * ante cualquier duda, el lead recibe la dinámica que hoy funciona en producción, nunca una
-     * a medio construir.
+     * 🔴 Desde el 14/10/2026 (misión demo-solo-experiencia-nueva) devuelve SIEMPRE
+     * self::EXPERIENCIA_NUEVA, sin mirar la columna `demo_experiencia`. Antes devolvía el valor de
+     * la columna si era uno de los válidos y caía a 'actual' ante null o basura ("ante la duda, la
+     * dinámica que funciona en producción"); esa regla de seguridad se dio vuelta: la dinámica
+     * 'actual' está retirada, así que ante cualquier duda —columna null, 'actual', valor
+     * inventado, una fila que un UPDATE directo dejó mal— el lead usa la página de experiencia.
      *
-     * @return string
+     * Es la capa de LECTURA del candado (la de escritura es el hook `saving` de `booted()`): si
+     * alguien saca el forzado de arriba, o escribe la columna por fuera de Eloquent, el
+     * comportamiento del lead no cambia. Todo lo que decide por dinámica —y hay mucho: los
+     * comandos de ciclo de demo, el agente, el payload del setup— pasa por acá o por
+     * usa_experiencia_demo_nueva().
+     *
+     * @return string Siempre self::EXPERIENCIA_NUEVA.
      */
     public function demo_experiencia_efectiva(): string
     {
-        if (in_array($this->demo_experiencia, self::EXPERIENCIAS, true)) {
-            return $this->demo_experiencia;
-        }
-
-        return self::EXPERIENCIA_ACTUAL;
+        return self::EXPERIENCIA_NUEVA;
     }
 
     /**
