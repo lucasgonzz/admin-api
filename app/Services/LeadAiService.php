@@ -9408,6 +9408,17 @@ BLOQUE_DEL_MANUAL;
          * demo" que manda ese botón como un sí. */
         $estado_pagina = $this->describir_estado_de_la_pagina($lead, $ahora);
 
+        /* La frase que el agente le dice al lead cuando acepta. Sale de las settings, nunca
+         * escrita a mano: ver frase_de_la_reserva(). El fin REAL es el de la demo ya asignada si la
+         * tiene vigente, y el de la ventana prevista si todavía no. */
+        $fin_para_la_frase = null;
+        if ($tiene_demo_asignada && ! $demo_asignada_vencida) {
+            $fin_para_la_frase = self::time_string_to_hhmm($lead->demo_end_time);
+        } elseif ($prevista['fin'] !== null) {
+            $fin_para_la_frase = $prevista['fin']->format('H:i');
+        }
+        $frase_de_la_reserva = $this->frase_de_la_reserva($fin_para_la_frase);
+
         $bloque = "\n\nDEMO DIRECTA (dinamica nueva -- la demo se hace AHORA, sin horarios):\n"
             . "  Su pagina (copiar textual; se puede pasar en cualquier momento): {$url_pagina}\n"
             . "  Estado de su pagina: {$estado_pagina}\n"
@@ -9423,8 +9434,8 @@ BLOQUE_DEL_MANUAL;
             . "    bloque dice que ya abrio su pagina, podes nombrarlo (\"vi que le pegaste una mirada\").\n"
             . "  - Si el lead pide la demo (por ejemplo \"" . LeadDemoSettings::get_cta_whatsapp_texto() . "\", que es lo que\n"
             . "    manda el boton de su pagina, o cualquier frase equivalente), es un SI: en el mismo mensaje confirmale que la\n"
-            . "    haga desde una computadora, en un lugar tranquilo y con una hora disponible, y devolve agendar_demo:\n"
-            . "    {\"ahora\": true} con los dos links y el pedido del mail, como en cualquier aceptacion.\n"
+            . "    haga desde una computadora y en un lugar tranquilo, decile que " . $frase_de_la_reserva . ", y devolve\n"
+            . "    agendar_demo: {\"ahora\": true} con los dos links y el pedido del mail, como en cualquier aceptacion.\n"
             . "  - Para ofrecerla: \"si queres, te la puedo tener lista en diez minutos\". Sin hora, sin grilla, sin preguntar\n"
             . "    horarios. Si el lead pregunta cuando, la respuesta es ahora mismo (o cuando se siente en la computadora).\n"
             . "  - Cuando acepta hacerla ahora: devolve agendar_demo: {\"ahora\": true} y en el MISMO mensaje pasale los dos\n"
@@ -9440,6 +9451,107 @@ BLOQUE_DEL_MANUAL;
             . "  - No existen usuario ni contrasena: todo el acceso pasa por el boton de la pagina.";
 
         return $bloque;
+    }
+
+    /**
+     * Qué le decimos al lead sobre cuánto dura la demo y cuánto se la reservamos (misión
+     * demo-dos-horas-y-experiencia, 13/10/2026).
+     *
+     * Hasta hoy la regla del "sí" decía *"que la haga desde una computadora, en un lugar tranquilo
+     * y con una hora disponible"* — una hora escrita a mano, que además pedía al lead que se
+     * reservara él una hora, cuando lo que le estábamos reservando nosotros eran seis. Lucas lo dio
+     * vuelta: lo que se COMUNICA es que dura poco, y aparte que el turno es generoso.
+     *
+     * La frase sale ENTERA de las settings. Ninguno de los dos números se escribe acá:
+     *
+     *   - la duración, de `LeadDemoSettings::get_duracion_minutos()` (60 hoy);
+     *   - el tope de la reserva, de `get_ventana_extendida_max_horas()` (2 hoy);
+     *   - la hora de fin, del turno real que le pasa el llamador.
+     *
+     * 🔴 Y los dos van en LETRAS, no en dígitos, y esto no es estilo: es una restricción técnica.
+     * `LeadMessage::texto_menciona_una_hora()` —que gobierna la credencial de "oferta flexible" y
+     * frena para revisión humana el mensaje que nombra una hora— tiene un patrón para el sufijo
+     * `hs`/`h` pegado a un número, así que un "2 hs" o un "2hs" en el texto del lead lo retiene.
+     * "dos horas" y "menos de una hora" no disparan ningún patrón. Si alguna vez hay que escribir
+     * un número de horas en un mensaje al lead, se escribe con `horas_en_letras()`.
+     *
+     * La hora de fin es la única parte opcional: si el lead todavía no tiene turno y tampoco hay
+     * instancia prevista, la frase se arma sin ella. Nunca se inventa una hora.
+     *
+     * Sobre el "menos de una hora" con la duración en 60 exactos: es el texto que pidió Lucas y
+     * describe bien la demo real (un recorrido guiado que no llega a la hora); los 60 minutos son
+     * el techo del turno, no su duración medida. Si alguna vez la duración sube de 60, la frase se
+     * adapta al siguiente tope en horas y sigue siendo verdadera.
+     *
+     * @param string|null $fin_hhmm Hora de fin real del turno en "HH:MM", o null si no hay ninguna.
+     *
+     * @return string Frase sin mayúscula inicial ni punto final: se incrusta en la regla del "sí".
+     */
+    private function frase_de_la_reserva(?string $fin_hhmm): string
+    {
+        $duracion_minutos = LeadDemoSettings::get_duracion_minutos();
+
+        if ($duracion_minutos <= 60) {
+            $duracion_en_palabras = 'dura menos de una hora';
+        } else {
+            /* Siguiente hora entera ESTRICTAMENTE mayor que la duración, así "menos de X" nunca
+             * miente: 90 min -> "menos de dos horas", 120 min -> "menos de tres horas". */
+            $horas_duracion       = (int) floor($duracion_minutos / 60) + 1;
+            $duracion_en_palabras = 'dura menos de ' . self::horas_en_letras($horas_duracion);
+        }
+
+        $reserva_en_palabras = self::horas_en_letras(LeadDemoSettings::get_ventana_extendida_max_horas());
+
+        $frase = $duracion_en_palabras . '; la tenés reservada ' . $reserva_en_palabras;
+        if ($fin_hhmm !== null && trim($fin_hhmm) !== '') {
+            $frase .= ', hasta las ' . trim($fin_hhmm);
+        }
+
+        return '"' . $frase . ', para que la recorras tranquilo"';
+    }
+
+    /**
+     * Una cantidad de horas escrita en letras: 1 -> "una hora", 2 -> "dos horas", 12 -> "doce
+     * horas".
+     *
+     * Cubre 1 a 12 porque ése es el clamp de la ventana extendida
+     * (`LeadDemoSettings::MIN_HORAS_VENTANA` a `MAX_HORAS_VENTANA`) y también alcanza para la
+     * duración, que está acotada a 240 minutos (`MAX_MINUTOS`) y como mucho da "cinco horas".
+     *
+     * 🔴 Existe por una razón concreta y no por estilo: lo que sale en un mensaje al lead no puede
+     * nombrar un número de horas en dígitos, porque `LeadMessage::texto_menciona_una_hora()` lo
+     * retiene para revisión humana ("2 hs" entra por el patrón del sufijo). Ver
+     * `frase_de_la_reserva()`.
+     *
+     * Fuera de rango devuelve los dígitos, que es el lado seguro acá: una frase rara que alguien
+     * va a ver es mejor que una frase muda. Con el clamp puesto no debería pasar nunca.
+     *
+     * @param int $horas Cantidad de horas.
+     *
+     * @return string
+     */
+    private static function horas_en_letras(int $horas): string
+    {
+        $numeros = [
+            1  => 'una',
+            2  => 'dos',
+            3  => 'tres',
+            4  => 'cuatro',
+            5  => 'cinco',
+            6  => 'seis',
+            7  => 'siete',
+            8  => 'ocho',
+            9  => 'nueve',
+            10 => 'diez',
+            11 => 'once',
+            12 => 'doce',
+        ];
+
+        if (! isset($numeros[$horas])) {
+            return $horas . ($horas === 1 ? ' hora' : ' horas');
+        }
+
+        return $numeros[$horas] . ($horas === 1 ? ' hora' : ' horas');
     }
 
     /**
