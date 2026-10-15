@@ -42,7 +42,7 @@ class DemoIngresoTokenService
      * El vencimiento es el mayor entre dos pisos (decisión de Lucas, 11/9/2026):
      *   1. demo_date + demo_end_time + gracia_minutos_post (respeta un fin manual amplio, ej. una
      *      demo_flexible con rango de todo el día).
-     *   2. demo_date + demo_start_time + bloqueo_real_minutos (180 minutos por defecto).
+     *   2. demo_date + demo_start_time + bloqueo_real_minutos (120 minutos por defecto desde el 13/10/2026; antes 180).
      * Antes solo existía el primero: el link dejaba de servir para canjear una sesión nueva a los
      * ~70 minutos del inicio (duracion + gracia), aunque al lead se le siga comunicando "una hora"
      * a propósito (ver LeadDemoSettings::KEY_BLOQUEO_REAL_MINUTOS). Como demo_end_time y

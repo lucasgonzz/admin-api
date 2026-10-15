@@ -259,7 +259,8 @@ class LeadDemoSettings
      * exactamente DEFAULT_VENTANA_EXTENDIDA_MAX_HORAS. Con el bloqueo en 180 la instancia quedaba
      * tomada una hora más que lo prometido, sin que nadie pudiera usarla y sin que el lead lo
      * supiera: hora muerta pura. Con 120 el piso del bloqueo y el techo de la ventana cierran en el
-     * mismo instante, así que la reserva dura lo que se dijo y ni un minuto más.
+     * mismo instante, así que la reserva dura lo que se dijo (más los diez minutos de gracia de
+     * siempre, que cubren al lead que todavía está adentro).
      *
      * No confundir con DEFAULT_DURACION_MINUTOS, que sigue en 60 y mide otra cosa (cuánto dura la
      * demo, que es lo que gobierna el check de fin, el hold del closer y la grilla).

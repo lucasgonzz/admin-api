@@ -915,7 +915,7 @@ class DemoExperienciaController extends Controller
         }
 
         // Límite de "activo" (11/9/2026, decisión de Lucas): el mayor entre "fin de la demo +
-        // gracia" (lo que ya había) e "inicio + bloqueo_real_minutos" (180 por defecto). Esta
+        // gracia" (lo que ya había) e "inicio + bloqueo_real_minutos" (120 por defecto desde el 13/10/2026; antes 180). Esta
         // función es, por su propio docblock, el ÚNICO lugar que decide si el lead puede entrar —
         // sin este piso, un lead que llega tarde o quiere reingresar veía "vencido" acá mismo, antes
         // de que el vencimiento del token (ya corregido en DemoIngresoTokenService::

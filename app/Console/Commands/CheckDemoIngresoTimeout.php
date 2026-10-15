@@ -375,7 +375,8 @@ class CheckDemoIngresoTimeout extends Command
      * usan `DemoDirectaService::fines_solapados()` (para decidir si la instancia está libre para
      * otro lead), `DemoIngresoTokenService::calcular_expiracion()` (hasta cuándo vale el link) y
      * `DemoExperienciaController::build_turno()` (hasta cuándo el botón deja entrar). Con los
-     * valores del 13/10/2026 —duración 60, gracia 10, bloqueo real 120— da inicio + 130 minutos.
+     * valores del 13/10/2026 —ventana de dos horas (fin nominal = inicio + 120), gracia 10, bloqueo
+     * real 120— da inicio + 130 minutos.
      *
      * @param Lead|null $lead Lead con su turno cargado.
      *
