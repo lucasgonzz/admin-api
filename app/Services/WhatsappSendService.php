@@ -45,6 +45,111 @@ class WhatsappSendService
     public $last_send_status_code = null;
 
     /**
+     * Config de WhatsApp por la que sale lo que mande ESTA instancia, o null para el principal.
+     *
+     * 🔴 Es un SETTER y no un argumento del constructor, y no se puede "simplificar" a uno.
+     * Este servicio se instancia en ~30 lugares del repo, con `new WhatsappSendService()` y con
+     * `app(WhatsappSendService::class)`, y además se inyecta por el contenedor en los `handle()` de
+     * varios jobs y en los constructores de otros servicios. Un parámetro de constructor —aun con
+     * default— obliga a que el contenedor sepa resolverlo y rompe toda esa superficie de una,
+     * incluidos los dobles de prueba que extienden esta clase sin repetir el constructor.
+     *
+     * Con el setter, el default es el comportamiento de siempre: quien no dice nada sigue saliendo
+     * por el número principal, exactamente como antes del 13/10/2026. Solo el canal del asistente
+     * —el job del dueño y los informes de la mañana— pide explícitamente el otro.
+     *
+     * @var WhatsappConfig|null
+     */
+    private $config_destino = null;
+
+    /**
+     * Fija por qué número sale lo que mande esta instancia de acá en adelante.
+     *
+     * Devuelve `$this` para poder encadenar (`$sender->para($config)->send_text(...)`), que es como
+     * lo usan los llamadores: deja el destino a la vista en la misma línea del envío, en vez de en
+     * una línea anterior que se puede perder en un refactor.
+     *
+     * @param WhatsappConfig $config Fila de `whatsapp_config` por la que hay que salir.
+     *
+     * @return self
+     */
+    public function para(WhatsappConfig $config): self
+    {
+        $this->config_destino = $config;
+
+        return $this;
+    }
+
+    /**
+     * Fija el destino por propósito (`principal` / `asistente`).
+     *
+     * 🔴 Si ese propósito todavía no está LISTO (sin fila, o —para el asistente— con la fila a medias:
+     * falta la clave o el secreto del webhook; ver {@see WhatsappConfig::canalListo()}), el destino
+     * queda en el PRINCIPAL, y eso es lo que hace que esta misión no cambie nada hasta que el número
+     * nuevo esté terminado: mientras tanto, el canal sigue saliendo por el institucional como venía.
+     * Lo contrario —cortar el envío, o salir por un número que todavía no recibe— dejaría a los
+     * dueños sin respuesta o hablándole a un chat al que no pueden contestar. Queda en el log (nivel
+     * info, no warning: es el estado normal hasta que Lucas termine el alta) para poder reconstruir
+     * por qué número salió algo.
+     *
+     * @param string $proposito Uno de los WhatsappConfig::PROPOSITO_*.
+     *
+     * @return self
+     */
+    public function paraProposito(string $proposito): self
+    {
+        $config = WhatsappConfig::canalListo($proposito);
+
+        if ($config === null) {
+            Log::channel('daily')->info('WhatsappSendService: el número de ese propósito no está listo, sale por el principal.', [
+                'proposito' => $proposito,
+            ]);
+
+            $this->config_destino = null;
+
+            return $this;
+        }
+
+        return $this->para($config);
+    }
+
+    /**
+     * Phone Number ID de Meta por el que sale lo que mande esta instancia.
+     *
+     * Lo leen los llamadores que tienen que DEJAR ESCRITO por qué número salió un mensaje (hoy, el
+     * canal del asistente, que lo guarda en `client_assistant_messages.phone_number_id`). Es una
+     * lectura del destino y no del último envío: contesta "por dónde va a salir" y sirve igual
+     * antes y después de mandar.
+     *
+     * @return string|null Null si no hay config de destino ni principal, o si la fila no lo tiene.
+     */
+    public function phone_number_id_de_destino(): ?string
+    {
+        $config = $this->resolve_destino_config();
+        if ($config === null) {
+            return null;
+        }
+
+        $phone_number_id = trim((string) $config->phone_number_id);
+
+        return $phone_number_id !== '' ? $phone_number_id : null;
+    }
+
+    /**
+     * Config por la que hay que salir: la que fijó el llamador, o el número principal.
+     *
+     * @return WhatsappConfig|null
+     */
+    private function resolve_destino_config(): ?WhatsappConfig
+    {
+        if ($this->config_destino !== null) {
+            return $this->config_destino;
+        }
+
+        return WhatsappConfig::getActive();
+    }
+
+    /**
      * Envía un mensaje de soporte según kind y adjuntos (audio, imagen o texto).
      *
      * @param string         $to      Número destino E.164.
@@ -121,7 +226,10 @@ class WhatsappSendService
          * antes de resolve_send_context(), porque ese método ya corta a null en
          * test_mode y no expone el motivo hacia arriba.
          */
-        $active_config = WhatsappConfig::getActive();
+        /* 🔴 La fila por la que SALE este mensaje, no «la activa»: con dos números, el modo de prueba de
+         * uno no puede simular (ni dejar de simular) los envíos del otro. Misma fuente que
+         * `resolve_send_context()`. */
+        $active_config = $this->resolve_destino_config();
         if ($active_config && $active_config->is_active && $active_config->test_mode) {
             $normalized_to = WhatsappNormalizer::normalize($to);
             $to_digits = preg_replace('/\D+/', '', $normalized_to) ?? '';
@@ -414,7 +522,10 @@ class WhatsappSendService
          * porque ese método ya corta a null en test_mode y no expone el motivo hacia arriba, así
          * que el llamador no podría distinguir "no salió porque estamos probando" de un fallo real.
          */
-        $active_config = WhatsappConfig::getActive();
+        /* 🔴 La fila por la que SALE este mensaje, no «la activa»: con dos números, el modo de prueba de
+         * uno no puede simular (ni dejar de simular) los envíos del otro. Misma fuente que
+         * `resolve_send_context()`. */
+        $active_config = $this->resolve_destino_config();
         if ($active_config && $active_config->is_active && $active_config->test_mode) {
             $normalized_to = WhatsappNormalizer::normalize($to);
             $to_digits = preg_replace('/\D+/', '', $normalized_to) ?? '';
@@ -652,7 +763,10 @@ class WhatsappSendService
          * porque ese método ya corta a null en test_mode sin dejar motivo, y el llamador loguearía
          * "la foto no salió" sin nada adentro por algo que no es un fallo.
          */
-        $active_config = WhatsappConfig::getActive();
+        /* 🔴 La fila por la que SALE este mensaje, no «la activa»: con dos números, el modo de prueba de
+         * uno no puede simular (ni dejar de simular) los envíos del otro. Misma fuente que
+         * `resolve_send_context()`. */
+        $active_config = $this->resolve_destino_config();
         if ($active_config && $active_config->is_active && $active_config->test_mode) {
             $normalized_to = WhatsappNormalizer::normalize($to);
             $to_digits = preg_replace('/\D+/', '', $normalized_to) ?? '';
@@ -814,7 +928,10 @@ class WhatsappSendService
          * corta a null sin dejar motivo, y el llamador loguearía "la foto no salió" por algo que no
          * es un fallo. Acá además evita subirle un archivo real a Meta desde un entorno de prueba.
          */
-        $active_config = WhatsappConfig::getActive();
+        /* 🔴 La fila por la que SALE este mensaje, no «la activa»: con dos números, el modo de prueba de
+         * uno no puede simular (ni dejar de simular) los envíos del otro. Misma fuente que
+         * `resolve_send_context()`. */
+        $active_config = $this->resolve_destino_config();
         if ($active_config && $active_config->is_active && $active_config->test_mode) {
             $fake_message_id = 'test-' . (string) \Illuminate\Support\Str::uuid();
 
@@ -1449,18 +1566,26 @@ class WhatsappSendService
     /**
      * Configuración activa de Kapso para envíos salientes.
      *
+     * Sale por la config que fijó el llamador con {@see para()} / {@see paraProposito()}, y por el
+     * número PRINCIPAL si nadie dijo nada —que es el comportamiento de siempre—. Todo lo demás de
+     * este método (el `test_mode`, el aviso a los admins, el chequeo de credenciales vacías) es
+     * idéntico para los dos números: el canal del asistente no tiene reglas propias, tiene
+     * credenciales propias.
+     *
      * @param bool $skip_failure_notification Interno: ver {@see send_text()}.
      *
      * @return array{api_key: string, phone_number_id: string}|null
      */
     private function resolve_send_context(bool $skip_failure_notification = false): ?array
     {
-        $config = WhatsappConfig::getActive();
+        $config = $this->resolve_destino_config();
         if (! $config || ! $config->is_active) {
-            Log::channel('daily')->warning('WhatsappSendService: configuración inactiva o inexistente.');
+            Log::channel('daily')->warning('WhatsappSendService: configuración inactiva o inexistente.', [
+                'proposito' => $config !== null ? (string) $config->proposito : null,
+            ]);
             $this->notify_admins_of_failure(
                 'Configuración de WhatsApp',
-                'No hay configuración activa de WhatsApp (WhatsappConfig::getActive() es null o is_active=false). Ningún mensaje se está enviando.',
+                'No hay configuración activa de WhatsApp (ni la fijada con para()/paraProposito() ni WhatsappConfig::getActive()). Ningún mensaje se está enviando.',
                 $skip_failure_notification
             );
 
@@ -1479,10 +1604,19 @@ class WhatsappSendService
         $api_key = trim((string) $config->kapso_api_key);
         $phone_number_id = trim((string) $config->phone_number_id);
         if ($api_key === '' || $phone_number_id === '') {
-            Log::channel('daily')->warning('WhatsappSendService: kapso_api_key o phone_number_id vacíos.');
+            /* 🔴 El propósito va en el aviso porque con DOS números la pregunta que sigue a
+             * este fallo es "cuál de los dos", y sin esto se contesta entrando a la base. El
+             * `phone_number_id` no es un secreto (viaja en cada URL de Kapso); la `kapso_api_key` sí,
+             * y por eso de ella solo se dice si está vacía o no. */
+            Log::channel('daily')->warning('WhatsappSendService: kapso_api_key o phone_number_id vacíos.', [
+                'proposito'       => (string) $config->proposito,
+                'phone_number_id' => $phone_number_id !== '' ? $phone_number_id : '(vacío)',
+            ]);
             $this->notify_admins_of_failure(
                 'Configuración de WhatsApp',
-                'kapso_api_key o phone_number_id están vacíos en la configuración activa.',
+                'kapso_api_key o phone_number_id están vacíos en la configuración del número '
+                    . (string) $config->proposito . ' (phone_number_id: '
+                    . ($phone_number_id !== '' ? $phone_number_id : 'vacío') . ').',
                 $skip_failure_notification
             );
 

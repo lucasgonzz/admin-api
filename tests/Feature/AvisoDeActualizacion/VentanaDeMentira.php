@@ -20,12 +20,24 @@ class VentanaDeMentira extends WhatsappSessionWindowService
     public $abierta = false;
 
     /**
-     * @param string $phone
+     * Propósito con el que se pidió la ventana, en orden. `null` es el llamado de siempre (sin
+     * propósito): lo que se anota acá es lo que deja ver POR QUÉ NÚMERO midió el servicio de aviso.
+     *
+     * @var array<int, string|null>
+     */
+    public $propositos_pedidos = [];
+
+    /**
+     * @param string      $phone
+     * @param string|null $proposito Segundo parámetro opcional del servicio real: sin él, PHP 7.4 tira
+     *                               un E_WARNING por firma incompatible apenas se carga esta clase.
      *
      * @return array{open: bool, last_inbound_at: string|null, expires_at: string|null, origin: string|null}
      */
-    public function window_state(string $phone): array
+    public function window_state(string $phone, ?string $proposito = null): array
     {
+        $this->propositos_pedidos[] = $proposito;
+
         if (! $this->abierta) {
             return [
                 'open'            => false,

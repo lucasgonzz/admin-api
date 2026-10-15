@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Client;
 use App\Models\ClientAssistantMessage;
 use App\Models\ClientTemplate;
+use App\Models\WhatsappConfig;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -189,7 +190,17 @@ class AsistenteInformesService
             return $this->resultado($client, 'sin_informes', 0, 'No hay informes del día sin avisar.');
         }
 
-        $abierta = $this->ventana->is_open($telefono);
+        /* 🔴 **La ventana de 24 hs se mide sobre el número POR EL QUE SALE el informe** (misión
+         * asistente-segundo-numero, 15/10/2026). La ventana de Meta es por par de números: lo que el
+         * dueño le escribió al número de leads y clientes NO habilita texto libre por el número del
+         * asistente, que es por donde sale este informe cuando ese número está listo.
+         *
+         * `propositoEfectivoDelAsistente()` devuelve `asistente` solo cuando el número está listo
+         * (fila + clave + secreto del webhook) y `principal` mientras no, y `paraProposito()` de más
+         * abajo hace la MISMA elección: los dos tienen que coincidir o se mide un número y se manda por
+         * el otro. Por eso mientras el segundo número no exista la ventana se sigue midiendo como
+         * siempre y ninguna prueba existente cambia. */
+        $abierta = $this->ventana->is_open($telefono, WhatsappConfig::propositoEfectivoDelAsistente());
 
         if ($abierta) {
             $enviado = $this->enviar_como_texto($client, $telefono, $informes);
@@ -225,7 +236,9 @@ class AsistenteInformesService
             (string) $enviado['texto'],
             (string) $enviado['whatsapp_message_id'],
             $informes[0]['ai_conversation_id'],
-            ClientAssistantMessage::ESTADO_RESPONDIDO
+            ClientAssistantMessage::ESTADO_RESPONDIDO,
+            null,
+            $this->sender->phone_number_id_de_destino()
         );
 
         /* Paso dos: recién ahora, con el WhatsApp ya entregado, se marcan los informes. */
@@ -380,11 +393,19 @@ class AsistenteInformesService
     {
         $texto = $this->armar_texto($informes);
 
-        $whatsapp_message_id = $this->sender->send_text(
-            $telefono,
-            $texto,
-            'Informes de la mañana - cliente #' . $client->id
-        );
+        /* 🔴 Por el número del ASISTENTE (misión whatsapp-dos-numeros, 13/10/2026). El informe
+         * de la mañana es del asistente del dueño: tiene que caer en el mismo chat donde él le
+         * pregunta las cosas, porque la mitad del pedido de Lucas es justamente poder responderle
+         * citando el informe. Por el número institucional caería en otra conversación y la cita no
+         * resolvería nada. Sin fila de asistente, `paraProposito()` cae al principal y sale como
+         * antes. */
+        $whatsapp_message_id = $this->sender
+            ->paraProposito(WhatsappConfig::PROPOSITO_ASISTENTE)
+            ->send_text(
+                $telefono,
+                $texto,
+                'Informes de la mañana - cliente #' . $client->id
+            );
 
         if ($whatsapp_message_id === null) {
             return ['estado' => 'error', 'detalle' => 'Meta rechazó el texto: ' . (string) $this->sender->last_send_error];
@@ -453,13 +474,16 @@ class AsistenteInformesService
             return ['estado' => 'sin_plantilla', 'detalle' => 'Los informes no dejaron ningún texto para la variable de la plantilla.'];
         }
 
-        $whatsapp_message_id = $this->sender->send_template(
-            $telefono,
-            (string) $plantilla->template_name,
-            [$variable],
-            (string) $plantilla->language_code,
-            'Informes de la mañana - cliente #' . $client->id
-        );
+        // Por el número del asistente, igual que el texto libre: ver `enviar_como_texto()`.
+        $whatsapp_message_id = $this->sender
+            ->paraProposito(WhatsappConfig::PROPOSITO_ASISTENTE)
+            ->send_template(
+                $telefono,
+                (string) $plantilla->template_name,
+                [$variable],
+                (string) $plantilla->language_code,
+                'Informes de la mañana - cliente #' . $client->id
+            );
 
         if ($whatsapp_message_id === null) {
             return ['estado' => 'error', 'detalle' => 'Meta rechazó la plantilla: ' . (string) $this->sender->last_send_error];

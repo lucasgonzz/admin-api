@@ -62,9 +62,21 @@ use Illuminate\Support\Facades\Route;
 
 /*
 | Webhook Kapso / WhatsApp (público, verificación por firma HMAC)
+|
+| 🔴 Cubeta PROPIA (`throttle:whatsapp-webhook`) y no la de todo /api, desde el 13/10/2026:
+| por acá entran los mensajes de los DOS números —el institucional y el del asistente— y Kapso
+| pega desde una sola IP, así que con el limitador `api` los dos números se repartían 60 req/min
+| entre ellos y con el resto del tráfico de la API. Ver `RouteServiceProvider`.
+|
+| 🔴 Y el `withoutMiddleware('throttle:api')` NO es decorativo: el grupo `api` del Kernel ya trae
+| `throttle:api` puesto, y sin sacarlo aplican las DOS cubetas (la de 60/min por IP de todo /api y la
+| propia). Lo mismo que hace el webhook crudo de Meta, más abajo.
+|
+| La ruta, el verbo y el controlador NO cambian: Kapso sigue pegando al mismo lugar.
 */
 Route::post('webhook/whatsapp', [WhatsappWebhookController::class, 'receive'])
-    ->middleware('throttle:api');
+    ->withoutMiddleware('throttle:api')
+    ->middleware('throttle:whatsapp-webhook');
 
 /*
 | Webhook CRUDO de Meta (modalidad `kind: meta` de Kapso), SOLO atribución Click-to-WhatsApp.
