@@ -368,7 +368,7 @@ class PipelinePresenter
             if ($llamada) {
                 $clave        = $oportunidad->lead_id === null ? null : (int) $oportunidad->lead_id;
                 $json['call'] = $clave !== null && isset($llamadas[$clave])
-                    ? self::videollamada($llamadas[$clave])
+                    ? self::videollamada($llamadas[$clave]['ultima'], $llamadas[$clave]['resumida'])
                     : null;
             }
 
@@ -383,15 +383,15 @@ class PipelinePresenter
      |----------------------------------------------------------------------------------------- */
 
     /**
-     * La última `lead_calls` de cada lead de la lista, indexada por `lead_id`.
+     * Por cada lead de la lista, indexado por `lead_id`: su última `lead_calls` (`ultima`) y la
+     * última que ya tiene resumen (`resumida`, null si ninguna).
      *
      * Una sola consulta para todas las oportunidades (mismo criterio que `ultimas_actividades()`).
-     * Ordenada por `id` ascendente y pasada por `keyBy`, así la que queda por lead es la de `id`
-     * más alto: la última.
+     * Ordenada por `id` ascendente, así lo que queda por lead es lo de `id` más alto.
      *
      * @param array<int, int|null> $ids_de_lead
      *
-     * @return array<int, LeadCall>
+     * @return array<int, array{ultima: LeadCall, resumida: LeadCall|null}>
      */
     private function ultimas_llamadas(array $ids_de_lead)
     {
@@ -413,7 +413,15 @@ class PipelinePresenter
 
         $mapa = [];
         foreach ($filas as $fila) {
-            $mapa[(int) $fila->lead_id] = $fila;
+            $lead_id = (int) $fila->lead_id;
+            if (! isset($mapa[$lead_id])) {
+                $mapa[$lead_id] = ['ultima' => $fila, 'resumida' => null];
+            }
+
+            $mapa[$lead_id]['ultima'] = $fila;
+            if ($fila->call_summary !== null) {
+                $mapa[$lead_id]['resumida'] = $fila;
+            }
         }
 
         return $mapa;
@@ -423,16 +431,33 @@ class PipelinePresenter
      * Una videollamada del closer, para la ficha de la oportunidad.
      *
      * `transcript` y `call_summary.transcripcion_completa` dicen lo mismo (lo duplica
-     * `CallSummaryService` a propósito, para que el resumen se pueda leer solo). Viajan las dos:
-     * `transcript` existe también cuando el resumen no se pudo generar, que es justo el caso en el
-     * que Tomás más necesita poder leer la llamada cruda.
+     * `CallSummaryService` a propósito, para que el resumen se pueda leer solo). Viajan las dos
+     * porque son columnas independientes: hoy `CallSummaryService` escribe las dos en el mismo
+     * `update`, pero un resumen viejo sin `transcripcion_completa` (o una transcripción cargada
+     * por otro camino) igual se tiene que poder leer en la ficha.
      *
-     * @param LeadCall $llamada
+     * `previous_summary`: si la última llamada todavía no tiene resumen pero una anterior sí, viaja
+     * el de esa (id, fechas y resumen); si no, null. Es el caso frecuente de "En seguimiento": la
+     * primera llamada resumida y una segunda agendada. Sin esto Tomás perdía el resumen de la
+     * primera justo antes de la segunda.
+     *
+     * @param LeadCall      $llamada  La última.
+     * @param LeadCall|null $resumida La última con resumen.
      *
      * @return array<string, mixed>
      */
-    private static function videollamada(LeadCall $llamada)
+    private static function videollamada(LeadCall $llamada, LeadCall $resumida = null)
     {
+        $anterior = null;
+        if ($llamada->call_summary === null && $resumida !== null && (int) $resumida->id !== (int) $llamada->id) {
+            $anterior = [
+                'id'           => (int) $resumida->id,
+                'scheduled_at' => self::fecha($resumida->scheduled_at),
+                'started_at'   => self::fecha($resumida->started_at),
+                'call_summary' => $resumida->call_summary,
+            ];
+        }
+
         return [
             'id'           => (int) $llamada->id,
             'estado'       => self::texto_o_null($llamada->estado),
@@ -441,6 +466,7 @@ class PipelinePresenter
             'meet_url'     => self::texto_o_null($llamada->meet_url),
             'call_summary' => $llamada->call_summary,
             'transcript'   => self::texto_o_null($llamada->transcript),
+            'previous_summary' => $anterior,
         ];
     }
 

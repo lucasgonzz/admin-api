@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Pipelines;
 
+use App\Models\Admin;
 use App\Models\Lead;
 use App\Models\LeadCall;
 use App\Models\LeadMessage;
@@ -9,8 +10,10 @@ use App\Models\Pipeline;
 use App\Models\PipelineActivity;
 use App\Models\PipelineOpportunity;
 use App\Models\PipelineStage;
+use App\Services\Pipelines\PipelineOpportunityService;
 use Database\Seeders\PipelineAgentesSeeder;
 use Database\Seeders\PipelineLeadSeeder;
+use Illuminate\Support\Facades\DB;
 
 /**
  * La automatización del embudo "Leads" (misión embudo-lead-pipelines, 13/10/2026): que el tablero
@@ -46,6 +49,12 @@ class EmbudoDeLeadTest extends BaseDePipelines
         parent::setUp();
 
         $this->borrar_pipeline(PipelineLeadSeeder::SLUG);
+
+        /* El responsable de la tarjeta es el PRIMER admin con `is_closer`, y la base de testing
+           puede traer uno de antes (una migración vieja marca al admin 3). Sin esto, el test del
+           responsable y el de "sin closer" dependerían de lo que haya quedado en la base. Va
+           adentro de la transacción de la prueba, así que no toca nada fuera de ella. */
+        Admin::query()->where('is_closer', true)->update(['is_closer' => false]);
     }
 
     /* ------------------------------------------------------------------------------------------
@@ -268,6 +277,10 @@ class EmbudoDeLeadTest extends BaseDePipelines
 
         $this->assertNotNull($actividad);
         $this->assertStringContainsString('agendó la videollamada', (string) $actividad->body);
+
+        $foto = collect((array) $actividad->data)->keyBy('key');
+        $this->assertTrue($foto->has(PipelineLeadSeeder::CAMPO_FECHA_LLAMADA), 'La fecha de la llamada tiene que quedar cargada en el campo de la etapa.');
+        $this->assertSame('2026-09-28 15:00', $foto->get(PipelineLeadSeeder::CAMPO_FECHA_LLAMADA)['value']);
         $this->assertStringContainsString('meet.google.com', (string) $actividad->body, 'El link del Meet va en la actividad.');
     }
 
@@ -652,5 +665,167 @@ class EmbudoDeLeadTest extends BaseDePipelines
         $slugs = array_column($respuesta->json('pipelines'), 'slug');
 
         $this->assertContains(PipelineLeadSeeder::SLUG, $slugs);
+    }
+
+    /**
+     * 🔴 Un lead que YA es cliente (`cerrado_ganado`, lo deja así la promoción) no se marca perdido
+     * si Tomás arrastra su tarjeta, que sigue abierta, a "No avanza".
+     *
+     * @return void
+     */
+    public function test_la_etapa_perdida_no_pisa_un_lead_ya_ganado()
+    {
+        $this->crear_closer();
+        $pipeline = $this->sembrar_embudo();
+
+        $lead = $this->crear_lead();
+        $this->confirmar_interes($lead);
+
+        $lead                    = $lead->fresh();
+        $lead->status            = 'cerrado_ganado';
+        $lead->claude_auto_reply = true;
+        $lead->save();
+
+        $mensajes_antes = LeadMessage::query()->where('lead_id', $lead->id)->count();
+
+        $no_avanza = PipelineStage::query()
+            ->where('pipeline_id', $pipeline->id)
+            ->where('stage_key', PipelineLeadSeeder::ETAPA_NO_AVANZA)
+            ->firstOrFail();
+
+        app(PipelineOpportunityService::class)->mover(
+            $this->oportunidad_del_lead($lead),
+            ['stage_id' => $no_avanza->id, 'lost_reason' => 'Otro'],
+            null
+        );
+
+        $lead = $lead->fresh();
+        $this->assertSame('cerrado_ganado', $lead->status, 'Un lead ganado no se puede cerrar como perdido desde el embudo.');
+        $this->assertTrue((bool) $lead->claude_auto_reply);
+        $this->assertSame($mensajes_antes, LeadMessage::query()->where('lead_id', $lead->id)->count(), 'No se escribe evento en la conversación.');
+    }
+
+    /**
+     * Con la primera llamada resumida y una segunda agendada, la ficha muestra la última (la
+     * agendada) y además el resumen de la anterior.
+     *
+     * @return void
+     */
+    public function test_la_ficha_trae_el_resumen_anterior_si_la_ultima_llamada_no_lo_tiene()
+    {
+        $this->admin_logueado();
+        $this->crear_closer();
+        $this->sembrar_embudo();
+
+        $lead = $this->crear_lead();
+        $this->confirmar_interes($lead);
+
+        $primera = LeadCall::create([
+            'lead_id'      => $lead->id,
+            'estado'       => 'completada',
+            'scheduled_at' => '2026-09-27 09:00:00',
+            'call_summary' => ['resumen_general' => 'Primera llamada.'],
+        ]);
+        $segunda = LeadCall::create([
+            'lead_id'      => $lead->id,
+            'estado'       => 'pendiente',
+            'scheduled_at' => '2026-10-02 10:00:00',
+        ]);
+
+        $ficha = $this->getJson('/api/admin/pipeline-opportunities/' . $this->oportunidad_del_lead($lead)->id);
+        $ficha->assertStatus(200);
+
+        $this->assertSame((int) $segunda->id, (int) $ficha->json('opportunity.call.id'), 'La ficha muestra la ÚLTIMA llamada.');
+        $this->assertNull($ficha->json('opportunity.call.call_summary'));
+        $this->assertSame((int) $primera->id, (int) $ficha->json('opportunity.call.previous_summary.id'));
+        $this->assertSame('Primera llamada.', $ficha->json('opportunity.call.previous_summary.call_summary.resumen_general'));
+    }
+
+    /**
+     * Con una sola llamada resumida no viaja resumen anterior.
+     *
+     * @return void
+     */
+    public function test_sin_llamada_anterior_el_resumen_anterior_va_null()
+    {
+        $this->admin_logueado();
+        $this->crear_closer();
+        $this->sembrar_embudo();
+
+        $lead = $this->crear_lead();
+        $this->confirmar_interes($lead);
+
+        LeadCall::create([
+            'lead_id'      => $lead->id,
+            'estado'       => 'completada',
+            'call_summary' => ['resumen_general' => 'Única.'],
+        ]);
+
+        $ficha = $this->getJson('/api/admin/pipeline-opportunities/' . $this->oportunidad_del_lead($lead)->id);
+        $ficha->assertStatus(200);
+
+        $this->assertSame('Única.', $ficha->json('opportunity.call.call_summary.resumen_general'));
+        $this->assertNull($ficha->json('opportunity.call.previous_summary'));
+    }
+
+    /**
+     * 🔴 La pestaña "Resumen" del lead: el detalle trae el último resumen (no la última llamada, que
+     * puede no tenerlo) y SIN la transcripción adentro — este scope lo usa también el listado de
+     * leads, y una transcripción por lead es cómo un listado se vuelve pesado.
+     *
+     * @return void
+     */
+    public function test_el_lead_trae_su_ultimo_resumen_sin_la_transcripcion()
+    {
+        $this->admin_logueado();
+
+        $lead = $this->crear_lead();
+
+        LeadCall::create([
+            'lead_id'      => $lead->id,
+            'estado'       => 'completada',
+            'call_summary' => ['resumen_general' => 'Vieja.', 'transcripcion_completa' => 'Tomás: hola'],
+            'transcript'   => 'Tomás: hola',
+        ]);
+        $resumida = LeadCall::create([
+            'lead_id'      => $lead->id,
+            'estado'       => 'completada',
+            'call_summary' => ['resumen_general' => 'La buena.', 'escenario_cierre' => 'C', 'transcripcion_completa' => 'Tomás: chau'],
+            'transcript'   => 'Tomás: chau',
+        ]);
+        LeadCall::create([
+            'lead_id'      => $lead->id,
+            'estado'       => 'pendiente',
+            'scheduled_at' => '2026-10-20 10:00:00',
+        ]);
+
+        $respuesta = $this->getJson('/api/admin/lead/' . $lead->id);
+        $respuesta->assertStatus(200);
+
+        $this->assertSame((int) $resumida->id, (int) $respuesta->json('model.last_summarized_call.id'));
+        $this->assertSame('La buena.', $respuesta->json('model.last_summarized_call.call_summary.resumen_general'));
+        $this->assertSame('C', $respuesta->json('model.last_summarized_call.call_summary.escenario_cierre'));
+        $this->assertNull($respuesta->json('model.last_summarized_call.call_summary.transcripcion_completa'), 'La transcripción no viaja en el lead.');
+        $this->assertArrayNotHasKey('transcript', (array) $respuesta->json('model.last_summarized_call'));
+    }
+
+    /**
+     * Un resumen guardado que no es JSON válido (la columna es TEXT) no rompe el detalle del lead:
+     * llega null y la pestaña cae a lo legado.
+     *
+     * @return void
+     */
+    public function test_un_resumen_que_no_es_json_no_rompe_el_lead()
+    {
+        $this->admin_logueado();
+
+        $lead    = $this->crear_lead();
+        $llamada = LeadCall::create(['lead_id' => $lead->id, 'estado' => 'completada']);
+        DB::table('lead_calls')->where('id', $llamada->id)->update(['call_summary' => 'esto no es json']);
+
+        $respuesta = $this->getJson('/api/admin/lead/' . $lead->id);
+        $respuesta->assertStatus(200);
+
+        $this->assertNull($respuesta->json('model.last_summarized_call.call_summary'));
     }
 }

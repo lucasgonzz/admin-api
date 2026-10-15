@@ -15,6 +15,7 @@ use App\Services\LeadDemoSettings;
 use App\Services\LeadWhatsappOnboardingSettings;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Prospecto comercial cargado desde el panel de admin-api.
@@ -517,20 +518,28 @@ class Lead extends Model
             'scheduled_messages'
         );
 
-        /* La última llamada del closer, para la pestaña "Resumen" (ver `last_call()`). Va en una
-           llamada aparte y no sumada al `with()` de arriba porque esa forma variádica solo acepta
-           NOMBRES de relación: una entrada con closure adentro de esa lista la rompe.
+        /* El último resumen de llamada del closer, para la pestaña "Resumen" (ver
+           `last_summarized_call()`). Va en una llamada aparte y no sumada al `with()` de arriba
+           porque esa forma variádica solo acepta NOMBRES de relación: una entrada con closure
+           adentro de esa lista la rompe.
 
-           🔴 CON COLUMNAS ACOTADAS, SIN `transcript`. El payload del lead se rehidrata entero
-           después de cada acción del panel y de cada evento de LeadBroadcastService; sumarle el
-           longText de la transcripción en cada vuelta sería pagar decenas de KB por algo que ya
-           viaja duplicado adentro de `call_summary.transcripcion_completa` (lo duplica
-           CallSummaryService a propósito). `lead_id` va en la lista de columnas porque es la clave
-           con la que Eloquent empareja la relación: sin ella la llamada no se adosa a ningún lead. */
-        $query->with(['last_call' => function ($relacion) {
+           🔴 CON COLUMNAS ACOTADAS Y SIN LA TRANSCRIPCIÓN. Este scope lo usa también el listado de
+           leads (hasta 500 por página) y el payload del lead se rehidrata entero después de cada
+           acción del panel y de cada evento de LeadBroadcastService. `transcript` no se pide, y
+           `call_summary` viaja SIN `transcripcion_completa`, que CallSummaryService duplica
+           adentro del resumen: una transcripción por lead con llamada, multiplicada por la
+           lista, es exactamente cómo un listado se vuelve lento sin que nadie lo vea venir. La
+           transcripción entera se lee en la ficha de la oportunidad del embudo.
+
+           `JSON_VALID` guarda el caso de un resumen que no sea JSON válido (la columna es TEXT):
+           sin la guarda, `JSON_REMOVE` tiraría error y rompería TODO listado de leads; con ella
+           ese resumen llega null y la pestaña cae a lo legado. `lead_id` va en la lista porque es
+           la clave con la que Eloquent empareja la relación. */
+        $query->with(['last_summarized_call' => function ($relacion) {
             $relacion->select([
                 'id', 'lead_id', 'meet_url', 'estado', 'scheduled_at', 'started_at',
-                'call_summary', 'created_at', 'updated_at',
+                DB::raw("CASE WHEN JSON_VALID(call_summary) THEN JSON_REMOVE(call_summary, '$.transcripcion_completa') ELSE NULL END AS call_summary"),
+                'created_at', 'updated_at',
             ]);
         }]);
 
@@ -1039,12 +1048,17 @@ class Lead extends Model
     }
 
     /**
-     * La ÚLTIMA llamada del closer con este lead (la de `id` más alto), o null.
+     * La última llamada del closer con este lead que YA TIENE RESUMEN (la de `id` más alto con
+     * `call_summary`), o null.
      *
      * 🔴 Existe para que la pestaña "Resumen" del modal deje de leer `leads.call_summary`, que es
      * una columna LEGADA que nadie escribe desde el refactor de múltiples llamadas por lead: el
      * resumen real vive en `lead_calls.call_summary`, lo escribe `CallSummaryService` y hasta hoy
      * esa pestaña mostraba vacío para toda llamada posterior al refactor.
+     *
+     * Es "la última CON resumen" y no "la última" a propósito: el caso frecuente es un lead en
+     * seguimiento con la primera llamada resumida y una segunda agendada; con "la última" la
+     * pestaña se quedaba sin el resumen justo antes de la segunda llamada.
      *
      * `orderByDesc('id')` sin `latestOfMany()` a propósito: con eager loading, `hasOne` se queda con
      * la primera fila de cada grupo, que con ese orden es la de `id` más alto. Es el mismo
@@ -1052,9 +1066,11 @@ class Lead extends Model
      *
      * @return \Illuminate\Database\Eloquent\Relations\HasOne
      */
-    public function last_call()
+    public function last_summarized_call()
     {
-        return $this->hasOne(LeadCall::class, 'lead_id')->orderByDesc('id');
+        return $this->hasOne(LeadCall::class, 'lead_id')
+            ->whereNotNull('call_summary')
+            ->orderByDesc('id');
     }
 
     /**

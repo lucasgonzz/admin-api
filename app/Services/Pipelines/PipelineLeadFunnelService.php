@@ -52,6 +52,9 @@ class PipelineLeadFunnelService
     /** El estado al que pasa un lead cuando su oportunidad entra a una etapa perdida (D3). */
     const ESTADO_PERDIDO = 'cerrado_perdido';
 
+    /** El estado que deja la promoción a cliente: un lead así no se cierra como perdido. */
+    const ESTADO_GANADO = 'cerrado_ganado';
+
     /** El `estado` de una `LeadCall` que ya ocurrió y tiene su resumen. */
     const LLAMADA_COMPLETADA = 'completada';
 
@@ -375,6 +378,11 @@ class PipelineLeadFunnelService
      * Si el lead ya estaba cerrado (perdido o ganado), no hace nada: mover la tarjeta de vuelta a
      * "No avanza" no vuelve a escribir el mismo evento en la conversación.
      *
+     * 🔴 El caso ganado no es teórico: la promoción a cliente deja el lead en `cerrado_ganado`,
+     * pero su tarjeta sigue abierta en el embudo (la etapa ganada no se mueve sola). Si Tomás
+     * limpia el tablero arrastrándola a "No avanza", sin esta guarda un lead que YA es cliente
+     * quedaría como perdido y con el agente apagado.
+     *
      * @param Lead                $lead
      * @param PipelineStage       $etapa
      * @param PipelineOpportunity $oportunidad
@@ -385,7 +393,7 @@ class PipelineLeadFunnelService
     {
         $anterior = (string) $lead->status;
 
-        if ($anterior === self::ESTADO_PERDIDO) {
+        if ($anterior === self::ESTADO_PERDIDO || $anterior === self::ESTADO_GANADO) {
             return;
         }
 
@@ -536,9 +544,16 @@ class PipelineLeadFunnelService
      */
     private function avisar($que, \Throwable $error, array $contexto)
     {
-        Log::channel('daily')->warning(
-            self::LOG . ' ' . $que . ': ' . $error->getMessage(),
-            array_merge($contexto, ['excepcion' => get_class($error)])
-        );
+        /* El log también va protegido: si el canal no se puede escribir (un `storage/` con dueño
+           root, que ya pasó en el VPS), Monolog tira desde adentro del `catch` y la excepción
+           llegaría igual al `save()` del lead. Perder un aviso es preferible a eso. */
+        try {
+            Log::channel('daily')->warning(
+                self::LOG . ' ' . $que . ': ' . $error->getMessage(),
+                array_merge($contexto, ['excepcion' => get_class($error)])
+            );
+        } catch (\Throwable $tambien) {
+            return;
+        }
     }
 }
