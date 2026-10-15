@@ -3,8 +3,13 @@
 namespace Tests\Feature\PanelEtapa8SinVideollamada;
 
 /**
- * Los textos que el panel le arma al cliente por WhatsApp: ninguno nombra la videollamada, la lista de progreso llama «Seguimos con soporte»
- * a la etapa 8, y el pedido de archivos dice que ESTAMOS instalando (no que quedó instalado).
+ * Los textos que el panel le arma al cliente por WhatsApp: ninguno nombra la videollamada, la lista de progreso tiene SIETE etapas y el pedido
+ * de archivos dice que ESTAMOS instalando (no que quedó instalado).
+ *
+ * 🔴 La lista de progreso terminaba en «8. Seguimos con soporte» hasta el 15/10/2026. Ese día el flujo pasó a siete etapas (decisión de Lucas): la 6
+ * es «Catálogo: categorías, imágenes y descripciones» (antes «Capacitación») y la 8 salió. Las aserciones de la lista cambiaron por eso: ahora
+ * afirman que la lista tiene esas siete líneas y NO tiene ninguna octava. El resto de lo que protege el archivo (la videollamada no se nombra, el
+ * pedido de archivos dice «ya estamos instalando») no cambió.
  *
  * Camino real del panel: `GET /api/admin/implementation/{id}/actions/{accion}/preview` → `ImplementationActionService::preview()` →
  * `ImplementationConversationService::build_*_body()`. Los botones «Progreso», «Pedido de archivos» y «Entrega del sistema» corren en modo
@@ -13,14 +18,14 @@ namespace Tests\Feature\PanelEtapa8SinVideollamada;
  */
 class TextosDelPanelSinVideollamadaTest extends BaseDeLaEtapa8DelPanel
 {
-    /** Las otras siete etapas, tal cual las ve el cliente (no cambiaron). */
-    const LISTA_DE_PROGRESO_SIN_LA_8 = [
+    /** Las siete etapas, tal cual las ve el cliente en la lista de progreso. */
+    const LISTA_DE_PROGRESO = [
         '1. Información de la empresa',
         '2. Instalación del sistema',
         '3. Recolección de archivos',
         '4. Migración de datos',
         '5. Entrega del sistema',
-        '6. Capacitación',
+        '6. Catálogo: categorías, imágenes y descripciones',
         '7. Vinculación con ARCA/AFIP',
     ];
 
@@ -44,23 +49,25 @@ class TextosDelPanelSinVideollamadaTest extends BaseDeLaEtapa8DelPanel
     }
 
     /**
-     * (a) 🔴 El botón «Progreso» (en la etapa 8 y en cualquier otra): la lista termina en «8. Seguimos con soporte», con las otras siete
-     * como siempre, y no nombra la videollamada.
+     * (a) 🔴 El botón «Progreso» (en la etapa 7 y en cualquier otra, y también en una implementación anterior que quedó en la 8): la lista tiene las
+     * siete etapas y TERMINA en la 7: no hay octava línea, ni «Seguimos con soporte» ni «Capacitación», y no nombra la videollamada.
      *
      * @return void
      */
-    public function test_el_boton_progreso_llama_seguimos_con_soporte_a_la_etapa_8(): void
+    public function test_el_boton_progreso_muestra_las_siete_etapas_y_ninguna_octava(): void
     {
-        foreach ([3, 8] as $etapa) {
+        foreach ([3, 7, 8] as $etapa) {
             $implementacion = $this->implementacion_en($etapa, 'manual');
             $cuerpo         = $this->cuerpo_del_preview($implementacion, 'progreso', '?stage=' . $etapa);
 
-            $this->assertStringContainsString('8. Seguimos con soporte', $cuerpo, 'etapa ' . $etapa);
-            $this->assertStringNotContainsStringIgnoringCase('videollamada', $cuerpo, 'etapa ' . $etapa);
-
-            foreach (self::LISTA_DE_PROGRESO_SIN_LA_8 as $linea) {
+            foreach (self::LISTA_DE_PROGRESO as $linea) {
                 $this->assertStringContainsString($linea, $cuerpo, 'etapa ' . $etapa);
             }
+
+            $this->assertStringNotContainsString('8. ', $cuerpo, 'etapa ' . $etapa . ': la lista no tiene octava línea.');
+            $this->assertStringNotContainsString('Seguimos con soporte', $cuerpo, 'etapa ' . $etapa);
+            $this->assertStringNotContainsString('6. Capacitación', $cuerpo, 'etapa ' . $etapa);
+            $this->assertStringNotContainsStringIgnoringCase('videollamada', $cuerpo, 'etapa ' . $etapa);
         }
     }
 
@@ -79,7 +86,8 @@ class TextosDelPanelSinVideollamadaTest extends BaseDeLaEtapa8DelPanel
         $this->assertStringContainsString('Para ir ganando tiempo, necesito que nos envíes los archivos con la información del negocio:', $cuerpo);
         $this->assertStringNotContainsStringIgnoringCase('ya está instalado', $cuerpo);
         $this->assertStringNotContainsStringIgnoringCase('videollamada', $cuerpo);
-        $this->assertStringContainsString('8. Seguimos con soporte', $cuerpo);
+        $this->assertStringContainsString('7. Vinculación con ARCA/AFIP', $cuerpo);
+        $this->assertStringNotContainsString('8. ', $cuerpo, 'La lista de progreso no tiene octava línea.');
 
         // Lo que se pide no cambió.
         foreach (['Artículos o productos (Excel)', 'Clientes (Excel)', 'Proveedores (Excel)', 'Logo de la empresa (imagen cuadrada)'] as $pedido) {
@@ -102,7 +110,7 @@ class TextosDelPanelSinVideollamadaTest extends BaseDeLaEtapa8DelPanel
     }
 
     /**
-     * (d) El botón «Entrega del sistema»: lleva la lista de progreso con la 8 renombrada y no nombra la videollamada.
+     * (d) El botón «Entrega del sistema»: lleva la lista de progreso de siete etapas (sin octava) y no nombra la videollamada.
      *
      * @return void
      */
@@ -111,7 +119,9 @@ class TextosDelPanelSinVideollamadaTest extends BaseDeLaEtapa8DelPanel
         $implementacion = $this->implementacion_en(5, 'manual');
         $cuerpo         = $this->cuerpo_del_preview($implementacion, 'entrega');
 
-        $this->assertStringContainsString('8. Seguimos con soporte', $cuerpo);
+        $this->assertStringContainsString('6. Catálogo: categorías, imágenes y descripciones', $cuerpo);
+        $this->assertStringContainsString('7. Vinculación con ARCA/AFIP', $cuerpo);
+        $this->assertStringNotContainsString('8. ', $cuerpo, 'La lista de progreso no tiene octava línea.');
         $this->assertStringNotContainsStringIgnoringCase('videollamada', $cuerpo);
     }
 
@@ -137,21 +147,44 @@ class TextosDelPanelSinVideollamadaTest extends BaseDeLaEtapa8DelPanel
     }
 
     /**
-     * (f) La lista marca con ✅ las etapas completadas y con ⬜ las demás, y la 8 sigue la misma regla que las otras (el cambio es solo del
-     * nombre).
+     * (f) La lista marca con ✅ las etapas completadas y con ⬜ las demás, y la 7 —la última— sigue la misma regla que las otras. Hasta el
+     * 15/10/2026 este test miraba la 8 («Seguimos con soporte»).
      *
      * @return void
      */
-    public function test_la_etapa_8_se_marca_como_las_demas(): void
+    public function test_la_etapa_7_se_marca_como_las_demas(): void
     {
         $servicio = $this->servicio();
 
-        $en_curso = $this->implementacion_en(8, 'auto');
-        $this->assertStringContainsString('⬜ 8. Seguimos con soporte', $servicio->build_progress_body($en_curso, 8));
-        $this->assertStringContainsString('✅ 7. Vinculación con ARCA/AFIP', $servicio->build_progress_body($en_curso, 8));
+        $en_curso = $this->implementacion_en(7, 'auto');
+        $this->assertStringContainsString('⬜ 7. Vinculación con ARCA/AFIP', $servicio->build_progress_body($en_curso, 7));
+        $this->assertStringContainsString('✅ 6. Catálogo: categorías, imágenes y descripciones', $servicio->build_progress_body($en_curso, 7));
 
-        $terminada = $this->implementacion_en(8, 'auto');
-        \App\Models\ImplementationStage::where('implementation_id', $terminada->id)->where('stage_number', 8)->update(['status' => 'completed']);
-        $this->assertStringContainsString('✅ 8. Seguimos con soporte', $servicio->build_progress_body($terminada->refresh(), 8));
+        $terminada = $this->implementacion_en(7, 'auto');
+        \App\Models\ImplementationStage::where('implementation_id', $terminada->id)->where('stage_number', 7)->update(['status' => 'completed']);
+        $this->assertStringContainsString('✅ 7. Vinculación con ARCA/AFIP', $servicio->build_progress_body($terminada->refresh(), 7));
+    }
+
+    /**
+     * (g) COMPATIBILIDAD. La lista de una implementación ANTERIOR (con su fila 8 completada) sale igual con las siete líneas: la 8 que tiene
+     * en la base no se dibuja.
+     *
+     * @return void
+     */
+    public function test_la_lista_de_una_implementacion_vieja_con_la_etapa_8_completada_tiene_siete_lineas(): void
+    {
+        $servicio = $this->servicio();
+
+        $vieja = $this->implementacion_en(8, 'auto');
+        \App\Models\ImplementationStage::where('implementation_id', $vieja->id)->where('stage_number', 8)->update(['status' => 'completed']);
+
+        $cuerpo = $servicio->build_progress_body($vieja->refresh(), 8);
+
+        foreach (self::LISTA_DE_PROGRESO as $linea) {
+            $this->assertStringContainsString($linea, $cuerpo);
+        }
+
+        $this->assertStringNotContainsString('8. ', $cuerpo);
+        $this->assertSame(7, substr_count($cuerpo, '✅'), 'Las siete etapas están cerradas y la 8 no se dibuja.');
     }
 }

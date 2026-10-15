@@ -33,11 +33,13 @@ class ImplementationConversationService
     private const RESPONSE_ACCUMULATING = '__ACCUMULATING__';
 
     /**
-     * Las ocho etapas con el nombre que ve el cliente en la lista de progreso de WhatsApp.
+     * Las siete etapas con el nombre que ve el cliente en la lista de progreso de WhatsApp.
      *
-     * 🔴 La 8 se llama «Seguimos con soporte» desde el 14/10/2026 (regla de Lucas: la videollamada no se nombra salvo que el
-     * cliente la pida; es el mismo nombre que ya llevan los mails de hito, `ImplementacionMailHelper::ETAPAS`). El nombre de la
-     * etapa en `implementation_stage_configs` —lo que ve el equipo en el panel— es otro tema y no se toca acá.
+     * 🔴 Son SIETE desde el 15/10/2026 (`Implementation::ULTIMA_ETAPA`, decisión de Lucas). La 6 dejó de ser «Capacitación» (la
+     * capacitación es el centro de recursos que se entrega con el sistema, en la 5) y es el catálogo, con el mismo nombre que le
+     * da el panel (`implementation_stage_configs`); y la 8, que desde el 14/10/2026 se mostraba como «Seguimos con soporte»
+     * (regla de Lucas: la videollamada no se nombra salvo que el cliente la pida), salió del flujo. La lista de una implementación
+     * anterior —con su fila 8— sale igual con estas siete.
      *
      * @var array<int, string>
      */
@@ -47,9 +49,8 @@ class ImplementationConversationService
         3 => 'Recolección de archivos',
         4 => 'Migración de datos',
         5 => 'Entrega del sistema',
-        6 => 'Capacitación',
+        6 => 'Catálogo: categorías, imágenes y descripciones',
         7 => 'Vinculación con ARCA/AFIP',
-        8 => 'Seguimos con soporte',
     ];
 
     /**
@@ -126,7 +127,7 @@ class ImplementationConversationService
         }
 
         if ($current_stage === 6) {
-            // Etapa 6: capacitación de empleados.
+            // Etapa 6: hoy es el catálogo (desde el 15/10/2026); en modo auto este camino es el heredado de «capacitación».
             $this->handle_stage_6($implementation, $parsed);
             return;
         }
@@ -138,7 +139,8 @@ class ImplementationConversationService
         }
 
         if ($current_stage === 8) {
-            // Etapa 8: seguimos con soporte (lo que escribe el cliente va a una persona).
+            // Etapa 8 (solo implementaciones anteriores al 15/10/2026: ya no es parte del flujo): seguimos con soporte
+            // (lo que escribe el cliente va a una persona).
             $this->handle_stage_8($implementation, $parsed);
             return;
         }
@@ -691,7 +693,8 @@ class ImplementationConversationService
      * Envía el primer mensaje de la etapa indicada sin esperar un mensaje entrante del cliente.
      *
      * Usado desde el controller al avanzar manualmente a una etapa que necesita
-     * iniciar la conversación de forma proactiva (etapas 2, 4, 5, 6 y 7).
+     * iniciar la conversación de forma proactiva (etapas 2, 4, 5, 6 y 7; la 8 solo existe en las
+     * implementaciones anteriores al 15/10/2026).
      *
      * @param Implementation $implementation Implementación activa.
      * @param int            $stage          Número de etapa a abrir.
@@ -715,7 +718,7 @@ class ImplementationConversationService
         }
 
         if ($stage === 6) {
-            // Etapa 6: capacitación — envía credenciales y recursos a empleados.
+            // Etapa 6: camino heredado de «capacitación» (modo auto) — envía credenciales y recursos a empleados.
             $this->send_stage_6_opening($implementation);
             return;
         }
@@ -727,7 +730,7 @@ class ImplementationConversationService
         }
 
         if ($stage === 8) {
-            // Etapa 8: seguimos con soporte (avisa al admin; al cliente no le manda nada).
+            // Etapa 8 (solo implementaciones anteriores al 15/10/2026): seguimos con soporte (avisa al admin; al cliente no le manda nada).
             $this->send_stage_8_opening($implementation);
             return;
         }
@@ -746,9 +749,12 @@ class ImplementationConversationService
      * - Etapa 3: notifica al admin asignado que debe ejecutar la instalación.
      * - Etapa 4: envía el primer mensaje al responsable de migración (recolección de archivos).
      * - Etapa 5: dispara el análisis IA en background (migración de datos).
-     * - Etapa 6: envía credenciales a empleados y mensaje al dueño (capacitación).
-     * - Etapa 7: envía la pregunta sobre acceso AFIP al dueño.
-     * - Etapa 8: avisa al admin asignado; al dueño no le manda nada (la videollamada no se ofrece).
+     * - Etapa 6: camino heredado de «capacitación» (modo auto): envía credenciales a empleados y mensaje al dueño. Desde el
+     *   15/10/2026 la 6 es el catálogo y la capacitación sale con la entrega (etapa 5): este envío NO se tocó, queda como estaba
+     *   hasta que Lucas decida si el modo auto lo conserva.
+     * - Etapa 7: envía la pregunta sobre acceso AFIP al dueño. Es la última etapa del flujo.
+     * - Etapa 8 (solo implementaciones anteriores al 15/10/2026): avisa al admin asignado; al dueño no le manda nada (la
+     *   videollamada no se ofrece). Entrar a la 8 ya no ocurre por el panel: cerrar la 7 cierra la implementación.
      *
      * @param Implementation $implementation Implementación que acaba de avanzar de etapa.
      * @param int            $new_stage      Número de la nueva etapa activa.
@@ -825,7 +831,7 @@ class ImplementationConversationService
         }
 
         if ($new_stage === 6) {
-            // Etapa 6: capacitación — enviar credenciales y recursos a empleados.
+            // Etapa 6: camino heredado de «capacitación» (modo auto) — enviar credenciales y recursos a empleados.
             $this->send_stage_opening_message($implementation, 6);
             return;
         }
@@ -837,7 +843,7 @@ class ImplementationConversationService
         }
 
         if ($new_stage === 8) {
-            // Etapa 8: seguimos con soporte.
+            // Etapa 8 (solo implementaciones anteriores al 15/10/2026): seguimos con soporte.
             $this->send_stage_opening_message($implementation, 8);
             return;
         }
@@ -1512,11 +1518,16 @@ class ImplementationConversationService
     }
 
     // -------------------------------------------------------------------------
-    // Etapa 5 — Capacitación: envío de credenciales a empleados
+    // Etapa 6 — (heredado de «Capacitación»): envío de credenciales a empleados
     // -------------------------------------------------------------------------
 
     /**
-     * Envía el primer mensaje de la Etapa 5 al dueño del cliente y notifica a cada empleado.
+     * Envía el primer mensaje de la Etapa 6 al dueño del cliente y notifica a cada empleado.
+     *
+     * 🔴 Es el camino de «Capacitación», que era la etapa 6 hasta el 15/10/2026. Desde ese día la 6 es el catálogo y la capacitación
+     * es el centro de recursos que se entrega con el sistema (etapa 5); este envío solo corre en modo `auto` (que ninguna
+     * implementación usa hoy: nacen `manual`) y NO se cambió. Si el modo `auto` vuelve, hay que decidir si estos mensajes se
+     * mueven a la entrega o se sacan.
      *
      * Acciones:
      * 1. Enviar a cada empleado con teléfono cargado sus credenciales de acceso y link al centro
@@ -1532,7 +1543,7 @@ class ImplementationConversationService
      */
     private function send_stage_6_opening(Implementation $implementation): void
     {
-        // Stage 6 (capacitación) de esta implementación.
+        // Stage 6 de esta implementación.
         $stage = ImplementationStage::where('implementation_id', $implementation->id)
             ->where('stage_number', 6)
             ->first();
@@ -1630,7 +1641,7 @@ class ImplementationConversationService
     }
 
     /**
-     * Maneja un mensaje entrante durante la Etapa 6 (capacitación).
+     * Maneja un mensaje entrante durante la Etapa 6 (en modo auto, camino heredado de «capacitación»; ver send_stage_6_opening()).
      *
      * Esta etapa avanza manualmente desde el admin. Cualquier mensaje del cliente
      * recibe una respuesta indicando que espere a que el equipo ingrese al sistema.
@@ -2156,11 +2167,14 @@ class ImplementationConversationService
     }
 
     // -------------------------------------------------------------------------
-    // Etapa 8 — Seguimos con soporte
+    // Etapa 8 — Seguimos con soporte (heredada: solo implementaciones anteriores al 15/10/2026)
     // -------------------------------------------------------------------------
 
     /**
      * Apertura de la Etapa 8: avisa al admin asignado y NO le manda nada al cliente.
+     *
+     * 🔴 La etapa 8 salió del flujo el 15/10/2026 (`Implementation::ULTIMA_ETAPA` = 7): cerrar la 7 cierra la implementación. Este
+     * camino queda para una implementación anterior que ya estaba en la 8 y para quien llame a `handle_stage_advance(…, 8)` directo.
      *
      * 🔴 Hasta el 14/10/2026 le mandaba al dueño «nos gustaría hacer una videollamada corta (20-30 minutos)…» y le preguntaba
      * disponibilidad. Regla de Lucas (14/10/2026): la videollamada no se nombra salvo que el cliente la pida. Por eso, al entrar a la
@@ -2364,11 +2378,11 @@ class ImplementationConversationService
      *
      * @param Implementation $implementation Implementación con relación stages cargable.
      *
-     * @return string Texto multilínea con las 8 etapas y sus estados.
+     * @return string Texto multilínea con las 7 etapas y sus estados.
      */
     private function build_progress_list(Implementation $implementation): string
     {
-        // Nombres definitivos de las 8 etapas para mostrar en la lista de progreso.
+        // Nombres definitivos de las 7 etapas para mostrar en la lista de progreso.
         $etapas = self::ETAPAS_DEL_PROGRESO;
 
         // Cargar las etapas si no están ya en memoria.
@@ -2391,11 +2405,12 @@ class ImplementationConversationService
     }
 
     // -------------------------------------------------------------------------
-    // Etapa 8 — Seguimos con soporte
+    // Etapa 8 — Seguimos con soporte (heredada: solo implementaciones anteriores al 15/10/2026)
     // -------------------------------------------------------------------------
 
     /**
-     * Maneja un mensaje entrante durante la Etapa 8 (seguimos con soporte).
+     * Maneja un mensaje entrante durante la Etapa 8 (seguimos con soporte). Solo ocurre en una implementación anterior al 15/10/2026
+     * que quedó en la 8: la etapa salió del flujo (ver ETAPAS_DEL_PROGRESO) y cerrar la 7 ya cierra la implementación.
      *
      * 🔴 Desde el 14/10/2026 la videollamada no se ofrece ni se pregunta (regla de Lucas: no se nombra salvo que el cliente la pida).
      * Lo que el cliente escribe va a una persona: el admin asignado recibe el texto y el cliente recibe el mismo acuse que en la
@@ -4200,7 +4215,7 @@ class ImplementationConversationService
     // -------------------------------------------------------------------------
 
     /**
-     * Checklist de progreso de las 8 etapas.
+     * Checklist de progreso de las 7 etapas.
      *
      * Usado tanto por handle_form_submitted() (modo auto, siempre con $stage = 1) como por
      * ImplementationActionService (modo manual, acción 'progreso' con selector de etapa).
@@ -4217,7 +4232,7 @@ class ImplementationConversationService
      */
     public function build_progress_body(Implementation $implementation, int $stage): string
     {
-        // Nombres legibles de las 8 etapas fijas del flujo.
+        // Nombres legibles de las 7 etapas fijas del flujo.
         $etapas = self::ETAPAS_DEL_PROGRESO;
 
         $implementation->loadMissing(['client', 'stages']);
