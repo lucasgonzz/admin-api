@@ -33,9 +33,26 @@ class WhatsappConfigController extends Controller
      */
     public function show(): JsonResponse
     {
+        $principal = WhatsappConfig::porProposito(WhatsappConfig::PROPOSITO_PRINCIPAL);
+        $asistente = WhatsappConfig::porProposito(WhatsappConfig::PROPOSITO_ASISTENTE);
+
         return response()->json([
-            'principal' => WhatsappConfig::porProposito(WhatsappConfig::PROPOSITO_PRINCIPAL),
-            'asistente' => WhatsappConfig::porProposito(WhatsappConfig::PROPOSITO_ASISTENTE),
+            'principal' => $principal,
+            'asistente' => $asistente,
+            /* Clave APARTE y aditiva: dice si cada número está listo y qué le falta, con la misma
+             * regla que usa el resto del admin para decidir por qué número sale cada cosa
+             * (`WhatsappConfig::canalListo()`). Así el panel no repite esa regla y no se desincroniza
+             * de ella. Solo trae NOMBRES de campos: nunca un valor guardado. */
+            'estado' => [
+                'principal' => [
+                    'listo'  => $principal !== null,
+                    'faltan' => $principal !== null ? [] : ['fila'],
+                ],
+                'asistente' => [
+                    'listo'  => $asistente !== null && $asistente->tieneLoNecesarioParaAtender(),
+                    'faltan' => $asistente !== null ? $asistente->loQueLeFaltaParaAtender() : ['fila'],
+                ],
+            ],
         ]);
     }
 
@@ -70,17 +87,36 @@ class WhatsappConfigController extends Controller
 
         $proposito = $this->proposito_pedido($request);
 
+        /* 🔴 `usar_clave_del_principal` (solo para el asistente): los dos números cuelgan del MISMO
+         * proyecto de Kapso y se envían con la misma API key, así que el panel no tiene por qué pedirle a
+         * una persona que pegue una clave que ya está guardada en la fila del principal. La copia se
+         * hace ACÁ, del lado del servidor: la clave no viaja al navegador para volver a subir, y un PUT
+         * con la casilla tildada no puede terminar con la clave de otro proyecto. Con una
+         * `kapso_api_key` explícita en el body gana esa, porque es el caso del número que de verdad
+         * vive en otro proyecto. */
+        $copiar_clave_del_principal = $proposito === WhatsappConfig::PROPOSITO_ASISTENTE
+            && $request->boolean('usar_clave_del_principal')
+            && trim((string) $request->input('kapso_api_key', '')) === '';
+
         $reglas = [
-            'kapso_api_key'   => 'required|string|max:255',
+            'kapso_api_key'   => $copiar_clave_del_principal ? 'nullable|string|max:255' : 'required|string|max:255',
             'phone_number_id' => 'required|string|max:255',
             'test_mode'       => 'sometimes|boolean',
             /* Los tres datos que identifican al número para una persona. `nullable` y no `required`
              * porque el número anda igual sin ellos —son para que el panel y los logs puedan decir
              * cuál es cuál—, y porque el panel manda los siete campos siempre: cuando el operador
              * no los completa llegan como cadena vacía, que tiene que pasar sin 422. */
-            'display_phone'   => 'nullable|string|max:255',
+            /* 🔴 El número tal como se lee es OBLIGATORIO para el asistente (y opcional para el
+             * principal): es lo que se le dice a un dueño que le escribe al número equivocado, y sin él
+             * el número no se considera listo (`WhatsappConfig::canalListo()`). Con ocho dígitos como
+             * mínimo, la misma vara que usa esa regla, para que el panel no deje guardar algo que
+             * después el modelo va a rechazar sin decir por qué. */
+            'display_phone'   => $proposito === WhatsappConfig::PROPOSITO_ASISTENTE
+                ? ['required', 'string', 'max:255', 'regex:/(?:\D*\d){8,}/']
+                : 'nullable|string|max:255',
             'nombre'          => 'nullable|string|max:255',
             'waba_id'         => 'nullable|string|max:255',
+            'usar_clave_del_principal' => 'sometimes|boolean',
         ];
 
         /*
@@ -118,7 +154,23 @@ class WhatsappConfigController extends Controller
             $config->is_active = true;
         }
 
-        $config->kapso_api_key   = $validated['kapso_api_key'];
+        if ($copiar_clave_del_principal) {
+            $principal = WhatsappConfig::porProposito(WhatsappConfig::PROPOSITO_PRINCIPAL);
+            $clave     = $principal !== null ? trim((string) $principal->kapso_api_key) : '';
+
+            if ($clave === '') {
+                /* No se inventa una clave ni se deja la fila sin ella: sin clave el número no envía. */
+                return response()->json([
+                    'message' => 'El número principal no tiene clave de Kapso cargada, así que no hay una para compartir.',
+                    'errors'  => ['kapso_api_key' => ['Cargá la clave del número principal o pegá una para este número.']],
+                ], 422);
+            }
+
+            $config->kapso_api_key = $clave;
+        } else {
+            $config->kapso_api_key = $validated['kapso_api_key'];
+        }
+
         $config->phone_number_id = $validated['phone_number_id'];
 
         /* 🔴 El secreto se escribe solo si vino Y no está vacío. El panel manda los siete campos
