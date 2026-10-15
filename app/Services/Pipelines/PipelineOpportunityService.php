@@ -442,6 +442,17 @@ class PipelineOpportunityService
            respuesta es la misma que antes: el sync no la toca y nunca propaga. */
         $this->sincronizar_calendario($resultado[0], $admin_id, $antes);
 
+        /* Embudo "Leads" (misión embudo-lead-pipelines, 13/10/2026): si la oportunidad de un lead
+           entró a una etapa PERDIDA de ese pipeline, se cierra el lead (decisión D3). Fuera de ese
+           pipeline no hace nada, así que mover una tarjeta de "Agentes" no toca ningún lead.
+
+           Se resuelve con `app()` y no por constructor a propósito: el servicio del embudo pide
+           ESTE servicio para dar de alta y para mover, y si los dos se pidieran por constructor el
+           contenedor entraría en bucle al resolver cualquiera de los dos. También va después del
+           commit, por lo mismo que el calendario: escribe en otra tabla y no tiene por qué poder
+           abortar un movimiento que ya quedó hecho. */
+        app(PipelineLeadFunnelService::class)->al_mover_oportunidad($resultado[0]);
+
         return $resultado;
     }
 

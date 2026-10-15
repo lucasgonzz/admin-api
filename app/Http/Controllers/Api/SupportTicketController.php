@@ -112,7 +112,11 @@ class SupportTicketController extends BaseController
                 'assigned_admin',
                 'lastMessage.sender_admin',
             ])
-            ->withUnreadMessagesCount();
+            ->withUnreadMessagesCount()
+            /* Indicadores del panel de inicio (`sin_responder`, `abierto_hoy`): los dos deep links
+               de /inicio filtran la lista por estas dos claves, con el MISMO criterio con el que se
+               contaron las tarjetas. Ver SupportTicket::scopeWithIndicadoresDeInicio(). */
+            ->withIndicadoresDeInicio();
     }
 
     /**

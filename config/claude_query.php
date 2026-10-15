@@ -2913,17 +2913,19 @@ return [
                 'etapas' => [
                     'tipo'        => 'has_many', 'tabla' => 'pipeline_stages',
                     'clave_local' => 'id', 'clave_externa' => 'pipeline_id',
-                    'columnas'    => ['id', 'name', 'type', 'color', 'sort_order'],
+                    'columnas'    => ['id', 'name', 'stage_key', 'type', 'color', 'sort_order'],
                 ],
             ],
-            'nota' => 'include=etapas trae las etapas ordenadas por id: el orden del tablero es sort_order. `slug` solo lo usa el seeder (el pipeline "Agentes" tiene slug `agentes`).',
+            'nota' => 'include=etapas trae las etapas ordenadas por id: el orden del tablero es sort_order. `slug` es la clave estable del pipeline, la pone el seeder y ya no la usa solo él: desde la misión embudo-lead-pipelines la publica la API y la SPA acepta `?pipeline=<slug>` en el tablero. Los dos sembrados son `agentes` y `lead` (el embudo de cierre de Tomás, que se alimenta solo desde leads.status y lead_calls).',
         ],
 
         'pipeline_stage' => [
             'tabla'           => 'pipeline_stages',
             'descripcion'     => 'Etapas de cada pipeline del CRM: nombre, color, orden, tipo (open | won | lost, que ES el estado de las oportunidades que están adentro) y la definición de los campos que pide al entrar.',
             'columnas'        => [
-                'id', 'pipeline_id', 'name', 'color', 'type', 'sort_order', 'fields',
+                /* `stage_key` entró con la misión embudo-lead-pipelines (13/10/2026): clave estable
+                   que sobrevive a un renombre. NULL en toda etapa que no sembró un seeder. */
+                'id', 'pipeline_id', 'name', 'stage_key', 'color', 'type', 'sort_order', 'fields',
                 'created_at', 'updated_at',
             ],
             'clave_de_cursor' => 'id',
@@ -2935,6 +2937,7 @@ return [
                 'pipeline_id' => ['columna' => 'pipeline_id', 'tipo' => 'entero'],
                 /* Enumeración real: las claves de PipelineStage::TYPE_LABELS. */
                 'type'        => ['columna' => 'type',        'tipo' => 'en', 'valores' => ['open', 'won', 'lost']],
+                'stage_key'   => ['columna' => 'stage_key',   'tipo' => 'texto_exacto'],
                 'ids'         => ['columna' => 'id',          'tipo' => 'lista_de_enteros'],
             ],
             'relaciones'      => [
@@ -2944,7 +2947,7 @@ return [
                     'columnas'    => ['id', 'name', 'archived_at'],
                 ],
             ],
-            'nota' => '`fields` es la DEFINICIÓN de los campos ([{key, label, type, required, agenda, options}]); lo que se cargó en cada movimiento está en pipeline_activity.data (include=contenido).',
+            'nota' => '`fields` es la DEFINICIÓN de los campos ([{key, label, type, required, agenda, options}]); lo que se cargó en cada movimiento está en pipeline_activity.data (include=contenido). `stage_key` es la clave estable de la etapa: la siembra el seeder del pipeline y sobrevive a un renombre desde Configuración. Las cinco del embudo de leads son interesados, esperando_llamada, en_seguimiento, cerrado y no_avanza, y es con esas —no con el nombre— que la automatización encuentra su etapa destino. Para toda etapa creada desde el ABM va NULL.',
         ],
 
         'pipeline_opportunity' => [
@@ -2989,7 +2992,7 @@ return [
                 'etapa' => [
                     'tipo'        => 'belongs_to', 'tabla' => 'pipeline_stages',
                     'clave_local' => 'stage_id', 'clave_externa' => 'id',
-                    'columnas'    => ['id', 'name', 'type', 'color', 'sort_order'],
+                    'columnas'    => ['id', 'name', 'stage_key', 'type', 'color', 'sort_order'],
                 ],
                 'pipeline' => [
                     'tipo'        => 'belongs_to', 'tabla' => 'pipelines',
