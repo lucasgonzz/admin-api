@@ -83,12 +83,14 @@ class WhatsappSendService
     /**
      * Fija el destino por propósito (`principal` / `asistente`).
      *
-     * 🔴 Si ese propósito todavía no tiene fila, el destino queda en el PRINCIPAL, y eso es
-     * lo que hace que esta misión no cambie nada hasta que el número nuevo exista: mientras no esté
-     * cargado el `phone_number_id` del asistente, el canal sigue saliendo por el institucional como
-     * venía. Lo contrario —cortar el envío— dejaría a los dueños sin respuesta por una fila que
-     * falta. Queda la advertencia en el log porque un propósito sin fila es una configuración a
-     * medio hacer, no un estado normal para siempre.
+     * 🔴 Si ese propósito todavía no está LISTO (sin fila, o —para el asistente— con la fila a medias:
+     * falta la clave o el secreto del webhook; ver {@see WhatsappConfig::canalListo()}), el destino
+     * queda en el PRINCIPAL, y eso es lo que hace que esta misión no cambie nada hasta que el número
+     * nuevo esté terminado: mientras tanto, el canal sigue saliendo por el institucional como venía.
+     * Lo contrario —cortar el envío, o salir por un número que todavía no recibe— dejaría a los
+     * dueños sin respuesta o hablándole a un chat al que no pueden contestar. Queda en el log (nivel
+     * info, no warning: es el estado normal hasta que Lucas termine el alta) para poder reconstruir
+     * por qué número salió algo.
      *
      * @param string $proposito Uno de los WhatsappConfig::PROPOSITO_*.
      *
@@ -96,10 +98,10 @@ class WhatsappSendService
      */
     public function paraProposito(string $proposito): self
     {
-        $config = WhatsappConfig::porProposito($proposito);
+        $config = WhatsappConfig::canalListo($proposito);
 
         if ($config === null) {
-            Log::channel('daily')->warning('WhatsappSendService: no hay número configurado para ese propósito, sale por el principal.', [
+            Log::channel('daily')->info('WhatsappSendService: el número de ese propósito no está listo, sale por el principal.', [
                 'proposito' => $proposito,
             ]);
 

@@ -113,6 +113,105 @@ class WhatsappConfig extends Model
     }
 
     /**
+     * Fila de un propósito, SOLO si ese número ya está en condiciones de atender su canal entero.
+     *
+     * 🔴 **«Listo» es mucho más que «hay una fila»** (misión asistente-segundo-numero, 15/10/2026), y
+     * esa diferencia es lo que garantiza que el admin no cambia NADA para los clientes actuales
+     * mientras el número del asistente no esté terminado de configurar:
+     *
+     *   - `principal`: alcanza con la fila activa (lo que `getActive()` siempre pidió). No se le suman
+     *     condiciones nuevas: el número de leads y clientes tiene que seguir funcionando con la
+     *     configuración que ya tiene.
+     *   - `asistente`: fila activa **con `phone_number_id`, `kapso_api_key`, `webhook_secret` y
+     *     `display_phone`**. Los dos primeros son lo que hace falta para enviar; el tercero lo escribe
+     *     el comando que da de alta el webhook en Kapso, o sea que es la señal de que el número
+     *     también puede RECIBIR. Un número que envía pero no recibe es peor que no tenerlo: el dueño
+     *     leería el informe en un chat al que no puede contestar. El cuarto —el número tal como se
+     *     lee— es lo que se le dice a un dueño que escribe por el número equivocado: sin él no hay a
+     *     dónde mandarlo. Con la fila a medias —alta hecha en el panel, webhook sin registrar— todo
+     *     sigue saliendo y entrando por el principal, como hasta hoy.
+     *
+     * Todos los consumidores que tienen que decidir «¿mando por el número del asistente o por el
+     * principal?» pasan por acá, y no por `porProposito()`, que solo mira que la fila exista.
+     *
+     * @param string $proposito Uno de los PROPOSITO_* de esta clase.
+     *
+     * @return self|null
+     */
+    public static function canalListo(string $proposito): ?self
+    {
+        $config = self::porProposito($proposito);
+        if ($config === null) {
+            return null;
+        }
+
+        if ($proposito === self::PROPOSITO_ASISTENTE && ! $config->tieneLoNecesarioParaAtender()) {
+            return null;
+        }
+
+        return $config;
+    }
+
+    /**
+     * Propósito por el que hay que mandar (y por el que hay que medir la ventana de 24 h) lo que
+     * pertenece al canal del asistente: el propio `asistente` si su número está listo, y `principal`
+     * si no.
+     *
+     * 🔴 La ventana de 24 h de Meta es por PAR de números: lo que un dueño le escribió al número de
+     * leads no habilita texto libre por el número del asistente, ni al revés. Quien manda por uno
+     * tiene que medir la ventana sobre el mismo. Devolver acá el propósito EFECTIVO —y no siempre
+     * `asistente`— es lo que mantiene la medición de los informes y de los avisos tal cual estaba
+     * hasta que el segundo número exista de verdad.
+     *
+     * @return string Uno de los PROPOSITO_*.
+     */
+    public static function propositoEfectivoDelAsistente(): string
+    {
+        return self::canalListo(self::PROPOSITO_ASISTENTE) !== null
+            ? self::PROPOSITO_ASISTENTE
+            : self::PROPOSITO_PRINCIPAL;
+    }
+
+    /**
+     * Qué le falta a esta fila para atender el canal del asistente, por nombre de campo.
+     *
+     * No devuelve ningún valor guardado: solo nombres, para que un diagnóstico (`whatsapp:estado`, el
+     * panel) pueda decir «falta el secreto del webhook» sin tocar jamás la clave o el secreto.
+     *
+     * @return array<int, string> Vacío = no falta nada.
+     */
+    public function loQueLeFaltaParaAtender(): array
+    {
+        $faltan = [];
+
+        if (trim((string) $this->phone_number_id) === '') {
+            $faltan[] = 'phone_number_id';
+        }
+        if (trim((string) $this->kapso_api_key) === '') {
+            $faltan[] = 'kapso_api_key';
+        }
+        if (trim((string) $this->webhook_secret) === '') {
+            $faltan[] = 'webhook_secret';
+        }
+        // «Un número que se pueda marcar»: ocho dígitos como mínimo, ignorando signos y espacios.
+        if (strlen((string) preg_replace('/\D+/', '', (string) $this->display_phone)) < 8) {
+            $faltan[] = 'display_phone';
+        }
+
+        return $faltan;
+    }
+
+    /**
+     * Si esta fila tiene todo lo que un número necesita para enviar Y recibir.
+     *
+     * @return bool
+     */
+    public function tieneLoNecesarioParaAtender(): bool
+    {
+        return $this->loQueLeFaltaParaAtender() === [];
+    }
+
+    /**
      * Fila activa que corresponde a un Phone Number ID de Meta.
      *
      * Es la resolución que usa el webhook: el payload de Kapso trae el `phone_number_id` del número
