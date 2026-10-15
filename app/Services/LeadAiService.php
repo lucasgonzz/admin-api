@@ -837,7 +837,9 @@ TXT;
                  * una persona. */
                 $trajo_horario = is_array($agendar_crudo)
                     && (! empty($agendar_crudo['demo_date']) || ! empty($agendar_crudo['demo_start_time']));
-                if ($trajo_horario || $this->mensaje_menciona_una_hora($mensaje_directa)) {
+                /* La frase de la reserva ("hasta las HH:MM" con el fin real) la dicta el propio
+                 * prompt: se saca antes de buscar horarios (15/10/2026, ver el método). */
+                if ($trajo_horario || $this->mensaje_menciona_una_hora($this->sin_la_frase_de_la_reserva($mensaje_directa, $lead))) {
                     $notas_directa[] = 'El agente escribió un horario concreto, pero la demo directa se asigna para ahora: revisá el texto antes de aprobar.';
                 }
 
@@ -9411,13 +9413,17 @@ BLOQUE_DEL_MANUAL;
         /* La frase que el agente le dice al lead cuando acepta. Sale de las settings, nunca
          * escrita a mano: ver frase_de_la_reserva(). El fin REAL es el de la demo ya asignada si la
          * tiene vigente, y el de la ventana prevista si todavía no. */
-        $fin_para_la_frase = null;
+        $fin_para_la_frase     = null;
+        $minutos_de_la_reserva = null;
         if ($tiene_demo_asignada && ! $demo_asignada_vencida) {
-            $fin_para_la_frase = self::time_string_to_hhmm($lead->demo_end_time);
+            $fin_para_la_frase     = self::time_string_to_hhmm($lead->demo_end_time);
+            $minutos_de_la_reserva = self::minutos_entre_horas($lead->demo_start_time, $lead->demo_end_time);
         } elseif ($prevista['fin'] !== null) {
-            $fin_para_la_frase = $prevista['fin']->format('H:i');
+            $fin_para_la_frase     = $prevista['fin']->format('H:i');
+            $inicio_previsto       = $directa->ventana_desde($ahora)['inicio'];
+            $minutos_de_la_reserva = (int) $inicio_previsto->diffInMinutes($prevista['fin']);
         }
-        $frase_de_la_reserva = $this->frase_de_la_reserva($fin_para_la_frase);
+        $frase_de_la_reserva = $this->frase_de_la_reserva($fin_para_la_frase, $minutos_de_la_reserva);
 
         $bloque = "\n\nDEMO DIRECTA (dinamica nueva -- la demo se hace AHORA, sin horarios):\n"
             . LeadOrigenService::encabezado_de_la_pagina($lead, $url_pagina)
@@ -9477,16 +9483,25 @@ BLOQUE_DEL_MANUAL;
      * La hora de fin es la única parte opcional: si el lead todavía no tiene turno y tampoco hay
      * instancia prevista, la frase se arma sin ella. Nunca se inventa una hora.
      *
+     * 🔴 La hora de fin SÍ va en dígitos ("hasta las 15:37": es lo que pidió Lucas), y eso pega en
+     * dos patrones del detector. Por eso el chequeo del "sí" en la demo directa la exime —a ella
+     * sola, con su hora real— antes de buscar horarios: ver `sin_la_frase_de_la_reserva()`.
+     *
+     * Cerca de la medianoche la ventana viene recortada a las 23:59 (`ventana_desde()`), y ahí
+     * "reservada dos horas" sería falso: con `$minutos_reales` por debajo del tope la frase no
+     * nombra las horas y dice sólo hasta cuándo ("la tenés reservada hasta las 23:59").
+     *
      * Sobre el "menos de una hora" con la duración en 60 exactos: es el texto que pidió Lucas y
      * describe bien la demo real (un recorrido guiado que no llega a la hora); los 60 minutos son
      * el techo del turno, no su duración medida. Si alguna vez la duración sube de 60, la frase se
      * adapta al siguiente tope en horas y sigue siendo verdadera.
      *
-     * @param string|null $fin_hhmm Hora de fin real del turno en "HH:MM", o null si no hay ninguna.
+     * @param string|null $fin_hhmm       Hora de fin real del turno en "HH:MM", o null si no hay ninguna.
+     * @param int|null    $minutos_reales Largo real de la ventana (inicio a fin), o null si no se sabe.
      *
      * @return string Frase sin mayúscula inicial ni punto final: se incrusta en la regla del "sí".
      */
-    private function frase_de_la_reserva(?string $fin_hhmm): string
+    private function frase_de_la_reserva(?string $fin_hhmm, ?int $minutos_reales = null): string
     {
         $duracion_minutos = LeadDemoSettings::get_duracion_minutos();
 
@@ -9499,14 +9514,97 @@ BLOQUE_DEL_MANUAL;
             $duracion_en_palabras = 'dura menos de ' . self::horas_en_letras($horas_duracion);
         }
 
-        $reserva_en_palabras = self::horas_en_letras(LeadDemoSettings::get_ventana_extendida_max_horas());
+        $horas_de_reserva = LeadDemoSettings::get_ventana_extendida_max_horas();
+        $tiene_fin        = $fin_hhmm !== null && trim($fin_hhmm) !== '';
+        $recortada        = $tiene_fin && $minutos_reales !== null && $minutos_reales < $horas_de_reserva * 60;
 
-        $frase = $duracion_en_palabras . '; la tenés reservada ' . $reserva_en_palabras;
-        if ($fin_hhmm !== null && trim($fin_hhmm) !== '') {
-            $frase .= ', hasta las ' . trim($fin_hhmm);
+        if ($recortada) {
+            $frase = $duracion_en_palabras . '; la tenés reservada hasta las ' . trim($fin_hhmm);
+        } else {
+            $frase = $duracion_en_palabras . '; la tenés reservada ' . self::horas_en_letras($horas_de_reserva);
+            if ($tiene_fin) {
+                $frase .= ', hasta las ' . trim($fin_hhmm);
+            }
         }
 
         return '"' . $frase . ', para que la recorras tranquilo"';
+    }
+
+    /**
+     * Minutos entre dos horas "HH:MM" del mismo día, o null si alguna no parsea o el resultado no
+     * es positivo.
+     *
+     * @param mixed $desde Hora de inicio (texto libre, como `demo_start_time`).
+     * @param mixed $hasta Hora de fin (texto libre, como `demo_end_time`).
+     *
+     * @return int|null
+     */
+    private static function minutos_entre_horas($desde, $hasta): ?int
+    {
+        $a = self::time_string_to_hhmm($desde);
+        $b = self::time_string_to_hhmm($hasta);
+        if (! preg_match('/^(\d{1,2}):(\d{2})$/', (string) $a, $ma) || ! preg_match('/^(\d{1,2}):(\d{2})$/', (string) $b, $mb)) {
+            return null;
+        }
+        $minutos = ((int) $mb[1] * 60 + (int) $mb[2]) - ((int) $ma[1] * 60 + (int) $ma[2]);
+
+        return $minutos > 0 ? $minutos : null;
+    }
+
+    /**
+     * El texto del "sí" sin la frase de la reserva, para pasarlo por el detector de horarios
+     * (15/10/2026, misión demo-dos-horas-y-experiencia).
+     *
+     * La regla del "sí" le pide al agente decir *"la tenés reservada dos horas, hasta las 15:37"*
+     * (`frase_de_la_reserva()`), y "hasta las 15:37" pega en dos patrones de
+     * `LeadMessage::PATRONES_DE_HORA`. Sin esta exención, cada "sí" que obedece el prompt quedaba
+     * retenido con la nota "el agente escribió un horario concreto", que en ese caso es falsa.
+     *
+     * Se exime SÓLO esa construcción ("reservada ... hasta las HH:MM") y SÓLO si la hora es la que
+     * el sistema le dio al agente: el fin del turno ya asignado o el de la ventana prevista, con
+     * cinco minutos de tolerancia (el previsto se recalcula acá unos segundos después de armar el
+     * prompt y puede correrse un minuto). Una hora distinta queda en el texto y el detector la
+     * agarra como antes. Cualquier otra hora del mensaje, también.
+     *
+     * @param string $texto Texto sugerido por el modelo.
+     * @param Lead   $lead  Lead del turno.
+     *
+     * @return string
+     */
+    private function sin_la_frase_de_la_reserva(string $texto, Lead $lead): string
+    {
+        $finales = [];
+        $fin_asignado = self::time_string_to_hhmm($lead->demo_end_time);
+        if (preg_match('/^\d{1,2}:\d{2}$/', (string) $fin_asignado)) {
+            $finales[] = (string) $fin_asignado;
+        }
+        try {
+            $prevista = app(DemoDirectaService::class)->elegir_prevista($lead, AppTime::now(DemoDirectaService::TZ));
+            if ($prevista['fin'] !== null) {
+                $finales[] = $prevista['fin']->format('H:i');
+            }
+        } catch (\Throwable $e) {
+            /* Sin previsión no hay nada que eximir: el texto pasa entero por el detector. */
+        }
+        if (empty($finales)) {
+            return $texto;
+        }
+
+        return (string) preg_replace_callback(
+            '/reservad[ao]\s+(?:[^,.;\n]{1,30}?,?\s+)?hasta\s+las\s+(\d{1,2}):(\d{2})/iu',
+            function ($m) use ($finales) {
+                $dicho = (int) $m[1] * 60 + (int) $m[2];
+                foreach ($finales as $fin) {
+                    $partes = explode(':', $fin);
+                    if (abs(((int) $partes[0] * 60 + (int) $partes[1]) - $dicho) <= 5) {
+                        return 'reservada';
+                    }
+                }
+
+                return $m[0];
+            },
+            $texto
+        );
     }
 
     /**

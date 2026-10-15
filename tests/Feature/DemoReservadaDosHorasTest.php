@@ -212,6 +212,27 @@ class DemoReservadaDosHorasTest extends TestCase
     }
 
     /**
+     * Cerca de la medianoche la ventana se recorta a las 23:59 (`ventana_desde()`): un "sí" a las
+     * 22:30 se reserva de 22:40 a 23:59, una hora y diecinueve minutos. Decir "dos horas" ahí sería
+     * falso, así que la frase dice sólo hasta cuándo (15/10/2026).
+     *
+     * @return void
+     */
+    public function test_con_la_ventana_recortada_por_la_medianoche_no_promete_dos_horas(): void
+    {
+        $this->fijar_settings_de_la_mision();
+        Carbon::setTestNow(Carbon::parse('2026-10-13 22:30:00', self::TZ));
+
+        $this->crear_demo();
+        $lead = $this->crear_lead_de_la_dinamica_nueva();
+
+        $bloque = $this->contexto_de_demo_directa($lead);
+
+        $this->assertStringContainsString('la tenés reservada hasta las 23:59, para que la recorras tranquilo', $bloque);
+        $this->assertStringNotContainsString('reservada dos horas', $bloque, 'La ventana recortada dura menos de dos horas.');
+    }
+
+    /**
      * Y la frase sigue a la setting: con la reserva en 3 horas dice "tres horas", no "dos".
      *
      * @return void
