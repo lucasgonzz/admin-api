@@ -87,5 +87,29 @@ class RouteServiceProvider extends ServiceProvider
 
             return Limit::perMinute($per_minute)->by('meta-raw-webhook:' . $request->ip());
         });
+
+        /*
+         * 🔴 Cubeta PROPIA para el webhook de MENSAJES de WhatsApp (misión
+         * whatsapp-dos-numeros, 13/10/2026).
+         *
+         * Hasta hoy `webhook/whatsapp` colgaba del limitador `api`, que agrupa por
+         * `user->id ?: ip`: UNA cubeta de 60/min por IP para toda la API. Y por esa ruta entran
+         * ahora los mensajes de los DOS números —el institucional (leads, soporte,
+         * implementación) y el del asistente de los dueños—, los dos desde la misma IP de Kapso.
+         * O sea que un dueño mandando una ráfaga de fotos a su asistente le comía la cuota a las
+         * conversaciones de los leads, y al revés. Un 429 acá no es un reintento más tarde: es un
+         * mensaje de una persona que no entra.
+         *
+         * El prefijo en el `by()` es lo que hace la cubeta distinta aunque la IP sea la misma.
+         */
+        RateLimiter::for('whatsapp-webhook', function (Request $request) {
+            $default_per_minute = app()->environment('local') ? 600 : 120;
+            $per_minute = (int) env('WHATSAPP_WEBHOOK_RATE_LIMIT_PER_MINUTE', $default_per_minute);
+            if ($per_minute < 1) {
+                $per_minute = $default_per_minute;
+            }
+
+            return Limit::perMinute($per_minute)->by('whatsapp-webhook:' . $request->ip());
+        });
     }
 }

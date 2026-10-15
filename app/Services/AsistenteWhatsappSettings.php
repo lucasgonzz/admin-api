@@ -66,6 +66,24 @@ class AsistenteWhatsappSettings
     private const DEFAULT_ASISTENTE_TEXTO_AJENO = 'Este número es el asistente de ComercioCity '
         . 'para dueños que ya usan el sistema; para consultas escribinos al +54 9 3444 54-4199';
 
+    /**
+     * Clave: texto con el que se le avisa a un dueño, cuando escribe al número de leads y clientes, cuál
+     * es el número de su asistente (misión asistente-segundo-numero, 15/10/2026).
+     */
+    public const KEY_ASISTENTE_TEXTO_AVISO_NUMERO = 'asistente_whatsapp_texto_aviso_numero';
+
+    /**
+     * Texto por defecto del aviso del número. Lleva dos marcas que `texto_aviso_del_numero()` reemplaza:
+     * `{numero}` (el número como se lee, p. ej. «+1 201-586-6682») y `{link}` (el enlace `wa.me`, que abre
+     * el chat directo con un toque). Sin saludo: el dueño acaba de escribir y está en medio de una
+     * conversación, no recibiendo un mensaje frío.
+     */
+    private const DEFAULT_ASISTENTE_TEXTO_AVISO_NUMERO = 'Tu asistente ahora tiene su propio número de WhatsApp: '
+        . '{numero}. Escribile ahí y te contesta con la información de tu negocio: {link}'
+        . "
+
+Este número queda para hablar con el equipo de ComercioCity.";
+
     /** Clave: nombre de la plantilla de Meta con la que salen los informes de la mañana. */
     public const KEY_INFORME_TEMPLATE_NAME = 'asistente_informe_template_name';
 
@@ -134,6 +152,24 @@ class AsistenteWhatsappSettings
         $texto = trim((string) AdminSetting::get(self::KEY_ASISTENTE_TEXTO_AJENO, ''));
 
         return $texto !== '' ? $texto : self::DEFAULT_ASISTENTE_TEXTO_AJENO;
+    }
+
+    /**
+     * Texto del aviso que recibe un dueño cuando le escribe al asistente por el número equivocado.
+     *
+     * @param string $numero Número del asistente como se lee (el `display_phone` de su fila).
+     * @param string $link   Enlace `https://wa.me/<dígitos>` que abre el chat con ese número.
+     *
+     * @return string
+     */
+    public static function texto_aviso_del_numero(string $numero, string $link): string
+    {
+        $texto = trim((string) AdminSetting::get(self::KEY_ASISTENTE_TEXTO_AVISO_NUMERO, ''));
+        if ($texto === '') {
+            $texto = self::DEFAULT_ASISTENTE_TEXTO_AVISO_NUMERO;
+        }
+
+        return str_replace(['{numero}', '{link}'], [$numero, $link], $texto);
     }
 
     /**

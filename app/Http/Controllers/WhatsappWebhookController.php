@@ -39,6 +39,7 @@ use App\Services\WhatsappSendService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -76,22 +77,38 @@ class WhatsappWebhookController extends Controller
         Request $request,
         SupportTicketAssignmentService $assignment_service
     ): JsonResponse {
-        $config = WhatsappConfig::getActive();
+        /*
+         * 🔴 EL BODY SE DECODIFICA ANTES DE VALIDAR LA FIRMA, y ese orden es obligado desde
+         * el 13/10/2026 (misión whatsapp-dos-numeros).
+         *
+         * El admin escucha DOS números de WhatsApp, y por cuál de los dos entró el mensaje lo
+         * dice el propio payload (`phone_number_id`). Cada número tiene su propio secreto de
+         * webhook, así que sin decodificar el body no se sabe con qué secreto hay que validar la
+         * firma. No lo reordenes de vuelta.
+         *
+         * No afloja ninguna guarda: de lo decodificado se lee UN campo para elegir la fila de
+         * config, y la firma se sigue validando sobre el body CRUDO —el mismo string que llegó—
+         * antes de tocar ni una fila de la base.
+         */
+        $raw_body = $request->getContent();
+        $payload  = json_decode($raw_body, true);
+        $payload  = is_array($payload) ? $payload : [];
+
+        $config = $this->resolver_config($payload);
         if (! $config || ! $config->is_active) {
             return response()->json(['message' => 'WhatsApp integration unavailable.'], 503);
         }
 
         if (! $this->verify_signature($request, $config)) {
             Log::channel('daily')->warning('WhatsApp webhook: firma inválida.', [
-                'ip' => $request->ip(),
+                'ip'        => $request->ip(),
+                'proposito' => $config->proposito,
             ]);
 
             return response()->json(['message' => 'Invalid signature.'], 401);
         }
 
-        $raw_body = $request->getContent();
-        $payload = json_decode($raw_body, true);
-        if (! is_array($payload)) {
+        if (empty($payload)) {
             return response()->json(['ok' => true], 200);
         }
 
@@ -118,9 +135,15 @@ class WhatsappWebhookController extends Controller
         $reaction_data = $reaction_service->extract_reaction($payload, $parsed);
         if ($reaction_data !== null) {
             try {
-                $support_contact = $this->find_support_contact_by_phone((string) $reaction_data['from']);
-                if ($support_contact === null) {
-                    $reaction_service->handle_lead_inbound_reaction($reaction_data, $payload);
+                /* 🔴 Una reacción que entra por el número del ASISTENTE (un 👍 al informe de la mañana)
+                   no es de ningún lead: el asistente no tiene leads ni los crea. Sin esta guarda, la
+                   reacción de un dueño que no es contacto de soporte iría a
+                   `handle_lead_inbound_reaction()`, que está pensada para el hilo de un lead. */
+                if ($config->proposito !== WhatsappConfig::PROPOSITO_ASISTENTE) {
+                    $support_contact = $this->find_support_contact_by_phone((string) $reaction_data['from']);
+                    if ($support_contact === null) {
+                        $reaction_service->handle_lead_inbound_reaction($reaction_data, $payload);
+                    }
                 }
             } catch (\Throwable $exception) {
                 Log::channel('daily')->error('WhatsApp webhook: error al procesar reacción.', [
@@ -146,6 +169,21 @@ class WhatsappWebhookController extends Controller
                     'has_inbound_media'    => ! empty($parsed['inbound_media']),
                     'body_preview'         => mb_substr((string) ($parsed['body'] ?? ''), 0, 120),
                 ]);
+            }
+
+            /*
+             * 🔴 EL ENRUTADO SE DECIDE POR NÚMERO, no por un flag del cliente (misión
+             * whatsapp-dos-numeros, 13/10/2026).
+             *
+             * Al número del asistente entra UNA sola cosa: el dueño hablando con el asistente de
+             * IA de su propio sistema. Ahí no se abren tickets, no se crean leads y no se contesta
+             * ninguna implementación —todo eso vive en el número institucional—, así que la rama
+             * corta acá y no sigue al árbol de abajo.
+             */
+            if ($config->proposito === WhatsappConfig::PROPOSITO_ASISTENTE) {
+                $this->handle_mensaje_del_asistente($parsed);
+
+                return response()->json(['ok' => true], 200);
             }
 
             $support_contact = $this->find_support_contact_by_phone($parsed['from']);
@@ -193,15 +231,41 @@ class WhatsappWebhookController extends Controller
                      * `ClientEmployee`. Es la decisión de Lucas de esta misión —solo el dueño habla
                      * con el asistente—, y un empleado de un cliente con el canal prendido cae en
                      * la rama de soporte de abajo, que está desconectada.
+                     *
+                     * 🔴 **DESDE EL 15/10/2026 ESTA RAMA DEPENDE DE SI EL NÚMERO DEL ASISTENTE ESTÁ
+                     * LISTO** (misión asistente-segundo-numero). El asistente tiene su propio número
+                     * de WhatsApp y el dueño tiene que hablarle ahí:
+                     *
+                     *   - **Con el número del asistente listo** (fila + clave + secreto del webhook),
+                     *     el dueño que le escribe a ESTE número —el de leads y clientes— no habla con
+                     *     el asistente: recibe un aviso con el número correcto y nada más. No se abre
+                     *     ticket y no se le crea nada. Mantenerlo hablando con el asistente por acá
+                     *     dejaría las dos conversaciones abiertas a la vez, con las respuestas por un
+                     *     número y los informes por el otro.
+                     *   - **Sin él**, todo sigue exactamente como hasta hoy: el asistente le contesta
+                     *     por este mismo número. Es lo que garantiza que no cambie nada para ningún
+                     *     cliente hasta que Lucas termine el alta del segundo número. No saques esta
+                     *     bifurcación: sin ella, el día del deploy —antes de cargar el número— los
+                     *     dueños con el asistente prendido se quedarían sin asistente.
                      */
-                    app(AsistenteWhatsappService::class)->recibir($parsed, $client);
-                    Log::channel('daily')->info('WhatsApp webhook: mensaje enrutado al asistente del cliente.', [
-                        'from'      => $parsed['from'],
-                        'type'      => $parsed['type'],
-                        'route'     => 'asistente',
-                        'client_id' => $client->id,
-                        'cito'      => ! empty($parsed['reply_to_message_id']),
-                    ]);
+                    if (WhatsappConfig::canalListo(WhatsappConfig::PROPOSITO_ASISTENTE) !== null) {
+                        $this->avisar_el_numero_del_asistente($parsed, $client);
+                        Log::channel('daily')->info('WhatsApp webhook: dueño con asistente escribió al número principal, se le avisa el número del asistente.', [
+                            'from'      => $parsed['from'],
+                            'type'      => $parsed['type'],
+                            'route'     => 'aviso-numero-del-asistente',
+                            'client_id' => $client->id,
+                        ]);
+                    } else {
+                        app(AsistenteWhatsappService::class)->recibir($parsed, $client);
+                        Log::channel('daily')->info('WhatsApp webhook: mensaje enrutado al asistente del cliente.', [
+                            'from'      => $parsed['from'],
+                            'type'      => $parsed['type'],
+                            'route'     => 'asistente',
+                            'client_id' => $client->id,
+                            'cito'      => ! empty($parsed['reply_to_message_id']),
+                        ]);
+                    }
                 } else {
                     $this->handle_support_message($parsed, $client, $client_employee, $assignment_service);
                     Log::channel('daily')->info('WhatsApp webhook: mensaje enrutado a soporte.', [
@@ -516,15 +580,104 @@ class WhatsappWebhookController extends Controller
     }
 
     /**
-     * Verifica la firma HMAC-SHA256 del body crudo contra el secreto configurado.
+     * Por cuál de los números de WhatsApp entró este evento.
+     *
+     * Kapso manda el `phone_number_id` del número que recibió el mensaje "for routing", y de ahí
+     * sale todo lo demás: con qué secreto se valida la firma, por qué número se contesta y a qué
+     * árbol de enrutado va el mensaje.
+     *
+     * 🔴 **SIN DATO, O CON UN `phone_number_id` QUE NO MATCHEA NINGUNA FILA, DEVUELVE LA
+     * PRINCIPAL.** Eso no es un descuido: es la compatibilidad con Kapso y es lo que hace que esta
+     * misión no pueda romper el número de leads. Si algún día Kapso deja de mandar el campo, le
+     * cambia el nombre, o Lucas da de alta un tercer número sin cargarlo en el panel, los mensajes
+     * siguen entrando por donde entraban hasta hoy — con un warning que lo denuncia, en vez de un
+     * 503 que deje a los leads sin webhook. Cortar acá con null sería más "prolijo" y nos dejaría
+     * sin pipeline comercial el día que el payload cambie.
+     *
+     * @param array<string, mixed> $payload Body JSON decodificado del webhook.
+     *
+     * @return WhatsappConfig|null Null solo si no hay NINGUNA config activa (el webhook devuelve 503).
+     */
+    private function resolver_config(array $payload): ?WhatsappConfig
+    {
+        $phone_number_id = $this->phone_number_id_del_payload($payload);
+
+        if ($phone_number_id !== null) {
+            $config = WhatsappConfig::porPhoneNumberId($phone_number_id);
+            if ($config !== null) {
+                return $config;
+            }
+        }
+
+        Log::channel('daily')->warning('WhatsApp webhook: no se pudo resolver el número del payload, se usa el principal.', [
+            'phone_number_id' => $phone_number_id,
+            'motivo'          => $phone_number_id === null ? 'el payload no trae el campo' : 'no hay fila activa con ese id',
+        ]);
+
+        return WhatsappConfig::getActive();
+    }
+
+    /**
+     * `phone_number_id` del payload, por las dos rutas en las que Kapso lo manda.
+     *
+     * @param array<string, mixed> $payload Body JSON decodificado del webhook.
+     *
+     * @return string|null Null si no vino por ninguna de las dos.
+     */
+    private function phone_number_id_del_payload(array $payload): ?string
+    {
+        $candidatos = [
+            isset($payload['phone_number_id']) ? $payload['phone_number_id'] : null,
+            isset($payload['conversation']['phone_number_id']) ? $payload['conversation']['phone_number_id'] : null,
+        ];
+
+        foreach ($candidatos as $candidato) {
+            if ($candidato === null || is_array($candidato)) {
+                continue;
+            }
+
+            $candidato = trim((string) $candidato);
+            if ($candidato !== '') {
+                return $candidato;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Verifica la firma HMAC-SHA256 del body crudo contra el secreto de ESA config.
      *
      * @param Request        $request
-     * @param WhatsappConfig $config
+     * @param WhatsappConfig $config Fila que resolvió {@see resolver_config()}: cada número tiene
+     *                               su propio secreto, registrado en Kapso por separado.
      *
      * @return bool
      */
     private function verify_signature(Request $request, WhatsappConfig $config): bool
     {
+        /*
+         * 🔴 SIN SECRETO NO SE VALIDA NADA, Y POR ESO SE RECHAZA.
+         *
+         * Hasta el 13/10/2026 este método le pasaba el secreto a `hash_hmac()` tal cual. Con la
+         * columna en null o vacía, `hash_hmac()` NO falla: firma con la clave `""`. O sea que
+         * cualquiera que conozca la URL del webhook podía calcular esa misma firma y meter
+         * mensajes — crear leads, escribirle a gente real, hablarle al asistente de un dueño. Una
+         * config a medio cargar abría el webhook en vez de cerrarlo.
+         *
+         * No lo "simplifiques" de vuelta sacando esta guarda: el lado seguro de un secreto que
+         * falta es rechazar, no aceptar todo.
+         */
+        $secreto = trim((string) $config->webhook_secret);
+        if ($secreto === '') {
+            Log::channel('daily')->warning('WhatsApp webhook: la config no tiene secreto, se rechaza la firma.', [
+                'proposito'       => $config->proposito,
+                'phone_number_id' => $config->phone_number_id,
+            ]);
+
+            return false;
+        }
+
         // Kapso documenta X-Webhook-Signature; se acepta también X-Kapso-Signature.
         $signature = (string) ($request->header('X-Kapso-Signature') ?: $request->header('X-Webhook-Signature'));
         if ($signature === '') {
@@ -533,7 +686,7 @@ class WhatsappWebhookController extends Controller
 
         $signature = str_replace('sha256=', '', $signature);
         $raw_body = $request->getContent();
-        $expected = hash_hmac('sha256', $raw_body, $config->webhook_secret);
+        $expected = hash_hmac('sha256', $raw_body, $secreto);
 
         return hash_equals($expected, $signature);
     }
@@ -658,6 +811,18 @@ class WhatsappWebhookController extends Controller
 
         return [
             'from'                => WhatsappNormalizer::normalize((string) $from_raw),
+            /*
+             * 🔴 EL REMITENTE TAL CUAL LLEGÓ, SIN NORMALIZAR (misión whatsapp-dos-numeros,
+             * 13/10/2026). Los dos conviven a propósito y hacen falta los dos.
+             *
+             * `normalize()` está escrito para teléfonos ARGENTINOS: a un `+1 555 123 4567` le
+             * devuelve `+54915551234567`. Para leads, soporte e implementación eso es correcto y
+             * necesario —los números están guardados en diez formatos distintos—, pero el número
+             * del asistente resuelve al dueño por IGUALDAD EXACTA, y comparar contra un número que
+             * `normalize()` ya rompió sería darle (o negarle) a alguien el acceso a los datos de un
+             * negocio por un prefijo inventado. Ver `find_dueno_por_telefono_exacto()`.
+             */
+            'from_crudo'          => (string) $from_raw,
             'message_id'          => (string) $message_id,
             'type'                => $type,
             'body'                => $body,
@@ -666,6 +831,16 @@ class WhatsappWebhookController extends Controller
             'timestamp'           => $timestamp,
             'contact_name'        => $contact_name,
             'reply_to_message_id' => $this->extract_reply_to_message_id($message),
+            /*
+             * Por qué número entró el mensaje, para que la fila de `client_assistant_messages` lo
+             * guarde. Se devuelve el valor CRUDO del payload y no el `phone_number_id` de la config
+             * que resolvió `resolver_config()`, y la diferencia se ve justo en el caso que importa:
+             * cuando el payload no trae el campo, la config que se usó es la principal —por el
+             * repliegue— pero lo que sabemos del mensaje es NADA, y guardar el id del principal
+             * sería escribir en la base una suposición como si fuera un dato. Null significa "no
+             * vino", que es la verdad y es lo que la columna admite.
+             */
+            'phone_number_id'     => $this->phone_number_id_del_payload($payload),
         ];
     }
 
@@ -1059,6 +1234,191 @@ class WhatsappWebhookController extends Controller
         foreach ($leads as $lead) {
             if (WhatsappNormalizer::phones_match((string) $lead->phone, $phone)) {
                 return $lead;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Qué se hace con un mensaje que entró por el NÚMERO DEL ASISTENTE.
+     *
+     * Acá entra una sola cosa: el dueño de un cliente activo, con el canal prendido, hablando con
+     * el asistente de IA de su propio sistema. Cualquier otro remitente —un desconocido, un
+     * empleado del dueño, el dueño con el canal apagado, un cliente dado de baja— recibe un texto
+     * fijo que le dice a dónde escribir, y nada más: no se le crea lead, no se le abre ticket y no
+     * entra a ninguna rama de implementación.
+     *
+     * 🔴 Y eso vale TAMBIÉN para un cliente con implementación en curso. Su implementación se
+     * lleva por el número institucional —es ahí donde le escribimos y donde está el hilo—, así
+     * que contestarle por acá un paso de la implementación partiría la conversación en dos
+     * números: el dueño leería la pregunta en un chat y la respuesta en otro.
+     *
+     * @param array<string, mixed> $parsed Mensaje entrante ya parseado.
+     *
+     * @return void
+     */
+    private function handle_mensaje_del_asistente(array $parsed): void
+    {
+        /* El crudo y no `$parsed['from']`: ver el comentario de `from_crudo` en
+           `parse_inbound_message()`. Tanto para resolver al dueño como para contestarle hace falta
+           el número que de verdad escribió, no la versión argentinizada. */
+        $desde  = (string) (isset($parsed['from_crudo']) && $parsed['from_crudo'] !== ''
+            ? $parsed['from_crudo']
+            : $parsed['from']);
+        $client = $this->find_dueno_por_telefono_exacto($desde);
+
+        if ($client !== null && (bool) $client->asistente_whatsapp_activo) {
+            app(AsistenteWhatsappService::class)->recibir($parsed, $client);
+            Log::channel('daily')->info('WhatsApp webhook: mensaje enrutado al asistente del cliente.', [
+                'from'      => $parsed['from'],
+                'type'      => $parsed['type'],
+                'route'     => 'asistente',
+                'client_id' => $client->id,
+                'cito'      => ! empty($parsed['reply_to_message_id']),
+            ]);
+
+            return;
+        }
+
+        Log::channel('daily')->info('WhatsApp webhook: remitente ajeno al número del asistente.', [
+            'from'      => $parsed['from'],
+            'type'      => $parsed['type'],
+            'route'     => 'asistente-ajeno',
+            'client_id' => $client !== null ? $client->id : null,
+            'motivo'    => $client === null ? 'no es el dueño de ningún cliente activo' : 'el dueño tiene el canal apagado',
+        ]);
+
+        $texto = AsistenteWhatsappSettings::texto_para_remitente_ajeno();
+        if ($texto === '') {
+            return;
+        }
+
+        /* 🔴 Solo se le contesta a un remitente ARGENTINO. `WhatsappSendService::send_text()` pasa el
+           destino por `WhatsappNormalizer::normalize()`, que está escrito para teléfonos argentinos y
+           convierte un `+1 555 123 4567` en `+54915551234567`: el mensaje saldría hacia un número que no
+           existe, Meta lo rechazaría y el envío fallido avisaría a los admins por algo que no es una
+           falla. A quien escribe desde otro país no se le contesta; queda en el log de arriba. */
+        if (strpos(ltrim((string) preg_replace('/\D+/', '', $desde), '0'), '54') !== 0) {
+            return;
+        }
+
+        /* 🔴 `paraProposito('asistente')` no es adorno: sin él la respuesta saldría por el número
+           institucional, y la persona vería su pregunta en un chat y la respuesta en otro — que es
+           exactamente la confusión que este texto viene a evitar. */
+        app(WhatsappSendService::class)
+            ->paraProposito(WhatsappConfig::PROPOSITO_ASISTENTE)
+            ->send_text(
+                $desde,
+                $texto,
+                'Remitente ajeno al numero del asistente'
+            );
+    }
+
+    /**
+     * Le dice a un dueño con el asistente prendido cuál es el número de su asistente.
+     *
+     * Se llama cuando ese dueño escribe al número de LEADS Y CLIENTES con el número del asistente ya
+     * listo. El mensaje no se procesa de ninguna otra forma: ni va al asistente (hablaría por el chat
+     * equivocado), ni abre ticket, ni crea nada.
+     *
+     * 🔴 **Una vez cada 30 minutos por dueño.** Quien escribe a una conversación y no recibe lo que
+     * espera suele mandar tres mensajes seguidos; contestarle el mismo aviso tres veces es ruido y
+     * lo hace parecer un bucle. `Cache::add()` es atómico: solo el primero de una ráfaga pasa.
+     *
+     * Sale por el número principal y como texto libre, sin plantilla: el dueño acaba de escribir,
+     * así que su ventana de 24 hs en este número está abierta por definición.
+     *
+     * @param array<string, mixed> $parsed Mensaje entrante ya parseado.
+     * @param Client               $client Cliente cuyo dueño escribió.
+     *
+     * @return void
+     */
+    private function avisar_el_numero_del_asistente(array $parsed, Client $client): void
+    {
+        $config = WhatsappConfig::canalListo(WhatsappConfig::PROPOSITO_ASISTENTE);
+        if ($config === null) {
+            return;
+        }
+
+        if (! Cache::add('whatsapp_aviso_numero_asistente_cliente_' . (int) $client->id, 1, now()->addMinutes(30))) {
+            return;
+        }
+
+        $numero = trim((string) $config->display_phone);
+        $digitos = preg_replace('/\D+/', '', $numero);
+
+        app(WhatsappSendService::class)->send_text(
+            (string) $parsed['from'],
+            AsistenteWhatsappSettings::texto_aviso_del_numero($numero, 'https://wa.me/' . $digitos),
+            'Aviso del numero del asistente - cliente #' . (int) $client->id
+        );
+    }
+
+    /**
+     * El DUEÑO cuyo teléfono es EXACTAMENTE este, o null.
+     *
+     * 🔴 **No usa `phones_match()`, y esa omisión es la razón de que este método exista** en vez de
+     * reusar `find_client_by_phone()`: `phones_match()` cae a comparar los ÚLTIMOS OCHO DÍGITOS y da
+     * `true` entre `+5493411234567` (Rosario) y `+5493511234567` (Córdoba), que son dos personas
+     * distintas.
+     *
+     * En el número institucional ese criterio es correcto —un falso positivo manda un mensaje al chat
+     * equivocado, molesto y recuperable—, pero acá el falso positivo le abre a una persona el
+     * asistente de IA del negocio de OTRA: ventas, costos, deudas, clientes. Por eso se compara el
+     * número completo y nada más. Ver `WhatsappNormalizer::equals_estricto()`, que además tolera los
+     * formatos distintos en que las fichas guardan un teléfono argentino.
+     *
+     * Un remitente que matchea un `ClientEmployee` devuelve null aunque además sea el teléfono de
+     * la ficha de un cliente: el asistente es del dueño y de nadie más, y el lado seguro de la
+     * duda es no darle acceso.
+     *
+     * @param string $phone Teléfono del remitente, TAL CUAL llegó en el payload.
+     *
+     * @return Client|null
+     */
+    private function find_dueno_por_telefono_exacto(string $phone): ?Client
+    {
+        if (trim($phone) === '') {
+            return null;
+        }
+
+        $client_employees = ClientEmployee::query()
+            ->whereNotNull('phone')
+            ->where('phone', '!=', '')
+            ->get();
+
+        foreach ($client_employees as $client_employee) {
+            if (WhatsappNormalizer::equals_estricto((string) $client_employee->phone, $phone)) {
+                return null;
+            }
+        }
+
+        $active_clients = Client::where('is_active', true)
+            ->whereNotNull('phone')
+            ->where('phone', '!=', '')
+            ->get();
+
+        foreach ($active_clients as $client) {
+            if (WhatsappNormalizer::equals_estricto((string) $client->phone, $phone)) {
+                return $client;
+            }
+        }
+
+        /* Repliegue por lead promovido, igual que en el camino institucional: el `clients.phone`
+           puede estar vacío porque el teléfono quedó cargado en el lead del que nació el cliente. */
+        $promoted_leads = Lead::whereNotNull('promoted_client_id')
+            ->whereNotNull('phone')
+            ->get();
+
+        foreach ($promoted_leads as $lead) {
+            if (! WhatsappNormalizer::equals_estricto((string) $lead->phone, $phone)) {
+                continue;
+            }
+
+            $client = Client::where('is_active', true)->find($lead->promoted_client_id);
+            if ($client) {
+                return $client;
             }
         }
 

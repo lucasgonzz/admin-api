@@ -555,16 +555,22 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
          * y con eso puede pedir la foto de nuevo en vez de contestar como si nunca hubiera existido.
          */
         if ($this->imagenes !== []) {
-            /* 🔴 La foto se baja con las credenciales del número que la RECIBIÓ, no con las del
-             * principal. La URL de media de Kapso viene firmada para la cuenta de ese número y el
-             * repliegue por `whatsapp_media_id` le pega a `…/{phone_number_id}/media`: con el
-             * `phone_number_id` del otro número, Meta contesta que no existe. Null —el asistente
-             * todavía sin fila— deja el comportamiento de hoy, que es bajar con el principal. */
-            $preparadas = $imagenes->preparar(
-                $this->imagenes,
-                (int) $fila->id,
-                WhatsappConfig::porProposito(WhatsappConfig::PROPOSITO_ASISTENTE)
-            );
+            /* 🔴 La foto se baja con las credenciales del número por el que ENTRÓ el mensaje, no con las
+             * del principal ni «las del asistente» a secas. La URL de media de Kapso viene firmada para
+             * la cuenta de ese número y el repliegue por `whatsapp_media_id` le pega a
+             * `…/{phone_number_id}/media`: con el `phone_number_id` del otro número, Meta contesta que no
+             * existe.
+             *
+             * El número sale de la FILA (`phone_number_id`, que guarda el webhook al recibir) y no de
+             * «cuál es el número del asistente hoy»: un mensaje que entró por el principal antes de que el
+             * asistente tuviera su número —o con la fila a medias— se baja con el principal, que es el
+             * dueño de esa foto. Fila sin dato (mensajes anteriores a esta columna, o un payload que no
+             * lo traía) o número que no se encuentra → null → el comportamiento de siempre. */
+            $numero_de_entrada = trim((string) $fila->phone_number_id) !== ''
+                ? WhatsappConfig::porPhoneNumberId((string) $fila->phone_number_id)
+                : null;
+
+            $preparadas = $imagenes->preparar($this->imagenes, (int) $fila->id, $numero_de_entrada);
 
             /* 🔴 Dos motivos distintos para que una foto no viaje, y cada uno lleva su nota. Las que
              * quedaron afuera por el TOPE llegaron bien: decirle al asistente que "no se pudieron
