@@ -49,11 +49,18 @@ class DemoDirectaService
      * (realizada, closer, cerrado, en pausa) puede seguir teniendo demo_date/demo_id cargados,
      * pero ya no va a entrar por ese turno: la instancia se considera libre.
      *
-     * `demo_pendiente_de_ingreso` SÍ ocupa mientras conserve su turno: un lead de la dinámica
-     * actual llega ahí por timeout y puede entrar más tarde dentro de su hora (el evento
-     * demo.ingreso lo avanza desde ese estado). Los de la demo directa, en cambio, pierden el turno
-     * al pasar a ese estado (marcar_no_ingreso y el vencimiento por no-show limpian demo_date), así
-     * que no bloquean nada: cuando vuelven, se les asigna de nuevo.
+     * `demo_pendiente_de_ingreso` SÍ ocupa mientras conserve su turno: un lead llega ahí por
+     * timeout y puede entrar más tarde dentro de su ventana (el evento demo.ingreso lo avanza desde
+     * ese estado, `DemoEventosController::ESTADOS_DESDE_LOS_QUE_AVANZA_POR_INGRESO_REAL`).
+     *
+     * 🔴 Y desde el 13/10/2026 eso vale TAMBIÉN para la demo directa, que es lo contrario de lo que
+     * decía este docblock. Hasta esa fecha el vencimiento por no-show limpiaba el turno
+     * (`demo_id`/`demo_date`/`demo_start_time`/...), así que un lead de demo directa en
+     * `demo_pendiente_de_ingreso` no bloqueaba nada y, cuando volvía, se le asignaba una instancia
+     * nueva. La misión demo-dos-horas-y-experiencia dejó de limpiarlo: si al lead se le prometieron
+     * dos horas, las dos horas son suyas aunque no haya entrado en la primera, y puede entrar en el
+     * minuto 90 por el botón de su página. El que sí sigue soltando el turno es `marcar_no_ingreso`,
+     * que es una decisión humana ("este no entra más"), no un reloj.
      *
      * @var array<int, string>
      */
@@ -92,62 +99,53 @@ class DemoDirectaService
     }
 
     /**
-     * Primera instancia (por id) libre para la ventana pedida, con la ventana que de verdad se le
-     * puede dar, o null si ninguna sirve.
+     * Primera instancia (por id) libre para TODA la ventana pedida, o null si ninguna sirve.
      *
      * "Libre" = ningún OTRO lead, en un estado que ocupe la instancia, tiene ese mismo demo_id el
-     * día del inicio con una ventana [inicio - setup, fin + gracia] que cubra el INICIO pedido
-     * (también inflado con setup y gracia: dos setups no pueden pisarse, y la gracia es el rato en
-     * que el lead anterior todavía puede estar adentro).
+     * día del inicio con una ventana [inicio - setup, fin + gracia] que se solape con la pedida
+     * (también inflada con setup y gracia: dos setups no pueden pisarse, y la gracia es el rato en
+     * que el lead anterior todavía puede estar adentro). Un solo intervalo solapado alcanza para
+     * descartar la instancia, y se prueba la siguiente.
      *
-     * Si la instancia está libre ahora pero tiene un turno más tarde (una demo de la dinámica
-     * actual a las 15:00, o un lead que dijo "sí" hace un rato y arranca en cinco minutos), la
-     * ventana se RECORTA para terminar antes de ese turno, siempre que quede al menos la duración
-     * configurada. Sin ese recorte, tres instancias vacías con una demo de una hora cada una a la
-     * tarde dejaban a un "sí" de las 10:00 sin lugar, porque la ventana extendida de seis horas no
-     * entraba entera.
+     * 🔴 Por qué ya no hay recorte (13/10/2026, misión demo-dos-horas-y-experiencia). Hasta esta
+     * misión, una instancia con un turno vecino más tarde servía igual: la ventana se RECORTABA
+     * para terminar antes de ese turno y se aceptaba mientras quedara al menos
+     * `get_duracion_minutos()`. Ese recorte existía porque la ventana extendida eran SEIS horas y
+     * casi nunca entraba entera: sin él, tres instancias vacías con una demo a la tarde dejaban a
+     * un "sí" de las 10:00 sin lugar.
+     *
+     * Lo que cambió es lo que se le promete al lead. Desde esta misión el agente le dice *"la tenés
+     * reservada dos horas, hasta las HH:MM"* (ver `LeadAiService::build_demo_directa_context()`),
+     * así que media reserva dejó de ser una reserva: el lead que vuelve a las dos horas se encuentra
+     * con el turno vencido y con otro lead adentro de su instancia. Y con la ventana en 2 h
+     * (`LeadDemoSettings::DEFAULT_VENTANA_EXTENDIDA_MAX_HORAS`) el recorte casi no hace falta: la
+     * ventana entera entra en cualquier hueco razonable de la tarde. Si ninguna instancia sirve,
+     * `proxima_liberacion()` le dice al agente desde qué hora sí, que es una respuesta honesta —
+     * mejor que una reserva de veinte minutos vendida como dos horas.
+     *
+     * Y por eso la aritmética del recorte no quedó como caso borde: era vacía. Un intervalo que se
+     * solapa con la pedida y NO pisa el arranque tiene su `desde` en algún punto de
+     * `(inicio - setup, fin + gracia]`, así que su tope (`desde - gracia - 1`) cae siempre antes de
+     * `fin`. O sea: todo vecino que no bloquea el inicio mueve el fin, sin excepción. Un `if` para
+     * "recorte que no mueve el fin" no tendría ningún caso que atender.
+     *
+     * El clamp de las 23:59 y el `cabe` de `ventana_desde()` NO son esto y no cambiaron: la ventana
+     * pedida ya llega recortada por el fin del día, y el fin del día no es un vecino.
      *
      * @param Lead   $lead   Lead al que se le va a asignar (se excluye a sí mismo: reagendar no
      *                       puede chocar contra la propia reserva, misma lección del lead #10).
      * @param Carbon $inicio Inicio de la ventana pedida.
      * @param Carbon $fin    Fin de la ventana pedida (tope de la ventana extendida).
      *
-     * @return array{demo: Demo, fin: Carbon}|null
+     * @return array{demo: Demo, fin: Carbon}|null La ventana devuelta es siempre la pedida entera.
      */
     public function instancia_libre(Lead $lead, Carbon $inicio, Carbon $fin): ?array
     {
-        $ocupadas    = $this->ocupacion_por_demo($lead, $inicio, $fin);
-        $setup_antes = LeadDemoSettings::get_setup_minutos_antes();
-        $gracia      = LeadDemoSettings::get_gracia_minutos_post();
-        $duracion    = LeadDemoSettings::get_duracion_minutos();
+        $ocupadas = $this->ocupacion_por_demo($lead, $inicio, $fin);
 
         foreach (Demo::query()->orderBy('id')->get() as $demo) {
             if (empty($ocupadas[$demo->id])) {
                 return ['demo' => $demo, 'fin' => $fin->copy()];
-            }
-
-            /* Hay turnos que se solapan con la ventana pedida: sirve sólo si todos arrancan
-             * después del inicio, y entonces la ventana termina antes del más temprano. */
-            $fin_recortado = $fin->copy();
-            $bloqueada     = false;
-            foreach ($ocupadas[$demo->id] as $intervalo) {
-                /* $intervalo['desde'] ya viene con el setup descontado. Si ese margen cae antes
-                 * de que termine nuestro propio setup (inicio - setup), el turno pisa el arranque. */
-                if ($intervalo['desde']->lte($inicio->copy()->subMinutes($setup_antes))) {
-                    $bloqueada = true;
-                    break;
-                }
-                $tope_por_este = $intervalo['desde']->copy()->subMinutes($gracia + 1);
-                if ($tope_por_este->lt($fin_recortado)) {
-                    $fin_recortado = $tope_por_este;
-                }
-            }
-
-            if ($bloqueada) {
-                continue;
-            }
-            if ($fin_recortado->diffInMinutes($inicio, false) <= -$duracion) {
-                return ['demo' => $demo, 'fin' => $fin_recortado->second(0)];
             }
         }
 

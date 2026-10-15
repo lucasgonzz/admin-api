@@ -366,24 +366,70 @@ class DemoDirectaTest extends TestCase
     /* ------------------------------------------------------------------ */
 
     /**
-     * (9) La instancia que tiene un turno más tarde sirve igual: la ventana se recorta para
-     *     terminar antes de ese turno (15:00 − 15 de setup − 10 de gracia − 1 = 14:34).
+     * (9) 🔴 CAMBIO DE CONDUCTA del 13/10/2026 (misión demo-dos-horas-y-experiencia): la instancia
+     *     que tiene un turno más tarde YA NO SIRVE.
+     *
+     *     Hasta esa fecha este test afirmaba lo contrario: la ventana se recortaba para terminar
+     *     antes del turno vecino (15:00 − 15 de setup − 10 de gracia − 1 = 14:34) y la instancia se
+     *     asignaba igual, con media reserva. Eso se podía defender mientras la ventana extendida
+     *     fueran seis horas y nadie le prometiera nada al lead. Desde esta misión el agente le dice
+     *     "la tenés reservada dos horas, hasta las HH:MM", así que una reserva recortada sería una
+     *     promesa incumplida: `DemoDirectaService::instancia_libre()` descarta la instancia y, si no
+     *     queda ninguna, la asignación falla con la excepción reintentable que nombra desde qué hora
+     *     sí (el mismo camino del caso 6).
+     *
+     *     Acá la única instancia está tomada de 15:00 a 16:00, y su fin REAL es 17:00
+     *     (15:00 + bloqueo_real 120), que es la hora que tiene que nombrar el aviso.
      *
      * @return void
      */
-    public function test_la_ventana_se_recorta_antes_del_proximo_turno_de_la_instancia(): void
+    public function test_la_instancia_con_un_turno_mas_tarde_ya_no_se_usa(): void
     {
         $demo = $this->crear_demo(1);
         $this->ocupar_instancia($demo, '2026-09-08', '15:00', '16:00');
         $lead    = $this->crear_lead_de_la_dinamica_nueva();
         $mensaje = $this->crear_mensaje_pendiente($lead, $demo);
 
+        /* Antes de esta misión acá se asignaba la instancia con la ventana recortada a las 14:34. */
+        $this->assertNull(
+            (new DemoDirectaService())->elegir_prevista($lead)['demo'],
+            'La instancia con un turno vecino no puede ofrecerse: la ventana entera no entra.'
+        );
+
+        try {
+            (new LeadAiService())->apply_pending_actions($mensaje, $this->final_actions_del_panel($lead));
+            $this->fail('Sin instancia libre para la ventana entera, aplicar el "sí" tiene que tirar SinDemoLibreException.');
+        } catch (SinDemoLibreException $e) {
+            $this->assertStringContainsString('17:00', $e->getMessage(), 'El aviso tiene que decir desde qué hora se libera (15:00 + bloqueo_real 120).');
+        }
+
+        $lead->refresh();
+        $this->assertNull($lead->demo_id, 'La excepción es reintentable: no puede dejar nada escrito.');
+        $this->assertNull($lead->demo_date);
+    }
+
+    /**
+     * (9 bis) Y el contrapunto: con una segunda instancia libre, se usa ÉSA y con la ventana
+     *         ENTERA (10:10 a 16:10, las seis horas que este archivo fija en su setUp), no la
+     *         recortada de la primera. Es lo que vuelve aceptable el descarte del caso anterior:
+     *         se saltea la instancia comprometida y se prueba la siguiente.
+     *
+     * @return void
+     */
+    public function test_con_otra_instancia_libre_se_usa_esa_con_la_ventana_entera(): void
+    {
+        $demo_con_turno = $this->crear_demo(1);
+        $demo_libre     = $this->crear_demo(2);
+        $this->ocupar_instancia($demo_con_turno, '2026-09-08', '15:00', '16:00');
+        $lead    = $this->crear_lead_de_la_dinamica_nueva();
+        $mensaje = $this->crear_mensaje_pendiente($lead, $demo_con_turno);
+
         (new LeadAiService())->apply_pending_actions($mensaje, $this->final_actions_del_panel($lead));
 
         $lead->refresh();
-        $this->assertSame($demo->id, (int) $lead->demo_id);
+        $this->assertSame($demo_libre->id, (int) $lead->demo_id, 'Se tiene que saltear la instancia comprometida y tomar la siguiente.');
         $this->assertSame('10:10', substr((string) $lead->demo_start_time, 0, 5));
-        $this->assertSame('14:34', substr((string) $lead->demo_end_time, 0, 5));
+        $this->assertSame('16:10', substr((string) $lead->demo_end_time, 0, 5), 'La ventana va entera: ya no se recorta por ningún vecino.');
     }
 
     /**
@@ -468,37 +514,88 @@ class DemoDirectaTest extends TestCase
     }
 
     /**
-     * (12) 🔴 El no-show: una demo directa cuyo lead no entró en 60 minutos desde el inicio pierde el
-     *      turno (la instancia queda libre) y pasa a demo_pendiente_de_ingreso, sin mensaje.
+     * (12) 🔴 CAMBIO DE CONDUCTA del 13/10/2026 (misión demo-dos-horas-y-experiencia): el no-show de
+     *      los 60 minutos YA NO libera la instancia.
+     *
+     *      Hasta esa fecha este test afirmaba que el lead perdía el turno (`demo_id`, `demo_date` y
+     *      el setup en `pendiente`) para que la instancia quedara libre al toque. Tenía sentido con
+     *      la ventana extendida en SEIS horas; con la reserva en DOS, y sobre todo desde que el
+     *      agente le promete al lead "la tenés reservada dos horas", vaciarle el turno a los 60
+     *      minutos era apagarle el botón justo cuando se sentaba.
+     *
+     *      Ahora el turno queda intacto y la instancia sigue reservada hasta el fin REAL de la
+     *      ventana — `max(fin + gracia, inicio + bloqueo_real)`, que para el turno de 08:30 a 14:30
+     *      de este test da las 14:40. Lo que se mide acá es justamente eso: que ningún otro lead
+     *      pueda tomarla antes, y que después sí.
+     *
+     *      Y ahora SÍ sale un mensaje: el "¿pudiste entrar?" con la plantilla aprobada
+     *      `cc_check_ingreso_demo` (el detalle de ese envío, con sus guardas, lo cubre
+     *      `CheckDemoIngresoTimeoutTest`).
      *
      * @return void
      */
-    public function test_el_no_show_libera_la_instancia_a_los_sesenta_minutos(): void
+    public function test_el_no_show_conserva_el_turno_y_la_instancia_sigue_reservada(): void
     {
         AdminSetting::set(LeadDemoSettings::KEY_DEMO_DIRECTA_NO_SHOW_MINUTOS, '60');
         Http::fake(['*' => Http::response(['ok' => true], 200)]);
-        $demo = $this->crear_demo(1);
+
+        /* Dos instancias: la 1 la tiene un lead que arrancó hace 30 minutos (no es no-show todavía)
+         * y la 2 el que arrancó hace 90 (sí lo es). Separadas para poder medir la instancia del
+         * no-show sin que la del otro lead tape el resultado. */
+        $demo_reciente = $this->crear_demo(1);
+        $demo_vencida  = $this->crear_demo(2);
 
         $reciente = $this->crear_lead_de_la_dinamica_nueva();
-        $this->dejar_en_demo_directa($reciente, $demo, '09:40', '15:40');
+        $this->dejar_en_demo_directa($reciente, $demo_reciente, '09:40', '15:40');
 
         $vencido = $this->crear_lead_de_la_dinamica_nueva();
         $vencido->phone = '5493519999998';
         $vencido->save();
-        $this->dejar_en_demo_directa($vencido, $demo, '08:30', '14:30');
+        $this->dejar_en_demo_directa($vencido, $demo_vencida, '08:30', '14:30');
+
+        /* El helper deja un entrante del lead con `created_at` = ahora, y la ventana de silencio
+         * del check de ingreso (10 minutos por default) lo leería como "estamos hablando con él" y
+         * se saltearía el mensaje. Se corre al momento en que de verdad dijo que sí. */
+        LeadMessage::where('lead_id', $vencido->id)->update(['created_at' => Carbon::parse('2026-09-08 08:20:00', 'America/Argentina/Buenos_Aires')]);
 
         $this->artisan('leads:check-demo-ingreso-timeout')->assertExitCode(0);
 
         $reciente->refresh();
         $this->assertSame('demo_agendada', $reciente->status, 'Arrancó hace 30 minutos: todavía no es no-show.');
-        $this->assertSame($demo->id, (int) $reciente->demo_id);
+        $this->assertSame($demo_reciente->id, (int) $reciente->demo_id);
 
+        /* El vencido cambia de estado pero NO de turno. */
         $vencido->refresh();
-        $this->assertSame('demo_pendiente_de_ingreso', $vencido->status, 'Arrancó hace 90 minutos sin entrar: pierde el turno.');
-        $this->assertNull($vencido->demo_id);
-        $this->assertNull($vencido->demo_date);
-        $this->assertSame('pendiente', (string) $vencido->demo_setup_status);
-        $this->assertDatabaseMissing('lead_messages', ['lead_id' => $vencido->id, 'sender' => 'sistema', 'status' => 'enviado']);
+        $this->assertSame('demo_pendiente_de_ingreso', $vencido->status, 'Arrancó hace 90 minutos sin entrar: cambia de estado.');
+        $this->assertSame($demo_vencida->id, (int) $vencido->demo_id, 'El turno se conserva: la instancia sigue siendo suya.');
+        $this->assertNotNull($vencido->demo_date);
+        $this->assertSame('08:30', substr((string) $vencido->demo_start_time, 0, 5));
+        $this->assertSame('14:30', substr((string) $vencido->demo_end_time, 0, 5));
+        $this->assertTrue((bool) $vencido->demo_flexible, 'Sigue siendo una demo directa: el flexible no se apaga.');
+        $this->assertSame('exitoso', (string) $vencido->demo_setup_status, 'La instancia está armada y lista: el setup no vuelve a pendiente.');
+
+        /* Y le salió el "¿pudiste entrar?". */
+        $this->assertDatabaseHas('lead_messages', [
+            'lead_id' => $vencido->id,
+            'sender'  => 'sistema',
+            'status'  => 'enviado',
+            'content' => '¡Hola Guillermo! ¿Cómo vas? ¿Pudiste entrar a la demo?',
+        ]);
+        $this->assertTrue((bool) $vencido->demo_check_ingreso_enviado);
+
+        /* Ahora mismo (10:00) ninguna de las dos instancias se puede ofrecer: la 1 la tiene el
+         * reciente y la 2 sigue reservada para el que no entró. */
+        $otro = $this->crear_lead_de_la_dinamica_nueva();
+        $this->assertNull(
+            (new DemoDirectaService())->elegir_prevista($otro)['demo'],
+            'La instancia del no-show sigue reservada: no puede ofrecérsele a otro lead.'
+        );
+
+        /* Pasado el fin real de esa ventana (14:40), la instancia 2 sí queda libre. */
+        Carbon::setTestNow(Carbon::parse('2026-09-08 14:50:00', 'America/Argentina/Buenos_Aires'));
+        $libre = (new DemoDirectaService())->elegir_prevista($otro->refresh());
+        $this->assertNotNull($libre['demo'], 'Pasada la ventana, la instancia tiene que volver al pool.');
+        $this->assertSame($demo_vencida->id, (int) $libre['demo']->id);
     }
 
     /**
