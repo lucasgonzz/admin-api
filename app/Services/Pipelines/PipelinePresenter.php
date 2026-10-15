@@ -5,6 +5,7 @@ namespace App\Services\Pipelines;
 use App\Helpers\AppTime;
 use App\Models\Client;
 use App\Models\Lead;
+use App\Models\LeadCall;
 use App\Models\LeadPipelineStatus;
 use App\Models\Pipeline;
 use App\Models\PipelineActivity;
@@ -140,6 +141,11 @@ class PipelinePresenter
             $salida[] = [
                 'id'           => (int) $pipeline->id,
                 'name'         => (string) $pipeline->name,
+                /* El slug se publica desde la misión embudo-lead-pipelines (13/10/2026): es lo que
+                   deja linkear un tablero sin conocer el id que le tocó al pipeline en la base de
+                   cada instalación (`?pipeline=lead`). Lo usa el aviso de WhatsApp al closer y lo
+                   va a usar el panel de inicio por rol. */
+                'slug'         => self::texto_o_null($pipeline->slug),
                 'description'  => $pipeline->description,
                 'lost_reasons' => $pipeline->motivos_de_perdida(),
                 'sort_order'   => (int) $pipeline->sort_order,
@@ -170,6 +176,10 @@ class PipelinePresenter
             'id'                  => (int) $etapa->id,
             'pipeline_id'         => (int) $etapa->pipeline_id,
             'name'                => (string) $etapa->name,
+            /* Clave estable de la etapa, null en todas las que no sembró un seeder (misión
+               embudo-lead-pipelines). Sobrevive a un renombre, y es con la que la automatización
+               del embudo "Leads" encuentra su etapa destino. */
+            'stage_key'           => self::texto_o_null($etapa->stage_key),
             'color'               => (string) $etapa->color,
             'type'                => (string) $etapa->type,
             'sort_order'          => (int) $etapa->sort_order,
@@ -299,6 +309,12 @@ class PipelinePresenter
      *      'completo'           → el Pipeline entero, con etapas y conteos (ficha).
      *  - `ahora` (Carbon): el reloj para `agenda_bucket` y `days_in_stage` (default
      *    `AppTime::now()`, uno solo para toda la lista).
+     *  - `llamada` (bool, default false): agrega `call` con la última `lead_calls` del sujeto —
+     *    fecha, Meet, estado, resumen y transcripción (misión embudo-lead-pipelines, 13/10/2026).
+     *    🔴 SOLO la ficha la pide. En el tablero y los listados `call` no viaja ni como clave, y es
+     *    a propósito: `lead_calls.transcript` es un longText y una columna así multiplicada por las
+     *    tarjetas de un tablero es exactamente cómo un listado se vuelve lento sin que nadie lo vea
+     *    venir. Para un sujeto cliente va null siempre.
      *
      * @param EloquentCollection   $oportunidades Colección de PipelineOpportunity.
      * @param array<string, mixed> $opciones
@@ -312,6 +328,7 @@ class PipelinePresenter
         }
 
         $contacto = ! empty($opciones['contacto']);
+        $llamada  = ! empty($opciones['llamada']);
         $modo     = isset($opciones['pipeline']) ? $opciones['pipeline'] : null;
         $ahora    = isset($opciones['ahora']) && $opciones['ahora'] instanceof Carbon ? $opciones['ahora'] : AppTime::now();
 
@@ -336,6 +353,8 @@ class PipelinePresenter
             }
         }
 
+        $llamadas = $llamada ? $this->ultimas_llamadas($oportunidades->pluck('lead_id')->all()) : [];
+
         $salida = [];
 
         foreach ($oportunidades as $oportunidad) {
@@ -346,10 +365,83 @@ class PipelinePresenter
                 $json['pipeline'] = $this->pipeline_de_la_oportunidad($oportunidad, $modo, $pipelines_completos);
             }
 
+            if ($llamada) {
+                $clave        = $oportunidad->lead_id === null ? null : (int) $oportunidad->lead_id;
+                $json['call'] = $clave !== null && isset($llamadas[$clave])
+                    ? self::videollamada($llamadas[$clave])
+                    : null;
+            }
+
             $salida[] = $json;
         }
 
         return $salida;
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | Videollamada del lead (misión embudo-lead-pipelines, 13/10/2026)
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * La última `lead_calls` de cada lead de la lista, indexada por `lead_id`.
+     *
+     * Una sola consulta para todas las oportunidades (mismo criterio que `ultimas_actividades()`).
+     * Ordenada por `id` ascendente y pasada por `keyBy`, así la que queda por lead es la de `id`
+     * más alto: la última.
+     *
+     * @param array<int, int|null> $ids_de_lead
+     *
+     * @return array<int, LeadCall>
+     */
+    private function ultimas_llamadas(array $ids_de_lead)
+    {
+        $ids = [];
+        foreach ($ids_de_lead as $id) {
+            if ($id !== null) {
+                $ids[(int) $id] = true;
+            }
+        }
+
+        if ($ids === []) {
+            return [];
+        }
+
+        $filas = LeadCall::query()
+            ->whereIn('lead_id', array_keys($ids))
+            ->orderBy('id')
+            ->get();
+
+        $mapa = [];
+        foreach ($filas as $fila) {
+            $mapa[(int) $fila->lead_id] = $fila;
+        }
+
+        return $mapa;
+    }
+
+    /**
+     * Una videollamada del closer, para la ficha de la oportunidad.
+     *
+     * `transcript` y `call_summary.transcripcion_completa` dicen lo mismo (lo duplica
+     * `CallSummaryService` a propósito, para que el resumen se pueda leer solo). Viajan las dos:
+     * `transcript` existe también cuando el resumen no se pudo generar, que es justo el caso en el
+     * que Tomás más necesita poder leer la llamada cruda.
+     *
+     * @param LeadCall $llamada
+     *
+     * @return array<string, mixed>
+     */
+    private static function videollamada(LeadCall $llamada)
+    {
+        return [
+            'id'           => (int) $llamada->id,
+            'estado'       => self::texto_o_null($llamada->estado),
+            'scheduled_at' => self::fecha($llamada->scheduled_at),
+            'started_at'   => self::fecha($llamada->started_at),
+            'meet_url'     => self::texto_o_null($llamada->meet_url),
+            'call_summary' => $llamada->call_summary,
+            'transcript'   => self::texto_o_null($llamada->transcript),
+        ];
     }
 
     /* ------------------------------------------------------------------------------------------
@@ -556,6 +648,12 @@ class PipelinePresenter
             'stage'            => $etapa ? [
                 'id'         => (int) $etapa->id,
                 'name'       => (string) $etapa->name,
+                /* 🔴 Acá NO va `stage_key`, aunque sí vaya en `stage()`. Esta forma reducida es
+                   contrato publicado y hay una prueba que la compara entera
+                   (`AltaMasivaTest`): la clave estable la necesita el back para encontrar su
+                   etapa destino, y la SPA la tiene en las etapas del pipeline, que viajan
+                   completas en la ficha y en `GET pipelines`. Sumarla acá sería ensanchar cada
+                   tarjeta del tablero para nadie. */
                 'color'      => (string) $etapa->color,
                 'type'       => (string) $etapa->type,
                 'sort_order' => (int) $etapa->sort_order,
