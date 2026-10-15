@@ -1204,7 +1204,7 @@ class DemoInstallationService
                 'Sin respuesta del demo-setup (timeout o conexión caída) contra ' . $url . '. '
                 . 'OJO: la corrida puede seguir viva en la instancia sembrando la base — NO vuelvas '
                 . 'a dispararla hasta confirmar que terminó, porque un segundo demo-setup le hace '
-                . 'otro migrate:fresh encima. Detalle: ' . $e->getMessage()
+                . 'otro migrate:fresh encima. Detalle: ' . ImplementationSettings::tapar_credenciales_de_demo($e->getMessage())
             );
         }
 
@@ -1225,9 +1225,12 @@ class DemoInstallationService
             );
         }
 
+        /* 🔴 El cuerpo se tapa antes de armar la excepción: el mensaje termina guardado en el log de
+         * la instalación de la demo, y el payload que se mandó lleva las credenciales de prueba de
+         * Zipnova y de Mercado Pago (misión credenciales-demo-zipnova-mp). */
         throw new \RuntimeException(
             'El demo-setup respondió HTTP ' . $response->status() . ': '
-            . substr((string) $response->body(), 0, 2000)
+            . ImplementationSettings::tapar_credenciales_de_demo(substr((string) $response->body(), 0, 2000))
         );
     }
 
