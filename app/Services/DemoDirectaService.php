@@ -196,7 +196,61 @@ class DemoDirectaService
             }
         }
 
-        return $mas_temprano;
+        /* 🔴 Desde el 15/10/2026 (misión demo-dos-horas-y-experiencia) la hora de arriba puede ser
+         * OPTIMISTA. instancia_libre() ya no recorta la ventana: un turno POSTERIOR en la misma
+         * instancia la bloquea entera. Con X ocupando hasta las 11:10 e Y arrancando a las 13:00,
+         * "se libera a las 11:10" era mentira: a las 11:10 la ventana nueva (11:20-13:20) choca con
+         * Y. Se prueba cada liberación del resto del día, en orden, y se devuelve la primera en la
+         * que la ventana entera entra de verdad. Si ninguna entra hoy, queda la de arriba, que es
+         * lo que este método devolvía siempre. */
+        $verificada = $this->primera_liberacion_que_entra($lead, $ventana['inicio']);
+
+        return $verificada !== null ? $verificada : $mas_temprano;
+    }
+
+    /**
+     * La primera hora del resto del día en la que, si el lead dijera "sí", alguna instancia
+     * tendría libre la ventana ENTERA (ver proxima_liberacion()). Null si ninguna entra hoy.
+     *
+     * Las candidatas son los fines reales de todas las ocupaciones del día: entre dos fines
+     * consecutivos nada se libera, así que no hace falta probar otros minutos. Se devuelve la
+     * liberación (lo mismo que este método devolvió siempre), pero se la PRUEBA como si el lead
+     * dijera "sí" en el primer minuto en que ya no toca esa ocupación: la ventana nueva arranca a
+     * MINUTOS_HASTA_EL_INICIO del sí y ocupa desde `setup_minutos_antes` antes de su inicio, así que
+     * un "sí" justo a la hora de la liberación todavía choca con ella (unos minutos; es así desde
+     * antes de esta misión y no se cambió acá).
+     *
+     * @param Lead   $lead   Lead para el que se consulta (se excluye a sí mismo).
+     * @param Carbon $inicio Inicio de la ventana pedida ahora.
+     *
+     * @return Carbon|null
+     */
+    private function primera_liberacion_que_entra(Lead $lead, Carbon $inicio): ?Carbon
+    {
+        $todo_el_dia = $this->ocupacion_por_demo($lead, $inicio, $inicio->copy()->setTime(23, 59, 0));
+        $margen      = max(0, LeadDemoSettings::get_setup_minutos_antes() - self::MINUTOS_HASTA_EL_INICIO) + 1;
+
+        $candidatas = [];
+        foreach ($todo_el_dia as $intervalos) {
+            foreach ($intervalos as $intervalo) {
+                if ($intervalo['hasta']->gt($inicio)) {
+                    $candidatas[$intervalo['hasta']->format('Y-m-d H:i:s')] = $intervalo['hasta'];
+                }
+            }
+        }
+        ksort($candidatas);
+
+        foreach ($candidatas as $candidata) {
+            $ventana = $this->ventana_desde($candidata->copy()->addMinutes($margen));
+            if (! $ventana['cabe']) {
+                return null;
+            }
+            if ($this->instancia_libre($lead, $ventana['inicio'], $ventana['fin']) !== null) {
+                return $candidata->copy();
+            }
+        }
+
+        return null;
     }
 
     /**

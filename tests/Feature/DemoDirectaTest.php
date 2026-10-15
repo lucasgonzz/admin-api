@@ -206,6 +206,89 @@ class DemoDirectaTest extends TestCase
         $this->assertStringContainsString('se libera a las 13:10', $prompt);
     }
 
+    /**
+     * (3-bis) Sin el recorte de la ventana (15/10/2026), un turno POSTERIOR en la misma instancia
+     *      también la bloquea. La hora que se le dice al agente tiene que ser una liberación en la
+     *      que la ventana ENTERA entra: con X hasta las 11:00 (se libera 11:10) e Y desde las 13:00,
+     *      un "sí" apenas pasadas las 11:10 da una ventana (11:2x a 13:2x) que choca con Y; recién
+     *      cuando se libera Y (15:10) entra.
+     *
+     * @return void
+     */
+    public function test_la_hora_de_liberacion_tiene_en_cuenta_los_turnos_posteriores(): void
+    {
+        AdminSetting::set(LeadDemoSettings::KEY_VENTANA_EXTENDIDA_MAX_HORAS, '2');
+        AdminSetting::set(LeadDemoSettings::KEY_BLOQUEO_REAL_MINUTOS, '120');
+        $demo = $this->crear_demo(1);
+        $this->ocupar_instancia($demo, '2026-09-08', '09:00', '11:00');
+        $lead = $this->crear_lead_de_la_dinamica_nueva();
+
+        $directa = app(DemoDirectaService::class);
+        $ahora   = AppTime::now(DemoDirectaService::TZ);
+
+        /* Sin Y: X se libera a las 11:10 (11:00 + gracia 10; el bloqueo real da lo mismo). */
+        $this->assertSame('11:10', $directa->proxima_liberacion($lead, $ahora)->format('H:i'));
+
+        /* Con Y a las 13:00, las 11:10 dejaron de servir: hay que esperar a que se libere Y. */
+        $this->ocupar_instancia($demo, '2026-09-08', '13:00', '15:00');
+        $this->assertSame('15:10', $directa->proxima_liberacion($lead, $ahora)->format('H:i'));
+    }
+
+    /**
+     * (3-ter) La frase de la reserva que dicta el prompt ("la tenés reservada dos horas, hasta las
+     *      HH:MM", con el fin real) NO es "un horario concreto": el "sí" que la usa no se retiene por
+     *      eso. Una hora que no es la del sistema sí se sigue reteniendo.
+     *
+     * @return void
+     */
+    public function test_la_frase_de_la_reserva_con_su_hora_real_no_dispara_el_detector(): void
+    {
+        $mensaje = $this->generar_si_con_la_reserva_hasta('12:10');
+
+        $this->assertStringNotContainsString('horario concreto', (string) $mensaje->ai_reasoning, 'La frase de la reserva con su fin real (10:10 + dos horas) no es un horario inventado.');
+    }
+
+    /**
+     * (3-ter, contracara) La misma frase con una hora que NO es la que dio el sistema se sigue
+     *      reteniendo: la exención es para el fin real y nada más.
+     *
+     * @return void
+     */
+    public function test_la_frase_de_la_reserva_con_otra_hora_se_sigue_reteniendo(): void
+    {
+        $mensaje = $this->generar_si_con_la_reserva_hasta('15:30');
+
+        $this->assertTrue((bool) ($mensaje->pending_actions['requiere_verificacion'] ?? false));
+        $this->assertStringContainsString('horario concreto', (string) $mensaje->ai_reasoning, 'Una hora que no es el fin real se sigue reteniendo.');
+    }
+
+    /**
+     * Un "sí" de la demo directa cuyo texto dice "la tenés reservada dos horas, hasta las {$hora}",
+     * con la ventana en dos horas (el "ahora" es 10:00, así que el fin real es 12:10).
+     *
+     * @param string $hora
+     *
+     * @return LeadMessage
+     */
+    private function generar_si_con_la_reserva_hasta(string $hora): LeadMessage
+    {
+        AdminSetting::set(LeadDemoSettings::KEY_VENTANA_EXTENDIDA_MAX_HORAS, '2');
+        $this->crear_demo(1);
+        $lead = $this->crear_lead_de_la_dinamica_nueva();
+
+        $this->sembrar_entorno_del_agente([
+            'mensaje_sugerido' => 'Dale! Se hace desde la computadora y dura menos de una hora; la tenés reservada dos horas, hasta las '
+                . $hora . ', para que la recorras tranquilo. Entrá desde acá: ' . $lead->demo_experiencia_url
+                . ' y la tienda: https://tienda-1.test',
+            'estado_sugerido'  => 'demo_agendada',
+            'agendar_demo'     => ['ahora' => true],
+            'razonamiento'     => '',
+        ]);
+        $this->sembrar_recurso_demo_agenda_v2($this->md_con_marcador());
+
+        return (new LeadAiService())->generate_suggestion($lead, false);
+    }
+
     /* ------------------------------------------------------------------ */
     /* 4 a 8 — aplicación al aprobar                                          */
     /* ------------------------------------------------------------------ */
