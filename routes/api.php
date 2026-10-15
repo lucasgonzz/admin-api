@@ -728,6 +728,8 @@ Route::prefix('admin')->group(function () {
         Route::put('client/{clientId}/candado-sesion', [ClientSessionLockController::class, 'update_json']);
         /* Botón "Reintentar sincronización" de la pestaña Candado de sesión. */
         Route::post('client/{clientId}/candado-sesion/sync', [ClientSessionLockController::class, 'sync_json']);
+        /* Boton Gestionar extensiones (mision extensiones-desde-el-admin, 15/10/2026): pide al empresa-api del cliente un acceso de un solo uso al configurador. */
+        Route::post('client/{clientId}/extensiones/acceso', [\App\Http\Controllers\ClientExtensionesAccesoController::class, 'acceso_json']);
 
         /* Consumo de tokens de IA (misión tokens-por-cliente, 17/9/2026).
            El GET lee del espejo local (`client_ai_token_usages`) y NO sale a la red: abrir una
