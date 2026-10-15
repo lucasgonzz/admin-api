@@ -484,6 +484,10 @@ class ClaudeLeadsOutboundController extends Controller
         if ($plantilla['error'] !== null) {
             return $plantilla['error'];
         }
+        /* A Meta sale el nombre de la FILA, no el que vino en el pedido: la búsqueda del gate no
+           distingue mayúsculas (collation `_ci`), y `CC_X` pasaría el gate para que Meta lo rechace
+           como inexistente. Igual que el envío individual. */
+        $template_name = (string) $plantilla['fila']->template_name;
 
         /* Ids únicos conservando el orden en que los nombró el llamador. Un id repetido se omite en
            vez de mandar dos veces el mismo mensaje al mismo teléfono. */

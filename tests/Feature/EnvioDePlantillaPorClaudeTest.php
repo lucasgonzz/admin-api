@@ -738,4 +738,40 @@ class EnvioDePlantillaPorClaudeTest extends TestCase
         $respuesta->assertStatus(422);
         $this->assertCount(0, $espia->envios);
     }
+
+    /**
+     * 🔴 El lote manda a Meta el nombre de la FILA, no el que vino en el pedido.
+     *
+     * El gate busca la plantilla con una collation que no distingue mayúsculas: `CC_X` lo pasa, y si
+     * saliera así, Meta lo rechazaría como plantilla inexistente.
+     *
+     * @return void
+     */
+    public function test_el_lote_manda_el_nombre_tal_como_esta_registrado()
+    {
+        $uno   = $this->crear_lead('Uno');
+        $espia = $this->espiar_sender();
+
+        $cuerpo = [
+            'lead_ids'             => [$uno->id],
+            'template_name'        => 'CC_RECUPERACION_DEMORA_PROPIA',
+            'content_template'     => 'Hola {{1}}!',
+            'variables_desde_lead' => ['contact_name'],
+        ];
+
+        $simulacion = $this->withHeaders($this->headers())
+            ->postJson('/api/claude/send-template-batch', $cuerpo);
+        $simulacion->assertStatus(200);
+
+        $respuesta = $this->withHeaders($this->headers())
+            ->postJson('/api/claude/send-template-batch', array_merge($cuerpo, [
+                'dry_run'       => false,
+                'confirm_count' => 1,
+                'confirm_token' => $simulacion->json('confirm_token'),
+            ]));
+
+        $respuesta->assertStatus(200);
+        $this->assertCount(1, $espia->envios);
+        $this->assertSame('cc_recuperacion_demora_propia', $espia->envios[0]['template_name']);
+    }
 }

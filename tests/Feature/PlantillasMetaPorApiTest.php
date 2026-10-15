@@ -1002,4 +1002,80 @@ class PlantillasMetaPorApiTest extends TestCase
 
         $this->assertCount(2, $fila->variables);
     }
+
+    /**
+     * 🔴 Un `dry_run` nulo o vacío explícito sigue siendo simulación.
+     *
+     * `boolean('dry_run', true)` lo leía como false y creaba la plantilla en Meta de verdad.
+     *
+     * @return void
+     */
+    public function test_un_dry_run_nulo_o_vacio_no_crea_nada()
+    {
+        Http::fake([$this->patron() => Http::response(['id' => '1', 'status' => 'PENDING'], 200)]);
+
+        foreach ([null, ''] as $valor) {
+            $nombre = $this->nombre_unico('dryrunnulo');
+
+            $respuesta = $this->withHeaders($this->headers())
+                ->postJson('/api/claude/templates/meta', $this->payload(['name' => $nombre, 'dry_run' => $valor]));
+
+            $respuesta->assertStatus(200);
+            $respuesta->assertJson(['dry_run' => true, 'creada' => false]);
+            $this->assertNull(FollowupTemplate::where('template_name', $nombre)->first());
+        }
+
+        Http::assertNothingSent();
+    }
+
+    /**
+     * 🔴 El sync NO enciende una plantilla apagada que no estaba esperando la revisión de Meta.
+     *
+     * La migración deja `meta_status` en NULL a las filas con `activa = 0`, y entre ellas hay
+     * plantillas del pipeline apagadas a propósito. Si el primer sync las encendiera por estar
+     * aprobadas en Meta, el cron de seguimientos las empezaría a mandar solas.
+     *
+     * @return void
+     */
+    public function test_el_sync_no_enciende_una_apagada_a_proposito()
+    {
+        $apagada = $this->fila(['activa' => false, 'meta_status' => null, 'estado' => 'demo_realizada']);
+
+        Http::fake([
+            $this->patron() => Http::response(['data' => [[
+                'name'     => $apagada->template_name,
+                'status'   => 'APPROVED',
+                'category' => 'UTILITY',
+                'id'       => '700700',
+            ]]], 200),
+        ]);
+
+        $this->artisan('templates:sync-meta')->assertExitCode(0);
+
+        $apagada->refresh();
+        $this->assertFalse((bool) $apagada->activa, '🔴 Encenderla es de una persona, no del sync.');
+        $this->assertSame('APPROVED', $apagada->meta_status, 'El estado de Meta sí se baja.');
+    }
+
+    /**
+     * Si Meta deja de devolver una plantilla rechazada, se conserva el motivo real del rechazo.
+     *
+     * @return void
+     */
+    public function test_una_consulta_vacia_no_pisa_el_motivo_de_rechazo()
+    {
+        $rechazada = $this->fila([
+            'activa'       => false,
+            'meta_status'  => 'REJECTED',
+            'meta_rechazo' => 'INVALID_FORMAT',
+        ]);
+
+        Http::fake([$this->patron() => Http::response(['data' => []], 200)]);
+
+        $this->withHeaders($this->headers())
+            ->postJson('/api/claude/templates/meta/' . $rechazada->template_name . '/refresh');
+
+        $rechazada->refresh();
+        $this->assertSame('INVALID_FORMAT', $rechazada->meta_rechazo);
+    }
 }

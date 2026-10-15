@@ -157,7 +157,11 @@ class ClaudeMetaTemplatesController extends Controller
         $componentes = $this->armar_componentes($cuerpo, $ejemplos);
 
         /* --- Freno 1: dry_run por defecto. --- */
-        if ($request->boolean('dry_run', true) === true) {
+        /* `filled` y no `boolean('dry_run', true)`: un `"dry_run": null` o `""` explícito daría
+           false y CREARÍA la plantilla en Meta. Ausente o vacío es simulación; mismo patrón que el
+           lote de envío. */
+        $dry_run = $request->filled('dry_run') ? $request->boolean('dry_run') : true;
+        if ($dry_run === true) {
             return response()->json([
                 'dry_run' => true,
                 'creada'  => false,

@@ -255,8 +255,12 @@ class MetaTemplateService
 
         if (empty($meta)) {
             /* Ver el bloque 🔴 del docblock: no se cambia ni el estado ni `activa`. */
-            $fila->meta_rechazo = 'Meta no devolvió esta plantilla al consultarla por nombre. '
-                . 'No se cambió su estado: una consulta vacía no es un rechazo.';
+            /* Si ya tenía un motivo de rechazo real, se conserva: pisarlo cada hora con este
+               aviso genérico borraría lo único que explica por qué Meta la rechazó. */
+            if (trim((string) $fila->meta_rechazo) === '') {
+                $fila->meta_rechazo = 'Meta no devolvió esta plantilla al consultarla por nombre. '
+                    . 'No se cambió su estado: una consulta vacía no es un rechazo.';
+            }
             $fila->meta_synced_at = now();
             $fila->save();
 
@@ -297,7 +301,13 @@ class MetaTemplateService
             ? ($rechazo !== '' ? $rechazo : 'Meta la rechazó sin informar motivo.')
             : ($rechazo !== '' ? $rechazo : null);
 
-        if ($estado_nuevo === 'APPROVED' && $estado_anterior !== 'APPROVED') {
+        /* Solo se enciende la que ESTABA ESPERANDO la revisión de Meta (PENDING o IN_APPEAL).
+           🔴 No una con `meta_status` NULL: la migración deja en NULL justamente a las filas que
+           estaban con `activa = 0`, y entre ellas hay plantillas del pipeline apagadas a propósito
+           (las de `demo_realizada`, que maneja el closer). Si el primer sync las encendiera por
+           estar aprobadas en Meta, `LeadFollowupService` las empezaría a mandar solas cada dos
+           horas. A esas el sync les baja el estado y nada más; encenderlas es de una persona. */
+        if ($estado_nuevo === 'APPROVED' && in_array($estado_anterior, ['PENDING', 'IN_APPEAL'], true)) {
             $fila->activa = true;
             $resultado['activada'] = true;
         }

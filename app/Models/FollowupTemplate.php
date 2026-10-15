@@ -46,41 +46,46 @@ class FollowupTemplate extends Model
      *
      * @var array<string, array<int, array<string, mixed>>>
      */
+    /* 🔴 `ai_suggestable` en true SOLO en `cc_recuperacion_motivo`: en el panel ese flag muestra
+       «Sugerir con IA», y el botón llama siempre a `suggest-recovery-reason`, que redacta el MOTIVO
+       DE LA DEMORA. En cualquier otro hueco llenaría «la respuesta» o «el momento que propuso el
+       lead» con un motivo de demora. Hasta que haya una sugerencia que entienda cada hueco, el resto
+       va en false (chequeo independiente del 15/10/2026). */
     const SIGNIFICADO_POR_PLANTILLA = [
         'cc_recuperacion_motivo' => [
             2 => ['label' => 'Motivo de la demora', 'ai_suggestable' => true],
         ],
         'cc_coord_dia_acordado' => [
-            2 => ['label' => 'El momento que propuso el lead, EN SUS PALABRAS (ej. «el viernes a la mañana»)', 'ai_suggestable' => true],
+            2 => ['label' => 'El momento que propuso el lead, EN SUS PALABRAS (ej. «el viernes a la mañana»)', 'ai_suggestable' => false],
         ],
         'cc_coord_horario_sin_confirmar' => [
-            2 => ['label' => 'El día u horario que se le había ofrecido (ej. «el viernes a las 16»)', 'ai_suggestable' => true],
+            2 => ['label' => 'El día u horario que se le había ofrecido (ej. «el viernes a las 16»)', 'ai_suggestable' => false],
         ],
         'cc_coord_espera_lead' => [
-            2 => ['label' => 'El impedimento que nombró el lead, en sus palabras (ej. «lo de la luz en el local»)', 'ai_suggestable' => true],
+            2 => ['label' => 'El impedimento que nombró el lead, en sus palabras (ej. «lo de la luz en el local»)', 'ai_suggestable' => false],
         ],
         'cc_coord_consulta_sin_cerrar' => [
-            2 => ['label' => 'El tema exacto que quedó abierto (ej. «la migración desde tu Excel»)', 'ai_suggestable' => true],
+            2 => ['label' => 'El tema exacto que quedó abierto (ej. «la migración desde tu Excel»)', 'ai_suggestable' => false],
         ],
         'cc_closer_confirmar_horario' => [
-            2 => ['label' => 'Cuándo se acordó la llamada (ej. «hoy», «el jueves»)', 'ai_suggestable' => true],
+            2 => ['label' => 'Cuándo se acordó la llamada (ej. «hoy», «el jueves»)', 'ai_suggestable' => false],
         ],
         'cc_closer_confirmar_horario_v2' => [
-            2 => ['label' => 'Cuándo se acordó la llamada (ej. «hoy», «el jueves»)', 'ai_suggestable' => true],
+            2 => ['label' => 'Cuándo se acordó la llamada (ej. «hoy», «el jueves»)', 'ai_suggestable' => false],
         ],
         'cc_respuesta_pendiente' => [
-            2 => ['label' => 'Qué preguntó el lead (ej. «cómo es la migración de tus datos»)', 'ai_suggestable' => true],
-            3 => ['label' => 'La respuesta, breve y CERRADA CON PUNTO (después va texto fijo)', 'ai_suggestable' => true],
+            2 => ['label' => 'Qué preguntó el lead (ej. «cómo es la migración de tus datos»)', 'ai_suggestable' => false],
+            3 => ['label' => 'La respuesta, breve y CERRADA CON PUNTO (después va texto fijo)', 'ai_suggestable' => false],
         ],
         'cc_post_llamada_retomar' => [
-            2 => ['label' => 'El punto que más le pesaba, del resumen de la llamada', 'ai_suggestable' => true],
+            2 => ['label' => 'El punto que más le pesaba, del resumen de la llamada', 'ai_suggestable' => false],
         ],
         'cc_nutre_contenido' => [
-            2 => ['label' => 'El dolor, EN LAS PALABRAS del lead (ej. «el stock que nunca sabés si está actualizado»)', 'ai_suggestable' => true],
+            2 => ['label' => 'El dolor, EN LAS PALABRAS del lead (ej. «el stock que nunca sabés si está actualizado»)', 'ai_suggestable' => false],
             3 => ['label' => 'Link al reel o publicación, CERRADO CON PUNTO', 'ai_suggestable' => false],
         ],
         'cc_nutre_testimonio' => [
-            2 => ['label' => 'El dolor compartido con el cliente del testimonio', 'ai_suggestable' => true],
+            2 => ['label' => 'El dolor compartido con el cliente del testimonio', 'ai_suggestable' => false],
             3 => ['label' => 'Link al reel del testimonio, CERRADO CON PUNTO', 'ai_suggestable' => false],
         ],
     ];
@@ -235,7 +240,7 @@ class FollowupTemplate extends Model
      *      WhatsApp, y cambiarlo dejaría seguimientos sin salir.
      *
      * 🔴 Y SI NINGUNA VÍA SABE, DICE QUE NO SABE. Devuelve «Hueco {{n}} — ver el texto de la
-     * plantilla» con `ai_suggestable` en true, en vez de inventar un nombre de campo. Una etiqueta
+     * plantilla» con `ai_suggestable` en false, en vez de inventar un nombre de campo. Una etiqueta
      * honesta hace que quien la manda lea el texto; una etiqueta inventada hace que confíe.
      *
      * @return array<int, array<string, mixed>>
@@ -303,7 +308,7 @@ class FollowupTemplate extends Model
                     'placeholder'    => $placeholder,
                     'field'          => null,
                     'label'          => 'Hueco ' . $placeholder . ' — ejemplo: «' . trim((string) $ejemplos[$numero - 1]) . '»',
-                    'ai_suggestable' => true,
+                    'ai_suggestable' => false,
                 ];
                 continue;
             }
@@ -348,7 +353,7 @@ class FollowupTemplate extends Model
                 'placeholder'    => $placeholder,
                 'field'          => null,
                 'label'          => 'Hueco ' . $placeholder . ' — ver el texto de la plantilla',
-                'ai_suggestable' => true,
+                'ai_suggestable' => false,
             ];
         }
 
