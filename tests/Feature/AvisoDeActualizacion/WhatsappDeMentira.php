@@ -36,6 +36,28 @@ class WhatsappDeMentira extends WhatsappSendService
     public $respuesta = 'wamid.DEPRUEBA';
 
     /**
+     * Propósitos con los que el servicio de aviso pidió el destino del envío, en orden. Deja ver POR
+     * QUÉ NÚMERO iba a salir el aviso (`asistente` o `principal`) sin salir a la red.
+     *
+     * @var array<int, string>
+     */
+    public $propositos_pedidos = [];
+
+    /**
+     * Anota el propósito y deja que el servicio real resuelva el destino (contra la base del test).
+     *
+     * @param string $proposito
+     *
+     * @return WhatsappSendService
+     */
+    public function paraProposito(string $proposito): WhatsappSendService
+    {
+        $this->propositos_pedidos[] = $proposito;
+
+        return parent::paraProposito($proposito);
+    }
+
+    /**
      * @param string      $to
      * @param string      $body
      * @param string|null $context
