@@ -25,6 +25,7 @@ class RenderDeLosHitosTest extends BaseDelMailDeImplementacion
     {
         $asuntos = [
             'bienvenida' => 'Arrancamos con la implementación de tu sistema',
+            'instalando' => 'Recibimos tu formulario: ya estamos instalando tu sistema',
             'instalado'  => 'Tu sistema ya está instalado',
             'acceso'     => 'Ya podés entrar a tu sistema',
             'imagenes'   => 'Las fotos de tu catálogo',
@@ -33,13 +34,13 @@ class RenderDeLosHitosTest extends BaseDelMailDeImplementacion
         ];
 
         $etapa_en_curso = [
-            'bienvenida' => 1, 'instalado' => 3, 'acceso' => 4, 'imagenes' => 4, 'categorias' => 4, 'listo' => 6,
+            'bienvenida' => 1, 'instalando' => 2, 'instalado' => 3, 'acceso' => 4, 'imagenes' => 4, 'categorias' => 4, 'listo' => 6,
         ];
 
         $client = $this->crear_cliente(['email' => 'dueno@ejemplo.test']);
         $impl   = $this->crear_implementacion($client);
 
-        $this->assertSame(array_keys($asuntos), ImplementacionMailService::HITOS, 'Los seis hitos, en orden.');
+        $this->assertSame(array_keys($asuntos), ImplementacionMailService::HITOS, 'Los siete hitos, en orden.');
 
         foreach (ImplementacionMailService::HITOS as $hito) {
             $this->poner_las_etapas($impl, $this->estados_del_hito($hito));

@@ -399,6 +399,19 @@ class ImplementationUserSetupService
          * Contrato aditivo: campo nuevo y opcional, un empresa-api anterior lo ignora. */
         unset($payload['serper_api_key']);
 
+        /* 🔴 Las credenciales de PRUEBA de Zipnova y de Mercado Pago son de las demos y NUNCA viajan en
+         * el user-setup de un cliente real (misión credenciales-demo-zipnova-mp). Esta función no las
+         * agrega, pero setup_data se desparrama entero más arriba: se descartan los cinco nombres por si
+         * un setup_data editado a mano los trajera, para que ninguna credencial de demo termine en la
+         * base de un cliente que paga. */
+        unset(
+            $payload['zipnova_api_token'],
+            $payload['zipnova_api_secret'],
+            $payload['zipnova_account_id'],
+            $payload['mercadopago_access_token'],
+            $payload['mercadopago_public_key']
+        );
+
         /* 🔴 Los flags que le piden a empresa-api VACIAR una base que ya tiene datos (la guarda `base_con_datos`:
            `forzar_borrado_total` más `confirmar_base_de_datos` con el nombre de la base) NUNCA viajan desde acá. `setup_data`
            se desparrama entero más arriba, y es un JSON del cliente que un edit del admin puede completar con cualquier

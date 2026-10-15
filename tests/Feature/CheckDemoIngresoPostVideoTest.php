@@ -171,24 +171,6 @@ class CheckDemoIngresoPostVideoTest extends TestCase
     }
 
     /**
-     * (6) La dinámica actual no recibe este check (no tiene video en una página).
-     *
-     * @return void
-     */
-    public function test_la_dinamica_actual_no_es_candidata(): void
-    {
-        $espia = $this->espiar_whatsapp();
-        $lead  = $this->crear_lead(Carbon::now()->subMinutes(15));
-        $lead->demo_experiencia = Lead::EXPERIENCIA_ACTUAL;
-        $lead->save();
-        $this->mensaje($lead, 'lead', Carbon::now()->subMinutes(40));
-
-        $this->artisan('leads:check-demo-ingreso-post-video')->assertExitCode(0);
-
-        $this->assertCount(0, $espia->plantillas);
-    }
-
-    /**
      * @return WhatsappSendService
      */
     private function espiar_whatsapp(): WhatsappSendService

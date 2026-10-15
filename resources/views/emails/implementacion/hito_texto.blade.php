@@ -31,7 +31,7 @@ Podés hacerlo desde el celular. Si lo dejás por la mitad, se guarda solo y lo 
 @endif
 
 Cuando lo completes, instalamos tu sistema con esa configuración y te avisamos.
-@elseif($hito === 'instalado')
+@elseif($hito === 'instalando' || $hito === 'instalado')
 Lo que necesitamos:
 
 - Tus artículos: un Excel con código, nombre y costo o precio. Si tenés el código de barras, sumalo.
@@ -89,12 +89,20 @@ Lo que quedó cargado:
 
 @endif
 @if($url_sistema !== '')
+Cómo entrar:
+Dirección: {{ $direccion_sistema }}
+Usuario: tu número de documento
+Contraseña: la que te mandamos por WhatsApp
+
 Entrar a mi sistema: {{ $url_sistema }}
 @endif
 Ver los tutoriales: {{ $recursos_url }}
+@if($url_sistema !== '')
+Cuando entres, cambiá la contraseña desde la configuración.
+@endif
 
 Lo que sigue:
-- Una videollamada con vos y tu equipo para resolver dudas y dejarlos operando.
+- Cuando tengamos todos tus artículos, terminamos tu catálogo: las categorías, las fotos y las descripciones que falten.
 @if($con_arca)
 - Conectamos la facturación electrónica con ARCA.
 @endif

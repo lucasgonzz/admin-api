@@ -142,6 +142,25 @@ class ClientMensualidadService
             $client->afip_domicilio = $payload['afip_domicilio'];
         }
 
+        /* Tilde "facturar a Consumidor Final (sin CUIT)" (misión mensualidad-consumidor-final,
+         * 13/10/2026). Solo si la clave VIENE y no es null: un SPA anterior no la manda y, si
+         * `guardar()` la asumiera apagada, cada guardado desde ese front destildaría en silencio un
+         * cliente que Lucas marcó, y su próxima factura saldría pidiendo CUIT. Con `false` explícito
+         * sí se apaga. El null (la regla de validación es `nullable`) se trata como "no vino".
+         *
+         * Solo se asigna si el valor CAMBIA (hallazgo del chequeo de contrato, 13/10/2026): el SPA
+         * nuevo manda la clave en cada guardado, también con `false`. Si el código nuevo llega antes
+         * que la migración, asignar siempre haría que el UPDATE incluyera una columna que todavía
+         * no existe y el Guardar de TODA la tarjeta daría 500; con el valor sin cambios no se
+         * escribe nada y la ventana sin migrar no rompe el guardado. */
+        if (array_key_exists('facturar_consumidor_final', $payload) && $payload['facturar_consumidor_final'] !== null) {
+            $consumidor_final_nuevo = (bool) $payload['facturar_consumidor_final'];
+
+            if ((bool) $client->facturar_consumidor_final !== $consumidor_final_nuevo) {
+                $client->facturar_consumidor_final = $consumidor_final_nuevo;
+            }
+        }
+
         $client->save();
 
         return $client;
@@ -199,6 +218,8 @@ class ClientMensualidadService
             'afip_razon_social' => $client->afip_razon_social,
             'afip_condicion_iva' => $client->afip_condicion_iva,
             'afip_domicilio' => $client->afip_domicilio,
+            // Tilde de Consumidor Final (sin CUIT). Siempre bool; un front anterior ignora la clave.
+            'facturar_consumidor_final' => (bool) $client->facturar_consumidor_final,
             'desglose' => $desglose,
             /* Cobranzas (misión modulo-cobranzas, 18/9/2026). `mensualidad_inicio` como 'YYYY-MM-DD'
              * o null (el cast lo trae como Carbon y el front quiere un string para el input). La

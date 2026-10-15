@@ -64,7 +64,17 @@ class ClientVersionUpgradeProperties
                 'wrap_content' => true,
                 /**
                  * Opciones desde las ClientApi del cliente elegido en client_id.
-                 * admin-spa: GET /client/{id} y default distinto de active_client_api_id.
+                 * admin-spa: GET /client/{id} y preselecciona el destino por defecto.
+                 *
+                 * `default_principal` (misión `un-solo-frente`, 14/10/2026): preseleccionar el
+                 * FRENTE PRINCIPAL del cliente, que viaja como `frente_principal_client_api_id` en
+                 * el cliente (Client::getFrentePrincipalClientApiIdAttribute()). Es el mismo
+                 * default que usa la creación del lado del servidor.
+                 *
+                 * 🔴 `default_other_than_active` NO se saca, y es compatibilidad: un admin-spa
+                 * viejo no conoce `default_principal` y sigue preseleccionando "la que no es la
+                 * activa" (Lucas la puede cambiar a mano en el select). Un admin-spa nuevo mira
+                 * primero `default_principal` y, si el cliente no trae el campo, cae a esta.
                  */
                 'from_parent_field' => [
                     'parent_key' => 'client_id',
@@ -72,6 +82,7 @@ class ClientVersionUpgradeProperties
                     'collection_key' => 'client_apis',
                     'label_key' => 'url',
                     'default_other_than_active' => true,
+                    'default_principal' => true,
                 ],
             ],
             [

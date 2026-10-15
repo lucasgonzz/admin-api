@@ -30,8 +30,10 @@ use Illuminate\Support\Facades\Log;
  *    freno.
  *  - `allow_deploy_to_active_api` se evalúa contra la `ClientApi` activa de *cada* cliente, y el
  *    `start` además BORRA los logs del intento anterior de *cada* upgrade. Un flag global ahí
- *    significaría "desplegá sobre producción de todos los que tengan una sola API", que es
- *    exactamente lo que ese freno existe para impedir.
+ *    significaría "desplegá sobre producción de todos", que es exactamente lo que ese freno existe
+ *    para impedir. Desde el 14/10/2026 (misión `un-solo-frente`) el destino por defecto de cada
+ *    cliente es su FRENTE PRINCIPAL, y el `start` en el lugar sobre el principal ya no pide la
+ *    bandera sino el gate de horario —que también es por cliente—, así que el argumento vale igual.
  *
  * 🔴 **CONSECUENCIA PRÁCTICA, Y VA ESCRITA EN LAS DOS RESPUESTAS: CREAR ES LA PRIMERA QUINTA PARTE
  * DEL TRABAJO.** Después del lote, completar CADA actualización son cinco pasos por cliente
@@ -635,6 +637,8 @@ class ClaudeUpgradeBatchController extends Controller
                 continue;
             }
 
+            /* El frente principal del cliente (misión `un-solo-frente`, 14/10/2026): la misma regla que
+               el alta de a uno, porque sale del mismo servicio. */
             $target_id = $service->resolve_default_target_client_api_id($cliente);
 
             $candidatos[] = [
@@ -647,6 +651,7 @@ class ClaudeUpgradeBatchController extends Controller
                 'target_es_la_api_activa' => $target_id !== null
                     && $cliente->active_client_api_id !== null
                     && $target_id === (int) $cliente->active_client_api_id,
+                'modo'                 => $cliente->modo_de_despliegue_hacia($target_id),
                 'cliente'              => $cliente,
             ];
         }
@@ -790,6 +795,7 @@ class ClaudeUpgradeBatchController extends Controller
                 'cantidad'                => count($candidato['version_ids']),
                 'target_client_api_id'    => $candidato['target_client_api_id'],
                 'target_es_la_api_activa' => $candidato['target_es_la_api_activa'],
+                'modo'                    => $candidato['modo'],
             ];
         }
 
@@ -827,9 +833,12 @@ class ClaudeUpgradeBatchController extends Controller
                 'quien'    => 'claude',
                 'accion'   => 'POST claude/upgrades/' . $id . '/deploy/start',
                 'que_hace' => 'Pipeline PRE-CIERRE: compila y sube la SPA, sube la API, corre las migraciones y frena '
-                    . 'esperando los crons. Se puede correr con el negocio abierto porque va contra la API destino, que '
-                    . 'no es la que atiende. Frenos: confirm_client_name, sin deployment activo, target_client_api_id '
-                    . 'cargado y allow_deploy_to_active_api si la destino es la que está en producción.',
+                    . 'esperando los crons. En una ROTACIÓN (modo rotacion) se puede correr con el negocio abierto porque '
+                    . 'va contra la API destino, que no es la que atiende. EN EL LUGAR (modo en_el_lugar: la destino es la '
+                    . 'activa y es el frente principal) pisa el código vivo: respalda antes, pone el sistema en '
+                    . 'mantenimiento y lleva el GATE DE HORARIO del post-cierre. Frenos: confirm_client_name, sin '
+                    . 'deployment activo, target_client_api_id cargado, el gate de horario si va en el lugar, y '
+                    . 'allow_deploy_to_active_api si la destino es la activa pero NO el frente principal.',
             ],
             [
                 'paso'     => 2,
@@ -842,7 +851,9 @@ class ClaudeUpgradeBatchController extends Controller
                     . 'vps-supervisor.ps1 -Accion mudar -Cliente <slug> (drena la cola vieja y muda la conf de '
                     . 'supervisor al frente activo). Confundir los dos es lo que dejó a ananda, ferretotal y '
                     . 'san-cayetano con el worker en el frente muerto: mirá GET claude/clients/{client_id} para '
-                    . 'saber el hosting_type de la API destino ANTES de elegir el camino.',
+                    . 'saber el hosting_type de la API destino ANTES de elegir el camino. Desde el 14/10/2026, EN EL '
+                    . 'LUGAR (modo en_el_lugar) este paso no existe: no hay frente que mudar, y el pipeline marca solo '
+                    . 'crons_supervisor_at o vps_supervisor_moved_at al llegar a la pausa.',
             ],
             [
                 'paso'     => 3,
@@ -852,7 +863,8 @@ class ClaudeUpgradeBatchController extends Controller
                 'que_hace' => '⚠️ Sólo REGISTRA que el paso 2 ya se hizo (escribe crons_supervisor_at o '
                     . 'vps_supervisor_moved_at, según corresponda). Marcarlo NO mueve nada: si se marca sin haberlo '
                     . 'hecho, el post-cierre arranca igual y el cliente queda con el worker/los crons apuntando a la '
-                    . 'instancia vieja. El endpoint equivocado para el hosting de esta API rechaza con 422.',
+                    . 'instancia vieja. El endpoint equivocado para el hosting de esta API rechaza con 422. En el lugar ya '
+                    . 'viene marcado por el pipeline: no hace falta llamarlo.',
             ],
             [
                 'paso'     => 4,
@@ -891,7 +903,9 @@ class ClaudeUpgradeBatchController extends Controller
             . 'Para estos ' . $clientes . ' cliente(s) eso son ' . $llamadas . ' llamadas HTTP, ' . $clientes
             . ' intervención(es) a mano y ' . $clientes . ' ventana(s) de cierre distintas, porque el paso 4 sólo corre '
             . 'con ESE negocio cerrado. El gate de horario y allow_deploy_to_active_api son POR CLIENTE: por eso el '
-            . 'arranque va de a uno y no hay ningún lote que lo reemplace.';
+            . 'arranque va de a uno y no hay ningún lote que lo reemplace. Los que van EN EL LUGAR (modo en_el_lugar) '
+            . 'no tienen el paso manual —el pipeline marca los crons solo—, pero su deploy/start también espera el '
+            . 'cierre de ESE negocio.';
     }
 
     /**
@@ -923,10 +937,16 @@ class ClaudeUpgradeBatchController extends Controller
             }
         }
 
+        /* 🔴 Desde el 14/10/2026 (misión `un-solo-frente`) el destino por defecto es el frente
+           principal, así que "destino = activa" es el caso NORMAL —el cliente atiende desde su
+           principal y se actualiza en el lugar—, no el accidente de un cliente con una sola ClientApi.
+           El aviso ya no dice que el freno de la bandera los va a frenar (no los frena: el destino
+           por defecto siempre es el principal), sino lo que de verdad cambia para el deploy/start. */
         if ($sobre_la_activa > 0) {
-            $advertencias[] = $sobre_la_activa . ' cliente(s) tienen como API destino por defecto la API ACTIVA en '
-                . 'producción: el freno allow_deploy_to_active_api los va a frenar en el deploy/start. Pasa cuando el '
-                . 'cliente tiene una sola ClientApi.';
+            $advertencias[] = $sobre_la_activa . ' cliente(s) se actualizarían EN EL LUGAR: la API destino por defecto '
+                . 'es su frente principal y es la que está atendiendo. Su deploy/start no pide allow_deploy_to_active_api '
+                . 'pero sí el gate de horario (la jornada de ESE negocio terminada), porque pisa el código vivo; el '
+                . 'pipeline respalda antes y deja el sistema en mantenimiento hasta que terminan las migraciones.';
         }
 
         if ($sin_api_destino > 0) {

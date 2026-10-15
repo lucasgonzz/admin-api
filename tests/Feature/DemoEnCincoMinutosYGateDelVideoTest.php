@@ -32,6 +32,9 @@ use Tests\TestCase;
  *
  * Y el cuarto, el que protege producción: un lead de la dinámica ACTUAL tiene que comportarse
  * exactamente como antes de esta misión.
+ *
+ * ACTUALIZACIÓN 14/10/2026 (misión demo-solo-experiencia-nueva): la dinámica ACTUAL se retiró, así
+ * que ese cuarto grupo (los tests 4 y 4bis) se eliminó: ya no hay leads que la usen.
  */
 class DemoEnCincoMinutosYGateDelVideoTest extends TestCase
 {
@@ -83,7 +86,8 @@ class DemoEnCincoMinutosYGateDelVideoTest extends TestCase
     /**
      * Lead agendado, listo para que lo levante el comando.
      *
-     * @param string      $experiencia    Lead::EXPERIENCIA_NUEVA | Lead::EXPERIENCIA_ACTUAL.
+     * @param string      $experiencia    Lead::EXPERIENCIA_NUEVA (desde el 14/10/2026 el modelo fuerza esa dinámica en cada guardado: la
+     *     dinámica ACTUAL está retirada y ya no se puede fabricar un lead en ella).
      * @param Carbon      $inicio         Momento de inicio del turno.
      * @param Carbon|null $form_completado Marca de envío del formulario; null = sin completar.
      *
@@ -225,56 +229,6 @@ class DemoEnCincoMinutosYGateDelVideoTest extends TestCase
         $this->artisan('leads:run-demo-setup')->assertExitCode(0);
 
         $this->assertSame('exitoso', $lead->refresh()->demo_setup_status);
-    }
-
-    /**
-     * 4. 🔴 El test que protege producción: un lead de la dinámica ACTUAL, con el turno dentro de
-     *    la ventana y sin formulario, dispara exactamente como antes de esta misión. Esos leads no
-     *    tienen página inmersiva y nunca van a tener `demo_form_completado_at`.
-     *
-     * @return void
-     */
-    public function test_la_dinamica_actual_dispara_igual_que_siempre(): void
-    {
-        $ahora = $this->momento_base();
-        $this->fijar_reloj($ahora);
-
-        $lead = $this->crear_lead(Lead::EXPERIENCIA_ACTUAL, $ahora->copy()->addMinutes(10));
-
-        $this->assertNull($lead->demo_form_completado_at);
-
-        $this->artisan('leads:run-demo-setup')->assertExitCode(0);
-
-        $this->assertSame('exitoso', $lead->refresh()->demo_setup_status);
-    }
-
-    /**
-     * 4bis. La otra mitad del test 4, y es la que fija la ASIMETRÍA: para un lead `actual` el turno
-     *       ya empezado **no** dispara, porque para esa dinámica el tope superior sigue existiendo.
-     *       Sin este test, el 4 solo prueba que la dinámica actual sigue disparando y no que sigue
-     *       disparando *igual*: alguien podría sacarle el tope a las dos y el verde no cambiaría.
-     *
-     * @return void
-     */
-    public function test_la_dinamica_actual_conserva_el_tope_superior(): void
-    {
-        $ahora = $this->momento_base();
-        $this->fijar_reloj($ahora);
-
-        // Exactamente el caso del test 3, que en la dinámica nueva SÍ dispara.
-        $lead = $this->crear_lead(
-            Lead::EXPERIENCIA_ACTUAL,
-            $ahora->copy()->subMinutes(20),
-            $ahora->copy()
-        );
-
-        $this->artisan('leads:run-demo-setup')->assertExitCode(0);
-
-        $this->assertSame('pendiente', $lead->refresh()->demo_setup_status);
-        // Y no disparó por el motivo correcto: si el lead hubiera dejado de ser candidato por
-        // cualquier otra razón, el estado también quedaría en `pendiente` y el test pasaría sin
-        // probar nada. Que no haya salido ninguna llamada al empresa-api lo cierra.
-        Http::assertNothingSent();
     }
 
     /**

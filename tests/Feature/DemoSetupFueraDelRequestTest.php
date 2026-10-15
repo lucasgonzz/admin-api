@@ -32,6 +32,10 @@ use Tests\TestCase;
  *  - Ese `fallido` se reintenta **una sola vez**, y nunca con alguien adentro de la demo: el
  *    reintento dispara un `migrate:fresh` sobre la instancia.
  *  - Y la dinámica ACTUAL no se entera de nada de esto.
+ *
+ * ACTUALIZACIÓN 14/10/2026 (misión demo-solo-experiencia-nueva): la dinámica ACTUAL se retiró, así
+ * que los tres tests que probaban ese último punto (no encola, el vencimiento no la toca y no se
+ * reintenta) se eliminaron: ya no hay leads que la usen.
  */
 class DemoSetupFueraDelRequestTest extends TestCase
 {
@@ -78,7 +82,8 @@ class DemoSetupFueraDelRequestTest extends TestCase
     /**
      * Lead agendado con la dinámica y el estado de setup que pida cada caso.
      *
-     * @param string      $experiencia Lead::EXPERIENCIA_NUEVA | Lead::EXPERIENCIA_ACTUAL.
+     * @param string      $experiencia Lead::EXPERIENCIA_NUEVA (desde el 14/10/2026 el modelo fuerza esa dinámica en cada guardado: la
+     *     dinámica ACTUAL está retirada y ya no se puede fabricar un lead en ella).
      * @param Carbon      $inicio      Momento de inicio del turno.
      * @param string      $setup       Valor de `demo_setup_status`.
      * @param Carbon|null $last_run    Valor de `demo_setup_last_run_at`.
@@ -154,27 +159,6 @@ class DemoSetupFueraDelRequestTest extends TestCase
 
         // El estado NO se movió: el trabajo quedó encolado, no corrió. Si el job se hubiera
         // ejecutado inline, acá habría `ejecutandose`, `exitoso` o `fallido`.
-        $this->assertSame('pendiente', (string) $lead->refresh()->demo_setup_status);
-    }
-
-    /**
-     * 2. Garantía de no regresión de la dinámica ACTUAL: el mismo POST no encola nada.
-     *
-     * Un lead 'actual' no tiene página inmersiva, así que llegar acá ya sería raro — pero el
-     * endpoint es público y resuelve por uuid sin mirar la dinámica, que es exactamente el camino
-     * por el que una misión anterior sí la alcanzó.
-     */
-    public function test_la_dinamica_actual_no_encola_ningun_setup(): void
-    {
-        Queue::fake();
-        Carbon::setTestNow($this->momento_base());
-
-        $lead = $this->crear_lead(Lead::EXPERIENCIA_ACTUAL, $this->momento_base()->copy()->addMinutes(5));
-
-        $this->postJson('/api/demo-experiencia/' . $lead->uuid . '/formulario', $this->respuestas_formulario())
-            ->assertStatus(200);
-
-        Queue::assertNothingPushed();
         $this->assertSame('pendiente', (string) $lead->refresh()->demo_setup_status);
     }
 
@@ -405,50 +389,4 @@ class DemoSetupFueraDelRequestTest extends TestCase
         $this->assertSame('pendiente', (string) $lead->refresh()->demo_setup_status);
     }
 
-    /**
-     * 6. El comando de vencimiento tampoco toca a la dinámica ACTUAL.
-     *
-     * También de la verificación: la primera versión no filtraba por dinámica, así que le pisaba el
-     * estado y el error a un lead 'actual' colgado. No destruía nada, pero el criterio de
-     * aceptación de la misión dice *ningún* camino.
-     */
-    public function test_el_vencimiento_no_toca_a_la_dinamica_actual(): void
-    {
-        Carbon::setTestNow($this->momento_base());
-
-        $timeout = LeadDemoSettings::get_setup_timeout_minutos();
-
-        $lead = $this->crear_lead(
-            Lead::EXPERIENCIA_ACTUAL,
-            $this->momento_base()->copy()->addMinutes(5),
-            'ejecutandose',
-            $this->momento_base()->copy()->subMinutes($timeout + 5)
-        );
-
-        $this->artisan('leads:vencer-demo-setups-colgados')->assertExitCode(0);
-
-        $this->assertSame('ejecutandose', (string) $lead->refresh()->demo_setup_status);
-        $this->assertEmpty((string) $lead->demo_setup_last_error);
-    }
-
-    /**
-     * 5ter. Y la dinámica ACTUAL no entra nunca al reintento, esté como esté su setup.
-     */
-    public function test_la_dinamica_actual_no_se_reintenta(): void
-    {
-        Carbon::setTestNow($this->momento_base());
-        Http::fake(['*' => Http::response(['ok' => true], 200)]);
-
-        $lead = $this->crear_lead(
-            Lead::EXPERIENCIA_ACTUAL,
-            $this->momento_base()->copy()->addMinutes(5),
-            'fallido'
-        );
-
-        $this->artisan('leads:run-demo-setup')->assertExitCode(0);
-
-        $lead->refresh();
-        $this->assertSame('fallido', (string) $lead->demo_setup_status);
-        $this->assertSame(0, (int) $lead->demo_setup_intentos);
-    }
 }

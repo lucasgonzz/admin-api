@@ -43,6 +43,9 @@ class SettingsDeImplementacionEnUnaSolaRespuestaTest extends TestCase
         'implementation-google-cuota-demo'      => '/api/admin/settings/implementation-google-cuota-demo',
         'implementation-serper-api-key-default' => '/api/admin/settings/implementation-serper-api-key-default',
         'implementation-serper-api-key-demo'    => '/api/admin/settings/implementation-serper-api-key-demo',
+        // Misión credenciales-demo-zipnova-mp (14/10/2026): también entran en el lote.
+        'implementation-zipnova-demo'           => '/api/admin/settings/implementation-zipnova-demo',
+        'implementation-mercadopago-demo'       => '/api/admin/settings/implementation-mercadopago-demo',
     ];
 
     /**

@@ -460,6 +460,37 @@ return [
         'zone_wait_seconds' => env('HOSTINGER_ZONE_WAIT_SECONDS', 30),
     ],
 
+    // Conversions API for Business Messaging de Meta (misión origen-del-lead-y-conversiones-meta,
+    // 13/10/2026): los eventos LeadSubmitted, QualifiedLead y Purchase de los leads que vinieron de
+    // un anuncio Click-to-WhatsApp. Los manda App\Services\MetaConversionesService.
+    // Sin token o sin dataset NO sale ninguna llamada: los eventos quedan `sin_configurar` y se
+    // loguea un warning. Cuando se cargan, el conciliador manda los de los últimos siete días.
+    'meta_capi' => [
+        // Token de sistema de Meta con whatsapp_business_management y whatsapp_business_manage_events.
+        // 🔴 No se loguea nunca, ni entero ni parcial, y no viaja jamás por query string: va en el
+        // header Authorization: Bearer (Guzzle copia la URI completa en sus excepciones).
+        'token'           => env('META_CAPI_TOKEN', ''),
+        // Conjunto de datos (dataset) de la WABA. Si no lo tenés: php artisan meta:capi-dataset.
+        'dataset_id'      => env('META_CAPI_DATASET_ID', ''),
+        // Cuenta de WhatsApp Business de ComercioCity. Viaja en user_data de cada evento.
+        // `?:` y no solo el segundo argumento de env(): una clave descomentada y vacía en el .env
+        // llega como '' (no como null) y tiene que caer al default igual.
+        'waba_id'         => env('META_CAPI_WABA_ID') ?: '1290129236552587',
+        'graph_version'   => env('META_CAPI_GRAPH_VERSION') ?: 'v24.0',
+        // Opcional: con un código de Events Manager (Probar eventos), los eventos se ven ahí sin
+        // ensuciar la optimización de las campañas. Vacío en producción.
+        'test_event_code' => env('META_CAPI_TEST_EVENT_CODE', ''),
+        // Timeout (segundos) de cada llamada a Meta.
+        'timeout'         => (int) (env('META_CAPI_TIMEOUT') ?: 15),
+        // Conversiones de los leads que vinieron de la WEB (segunda tanda, 13/10/2026): van al
+        // conjunto de datos del píxel de la web, no al de la WABA. 🔴 Sin fallback a las de arriba:
+        // si falta cualquiera de las dos, los eventos de la web quedan sin_configurar. Si es un solo
+        // dataset, se cargan repetidas. El token, con la misma regla: no se loguea nunca ni viaja
+        // por query string.
+        'web_token'       => env('META_CAPI_WEB_TOKEN', ''),
+        'web_dataset_id'  => env('META_CAPI_WEB_DATASET_ID', ''),
+    ],
+
     // Ingesta de tareas creadas por Claude desde la conversación (grupo 180).
     // Si la clave no está definida, el endpoint queda cerrado: no se acepta ninguna request.
     'claude_task_ingest' => [

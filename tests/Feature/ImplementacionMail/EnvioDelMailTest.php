@@ -129,7 +129,7 @@ class EnvioDelMailTest extends BaseDelMailDeImplementacion
             $this->assertSame('enviado', $resultado['estado'], $hito);
         }
 
-        Mail::assertSent(ImplementacionMail::class, 6);
+        Mail::assertSent(ImplementacionMail::class, 7);
 
         $this->assertEqualsCanonicalizing(
             ImplementacionMailService::HITOS,

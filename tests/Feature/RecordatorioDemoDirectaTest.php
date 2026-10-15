@@ -170,28 +170,6 @@ class RecordatorioDemoDirectaTest extends TestCase
     }
 
     /**
-     * (6) La dinámica ACTUAL no cambia: plantilla Meta de siempre, sólo dentro de los 15 minutos
-     *     previos al inicio, sin mirar el silencio.
-     *
-     * @return void
-     */
-    public function test_la_dinamica_actual_sigue_con_su_plantilla(): void
-    {
-        $espia = $this->espiar_whatsapp();
-        $lead  = $this->crear_lead_nueva_con_demo('10:55', '11:55', '5493519999996');
-        $lead->demo_experiencia = Lead::EXPERIENCIA_ACTUAL;
-        $lead->save();
-        $this->mensaje($lead, 'lead', Carbon::now()->subMinutes(2));
-
-        $this->artisan('leads:send-demo-reminders')->assertExitCode(0);
-
-        $this->assertCount(0, $espia->textos);
-        $this->assertCount(1, $espia->plantillas);
-        $this->assertSame('cc_recordatorio_demo_', $espia->plantillas[0]['template_name']);
-        $this->assertTrue((bool) $lead->refresh()->recordatorio_demo_enviado);
-    }
-
-    /**
      * @return WhatsappSendService
      */
     private function espiar_whatsapp(): WhatsappSendService
