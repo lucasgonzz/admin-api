@@ -102,7 +102,10 @@ class AddPropositoToWhatsappConfigTable extends Migration
             return;
         }
 
-        foreach (['waba_id', 'nombre', 'display_phone'] as $columna) {
+        /* `waba_id` NO se saca desde acá: la migración `add_waba_id_to_whatsapp_config_table` (plantillas
+         * por API) también lo agrega y `MetaTemplateService` lo lee. Revertir esta migración sola no tiene
+         * por qué romper las plantillas. */
+        foreach (['nombre', 'display_phone'] as $columna) {
             if (Schema::hasColumn('whatsapp_config', $columna)) {
                 Schema::table('whatsapp_config', function (Blueprint $table) use ($columna) {
                     $table->dropColumn($columna);

@@ -6,6 +6,7 @@ use App\Models\ClientTemplate;
 use App\Models\WhatsappConfig;
 use App\Services\AsistenteWhatsappSettings;
 use App\Services\KapsoHttpClient;
+use App\Services\MetaTemplateService;
 use Illuminate\Console\Command;
 
 /**
@@ -54,7 +55,7 @@ class WhatsappEstadoCommand extends Command
     /**
      * Base del proxy de Meta que expone Kapso (plantillas).
      */
-    const BASE_META = 'https://api.kapso.ai/meta/whatsapp/v24.0/';
+    const BASE_META = 'https://api.kapso.ai/meta/whatsapp/' . MetaTemplateService::VERSION_META . '/';
 
     /**
      * Segundos de timeout de cada GET a Kapso.

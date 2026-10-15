@@ -54,7 +54,6 @@ class WhatsappConfig extends Model
         'meta_webhook_token',
         'display_phone',
         'nombre',
-        'waba_id',
         'is_active',
         'test_mode',
     ];
