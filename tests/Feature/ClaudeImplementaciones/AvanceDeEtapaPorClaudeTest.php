@@ -18,8 +18,10 @@ use Illuminate\Support\Facades\Queue;
  *  3. 🔴 NO dispara `handle_stage_advance`: entrar a la etapa 2 no crea una `ClientInstallation` (la crea
  *     `install`) y, aun en modo `auto`, no manda mensajes ni encola jobs. Es la diferencia más
  *     importante con el botón del panel.
- *  4. 🔴 Desde la etapa 8 cierra la implementación y deja `current_stage` en 8 (el panel la deja en 9):
- *     mientras esté abierta, el WhatsApp del cliente cae al hilo de la implementación.
+ *  4. 🔴 Desde la etapa 7 —la última, ARCA— cierra la implementación y deja `current_stage` en 7: mientras
+ *     esté abierta, el WhatsApp del cliente cae al hilo de la implementación. (Hasta el 15/10/2026 el flujo
+ *     tenía OCHO etapas y cerraba la 8; ver los tests de compatibilidad más abajo: una implementación que
+ *     ya está en la 8 se sigue cerrando, y la fila 8 pendiente de una vieja queda `skipped`.)
  *  5. `saltar` deja la etapa en `skipped`, y la nota queda en `data.notas`.
  */
 class AvanceDeEtapaPorClaudeTest extends BaseDeImplementaciones
@@ -39,6 +41,20 @@ class AvanceDeEtapaPorClaudeTest extends BaseDeImplementaciones
     }
 
     /**
+     * Una implementación ANTERIOR al 15/10/2026 (con la fila de la etapa 8) en la etapa pedida.
+     *
+     * @param int $etapa Etapa en la que está.
+     *
+     * @return \App\Models\Implementation
+     */
+    private function anterior_en_la_etapa(int $etapa)
+    {
+        $cliente = $this->crear_las_dos_apis($this->crear_cliente('Panchito Gómez'), 'panchito');
+
+        return $this->llevar_a_la_etapa($this->crear_implementacion_anterior($cliente), $etapa);
+    }
+
+    /**
      * El POST de avanzar.
      *
      * @param \App\Models\Implementation $implementation La implementación.
@@ -52,7 +68,7 @@ class AvanceDeEtapaPorClaudeTest extends BaseDeImplementaciones
     }
 
     /**
-     * Estados de las ocho etapas, en orden.
+     * Estados de las etapas de la implementación (una por fila), en orden.
      *
      * @param \App\Models\Implementation $implementation La implementación.
      *
@@ -95,6 +111,10 @@ class AvanceDeEtapaPorClaudeTest extends BaseDeImplementaciones
 
     /**
      * `etapa_actual` es obligatoria y va de 1 a 8: 422 en español.
+     *
+     * 🔴 El tope SIGUE en 8 aunque el flujo ahora tiene siete etapas, a propósito: una implementación
+     * anterior al 15/10/2026 que quedó en la etapa 8 tiene que poder cerrarse (ver más abajo), y para eso la
+     * validación tiene que aceptar el 8. Este test no cambió.
      *
      * @return void
      */
@@ -167,21 +187,79 @@ class AvanceDeEtapaPorClaudeTest extends BaseDeImplementaciones
     }
 
     /**
-     * El dry-run de la etapa 8 dice que cierra la implementación y avisa qué pasa con el WhatsApp.
+     * El dry-run de la etapa 7 —la última— dice que cierra la implementación y avisa qué pasa con el WhatsApp.
+     * (Hasta el 15/10/2026 este test pedía la etapa 8: la 8 ya no es la última.)
      *
      * @return void
      */
-    public function test_el_dry_run_de_la_etapa_8_dice_que_cierra(): void
+    public function test_el_dry_run_de_la_ultima_etapa_dice_que_cierra(): void
     {
-        $impl = $this->en_la_etapa(8);
+        $impl = $this->en_la_etapa(7);
 
-        $respuesta = $this->avanzar($impl, ['etapa_actual' => 8]);
+        $respuesta = $this->avanzar($impl, ['etapa_actual' => 7]);
 
+        $respuesta->assertJsonPath('de.numero', 7);
+        $respuesta->assertJsonPath('de.nombre', 'Vinculación ARCA/AFIP');
         $respuesta->assertJsonPath('cierra_la_implementacion', true);
         $respuesta->assertJsonPath('a', null);
         $this->assertStringContainsString('CIERRA la implementación', $this->cuerpo($respuesta));
         $this->assertStringContainsString('WhatsApp', $this->cuerpo($respuesta));
         $this->assertSame('in_progress', $impl->refresh()->status);
+    }
+
+    /**
+     * El dry-run de la etapa 6 NO cierra y dice que la que sigue es la 7: el catálogo ya no apunta a una
+     * «Capacitación» ni a una etapa 8.
+     *
+     * @return void
+     */
+    public function test_el_dry_run_de_la_etapa_6_apunta_a_la_7_y_no_cierra(): void
+    {
+        $impl = $this->en_la_etapa(6);
+
+        $respuesta = $this->avanzar($impl, ['etapa_actual' => 6]);
+
+        $respuesta->assertJsonPath('de.numero', 6);
+        $respuesta->assertJsonPath('de.nombre', 'Catálogo: categorías, imágenes y descripciones');
+        $respuesta->assertJsonPath('a.numero', 7);
+        $respuesta->assertJsonPath('a.nombre', 'Vinculación ARCA/AFIP');
+        $respuesta->assertJsonPath('cierra_la_implementacion', false);
+    }
+
+    /**
+     * COMPATIBILIDAD: el dry-run de una implementación vieja que ya está en la etapa 8 también dice que cierra
+     * (cerrar es `etapa >= última`, no `=== 7`), y la nombra con el nombre que tenía.
+     *
+     * @return void
+     */
+    public function test_el_dry_run_de_una_implementacion_vieja_en_la_etapa_8_dice_que_cierra(): void
+    {
+        $impl = $this->anterior_en_la_etapa(8);
+
+        $respuesta = $this->avanzar($impl, ['etapa_actual' => 8]);
+
+        $respuesta->assertStatus(200);
+        $respuesta->assertJsonPath('de.numero', 8);
+        $respuesta->assertJsonPath('de.nombre', 'Videollamada de capacitación');
+        $respuesta->assertJsonPath('cierra_la_implementacion', true);
+        $respuesta->assertJsonPath('a', null);
+        $this->assertSame('in_progress', $impl->refresh()->status);
+    }
+
+    /**
+     * COMPATIBILIDAD: el dry-run de la etapa 7 de una implementación vieja (con su fila 8 pendiente) avisa que esa
+     * fila queda `skipped`; en una implementación de siete etapas no hay nada que avisar de la 8.
+     *
+     * @return void
+     */
+    public function test_el_dry_run_de_la_etapa_7_avisa_de_la_etapa_8_pendiente_solo_en_una_vieja(): void
+    {
+        $vieja = $this->anterior_en_la_etapa(7);
+        $nueva = $this->llevar_a_la_etapa($this->crear_implementacion($this->crear_cliente('Rosa Fernández')), 7);
+
+        $this->assertStringContainsString('etapa 8 pendiente', $this->cuerpo($this->avanzar($vieja, ['etapa_actual' => 7])));
+        $this->assertStringNotContainsString('etapa 8 pendiente', $this->cuerpo($this->avanzar($nueva, ['etapa_actual' => 7])));
+        $this->assertSame('pending', ImplementationStage::where('implementation_id', $vieja->id)->where('stage_number', 8)->value('status'), 'El dry-run no toca nada.');
     }
 
     /* ------------------------------------------------------------------------------------------
@@ -226,17 +304,18 @@ class AvanceDeEtapaPorClaudeTest extends BaseDeImplementaciones
     }
 
     /**
-     * 2. Una implementación completada no avanza: 409.
+     * 2. Una implementación completada no avanza: 409. (Antes el test la ponía en la etapa 8, que era la última;
+     * ahora la última es la 7.)
      *
      * @return void
      */
     public function test_una_implementacion_completada_no_avanza(): void
     {
-        $impl         = $this->en_la_etapa(8);
+        $impl         = $this->en_la_etapa(7);
         $impl->status = 'completed';
         $impl->save();
 
-        $respuesta = $this->avanzar($impl, ['etapa_actual' => 8, 'dry_run' => false]);
+        $respuesta = $this->avanzar($impl, ['etapa_actual' => 7, 'dry_run' => false]);
 
         $respuesta->assertStatus(409);
         $respuesta->assertJsonPath('status', 'completed');
@@ -278,7 +357,8 @@ class AvanceDeEtapaPorClaudeTest extends BaseDeImplementaciones
     }
 
     /**
-     * Se puede recorrer de la 1 a la 8 de a una, y cada paso lee la real.
+     * Se puede recorrer de la 1 a la 7 de a una, y cada paso lee la real: de la 1 a la 6 avanza (la que sigue queda
+     * en curso) y la 7 cierra. (Hasta el 15/10/2026 el recorrido llegaba a la 8; ahora la 7 es la última.)
      *
      * @return void
      */
@@ -286,33 +366,67 @@ class AvanceDeEtapaPorClaudeTest extends BaseDeImplementaciones
     {
         $impl = $this->en_la_etapa(1);
 
-        for ($etapa = 1; $etapa <= 7; $etapa++) {
+        for ($etapa = 1; $etapa <= 6; $etapa++) {
             $this->avanzar($impl, ['etapa_actual' => $etapa, 'dry_run' => false])
                 ->assertStatus(200)
-                ->assertJsonPath('implementation.current_stage', $etapa + 1);
+                ->assertJsonPath('implementation.current_stage', $etapa + 1)
+                ->assertJsonPath('cierra_la_implementacion', false);
         }
 
-        $this->assertSame(['completed', 'completed', 'completed', 'completed', 'completed', 'completed', 'completed', 'in_progress'], $this->estados($impl));
+        $this->assertSame(['completed', 'completed', 'completed', 'completed', 'completed', 'completed', 'in_progress'], $this->estados($impl));
+
+        $this->avanzar($impl, ['etapa_actual' => 7, 'dry_run' => false])
+            ->assertStatus(200)
+            ->assertJsonPath('implementation.current_stage', 7)
+            ->assertJsonPath('implementation.status', 'completed')
+            ->assertJsonPath('cierra_la_implementacion', true);
+
+        $this->assertSame(['completed', 'completed', 'completed', 'completed', 'completed', 'completed', 'completed'], $this->estados($impl));
     }
 
     /**
-     * 5. `saltar` deja la etapa en `skipped` (no aplica) y avanza igual.
+     * 5. `saltar` deja la etapa en `skipped` (no aplica) y avanza igual. Antes el test saltaba la 7 (ARCA) y
+     * comprobaba que abría la 8; la 8 ya no existe, así que saltar la 7 CIERRA (test siguiente) y el caso de
+     * "salta y avanza" se prueba con la 4.
      *
      * @return void
      */
     public function test_saltar_deja_la_etapa_en_skipped(): void
+    {
+        $impl = $this->en_la_etapa(4);
+
+        $respuesta = $this->avanzar($impl, ['etapa_actual' => 4, 'saltar' => true, 'dry_run' => false]);
+
+        $respuesta->assertStatus(200);
+        $respuesta->assertJsonPath('etapa_cerrada.estado', 'skipped');
+        $respuesta->assertJsonPath('implementation.current_stage', 5);
+        $this->assertStringContainsString('skipped', $this->cuerpo($respuesta));
+
+        $this->assertSame('skipped', ImplementationStage::where('implementation_id', $impl->id)->where('stage_number', 4)->value('status'));
+        $this->assertSame('in_progress', ImplementationStage::where('implementation_id', $impl->id)->where('stage_number', 5)->value('status'));
+    }
+
+    /**
+     * 5. Saltar la última etapa —ARCA, el caso típico: el cliente factura con otro sistema— deja la 7 `skipped` Y cierra
+     * la implementación: `completed`, `current_stage` en 7 y sin etapa siguiente.
+     *
+     * @return void
+     */
+    public function test_saltar_la_ultima_etapa_la_deja_skipped_y_cierra(): void
     {
         $impl = $this->en_la_etapa(7);
 
         $respuesta = $this->avanzar($impl, ['etapa_actual' => 7, 'saltar' => true, 'dry_run' => false]);
 
         $respuesta->assertStatus(200);
+        $respuesta->assertJsonPath('etapa_cerrada.numero', 7);
         $respuesta->assertJsonPath('etapa_cerrada.estado', 'skipped');
-        $respuesta->assertJsonPath('implementation.current_stage', 8);
-        $this->assertStringContainsString('skipped', $this->cuerpo($respuesta));
+        $respuesta->assertJsonPath('etapa_actual', null);
+        $respuesta->assertJsonPath('cierra_la_implementacion', true);
+        $respuesta->assertJsonPath('implementation.status', 'completed');
+        $respuesta->assertJsonPath('implementation.current_stage', 7);
 
         $this->assertSame('skipped', ImplementationStage::where('implementation_id', $impl->id)->where('stage_number', 7)->value('status'));
-        $this->assertSame('in_progress', ImplementationStage::where('implementation_id', $impl->id)->where('stage_number', 8)->value('status'));
     }
 
     /**
@@ -340,33 +454,36 @@ class AvanceDeEtapaPorClaudeTest extends BaseDeImplementaciones
     }
 
     /* ------------------------------------------------------------------------------------------
-     | La etapa 8 cierra
+     | La etapa 7 —la última— cierra
      |----------------------------------------------------------------------------------------- */
 
     /**
-     * 4. 🔴 Desde la etapa 8 cierra la implementación: `status=completed`, `completed_at`, la etapa 8
-     * completada y `current_stage` QUEDA EN 8 (el panel la deja en 9).
+     * 4. 🔴 Desde la etapa 7 cierra la implementación: `status=completed`, `completed_at`, la etapa 7
+     * completada y `current_stage` QUEDA EN 7. Una implementación de siete etapas no tiene fila 8.
      *
      * @return void
      */
-    public function test_desde_la_etapa_8_cierra_la_implementacion_y_deja_la_etapa_en_8(): void
+    public function test_desde_la_etapa_7_cierra_la_implementacion_y_deja_la_etapa_en_7(): void
     {
-        $impl = $this->en_la_etapa(8);
+        $impl = $this->en_la_etapa(7);
 
-        $respuesta = $this->avanzar($impl, ['etapa_actual' => 8, 'dry_run' => false]);
+        $respuesta = $this->avanzar($impl, ['etapa_actual' => 7, 'dry_run' => false]);
 
         $respuesta->assertStatus(200);
         $respuesta->assertJsonPath('cierra_la_implementacion', true);
         $respuesta->assertJsonPath('implementation.status', 'completed');
-        $respuesta->assertJsonPath('implementation.current_stage', 8);
+        $respuesta->assertJsonPath('implementation.current_stage', 7);
+        $respuesta->assertJsonPath('etapa_cerrada.numero', 7);
+        $respuesta->assertJsonPath('etapa_cerrada.estado', 'completed');
         $respuesta->assertJsonPath('etapa_actual', null);
         $this->assertNotNull($respuesta->json('implementation.completed_at'));
 
         $impl->refresh();
         $this->assertSame('completed', $impl->status);
-        $this->assertSame(8, (int) $impl->current_stage, 'El panel la deja en 9; acá tiene que quedar en 8.');
+        $this->assertSame(7, (int) $impl->current_stage, 'Cerrar no mueve current_stage: queda en la última etapa.');
         $this->assertNotNull($impl->completed_at);
-        $this->assertSame('completed', ImplementationStage::where('implementation_id', $impl->id)->where('stage_number', 8)->value('status'));
+        $this->assertSame('completed', ImplementationStage::where('implementation_id', $impl->id)->where('stage_number', 7)->value('status'));
+        $this->assertSame(0, ImplementationStage::where('implementation_id', $impl->id)->where('stage_number', '>', 7)->count(), 'Cerrar no inventa una etapa 8.');
     }
 
     /**
@@ -376,14 +493,121 @@ class AvanceDeEtapaPorClaudeTest extends BaseDeImplementaciones
      */
     public function test_la_implementacion_cerrada_se_lee_como_completada(): void
     {
-        $impl = $this->en_la_etapa(8);
-        $this->avanzar($impl, ['etapa_actual' => 8, 'dry_run' => false])->assertStatus(200);
+        $impl = $this->en_la_etapa(7);
+        $this->avanzar($impl, ['etapa_actual' => 7, 'dry_run' => false])->assertStatus(200);
 
         $this->getJson('/api/claude/implementations/' . $impl->id, $this->headers())
             ->assertJsonPath('implementation.status', 'completed')
-            ->assertJsonPath('implementation.current_stage', 8);
+            ->assertJsonPath('implementation.current_stage', 7);
+
+        $this->avanzar($impl, ['etapa_actual' => 7, 'dry_run' => false])->assertStatus(409);
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | Compatibilidad con las implementaciones anteriores al 15/10/2026 (ocho filas de etapas)
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * COMPATIBILIDAD 1. Una implementación vieja que ya está EN la etapa 8 se sigue cerrando: `status=completed`,
+     * la etapa 8 completada y `current_stage` queda en 8 (cerrar es `etapa >= última`, no `=== 7`). Es el test
+     * que antes de la misión era el caso normal.
+     *
+     * @return void
+     */
+    public function test_una_implementacion_vieja_que_esta_en_la_etapa_8_se_sigue_cerrando(): void
+    {
+        $impl = $this->anterior_en_la_etapa(8);
+
+        $respuesta = $this->avanzar($impl, ['etapa_actual' => 8, 'dry_run' => false]);
+
+        $respuesta->assertStatus(200);
+        $respuesta->assertJsonPath('cierra_la_implementacion', true);
+        $respuesta->assertJsonPath('implementation.status', 'completed');
+        $respuesta->assertJsonPath('implementation.current_stage', 8);
+        $respuesta->assertJsonPath('etapa_cerrada.numero', 8);
+        $respuesta->assertJsonPath('etapa_cerrada.nombre', 'Videollamada de capacitación');
+        $respuesta->assertJsonPath('etapa_actual', null);
+
+        $impl->refresh();
+        $this->assertSame('completed', $impl->status);
+        $this->assertSame(8, (int) $impl->current_stage);
+        $this->assertNotNull($impl->completed_at);
+        $this->assertSame('completed', ImplementationStage::where('implementation_id', $impl->id)->where('stage_number', 8)->value('status'));
 
         $this->avanzar($impl, ['etapa_actual' => 8, 'dry_run' => false])->assertStatus(409);
+    }
+
+    /**
+     * COMPATIBILIDAD 2. Cerrar desde la 7 una implementación vieja deja la fila 8 que había quedado `pending` en
+     * `skipped` (con su `completed_at`): dentro de una implementación completada no queda una etapa «por hacer».
+     * La 7 queda `completed` y `current_stage` en 7.
+     *
+     * @return void
+     */
+    public function test_cerrar_desde_la_7_salta_la_etapa_8_pendiente_de_una_implementacion_vieja(): void
+    {
+        $impl = $this->anterior_en_la_etapa(7);
+        $this->assertSame('pending', ImplementationStage::where('implementation_id', $impl->id)->where('stage_number', 8)->value('status'));
+
+        $respuesta = $this->avanzar($impl, ['etapa_actual' => 7, 'dry_run' => false]);
+
+        $respuesta->assertStatus(200);
+        $respuesta->assertJsonPath('cierra_la_implementacion', true);
+        $respuesta->assertJsonPath('implementation.status', 'completed');
+        $respuesta->assertJsonPath('implementation.current_stage', 7);
+        $respuesta->assertJsonPath('etapa_actual', null);
+
+        $filas = ImplementationStage::where('implementation_id', $impl->id)->orderBy('stage_number')->get();
+        $this->assertCount(8, $filas, 'No se borra ninguna fila.');
+        $this->assertSame('completed', $filas[6]->status);
+        $this->assertSame('skipped', $filas[7]->status);
+        $this->assertNotNull($filas[7]->completed_at);
+        $this->assertSame(['completed', 'completed', 'completed', 'completed', 'completed', 'completed', 'completed', 'skipped'], $this->estados($impl));
+    }
+
+    /**
+     * COMPATIBILIDAD 3. Una implementación vieja que va avanzando de a una (con sus ocho filas) llega a la 7 y cierra
+     * ahí, sin pasar nunca a la 8: avanzar de la 6 a la 7 deja la 7 en curso y la 8 pendiente.
+     *
+     * @return void
+     */
+    public function test_una_implementacion_vieja_avanza_hasta_la_7_y_cierra_sin_pasar_por_la_8(): void
+    {
+        $impl = $this->anterior_en_la_etapa(6);
+
+        $this->avanzar($impl, ['etapa_actual' => 6, 'dry_run' => false])
+            ->assertStatus(200)
+            ->assertJsonPath('implementation.current_stage', 7)
+            ->assertJsonPath('etapa_actual.numero', 7);
+
+        $this->assertSame('pending', ImplementationStage::where('implementation_id', $impl->id)->where('stage_number', 8)->value('status'));
+
+        $this->avanzar($impl, ['etapa_actual' => 7, 'dry_run' => false])
+            ->assertStatus(200)
+            ->assertJsonPath('cierra_la_implementacion', true);
+
+        $this->assertSame(7, (int) $impl->refresh()->current_stage);
+        $this->assertSame('skipped', ImplementationStage::where('implementation_id', $impl->id)->where('stage_number', 8)->value('status'));
+    }
+
+    /**
+     * COMPATIBILIDAD 4. El método del modelo que salta las etapas heredadas SOLO toca las `pending`: una fila 8
+     * que ya está en curso o completada (una implementación vieja que llegó a la 8) no se pisa, y correrlo dos
+     * veces no cambia nada.
+     *
+     * @return void
+     */
+    public function test_saltar_las_etapas_heredadas_solo_toca_las_pendientes(): void
+    {
+        $en_curso = $this->anterior_en_la_etapa(8);
+        $this->assertSame(0, $en_curso->saltar_las_etapas_heredadas());
+        $this->assertSame('in_progress', ImplementationStage::where('implementation_id', $en_curso->id)->where('stage_number', 8)->value('status'));
+
+        $pendiente = $this->anterior_en_la_etapa(5);
+        $this->assertSame(1, $pendiente->saltar_las_etapas_heredadas());
+        $this->assertSame(0, $pendiente->saltar_las_etapas_heredadas(), 'Es idempotente.');
+        $this->assertSame('skipped', ImplementationStage::where('implementation_id', $pendiente->id)->where('stage_number', 8)->value('status'));
+        $this->assertSame('in_progress', ImplementationStage::where('implementation_id', $pendiente->id)->where('stage_number', 5)->value('status'), 'No toca las etapas del flujo.');
     }
 
     /* ------------------------------------------------------------------------------------------

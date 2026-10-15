@@ -9,7 +9,7 @@ use Illuminate\Database\Eloquent\Model;
  * Proceso de implementación guiada de un cliente (una instancia por client_id).
  *
  * @property int         $client_id      Cliente dueño.
- * @property int         $current_stage  Etapa actual (1–8).
+ * @property int         $current_stage  Etapa actual (1 a ULTIMA_ETAPA; 8 solo en las implementaciones anteriores al 15/10/2026).
  * @property string      $status         pending | in_progress | completed | paused.
  * @property string      $automation_mode manual | auto. Gatea los puntos de disparo automático (prompt 342).
  * @property string|null $migration_contact_phone Teléfono del responsable de migración.
@@ -21,6 +21,38 @@ use Illuminate\Database\Eloquent\Model;
  */
 class Implementation extends Model
 {
+    /**
+     * Última etapa del flujo de implementación: la 7, vinculación con ARCA/AFIP. Es la que CIERRA la
+     * implementación: cerrarla deja `status = completed` y `current_stage` en 7.
+     *
+     * 🔴 Hasta el 15/10/2026 el flujo tenía OCHO etapas (la 6 era «Capacitación» y la 8 «Videollamada de
+     * capacitación»). Decisión de Lucas del 15/10/2026: pasa a SIETE. La 6 se convierte, en la misma
+     * posición, en «Catálogo: categorías, imágenes y descripciones» (la capacitación es el centro de
+     * recursos que se entrega con el sistema, en la 5) y la 8 sale del flujo: el soporte es por WhatsApp y
+     * la videollamada solo existe si el cliente la pide. Este es el ÚNICO lugar donde vive ese número:
+     * todo lo que antes decía `8` (el tope del botón «Avanzar etapa», qué etapa cierra, cuántas filas crea
+     * el alta, la línea de progreso del mail) lo lee de acá.
+     *
+     * @var int
+     */
+    const ULTIMA_ETAPA = 7;
+
+    /**
+     * La etapa 8 que ya no existe en el flujo pero que traen las implementaciones creadas antes del
+     * 15/10/2026 (una fila `implementation_stages` con `stage_number = 8`).
+     *
+     * COMPATIBILIDAD HACIA ATRÁS, que es lo que hace que sea una constante y no un número perdido:
+     *  - Una implementación que ya está EN la 8 se sigue cerrando (cerrar es `etapa >= ULTIMA_ETAPA`).
+     *  - Al cerrar desde la 7, la fila 8 que haya quedado `pending` se marca `skipped`
+     *    (`saltar_las_etapas_heredadas()`).
+     *  - La validación de `etapa_actual` y de `etapa` de `claude/implementations/*` sigue aceptando 1 a 8.
+     *  - El bloque `etapas` de `GET claude/implementations/{id}` muestra la 8 solo si esa fila llegó a
+     *    arrancar (no `pending` ni `skipped`).
+     *
+     * @var int
+     */
+    const ETAPA_HEREDADA = 8;
+
     /**
      * @var array<int, string>
      */
@@ -143,6 +175,24 @@ class Implementation extends Model
     public function messages()
     {
         return $this->hasMany(ImplementationMessage::class)->orderBy('sent_at', 'asc');
+    }
+
+    /**
+     * Marca como `skipped` las filas de etapas POSTERIORES a la última (la 8 heredada) que hayan quedado
+     * `pending`: una implementación creada antes del 15/10/2026 trae esa fila, y al cerrarse desde la 7 no
+     * tiene que quedar una etapa «por hacer» en una implementación completada.
+     *
+     * Solo toca las `pending`: una fila 8 que ya está en curso o completada (una implementación vieja que
+     * llegó a la 8) no se pisa. Es idempotente.
+     *
+     * @return int Cantidad de filas marcadas.
+     */
+    public function saltar_las_etapas_heredadas(): int
+    {
+        return ImplementationStage::where('implementation_id', $this->id)
+            ->where('stage_number', '>', self::ULTIMA_ETAPA)
+            ->where('status', 'pending')
+            ->update(['status' => 'skipped', 'completed_at' => now()]);
     }
 
     /**

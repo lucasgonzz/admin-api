@@ -115,9 +115,12 @@ class ClaudeImplementationOpsController extends Controller
     const LATENCIA_MAXIMA_SEGUNDOS = 60;
 
     /**
-     * Las ocho etapas de una implementación y su nombre, por si el catálogo de la base
+     * Las siete etapas de una implementación y su nombre, por si el catálogo de la base
      * (`implementation_stage_configs`) no las trae. El nombre que manda es el de la base; esto es
      * la red para una base recién creada, sin seeders.
+     *
+     * Son siete desde el 15/10/2026 (`Implementation::ULTIMA_ETAPA`): la 6 pasó de «Capacitación» a
+     * «Catálogo: categorías, imágenes y descripciones» y la 8 salió del flujo (ver `ETAPAS_HEREDADAS`).
      *
      * @var array<int, string>
      */
@@ -127,8 +130,20 @@ class ClaudeImplementationOpsController extends Controller
         3 => 'Recolección de archivos',
         4 => 'Migración de datos',
         5 => 'Entrega del sistema',
-        6 => 'Capacitación',
+        6 => 'Catálogo: categorías, imágenes y descripciones',
         7 => 'Vinculación ARCA/AFIP',
+    ];
+
+    /**
+     * Las etapas que YA NO son parte del flujo pero que las implementaciones creadas antes del 15/10/2026
+     * todavía traen como fila (`Implementation::ETAPA_HEREDADA`). Solo sirve para ponerles nombre cuando
+     * aparecen —al cerrar una implementación vieja que está en la 8, o en el bloque `etapas` de una que
+     * ya llegó a ella— sin que el pedido reviente. El nombre que manda, igual que en `ETAPAS`, es el de la
+     * base si está.
+     *
+     * @var array<int, string>
+     */
+    const ETAPAS_HEREDADAS = [
         8 => 'Videollamada de capacitación',
     ];
 
@@ -617,7 +632,11 @@ class ClaudeImplementationOpsController extends Controller
     }
 
     /**
-     * El bloque `etapas`: las ocho, con su estado y lo que se registró en cada una.
+     * El bloque `etapas`: las siete del flujo (1 a `Implementation::ULTIMA_ETAPA`), con su estado y lo que
+     * se registró en cada una. La 8 (`Implementation::ETAPA_HEREDADA`) se suma SOLO si la implementación
+     * es anterior al 15/10/2026 y esa fila llegó a arrancar: existe y no está `pending` ni `skipped`. Una
+     * fila 8 pendiente —lo normal en una implementación vieja que sigue en las primeras etapas— o salteada
+     * al cerrar no es una etapa por hacer, y mostrarla le inventaría al que lee un paso que ya no existe.
      *
      * `acciones` junta lo que hizo el panel (`{action, stage, at}`) y lo que registró Claude por
      * `actions` (`{action, stage, at, canal, origen}`): el `origen` dice de cuál es cada una. Las del
@@ -638,7 +657,15 @@ class ClaudeImplementationOpsController extends Controller
 
         $bloque = [];
 
-        for ($numero = 1; $numero <= 8; $numero++) {
+        /* Las del flujo, siempre; y la heredada solo si la implementación vieja llegó a ella. */
+        $numeros = range(1, Implementation::ULTIMA_ETAPA);
+
+        if (isset($por_etapa[Implementation::ETAPA_HEREDADA])
+            && ! in_array((string) $por_etapa[Implementation::ETAPA_HEREDADA]->status, ['pending', 'skipped'], true)) {
+            $numeros[] = Implementation::ETAPA_HEREDADA;
+        }
+
+        foreach ($numeros as $numero) {
             $etapa = isset($por_etapa[$numero]) ? $por_etapa[$numero] : null;
 
             $acciones = [];
@@ -1082,7 +1109,7 @@ class ClaudeImplementationOpsController extends Controller
 
     /**
      * Da de alta una implementación: promueve el lead a cliente (si todavía no lo es) y arranca la
-     * implementación con sus ocho etapas, el formulario y la etapa 1 en curso.
+     * implementación con sus siete etapas, el formulario y la etapa 1 en curso.
      *
      * Es "tal lead compró": lo único que hay que decidir con Lucas es el SUBDOMINIO, porque de él
      * salen las cuatro URLs del cliente (`<sub>`, `<sub>2`, `api-<sub>`, `api-<sub>2`) y no se puede
@@ -1813,7 +1840,8 @@ class ClaudeImplementationOpsController extends Controller
 
     /**
      * Avanza la implementación a la etapa siguiente: cierra la actual (`completed`, o `skipped` si no
-     * aplica) y deja en curso la que sigue. Desde la etapa 8 cierra la implementación entera.
+     * aplica) y deja en curso la que sigue. Desde la etapa 7 (`Implementation::ULTIMA_ETAPA`, la vinculación con
+     * ARCA) cierra la implementación entera.
      *
      * Hace lo que hace "Avanzar etapa" del panel (`ImplementationController::advance_stage`), con DOS
      * diferencias deliberadas:
@@ -1824,11 +1852,21 @@ class ClaudeImplementationOpsController extends Controller
      * la creara, `install` se encontraría con una fila que armó otro con la versión que quedó fijada al
      * promover, que puede ser vieja.
      *
-     * 🔴 Desde la etapa 8 CIERRA y deja `current_stage` en 8. El panel la deja en 9, y además oculta el
-     * botón en la 8 ("la última etapa cierra automáticamente"), con lo que una implementación no se
-     * podía cerrar desde la interfaz. Importa: mientras esté `in_progress`, TODO lo que el cliente le
-     * escribe al número de WhatsApp del sistema cae al hilo de la implementación y no llega a soporte ni
-     * al asistente, así que una implementación que se queda abierta le deja mudo el WhatsApp.
+     * 🔴 Desde la etapa 7 —la última— CIERRA y deja `current_stage` en 7. El panel oculta el botón en la
+     * última etapa ("la última etapa cierra automáticamente"), con lo que una implementación no se podía
+     * cerrar desde la interfaz. Importa: mientras esté `in_progress`, TODO lo que el cliente le escribe al
+     * número de WhatsApp del sistema cae al hilo de la implementación y no llega a soporte ni al asistente,
+     * así que una implementación que se queda abierta le deja mudo el WhatsApp.
+     *
+     * 🔴 COMPATIBILIDAD con las implementaciones anteriores al 15/10/2026 (tenían OCHO etapas: la 8, la
+     * videollamada, era la última). "Cierra" es `etapa_actual >= ULTIMA_ETAPA`, no `=== 7`:
+     *   - Una implementación que ya está EN la 8 se sigue cerrando igual (queda `current_stage` en 8).
+     *   - Al cerrar desde la 7, la fila de la etapa 8 que haya quedado `pending` se marca `skipped`: no
+     *     queda una etapa "por hacer" dentro de una implementación completada.
+     *   - `etapa_actual` sigue aceptando 1 a 8 (la validación no se achica: la 8 vieja tiene que poder
+     *     cerrarse).
+     * Nada de lo que se contestaba se renombra ni se saca: `current_stage`, `etapa_cerrada`, `etapa_actual`
+     * (null al cerrar) y `cierra_la_implementacion` son los de siempre.
      *
      * Frenos:
      *   1. Lista blanca de parámetros y tipos.
@@ -1857,7 +1895,7 @@ class ClaudeImplementationOpsController extends Controller
         }
 
         $invalido = $this->validar_o_422($request, [
-            'etapa_actual' => 'required|integer|between:1,8',
+            'etapa_actual' => 'required|integer|between:1,' . Implementation::ETAPA_HEREDADA,
             'saltar'       => 'nullable|boolean',
             'nota'         => 'nullable|string|max:500',
             'dry_run'      => 'nullable|boolean',
@@ -1883,7 +1921,7 @@ class ClaudeImplementationOpsController extends Controller
         }
 
         $nombres = $this->nombres_de_etapas();
-        $cierra  = $etapa_pedida === 8;
+        $cierra  = $etapa_pedida >= Implementation::ULTIMA_ETAPA;
         $avisos  = $this->avisos_del_avance($implementation, $etapa_pedida, $saltar);
 
         if ($dry_run) {
@@ -2033,9 +2071,21 @@ class ClaudeImplementationOpsController extends Controller
             $avisos[] = 'La etapa ' . (int) $etapa . ' queda marcada como skipped (no aplica) y no como completed.';
         }
 
-        if ($etapa === 8) {
-            $avisos[] = 'Es la etapa 8: avanzar CIERRA la implementación (status completed, current_stage queda en 8). Desde ese momento lo que el '
+        if ($etapa >= Implementation::ULTIMA_ETAPA) {
+            $avisos[] = 'Es la etapa ' . (int) $etapa . ' (la última): avanzar CIERRA la implementación (status completed, current_stage queda en '
+                . (int) $etapa . '). Desde ese momento lo que el '
                 . 'cliente le escriba al número de WhatsApp del sistema vuelve a soporte y al asistente, en vez de caer al hilo de la implementación.';
+
+            /* Una implementación anterior al flujo de siete etapas trae una fila 8 pendiente: se marca skipped al cerrar. Se avisa. */
+            $heredada_pendiente = ImplementationStage::where('implementation_id', $implementation->id)
+                ->where('stage_number', '>', Implementation::ULTIMA_ETAPA)
+                ->where('status', 'pending')
+                ->exists();
+
+            if ($heredada_pendiente) {
+                $avisos[] = 'Esta implementación es anterior al flujo de siete etapas y trae una etapa 8 pendiente: al cerrar queda marcada como skipped '
+                    . '(la videollamada ya no es una etapa; si el cliente la pide, se coordina por fuera del flujo).';
+            }
         }
 
         return $avisos;
@@ -2048,7 +2098,8 @@ class ClaudeImplementationOpsController extends Controller
      * 🔴 NO llama a `handle_stage_advance` y no hay que agregárselo: ver el docblock de advance_json().
      *
      * @param Implementation $implementation La implementación, bloqueada.
-     * @param int            $etapa          La etapa que se cierra (1 a 8), ya verificada contra la real.
+     * @param int            $etapa          La etapa que se cierra (1 a 8; la 8 solo en una implementación anterior al
+     *                                       flujo de siete etapas), ya verificada contra la real.
      * @param bool           $saltar         true = la etapa queda skipped.
      * @param string|null    $nota           Nota a guardar en `data.notas` de la etapa que se cierra.
      *
@@ -2075,10 +2126,16 @@ class ClaudeImplementationOpsController extends Controller
             $actual->save();
         }
 
-        if ($etapa >= 8) {
+        /* La última etapa (o la 8 de una implementación vieja que ya estaba en ella) cierra la implementación y
+           NO mueve `current_stage`. La fila 8 que haya quedado pending —las implementaciones anteriores al flujo
+           de siete etapas la traen— se marca skipped: dentro de una implementación completada no queda una etapa
+           por hacer. Va en la misma transacción que el cierre, con la implementación ya bloqueada. */
+        if ($etapa >= Implementation::ULTIMA_ETAPA) {
             $implementation->status       = 'completed';
             $implementation->completed_at = now();
             $implementation->save();
+
+            $implementation->saltar_las_etapas_heredadas();
 
             return ['implementation' => $implementation, 'cerrada' => true, 'siguiente' => null];
         }
@@ -2152,7 +2209,7 @@ class ClaudeImplementationOpsController extends Controller
             'canal'    => 'required|string|in:' . implode(',', self::CANALES),
             'texto'    => 'required_if:canal,whatsapp_web|nullable|string|max:4000',
             'telefono' => 'nullable|string|max:30',
-            'etapa'    => 'nullable|integer|between:1,8',
+            'etapa'    => 'nullable|integer|between:1,' . Implementation::ETAPA_HEREDADA,
         ]);
         if ($invalido !== null) {
             return $invalido;
@@ -2279,7 +2336,7 @@ class ClaudeImplementationOpsController extends Controller
      * @param string         $accion         Una de ACCIONES.
      * @param string         $canal          Uno de CANALES.
      * @param string|null    $texto          Texto del mensaje (o de la nota).
-     * @param int            $etapa          Etapa en la que se registra (1 a 8).
+     * @param int            $etapa          Etapa en la que se registra (1 a 8; la 8 solo en una implementación anterior al flujo de siete etapas).
      * @param string|null    $telefono       Teléfono E.164 del mensaje (solo con whatsapp_web).
      *
      * @return array<string, mixed>|string `sin_etapa` si la etapa no existe; si no, un array con
@@ -3908,7 +3965,7 @@ class ClaudeImplementationOpsController extends Controller
      * Manda (o simula) el mail de un hito de la implementación al dueño del negocio: bienvenida, instalando
      * (formulario recibido), sistema instalado y acceso (los dos de antes del 14/10/2026, por compatibilidad),
      * fotos, categorías o listo (la entrega). Cada uno lleva la línea de progreso con el estado real de las
-     * ocho etapas.
+     * siete etapas.
      *
      * 🔴 ESTE ENDPOINT SOLO ARMA LA RESPUESTA Y PONE LOS FRENOS. El armado del mail, el envío, la casilla
      * y el registro viven en `ImplementacionMailService`: acá no hay ni una regla de qué dice cada mail ni
@@ -4135,19 +4192,20 @@ class ClaudeImplementationOpsController extends Controller
     }
 
     /**
-     * Los nombres de las ocho etapas: los del catálogo de la base y, donde falte alguno, los de
-     * `ETAPAS`.
+     * Los nombres de las etapas: las siete del flujo y la 8 heredada (la de las implementaciones anteriores
+     * al 15/10/2026, para que cerrar una que está en la 8 pueda nombrarla). Salen del catálogo de la base y,
+     * donde falte alguno, de `ETAPAS` / `ETAPAS_HEREDADAS`.
      *
      * @return array<int, string>
      */
     protected function nombres_de_etapas()
     {
-        $nombres = self::ETAPAS;
+        $nombres = self::ETAPAS + self::ETAPAS_HEREDADAS;
 
         foreach (ImplementationStageConfig::query()->get(['stage_number', 'name']) as $config) {
             $numero = (int) $config->stage_number;
 
-            if ($numero >= 1 && $numero <= 8 && trim((string) $config->name) !== '') {
+            if ($numero >= 1 && $numero <= Implementation::ETAPA_HEREDADA && trim((string) $config->name) !== '') {
                 $nombres[$numero] = (string) $config->name;
             }
         }

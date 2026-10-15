@@ -602,9 +602,9 @@ Route::middleware('claude.task.key')
         Route::post('implementations', 'Api\ClaudeImplementationOpsController@store_json');
 
         /* Avanzar (o cerrar) la etapa actual. 🔴 Hace lo que "Avanzar etapa" del panel SIN `handle_stage_advance`
-           (entrar a la etapa 2 no crea la instalación: la crea `install`) y, desde la etapa 8, CIERRA la
-           implementación dejando current_stage en 8: el panel no puede cerrarla, y mientras está abierta el
-           WhatsApp del cliente cae al hilo de la implementación. `etapa_actual` tiene que ser la real (409). */
+           (entrar a la etapa 2 no crea la instalación: la crea `install`) y, desde la última etapa (la 7), CIERRA la
+           implementación dejando current_stage en 7 (y una vieja que ya está en la 8 se sigue cerrando): el panel no
+           puede cerrarla, y mientras está abierta el WhatsApp del cliente cae al hilo de la implementación. `etapa_actual` tiene que ser la real (409). */
         Route::post('implementations/{id}/advance', 'Api\ClaudeImplementationOpsController@advance_json')
             ->whereNumber('id');
 
@@ -634,7 +634,7 @@ Route::middleware('claude.task.key')
             ->whereNumber('id');
 
         /* El MAIL de cada hito (bienvenida, instalando, instalado, acceso, imagenes, categorias, listo) al dueño del negocio, con la
-           línea de progreso de las ocho etapas. Síncrono, por el mailer `admin` (admin@comerciocity.com), y registrado en
+           línea de progreso de las siete etapas. Síncrono, por el mailer `admin` (admin@comerciocity.com), y registrado en
            `implementation_mails`. El armado y el envío viven en ImplementacionMailService: acá solo están los frenos —
            lista blanca, datos validados por hito, dry_run por defecto y confirm_client_name— y la respuesta. */
         Route::post('implementations/{id}/mail', 'Api\ClaudeImplementationOpsController@mail_json')

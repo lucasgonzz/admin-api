@@ -28,7 +28,7 @@ use Illuminate\Support\Facades\Queue;
  * Cada endpoint tiene sus propios tests; éste verifica que las PIEZAS ENCAJAN: lo que escribe uno es lo
  * que lee el siguiente (el link del formulario, la casilla del lead, el teléfono del responsable de
  * migración que sale del formulario, el payload del user setup que sale de lo que el cliente cargó, el
- * candado que llena el job, el cierre de la etapa 8) y que lo que Claude deja escrito sigue siendo
+ * candado que llena el job, el cierre de la etapa 7) y que lo que Claude deja escrito sigue siendo
  * legible por el panel.
  *
  * Lo que se simula, y por qué: el pipeline de instalación se da por terminado marcando las filas
@@ -216,7 +216,7 @@ class RecorridoCompletoDeUnaImplementacionPorClaudeTest extends BaseDeImplementa
      |----------------------------------------------------------------------------------------- */
 
     /**
-     * Del "tal lead compró" al cierre de la etapa 8, con todo lo que la skill hace en el medio.
+     * Del "tal lead compró" al cierre de la etapa 7 —la última—, con todo lo que la skill hace en el medio.
      *
      * @return void
      */
@@ -406,13 +406,15 @@ class RecorridoCompletoDeUnaImplementacionPorClaudeTest extends BaseDeImplementa
         $this->avanzar($id, 5);
         $this->avanzar($id, 6);
 
-        $this->avanzar($id, 7, ['saltar' => true, 'nota' => 'El cliente factura con otro sistema: ARCA no aplica']);
-
         /* ============================================================================ 8. Cerrar */
-        $cierre = $this->avanzar($id, 8);
+        /* Desde el 15/10/2026 el flujo tiene SIETE etapas: la 7 (ARCA) es la última y la que cierra. Saltarla —el
+           cliente factura con otro sistema— la deja `skipped` y cierra la implementación. (Antes había que avanzar
+           una 8 más, la videollamada, para cerrar.) */
+        $cierre = $this->avanzar($id, 7, ['saltar' => true, 'nota' => 'El cliente factura con otro sistema: ARCA no aplica']);
         $cierre->assertJsonPath('cierra_la_implementacion', true)
+            ->assertJsonPath('etapa_cerrada.estado', 'skipped')
             ->assertJsonPath('implementation.status', 'completed')
-            ->assertJsonPath('implementation.current_stage', 8);
+            ->assertJsonPath('implementation.current_stage', 7);
 
         /* ================================================== 9. Todo lo que quedó, leído de una sola vez */
         $final = $this->estado($id);
@@ -424,7 +426,7 @@ class RecorridoCompletoDeUnaImplementacionPorClaudeTest extends BaseDeImplementa
         $this->assertCount(2, $final->json('instalaciones'));
 
         $estados = array_column($final->json('etapas'), 'estado');
-        $this->assertSame(['completed', 'completed', 'completed', 'completed', 'completed', 'completed', 'skipped', 'completed'], $estados);
+        $this->assertSame(['completed', 'completed', 'completed', 'completed', 'completed', 'completed', 'skipped'], $estados);
 
         $this->assertSame(['presentacion', 'form_link', 'progreso'], array_column($final->json('etapas.0.acciones'), 'accion'));
         $this->assertSame(['claude', 'claude', 'claude'], array_column($final->json('etapas.0.acciones'), 'origen'));
@@ -471,7 +473,7 @@ class RecorridoCompletoDeUnaImplementacionPorClaudeTest extends BaseDeImplementa
         $this->assertSame(['entrega', 'form_link', 'pedir_archivos', 'presentacion', 'progreso', 'user_setup'], $ejecutadas, 'El checklist del panel tiene que ver lo que Claude registró.');
 
         /* La implementación cerrada no avanza más. */
-        $this->post_de($id, '/advance', ['etapa_actual' => 8, 'dry_run' => false])->assertStatus(409);
+        $this->post_de($id, '/advance', ['etapa_actual' => 7, 'dry_run' => false])->assertStatus(409);
 
         /* Y los WhatsApp que se le mandaron quedan todos con id: ninguno se lee como envío fallido. */
         $this->assertSame(0, ImplementationMessage::where('implementation_id', $id)->where('direction', 'outbound')->whereNull('whatsapp_message_id')->count());

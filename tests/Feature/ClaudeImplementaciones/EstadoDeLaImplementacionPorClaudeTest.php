@@ -152,7 +152,7 @@ class EstadoDeLaImplementacionPorClaudeTest extends BaseDeImplementaciones
      |----------------------------------------------------------------------------------------- */
 
     /**
-     * 1. La forma completa por defecto: implementación, cliente, ocho etapas, user setup, instalaciones,
+     * 1. La forma completa por defecto: implementación, cliente, siete etapas, user setup, instalaciones,
      * mails y entrantes. Sin `contacto` ni `formulario`.
      *
      * @return void
@@ -210,12 +210,13 @@ class EstadoDeLaImplementacionPorClaudeTest extends BaseDeImplementaciones
     }
 
     /**
-     * Las ocho etapas, con el nombre del catálogo y el estado real, y las acciones registradas con su
-     * origen (las del panel no traen canal).
+     * Las siete etapas, con el nombre del catálogo y el estado real, y las acciones registradas con su
+     * origen (las del panel no traen canal). Hasta el 15/10/2026 eran ocho: la 8 salió del flujo y el bloque
+     * `etapas` de una implementación nueva ya no la trae (ver los tests de compatibilidad más abajo para una vieja).
      *
      * @return void
      */
-    public function test_las_ocho_etapas_con_sus_acciones(): void
+    public function test_las_siete_etapas_con_sus_acciones(): void
     {
         $e = $this->escenario();
         $this->llevar_a_la_etapa($e['implementacion'], 3);
@@ -227,7 +228,7 @@ class EstadoDeLaImplementacionPorClaudeTest extends BaseDeImplementaciones
         $respuesta = $this->getJson('/api/claude/implementations/' . $e['implementacion']->id, $this->headers());
 
         $etapas = $respuesta->json('etapas');
-        $this->assertCount(8, $etapas);
+        $this->assertCount(7, $etapas);
 
         foreach ($etapas as $indice => $etapa) {
             $this->assertSame($indice + 1, $etapa['numero']);
@@ -245,6 +246,113 @@ class EstadoDeLaImplementacionPorClaudeTest extends BaseDeImplementaciones
             ['accion' => 'form_link', 'at' => '2026-10-05T14:05:00.000000Z', 'canal' => 'whatsapp_web', 'origen' => 'claude'],
         ], $etapas[0]['acciones']);
         $this->assertSame([], $etapas[1]['acciones']);
+    }
+
+    /**
+     * Los nombres de las siete etapas que salen cuando el catálogo de la base está vacío (el respaldo de
+     * `ClaudeImplementationOpsController::ETAPAS`): la 6 es el catálogo —ya no «Capacitación»— y la 7 es ARCA.
+     *
+     * @return void
+     */
+    public function test_los_nombres_de_las_siete_etapas_sin_catalogo_en_la_base(): void
+    {
+        $e = $this->escenario();
+
+        $etapas = $this->getJson('/api/claude/implementations/' . $e['implementacion']->id, $this->headers())->json('etapas');
+
+        $this->assertSame(
+            [
+                'Información de la empresa',
+                'Instalación del sistema',
+                'Recolección de archivos',
+                'Migración de datos',
+                'Entrega del sistema',
+                'Catálogo: categorías, imágenes y descripciones',
+                'Vinculación ARCA/AFIP',
+            ],
+            array_column($etapas, 'nombre')
+        );
+    }
+
+    /**
+     * El nombre de la base manda sobre el respaldo: con el catálogo sembrado por `ImplementationStageConfigSeeder`
+     * (siete etapas) los nombres salen del seeder, y el de la 6 es el nuevo.
+     *
+     * @return void
+     */
+    public function test_con_el_catalogo_sembrado_los_nombres_salen_de_la_base(): void
+    {
+        $this->seed(\Database\Seeders\ImplementationStageConfigSeeder::class);
+        $e = $this->escenario();
+
+        $etapas = $this->getJson('/api/claude/implementations/' . $e['implementacion']->id, $this->headers())->json('etapas');
+
+        $this->assertCount(7, $etapas);
+        $this->assertSame('Catálogo: categorías, imágenes y descripciones', $etapas[5]['nombre']);
+        $this->assertSame('Vinculación ARCA/AFIP', $etapas[6]['nombre']);
+    }
+
+    /**
+     * COMPATIBILIDAD 1. Una implementación anterior al 15/10/2026 (con su fila 8 pendiente) muestra las mismas
+     * siete etapas: la 8 pendiente no es una etapa por hacer y no se lista.
+     *
+     * @return void
+     */
+    public function test_una_implementacion_vieja_con_la_etapa_8_pendiente_muestra_siete(): void
+    {
+        $cliente = $this->crear_las_dos_apis($this->crear_cliente('Panchito Gómez'), 'panchito');
+        $vieja   = $this->llevar_a_la_etapa($this->crear_implementacion_anterior($cliente), 3);
+
+        $this->assertSame(8, \App\Models\ImplementationStage::where('implementation_id', $vieja->id)->count());
+
+        $etapas = $this->getJson('/api/claude/implementations/' . $vieja->id, $this->headers())->json('etapas');
+
+        $this->assertCount(7, $etapas);
+        $this->assertSame(range(1, 7), array_column($etapas, 'numero'));
+    }
+
+    /**
+     * COMPATIBILIDAD 2. Una implementación vieja que YA llegó a la etapa 8 la muestra como octava, con su estado
+     * real y el nombre que tenía: es una etapa que existió para ese cliente y hay que poder leerla.
+     *
+     * @return void
+     */
+    public function test_una_implementacion_vieja_que_esta_en_la_etapa_8_la_muestra(): void
+    {
+        $cliente = $this->crear_las_dos_apis($this->crear_cliente('Panchito Gómez'), 'panchito');
+        $vieja   = $this->llevar_a_la_etapa($this->crear_implementacion_anterior($cliente), 8);
+
+        $etapas = $this->getJson('/api/claude/implementations/' . $vieja->id, $this->headers())->json('etapas');
+
+        $this->assertCount(8, $etapas);
+        $this->assertSame(range(1, 8), array_column($etapas, 'numero'));
+        $this->assertSame('in_progress', $etapas[7]['estado']);
+        $this->assertSame('Videollamada de capacitación', $etapas[7]['nombre']);
+        $this->assertSame('completed', $etapas[6]['estado']);
+    }
+
+    /**
+     * COMPATIBILIDAD 3. Una etapa 8 `skipped` (la que deja el cierre desde la 7) o completada y cerrada: salteada
+     * no se lista; completada sí (la implementación vieja la hizo).
+     *
+     * @return void
+     */
+    public function test_la_etapa_8_salteada_no_se_muestra_y_la_completada_si(): void
+    {
+        $cliente = $this->crear_las_dos_apis($this->crear_cliente('Panchito Gómez'), 'panchito');
+        $vieja   = $this->llevar_a_la_etapa($this->crear_implementacion_anterior($cliente), 7);
+
+        $this->postJson('/api/claude/implementations/' . $vieja->id . '/advance', ['etapa_actual' => 7, 'dry_run' => false], $this->headers())->assertStatus(200);
+
+        $salteada = $this->getJson('/api/claude/implementations/' . $vieja->id, $this->headers())->json('etapas');
+        $this->assertCount(7, $salteada, 'La 8 quedó skipped al cerrar: no se lista.');
+        $this->assertSame('completed', $salteada[6]['estado']);
+
+        \App\Models\ImplementationStage::where('implementation_id', $vieja->id)->where('stage_number', 8)->update(['status' => 'completed']);
+
+        $completada = $this->getJson('/api/claude/implementations/' . $vieja->id, $this->headers())->json('etapas');
+        $this->assertCount(8, $completada, 'Una 8 completada la hizo ese cliente: se lista.');
+        $this->assertSame('completed', $completada[7]['estado']);
     }
 
     /* ------------------------------------------------------------------------------------------

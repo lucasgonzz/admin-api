@@ -19,7 +19,7 @@ use Tests\TestCase;
 /**
  * Andamiaje común de los tests del bloque `claude/implementations/*` (misión `implementar-cliente`,
  * 5/10/2026): la clave de ingesta, los headers, y los constructores de lo que casi todos los tests
- * necesitan —un cliente con sus dos APIs, su implementación con las ocho etapas, un lead, una versión,
+ * necesitan —un cliente con sus dos APIs, su implementación con sus siete etapas, un lead, una versión,
  * mensajes del hilo—.
  *
  * 🔴 Todo lo que construye lo hace con las MISMAS formas que producen los servicios reales
@@ -185,15 +185,21 @@ abstract class BaseDeImplementaciones extends TestCase
     }
 
     /**
-     * La implementación de un cliente, con las ocho etapas y el token, tal como la deja
+     * La implementación de un cliente, con sus etapas y el token, tal como la deja
      * `ImplementationStartService::start()`: en curso, etapa 1.
      *
-     * @param Client               $client    El cliente.
-     * @param array<string, mixed> $atributos Atributos a sumar o pisar de la implementación.
+     * 🔴 Con SIETE etapas por defecto (`Implementation::ULTIMA_ETAPA`): desde el 15/10/2026 el flujo
+     * tiene siete y el alta no crea la fila de la etapa 8. Para armar una implementación ANTERIOR a ese
+     * día —la que trae esa fila 8, que es la que hay que seguir sabiendo cerrar y leer— se pasa 8 como
+     * `$total_de_etapas` (o se usa `crear_implementacion_anterior()`).
+     *
+     * @param Client               $client           El cliente.
+     * @param array<string, mixed> $atributos        Atributos a sumar o pisar de la implementación.
+     * @param int                  $total_de_etapas  Cuántas filas de etapas se crean (default: las del flujo).
      *
      * @return Implementation
      */
-    protected function crear_implementacion(Client $client, array $atributos = []): Implementation
+    protected function crear_implementacion(Client $client, array $atributos = [], int $total_de_etapas = Implementation::ULTIMA_ETAPA): Implementation
     {
         $implementation                  = new Implementation();
         $implementation->client_id       = $client->id;
@@ -209,7 +215,7 @@ abstract class BaseDeImplementaciones extends TestCase
 
         $implementation->save();
 
-        for ($numero = 1; $numero <= 8; $numero++) {
+        for ($numero = 1; $numero <= $total_de_etapas; $numero++) {
             $etapa                    = new ImplementationStage();
             $etapa->implementation_id = $implementation->id;
             $etapa->stage_number      = $numero;
@@ -222,8 +228,24 @@ abstract class BaseDeImplementaciones extends TestCase
     }
 
     /**
+     * La implementación de un cliente tal como la dejaba `ImplementationStartService::start()` ANTES del
+     * 15/10/2026: con OCHO etapas, la fila 8 («Videollamada de capacitación») incluida. Es lo que hay en
+     * producción para toda implementación que arrancó antes del cambio a siete etapas.
+     *
+     * @param Client               $client    El cliente.
+     * @param array<string, mixed> $atributos Atributos a sumar o pisar de la implementación.
+     *
+     * @return Implementation
+     */
+    protected function crear_implementacion_anterior(Client $client, array $atributos = []): Implementation
+    {
+        return $this->crear_implementacion($client, $atributos, Implementation::ETAPA_HEREDADA);
+    }
+
+    /**
      * Pone la implementación en la etapa N: las anteriores completadas, la N en curso, las demás
-     * pendientes.
+     * pendientes. Recorre las filas que la implementación tiene (siete, u ocho si es anterior al
+     * 15/10/2026) y, si se pide una etapa que no tiene fila —la 8 en una implementación de siete—, la crea.
      *
      * @param Implementation $implementation La implementación.
      * @param int            $etapa          La etapa a la que se lleva (1 a 8).
@@ -235,10 +257,14 @@ abstract class BaseDeImplementaciones extends TestCase
         $implementation->current_stage = $etapa;
         $implementation->save();
 
-        for ($numero = 1; $numero <= 8; $numero++) {
-            $registro = ImplementationStage::where('implementation_id', $implementation->id)
-                ->where('stage_number', $numero)
-                ->first();
+        $ultima_fila = (int) ImplementationStage::where('implementation_id', $implementation->id)->max('stage_number');
+        $recorrer_hasta = max(Implementation::ULTIMA_ETAPA, $etapa, $ultima_fila);
+
+        for ($numero = 1; $numero <= $recorrer_hasta; $numero++) {
+            $registro = ImplementationStage::firstOrNew([
+                'implementation_id' => $implementation->id,
+                'stage_number'      => $numero,
+            ]);
 
             $registro->status       = $numero < $etapa ? 'completed' : ($numero === $etapa ? 'in_progress' : 'pending');
             $registro->started_at   = $numero <= $etapa ? now() : null;
@@ -253,7 +279,7 @@ abstract class BaseDeImplementaciones extends TestCase
      * Escribe el `data` de una etapa (pisa el que hubiera).
      *
      * @param Implementation       $implementation La implementación.
-     * @param int                  $etapa          La etapa (1 a 8).
+     * @param int                  $etapa          La etapa (1 a 8; la 8 solo en una implementación anterior al 15/10/2026).
      * @param array<string, mixed> $data           El JSON de la etapa.
      *
      * @return void
@@ -269,7 +295,7 @@ abstract class BaseDeImplementaciones extends TestCase
      * Lee el `data` de una etapa.
      *
      * @param Implementation $implementation La implementación.
-     * @param int            $etapa          La etapa (1 a 8).
+     * @param int            $etapa          La etapa (1 a 8; la 8 solo en una implementación anterior al 15/10/2026).
      *
      * @return array<string, mixed>
      */

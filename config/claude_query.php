@@ -2580,7 +2580,7 @@ return [
          --------------------------------------------------------------- */
         'implementation_stage' => [
             'tabla'           => 'implementation_stages',
-            'descripcion'     => 'Estado de cada etapa (1-8) de una implementación, con sus tiempos y cuántas alertas se mandaron. Sin `data`: ahí viven las respuestas del formulario, que son PII.',
+            'descripcion'     => 'Estado de cada etapa (1-7; las implementaciones anteriores al 15/10/2026 traen además una fila 8) de una implementación, con sus tiempos y cuántas alertas se mandaron. Sin `data`: ahí viven las respuestas del formulario, que son PII.',
             'columnas'        => [
                 'id', 'implementation_id', 'stage_number', 'status',
                 'started_at', 'completed_at', 'last_alert_sent_at', 'alert_count',
