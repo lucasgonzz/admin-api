@@ -248,13 +248,25 @@ class WhatsappWebhookController extends Controller
                      *     bifurcación: sin ella, el día del deploy —antes de cargar el número— los
                      *     dueños con el asistente prendido se quedarían sin asistente.
                      */
-                    if (WhatsappConfig::canalListo(WhatsappConfig::PROPOSITO_ASISTENTE) !== null) {
-                        $this->avisar_el_numero_del_asistente($parsed, $client);
+                    /* 🔴 El aviso solo sale si el NÚMERO DEL ASISTENTE va a reconocer a este dueño con su
+                     * propio comparador (`find_dueno_por_telefono_exacto()`, el estricto). El de acá arriba
+                     * (`find_support_contact_by_phone()`) es el laxo —compara los últimos dígitos—, y hay
+                     * fichas que el laxo reconoce y el estricto no (`11 15 2345-6789`). Mandar el aviso a
+                     * alguien a quien el otro número le va a contestar «yo no te conozco» lo deja en un
+                     * callejón sin salida: sin asistente en ninguno de los dos números. A ese dueño se lo
+                     * sigue atendiendo como hoy, por este mismo número (y la respuesta sale por el mismo
+                     * número por el que escribió: ver `EnviarMensajeAlAsistenteJob::proposito_de_salida()`). */
+                    $dueno_del_asistente = WhatsappConfig::canalListo(WhatsappConfig::PROPOSITO_ASISTENTE) !== null
+                        ? $this->find_dueno_por_telefono_exacto($this->telefono_del_remitente($parsed))
+                        : null;
+
+                    if ($dueno_del_asistente !== null && (bool) $dueno_del_asistente->asistente_whatsapp_activo) {
+                        $this->avisar_el_numero_del_asistente($parsed, $dueno_del_asistente);
                         Log::channel('daily')->info('WhatsApp webhook: dueño con asistente escribió al número principal, se le avisa el número del asistente.', [
                             'from'      => $parsed['from'],
                             'type'      => $parsed['type'],
                             'route'     => 'aviso-numero-del-asistente',
-                            'client_id' => $client->id,
+                            'client_id' => $dueno_del_asistente->id,
                         ]);
                     } else {
                         app(AsistenteWhatsappService::class)->recibir($parsed, $client);
@@ -686,7 +698,7 @@ class WhatsappWebhookController extends Controller
 
         $signature = str_replace('sha256=', '', $signature);
         $raw_body = $request->getContent();
-        $expected = hash_hmac('sha256', $raw_body, $secreto);
+        $expected = hash_hmac('sha256', $raw_body, (string) $config->webhook_secret);
 
         return hash_equals($expected, $signature);
     }
@@ -1263,9 +1275,7 @@ class WhatsappWebhookController extends Controller
         /* El crudo y no `$parsed['from']`: ver el comentario de `from_crudo` en
            `parse_inbound_message()`. Tanto para resolver al dueño como para contestarle hace falta
            el número que de verdad escribió, no la versión argentinizada. */
-        $desde  = (string) (isset($parsed['from_crudo']) && $parsed['from_crudo'] !== ''
-            ? $parsed['from_crudo']
-            : $parsed['from']);
+        $desde  = $this->telefono_del_remitente($parsed);
         $client = $this->find_dueno_por_telefono_exacto($desde);
 
         if ($client !== null && (bool) $client->asistente_whatsapp_activo) {
@@ -1303,6 +1313,14 @@ class WhatsappWebhookController extends Controller
             return;
         }
 
+        /* 🔴 Una respuesta cada seis horas por teléfono, y no una por mensaje. Este mensaje no se guarda
+           en ninguna tabla, así que ni el dedupe por wamid ni nada más lo frena: un reintento de Kapso
+           mandaría el texto dos veces, y quien tenga un autorespondedor del otro lado armaría un bucle
+           con el número del asistente. `Cache::add()` es atómico: solo pasa el primero. */
+        if (! Cache::add('whatsapp_texto_ajeno_asistente_' . md5((string) preg_replace('/\D+/', '', $desde)), 1, now()->addHours(6))) {
+            return;
+        }
+
         /* 🔴 `paraProposito('asistente')` no es adorno: sin él la respuesta saldría por el número
            institucional, y la persona vería su pregunta en un chat y la respuesta en otro — que es
            exactamente la confusión que este texto viene a evitar. */
@@ -1316,15 +1334,33 @@ class WhatsappWebhookController extends Controller
     }
 
     /**
+     * Teléfono del remitente TAL CUAL llegó en el payload (sin pasar por `normalize()`).
+     *
+     * @param array<string, mixed> $parsed Mensaje entrante ya parseado.
+     *
+     * @return string
+     */
+    private function telefono_del_remitente(array $parsed): string
+    {
+        return (string) (isset($parsed['from_crudo']) && $parsed['from_crudo'] !== ''
+            ? $parsed['from_crudo']
+            : $parsed['from']);
+    }
+
+    /**
      * Le dice a un dueño con el asistente prendido cuál es el número de su asistente.
      *
      * Se llama cuando ese dueño escribe al número de LEADS Y CLIENTES con el número del asistente ya
      * listo. El mensaje no se procesa de ninguna otra forma: ni va al asistente (hablaría por el chat
      * equivocado), ni abre ticket, ni crea nada.
      *
-     * 🔴 **Una vez cada 30 minutos por dueño.** Quien escribe a una conversación y no recibe lo que
+     * 🔴 **Una vez cada 5 minutos por dueño.** Quien escribe a una conversación y no recibe lo que
      * espera suele mandar tres mensajes seguidos; contestarle el mismo aviso tres veces es ruido y
-     * lo hace parecer un bucle. `Cache::add()` es atómico: solo el primero de una ráfaga pasa.
+     * lo hace parecer un bucle. `Cache::add()` es atómico: solo el primero de una ráfaga pasa. Son
+     * cinco minutos y no más a propósito: el mensaje del dueño NO se guarda en ningún lado, así que
+     * un silencio largo después del aviso dejaría perdido lo que escriba a continuación.
+     *
+     * Si el aviso no salió (Meta lo rechazó), la marca se borra y el próximo mensaje lo reintenta.
      *
      * Sale por el número principal y como texto libre, sin plantilla: el dueño acaba de escribir,
      * así que su ventana de 24 hs en este número está abierta por definición.
@@ -1341,18 +1377,25 @@ class WhatsappWebhookController extends Controller
             return;
         }
 
-        if (! Cache::add('whatsapp_aviso_numero_asistente_cliente_' . (int) $client->id, 1, now()->addMinutes(30))) {
+        $clave_del_aviso = 'whatsapp_aviso_numero_asistente_cliente_' . (int) $client->id;
+        if (! Cache::add($clave_del_aviso, 1, now()->addMinutes(5))) {
             return;
         }
 
         $numero = trim((string) $config->display_phone);
         $digitos = preg_replace('/\D+/', '', $numero);
 
-        app(WhatsappSendService::class)->send_text(
+        $enviado = app(WhatsappSendService::class)->send_text(
             (string) $parsed['from'],
             AsistenteWhatsappSettings::texto_aviso_del_numero($numero, 'https://wa.me/' . $digitos),
             'Aviso del numero del asistente - cliente #' . (int) $client->id
         );
+
+        /* Si el aviso no salió, no se lo deja marcado como enviado: el próximo mensaje del dueño lo
+           reintenta en vez de quedar mudo media hora. */
+        if ($enviado === null) {
+            Cache::forget($clave_del_aviso);
+        }
     }
 
     /**

@@ -84,43 +84,6 @@ class WhatsappNormalizer
     }
 
     /**
-     * Compara dos teléfonos por IGUALDAD EXACTA de sus dígitos.
-     *
-     * 🔴 **Es el único comparador de esta clase que NO tolera nada**, y existe para el número
-     * del asistente (misión whatsapp-dos-numeros, 13/10/2026), donde un falso positivo le abre a
-     * una persona el asistente de IA del negocio de otra: ventas, costos, deudas, clientes.
-     *
-     * Lo que NO hace, y por qué:
-     *
-     *   - **No llama a `normalize()`.** `normalize('+15551234567')` devuelve `+54915551234567`: le
-     *     pega el prefijo argentino a un número que no lo es. El número del asistente es un +1.
-     *   - **No cae al sufijo de ocho dígitos** como `phones_match()`, que da `true` entre
-     *     `+5493411234567` y `+5493511234567` — Rosario y Córdoba, dos personas distintas.
-     *
-     * Se comparan solo los dígitos porque el mismo número llega escrito de varias formas
-     * (`+54 9 341 123-4567`, `5493411234567`): eso es formato, no identidad. Lo que no se tolera es
-     * que falte o sobre un dígito.
-     *
-     * Con cualquiera de los dos sin dígitos devuelve false: dos ausencias no son una coincidencia.
-     *
-     * @param string $phone_a Primer teléfono.
-     * @param string $phone_b Segundo teléfono.
-     *
-     * @return bool true solo si son el MISMO número, dígito a dígito.
-     */
-    public static function equals_exacto(string $phone_a, string $phone_b): bool
-    {
-        $digits_a = preg_replace('/\D+/', '', $phone_a) ?? '';
-        $digits_b = preg_replace('/\D+/', '', $phone_b) ?? '';
-
-        if ($digits_a === '' || $digits_b === '') {
-            return false;
-        }
-
-        return $digits_a === $digits_b;
-    }
-
-    /**
      * Compara un teléfono GUARDADO en una ficha contra el REMITENTE de un mensaje, sin tolerar
      * ningún dígito de más ni de menos.
      *
@@ -159,8 +122,22 @@ class WhatsappNormalizer
 
         if (strpos(ltrim($digitos_remitente, '0'), '54') === 0) {
             $canonico = self::normalize($remitente);
+            if ($canonico === '') {
+                return false;
+            }
 
-            return $canonico !== '' && $canonico === self::normalize($guardado);
+            if ($canonico === self::normalize($guardado)) {
+                return true;
+            }
+
+            /* Fichas que traen el 9 móvil pero no el 54 (`93434544199`): once dígitos que empiezan con 9
+               son el móvil argentino sin el código de país, y `normalize()` les pegaría `+549` encima. Se
+               prueba también con el 54 por delante; sigue siendo el número COMPLETO, sin sufijos. */
+            if (strlen($digitos_guardado) === 11 && $digitos_guardado[0] === '9') {
+                return $canonico === self::normalize('54' . $digitos_guardado);
+            }
+
+            return false;
         }
 
         return $digitos_guardado === $digitos_remitente;
