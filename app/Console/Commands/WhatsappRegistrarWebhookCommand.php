@@ -30,11 +30,23 @@ use Illuminate\Console\Command;
  *      health ES el trabajo y su resultado decide el exit code.
  *   3. Registra el webhook con los cinco eventos y guarda el secreto en la fila.
  *
+ * 🔴 **El secreto NO se imprime nunca** (decisión del 15/10/2026): se genera, se manda a Kapso y se
+ * guarda en la fila en la misma corrida, y de ahí en adelante vive solo en la base y en Kapso. Antes se
+ * mostraba "por si hacía falta en Kapso", pero Kapso ya lo recibió por la API: imprimirlo solo lo deja
+ * en el historial de la terminal y en cualquier log que capture la salida.
+ *
+ * 🔴 **Tampoco se crea un webhook encima de otro.** Si el número ya tiene webhooks, el comando corta y
+ * dice cómo seguir: duplicar uno que apunta a este mismo admin haría que cada mensaje llegue dos veces,
+ * y dejar vivo uno a otro host (un `ngrok` de desarrollo, por ejemplo) mandaría los mensajes de los
+ * dueños también a la máquina de quien lo registró. `--listar` los muestra y `--reemplazar` los borra
+ * antes de dar de alta el nuestro.
+ *
  * Ejemplos:
  *
  *   php artisan whatsapp:registrar-webhook --solo-health
- *   php artisan whatsapp:registrar-webhook --dry-run
- *   php artisan whatsapp:registrar-webhook --proposito=asistente
+ *   php artisan whatsapp:registrar-webhook --listar
+ *   php artisan whatsapp:registrar-webhook --dry-run --reemplazar
+ *   php artisan whatsapp:registrar-webhook --proposito=asistente --reemplazar
  */
 class WhatsappRegistrarWebhookCommand extends Command
 {
@@ -51,6 +63,8 @@ class WhatsappRegistrarWebhookCommand extends Command
                             {--url= : URL del webhook; por defecto la de este admin}
                             {--secreto= : Secreto a usar; por defecto se genera uno nuevo}
                             {--solo-health : Solo consulta el health del número y no registra nada}
+                            {--listar : Solo muestra los webhooks que ya tiene el número en Kapso (host y eventos, sin URLs completas ni secretos)}
+                            {--reemplazar : Borra los webhooks que ya tenga el número antes de dar de alta el nuestro}
                             {--dry-run : Imprime qué se iba a mandar sin salir a la red}';
 
     /**
@@ -138,6 +152,17 @@ class WhatsappRegistrarWebhookCommand extends Command
             return $health_ok ? 0 : 1;
         }
 
+        if ((bool) $this->option('listar')) {
+            $existentes = $this->webhooks_del_numero($phone_number_id, $api_key);
+            if ($existentes === null) {
+                return 1;
+            }
+
+            $this->mostrar_webhooks($existentes);
+
+            return 0;
+        }
+
         $url = trim((string) $this->option('url'));
         if ($url === '') {
             /* La URL del webhook la arma `AdminApiPublicUrl` y no `config('app.url')`: en el shared
@@ -168,12 +193,50 @@ class WhatsappRegistrarWebhookCommand extends Command
         if ((bool) $this->option('dry-run')) {
             $this->newLine();
             $this->warn('--dry-run: no se llamó a Kapso y no se guardó nada.');
+            $this->line('  GET  ' . $this->endpoint_de_webhooks($phone_number_id) . '   (para ver si ya hay webhooks)');
+            if ((bool) $this->option('reemplazar')) {
+                $this->line('  DELETE ' . $this->endpoint_de_webhooks($phone_number_id) . '/{id}   (uno por cada webhook existente)');
+            }
             $this->line('  POST ' . $this->endpoint_de_webhooks($phone_number_id));
             if ($generado) {
-                $this->line('  El secreto se habría generado en esta corrida (no se muestra en un ensayo).');
+                $this->line('  El secreto se habría generado en esta corrida (nunca se muestra).');
             }
 
             return 0;
+        }
+
+        /* Antes de crear nada se mira qué hay. Ver la cabecera: ni duplicar ni dejar vivo uno ajeno. */
+        $existentes = $this->webhooks_del_numero($phone_number_id, $api_key);
+        if ($existentes === null) {
+            return 1;
+        }
+
+        if ($existentes !== []) {
+            $this->newLine();
+            $this->mostrar_webhooks($existentes);
+
+            if (! (bool) $this->option('reemplazar')) {
+                $this->newLine();
+                $this->error('Este número ya tiene webhooks en Kapso y no se registró ninguno nuevo.');
+                $this->line('Si hay que reemplazarlos, volvé a correr con --reemplazar: los borra y da de alta el nuestro.');
+
+                return 1;
+            }
+
+            foreach ($existentes as $existente) {
+                $borrado = KapsoHttpClient::make($api_key, self::TIMEOUT)->delete(
+                    $this->endpoint_de_webhooks($phone_number_id) . '/' . rawurlencode((string) $existente['id'])
+                );
+
+                if (! $borrado->successful()) {
+                    $this->error('Kapso no dejó borrar el webhook ' . $this->id_corto($existente) . ' (HTTP ' . $borrado->status() . ').');
+                    $this->warn('No se registró nada nuevo y no se tocó la fila.');
+
+                    return 1;
+                }
+
+                $this->info('Borrado el webhook ' . $this->id_corto($existente) . ' (' . $this->host_de($existente) . ').');
+            }
         }
 
         $respuesta = KapsoHttpClient::make($api_key, self::TIMEOUT)->post(
@@ -206,10 +269,8 @@ class WhatsappRegistrarWebhookCommand extends Command
 
         if ($generado) {
             $this->newLine();
-            $this->warn('Secreto generado en esta corrida (anotalo si lo necesitás en Kapso):');
-            $this->line($secreto);
-            $this->comment('No lo pegues en un informe ni en una novedad: con él se puede firmar '
-                . 'cualquier payload hacia este webhook.');
+            $this->comment('El secreto se generó en esta corrida y quedó guardado en la fila y en Kapso. '
+                . 'No se muestra a propósito: con él se puede firmar cualquier payload hacia este webhook.');
         }
 
         if (! $health_ok) {
@@ -254,6 +315,114 @@ class WhatsappRegistrarWebhookCommand extends Command
         $this->line(mb_strimwidth((string) $respuesta->body(), 0, 1000, '…'));
 
         return true;
+    }
+
+    /**
+     * Webhooks que el número ya tiene en Kapso.
+     *
+     * @param string $phone_number_id Phone Number ID de Meta.
+     * @param string $api_key         Clave de Kapso de ese número.
+     *
+     * @return array<int, array<string, mixed>>|null Null si Kapso no contestó 2xx (ya se avisó).
+     */
+    private function webhooks_del_numero(string $phone_number_id, string $api_key): ?array
+    {
+        $respuesta = KapsoHttpClient::make($api_key, self::TIMEOUT)->get(
+            $this->endpoint_de_webhooks($phone_number_id),
+            ['per_page' => 100]
+        );
+
+        if (! $respuesta->successful()) {
+            $this->error('Kapso no informó los webhooks del número (HTTP ' . $respuesta->status() . ').');
+
+            return null;
+        }
+
+        $data = $respuesta->json('data');
+
+        return is_array($data) ? array_values($data) : [];
+    }
+
+    /**
+     * Imprime los webhooks de un número sin exponer nada que no deba salir en una terminal.
+     *
+     * 🔴 **Solo el HOST de la URL, nunca la URL entera ni el `secret_key` ni los `headers`.** Hay
+     * webhooks cuyo path lleva un token (el de los eventos crudos de Meta), y una lista que lo
+     * imprimiera lo dejaría en el historial. Del host alcanza para lo único que hay que decidir:
+     * si apunta a este admin o a otro lado (una máquina de desarrollo, por ejemplo).
+     *
+     * @param array<int, array<string, mixed>> $webhooks
+     *
+     * @return void
+     */
+    private function mostrar_webhooks(array $webhooks): void
+    {
+        if ($webhooks === []) {
+            $this->info('El número no tiene ningún webhook en Kapso.');
+
+            return;
+        }
+
+        $nuestro_host = (string) parse_url(AdminApiPublicUrl::api('webhook/whatsapp'), PHP_URL_HOST);
+
+        $this->info('Webhooks del número en Kapso (' . count($webhooks) . '):');
+        foreach ($webhooks as $webhook) {
+            $host    = $this->host_de($webhook);
+            $eventos = isset($webhook['events']) && is_array($webhook['events']) ? implode(', ', $webhook['events']) : '(sin eventos)';
+            $activo  = ! empty($webhook['active']) ? 'activo' : 'inactivo';
+            $es_de_este_admin = $nuestro_host !== '' && $host === $nuestro_host ? 'es de este admin' : 'APUNTA A OTRO HOST';
+
+            $this->line('  - ' . $this->id_corto($webhook) . ' · ' . $host . $this->ruta_si_es_la_de_este_admin($webhook) . ' · ' . $activo . ' · ' . $es_de_este_admin);
+            $this->line('      eventos: ' . $eventos);
+        }
+    }
+
+    /**
+     * La ruta del webhook, SOLO si es la ruta conocida de este admin.
+     *
+     * Sirve para una sola cosa: ver con qué prefijo (`/public/api/…` o `/api/…`) está dado de alta el
+     * webhook del número principal, y copiarlo al dar de alta el del asistente con `--url`. Cualquier otra
+     * ruta —la de un `ngrok`, la de los eventos crudos de Meta, que lleva un token— no se muestra.
+     *
+     * @param array<string, mixed> $webhook
+     *
+     * @return string Vacío si no es la ruta conocida.
+     */
+    private function ruta_si_es_la_de_este_admin(array $webhook): string
+    {
+        $ruta = parse_url((string) (isset($webhook['url']) ? $webhook['url'] : ''), PHP_URL_PATH);
+
+        if (is_string($ruta) && preg_match('#^/(?:public/)?api/webhook/whatsapp/?$#', $ruta) === 1) {
+            return $ruta;
+        }
+
+        return '';
+    }
+
+    /**
+     * Host de la URL de un webhook (sin path ni query).
+     *
+     * @param array<string, mixed> $webhook
+     *
+     * @return string
+     */
+    private function host_de(array $webhook): string
+    {
+        $host = parse_url((string) (isset($webhook['url']) ? $webhook['url'] : ''), PHP_URL_HOST);
+
+        return is_string($host) && $host !== '' ? $host : '(url ilegible)';
+    }
+
+    /**
+     * Primeros ocho caracteres del id del webhook, que alcanzan para distinguirlos en pantalla.
+     *
+     * @param array<string, mixed> $webhook
+     *
+     * @return string
+     */
+    private function id_corto(array $webhook): string
+    {
+        return substr((string) (isset($webhook['id']) ? $webhook['id'] : '?'), 0, 8);
     }
 
     /**
