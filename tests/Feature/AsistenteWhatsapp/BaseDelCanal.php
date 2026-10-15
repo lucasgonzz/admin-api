@@ -36,6 +36,22 @@ abstract class BaseDelCanal extends TestCase
     const SECRETO = 'secreto-del-canal-del-asistente';
 
     /**
+     * Secreto del webhook del número del ASISTENTE. Distinto del principal a propósito: es lo que hace
+     * que una firma de un número no valga en el otro.
+     */
+    const SECRETO_DEL_ASISTENTE = 'secreto-del-numero-del-asistente';
+
+    /**
+     * `phone_number_id` del número principal que crea `crear_config_whatsapp()`.
+     */
+    const PHONE_NUMBER_ID_PRINCIPAL = '1234567890';
+
+    /**
+     * `phone_number_id` del número del asistente que crea `crear_config_asistente()`.
+     */
+    const PHONE_NUMBER_ID_ASISTENTE = '5550001112223';
+
+    /**
      * Nada sale a la red en estas pruebas.
      *
      * @return void
@@ -121,12 +137,40 @@ abstract class BaseDelCanal extends TestCase
     {
         $config                  = new WhatsappConfig();
         $config->kapso_api_key   = 'clave-kapso-de-prueba';
-        $config->phone_number_id = '1234567890';
+        $config->phone_number_id = self::PHONE_NUMBER_ID_PRINCIPAL;
         $config->webhook_secret  = self::SECRETO;
         $config->is_active       = true;
         /* En false a propósito: con `test_mode` prendido, `send_text()` corta antes de llegar al
          * espía y devuelve un id simulado. Acá el que corta es el espía. */
         $config->test_mode       = false;
+        $config->save();
+
+        return $config;
+    }
+
+    /**
+     * Número del ASISTENTE, completo y listo para atender (clave, secreto, número visible).
+     *
+     * Cada campo se pisa con `$campos`: una prueba que necesita «el número a medias» pasa
+     * `['webhook_secret' => '']`, que es justamente el estado entre el alta del panel y el registro del
+     * webhook.
+     *
+     * @param array<string, mixed> $campos Campos a pisar.
+     *
+     * @return WhatsappConfig
+     */
+    protected function crear_config_asistente(array $campos = []): WhatsappConfig
+    {
+        $config = new WhatsappConfig();
+        $config->forceFill(array_merge([
+            'proposito'       => WhatsappConfig::PROPOSITO_ASISTENTE,
+            'kapso_api_key'   => 'clave-kapso-del-asistente',
+            'phone_number_id' => self::PHONE_NUMBER_ID_ASISTENTE,
+            'webhook_secret'  => self::SECRETO_DEL_ASISTENTE,
+            'display_phone'   => '+1 201-586-6682',
+            'is_active'       => true,
+            'test_mode'       => false,
+        ], $campos));
         $config->save();
 
         return $config;
@@ -269,6 +313,15 @@ abstract class BaseDelCanal extends TestCase
              */
             public $orden = [];
 
+            /**
+             * @var array<int, string|null> `phone_number_id` por el que SALDRÍA cada envío de texto o
+             *                              de plantilla, en el orden en que se pidieron. Es lo único que
+             *                              puede decir que algo salió por el número del asistente y no
+             *                              por el principal. Aparte de `$textos`/`$plantillas` para no
+             *                              cambiarles la forma a las pruebas que ya las leen.
+             */
+            public $destinos = [];
+
             /** @var bool Si Meta confirma el envío (texto y plantilla). */
             public $confirma = true;
 
@@ -291,8 +344,9 @@ abstract class BaseDelCanal extends TestCase
 
             public function send_text(string $to, string $body, ?string $context = null, bool $skip_failure_notification = false): ?string
             {
-                $this->textos[] = ['to' => $to, 'body' => $body, 'context' => $context];
-                $this->orden[]  = 'texto';
+                $this->textos[]  = ['to' => $to, 'body' => $body, 'context' => $context];
+                $this->orden[]   = 'texto';
+                $this->destinos[] = $this->phone_number_id_de_destino();
 
                 if (! $this->confirma) {
                     $this->last_send_error = 'Meta rechazó el envío (simulado en la prueba).';
@@ -311,6 +365,7 @@ abstract class BaseDelCanal extends TestCase
                     'variables'     => $variables,
                     'language_code' => $language_code,
                 ];
+                $this->destinos[]   = $this->phone_number_id_de_destino();
 
                 if (! $this->confirma) {
                     $this->last_send_error = 'Meta rechazó la plantilla (simulado en la prueba).';
@@ -414,13 +469,13 @@ abstract class BaseDelCanal extends TestCase
      *
      * @return \Illuminate\Testing\TestResponse
      */
-    protected function postear_webhook(array $payload)
+    protected function postear_webhook(array $payload, string $secreto = self::SECRETO)
     {
         $body = json_encode($payload);
 
         return $this->call('POST', '/api/webhook/whatsapp', [], [], [], [
             'CONTENT_TYPE'           => 'application/json',
-            'HTTP_X_KAPSO_SIGNATURE' => hash_hmac('sha256', $body, self::SECRETO),
+            'HTTP_X_KAPSO_SIGNATURE' => hash_hmac('sha256', $body, $secreto),
         ], $body);
     }
 
@@ -438,7 +493,8 @@ abstract class BaseDelCanal extends TestCase
         string $telefono,
         string $texto,
         string $wamid = 'wamid.ENTRANTE1',
-        ?string $cita = null
+        ?string $cita = null,
+        ?string $phone_number_id = null
     ): array {
         $message = [
             'id'        => $wamid,
@@ -452,10 +508,19 @@ abstract class BaseDelCanal extends TestCase
             $message['context'] = ['id' => $cita];
         }
 
-        return [
+        $payload = [
             'event'        => 'whatsapp.message.received',
             'conversation' => ['phone_number' => $telefono, 'contact_name' => 'Dueño de prueba'],
             'message'      => $message,
         ];
+
+        /* Kapso manda el número que RECIBIÓ el mensaje arriba de todo "for routing". Sin el argumento el
+         * payload sale como antes de que existiera el segundo número, que es lo que las pruebas viejas
+         * siguen esperando. */
+        if ($phone_number_id !== null) {
+            $payload['phone_number_id'] = $phone_number_id;
+        }
+
+        return $payload;
     }
 }

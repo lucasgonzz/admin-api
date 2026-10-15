@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\WhatsappConfig;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -67,12 +68,18 @@ class AsistenteImagenesService
      *
      * @param array<int, array<string, mixed>> $medias        Metadata de `extract_inbound_media()`, una por foto.
      * @param int                              $mensaje_id    Fila de `client_assistant_messages`, solo para el log.
+     * @param WhatsappConfig|null              $config        Credenciales del número que RECIBIÓ las
+     *        fotos. Opcional y con default null —el comportamiento de siempre, que es bajar con el
+     *        número principal— porque desde el 13/10/2026 hay dos números y la media pertenece al
+     *        que la recibió: la URL de Kapso viene firmada para la cuenta de ese número y el
+     *        repliegue por `whatsapp_media_id` le pega a `…/{phone_number_id}/media`. Con el
+     *        `phone_number_id` del otro número, Meta contesta que ese adjunto no existe.
      *
      * @return array{partes: array<int, array<string, mixed>>, descartes: array<int, string>}
      *         `partes` ya tiene la forma que espera `Http::asMultipart()`; `descartes` son los
      *         motivos legibles de lo que quedó afuera, para dejarlos escritos en la fila.
      */
-    public function preparar(array $medias, int $mensaje_id): array
+    public function preparar(array $medias, int $mensaje_id, ?WhatsappConfig $config = null): array
     {
         $partes    = [];
         $descartes = [];
@@ -109,7 +116,7 @@ class AsistenteImagenesService
                 continue;
             }
 
-            $binario = $this->media->descargar_binario($media);
+            $binario = $this->media->descargar_binario($media, $config);
 
             if ($binario === null) {
                 /* 🔴 Sin la URL ni el id: la URL de Kapso viene firmada y el id identifica un
