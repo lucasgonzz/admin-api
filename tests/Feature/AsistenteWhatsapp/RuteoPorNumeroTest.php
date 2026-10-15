@@ -488,4 +488,73 @@ class RuteoPorNumeroTest extends BaseDelCanal
 
         $this->assertSame('👍', $mensaje->fresh()->lead_reaction_emoji);
     }
+
+    /**
+     * 🔴 Al dueño que el número del asistente NO va a reconocer (la ficha trae el teléfono con el «15» y el
+     * comparador estricto no lo acepta) no se lo manda a un callejón sin salida: no recibe el aviso, y el
+     * asistente le sigue contestando por el número al que escribió, como hoy.
+     *
+     * @return void
+     */
+    public function test_el_dueno_que_el_asistente_no_reconoce_sigue_con_el_asistente_en_el_principal(): void
+    {
+        Queue::fake();
+        $espia  = $this->espiar_sender();
+        $client = $this->crear_cliente('11 15 2345-6789', true);
+        $this->crear_config_asistente();
+
+        $this->postear_webhook(
+            $this->entrante_al_principal('5491123456789', 'Cuánto vendí?')
+        )->assertStatus(200);
+
+        $fila = ClientAssistantMessage::where('client_id', $client->id)->first();
+
+        $this->assertNotNull($fila, 'Sigue hablando con el asistente, por el número al que escribió.');
+        $this->assertSame(self::PHONE_NUMBER_ID_PRINCIPAL, $fila->phone_number_id);
+        Queue::assertPushed(EnviarMensajeAlAsistenteJob::class);
+        $this->assertCount(0, $espia->textos, 'Y no recibe un aviso que lo mandaría a un número que no lo reconoce.');
+    }
+
+    /**
+     * Si el aviso no salió (Meta lo rechazó), no se lo da por enviado: el próximo mensaje del dueño lo reintenta.
+     *
+     * @return void
+     */
+    public function test_si_el_aviso_no_sale_se_reintenta_con_el_proximo_mensaje(): void
+    {
+        Queue::fake();
+        $espia = $this->espiar_sender(false);
+        $this->crear_cliente('+' . self::TELEFONO_DUENO, true);
+        $this->crear_config_asistente();
+
+        $this->postear_webhook($this->entrante_al_principal('+' . self::TELEFONO_DUENO, 'Hola', 'wamid.F1'))->assertStatus(200);
+        $this->assertCount(1, $espia->textos, 'El primer intento salió a la red y Meta lo rechazó.');
+
+        $espia->confirma = true;
+        $this->postear_webhook($this->entrante_al_principal('+' . self::TELEFONO_DUENO, 'Hola?', 'wamid.F2'))->assertStatus(200);
+        $this->assertCount(2, $espia->textos, 'El segundo mensaje reintenta: el rechazo no dejó marcado el aviso como enviado.');
+    }
+
+    /**
+     * 🔴 Al desconocido que le escribe al asistente se le contesta UNA vez, no una por mensaje ni una por
+     * reintento de Kapso: el mensaje no se guarda en ninguna tabla y sin esto un autorespondedor del otro
+     * lado armaría un bucle.
+     *
+     * @return void
+     */
+    public function test_el_texto_al_desconocido_no_se_repite(): void
+    {
+        Queue::fake();
+        $espia = $this->espiar_sender();
+        $this->crear_config_asistente();
+
+        foreach (['wamid.X1', 'wamid.X2', 'wamid.X1'] as $wamid) {
+            $this->postear_webhook(
+                $this->entrante_al_asistente('+5493414445566', 'Hola', $wamid),
+                self::SECRETO_DEL_ASISTENTE
+            )->assertStatus(200);
+        }
+
+        $this->assertCount(1, $espia->textos);
+    }
 }

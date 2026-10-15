@@ -64,11 +64,13 @@ class AvisoPorElNumeroDelAsistenteTest extends BaseDelAviso
     /**
      * Cierra un upgrade con novedades y dispara el aviso.
      *
+     * @param bool $con_asistente Si el dueño tiene el asistente por WhatsApp prendido.
+     *
      * @return \App\Models\ClientUpgradeNotice
      */
-    private function avisar()
+    private function avisar(bool $con_asistente = true)
     {
-        $client  = $this->crear_cliente(['email' => 'dueno@ejemplo.test']);
+        $client  = $this->crear_cliente(['email' => 'dueno@ejemplo.test', 'asistente_whatsapp_activo' => $con_asistente]);
         $version = $this->crear_version();
         $this->crear_novedad($version, 'Una novedad', 'El cuerpo de la novedad.');
 
@@ -153,6 +155,26 @@ class AvisoPorElNumeroDelAsistenteTest extends BaseDelAviso
 
         $this->avisar();
 
+        $this->assertSame([WhatsappConfig::PROPOSITO_PRINCIPAL], $this->ventana->propositos_pedidos);
+        $this->assertSame('1111111111', $this->whatsapp->phone_number_id_de_destino());
+    }
+
+    /**
+     * 🔴 El dueño que NO tiene el asistente prendido (la mayoría de la flota) recibe el aviso por el número
+     * de siempre, aunque el del asistente esté listo: para él el +1 sería un número desconocido, y si
+     * contestara «gracias» le respondería un texto sobre un asistente que no tiene.
+     *
+     * @return void
+     */
+    public function test_el_duenio_sin_asistente_recibe_el_aviso_por_el_principal(): void
+    {
+        $this->preparar();
+        $this->config(WhatsappConfig::PROPOSITO_ASISTENTE, '2222222222');
+        $this->ventana->abierta = true;
+
+        $aviso = $this->avisar(false);
+
+        $this->assertNotNull($aviso->whatsapp_enviado_at);
         $this->assertSame([WhatsappConfig::PROPOSITO_PRINCIPAL], $this->ventana->propositos_pedidos);
         $this->assertSame('1111111111', $this->whatsapp->phone_number_id_de_destino());
     }

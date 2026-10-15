@@ -270,4 +270,134 @@ class ConfiguracionDeLosNumerosTest extends BaseDelCanal
             ->assertJsonPath('estado.asistente.listo', true)
             ->assertJsonPath('estado.asistente.faltan', []);
     }
+
+    /**
+     * 🔴 El secreto del webhook del asistente NO se escribe desde el panel: lo escribe el comando que da de
+     * alta el webhook. Si una persona pudiera pegarlo, el número quedaría «listo» sin webhook registrado.
+     *
+     * @return void
+     */
+    public function test_el_secreto_del_asistente_no_se_escribe_desde_el_panel(): void
+    {
+        $this->crear_config_whatsapp();
+
+        $this->putJson('/api/admin/whatsapp-config', $this->cuerpo([
+            'proposito'       => 'asistente',
+            'phone_number_id' => self::PHONE_NUMBER_ID_ASISTENTE,
+            'display_phone'   => '+1 201-586-6682',
+            'webhook_secret'  => 'secreto-pegado-a-mano',
+        ]))->assertStatus(200);
+
+        $this->assertNull(WhatsappConfig::delProposito('asistente')->webhook_secret);
+        $this->assertNull(WhatsappConfig::canalListo('asistente'));
+
+        // Con un secreto ya escrito por el comando, un PUT con otro valor no lo cambia.
+        WhatsappConfig::delProposito('asistente')->forceFill(['webhook_secret' => self::SECRETO_DEL_ASISTENTE])->save();
+
+        $this->putJson('/api/admin/whatsapp-config', $this->cuerpo([
+            'proposito'       => 'asistente',
+            'phone_number_id' => self::PHONE_NUMBER_ID_ASISTENTE,
+            'display_phone'   => '+1 201-586-6682',
+            'webhook_secret'  => 'otro-secreto',
+        ]))->assertStatus(200);
+
+        $this->assertSame(self::SECRETO_DEL_ASISTENTE, WhatsappConfig::delProposito('asistente')->webhook_secret);
+    }
+
+    /**
+     * 🔴 Dos números no pueden tener el mismo `phone_number_id`: es lo que decide por cuál fila se valida cada
+     * mensaje. Un pegado del número equivocado dejaría mudo al de leads y clientes.
+     *
+     * @return void
+     */
+    public function test_el_mismo_phone_number_id_no_puede_estar_en_las_dos_filas(): void
+    {
+        $this->crear_config_whatsapp();
+
+        $this->putJson('/api/admin/whatsapp-config', $this->cuerpo([
+            'proposito'       => 'asistente',
+            'phone_number_id' => self::PHONE_NUMBER_ID_PRINCIPAL,
+            'display_phone'   => '+1 201-586-6682',
+        ]))->assertStatus(422);
+
+        $this->assertNull(WhatsappConfig::delProposito('asistente'));
+    }
+
+    /**
+     * El interruptor de «número activo»: apagar el asistente es la marcha atrás desde el panel, y la fila
+     * apagada se sigue viendo para poder volver a prenderla.
+     *
+     * @return void
+     */
+    public function test_apagar_el_asistente_desde_el_panel_lo_deja_fuera_de_juego_y_se_puede_volver_a_prender(): void
+    {
+        $this->crear_config_whatsapp();
+        $this->crear_config_asistente();
+        $this->assertNotNull(WhatsappConfig::canalListo('asistente'));
+
+        $cuerpo = $this->cuerpo([
+            'proposito'       => 'asistente',
+            'phone_number_id' => self::PHONE_NUMBER_ID_ASISTENTE,
+            'display_phone'   => '+1 201-586-6682',
+            'is_active'       => false,
+        ]);
+
+        $this->putJson('/api/admin/whatsapp-config', $cuerpo)->assertStatus(200);
+
+        $this->assertNull(WhatsappConfig::canalListo('asistente'), 'Apagado, el número deja de estar listo: todo vuelve al principal.');
+        $this->assertSame('principal', WhatsappConfig::propositoEfectivoDelAsistente());
+
+        $this->getJson('/api/admin/whatsapp-config')
+            ->assertJsonPath('asistente.phone_number_id', self::PHONE_NUMBER_ID_ASISTENTE)
+            ->assertJsonPath('estado.asistente.listo', false)
+            ->assertJsonPath('estado.asistente.faltan.0', 'activo');
+
+        $this->assertSame(1, WhatsappConfig::where('proposito', 'asistente')->count(), 'Guardar no duplicó la fila.');
+
+        $cuerpo['is_active'] = true;
+        $this->putJson('/api/admin/whatsapp-config', $cuerpo)->assertStatus(200);
+
+        $this->assertNotNull(WhatsappConfig::canalListo('asistente'));
+    }
+
+    /**
+     * El número de leads y clientes no se apaga desde el panel.
+     *
+     * @return void
+     */
+    public function test_el_principal_no_se_puede_apagar(): void
+    {
+        $this->crear_config_whatsapp();
+
+        $this->putJson('/api/admin/whatsapp-config', $this->cuerpo([
+            'phone_number_id' => self::PHONE_NUMBER_ID_PRINCIPAL,
+            'is_active'       => false,
+        ]))->assertStatus(422);
+
+        $this->assertNotNull(WhatsappConfig::getActive());
+    }
+
+    /**
+     * 🔴 «Vacío = no contestar nada» del texto de soporte desconectado se puede guardar: el middleware
+     * convierte el `""` en `null`, y antes eso hacía que el panel dijera «guardado» y el texto volviera.
+     *
+     * @return void
+     */
+    public function test_el_texto_de_soporte_desconectado_se_puede_borrar(): void
+    {
+        \App\Models\AdminSetting::set(\App\Services\AsistenteWhatsappSettings::KEY_DESCONECTADO_TEXTO, 'Estamos de vacaciones');
+
+        $this->putJson('/api/admin/settings/support-ai', [
+            'suggestions_enabled' => true,
+            'texto_desconectado'  => '',
+        ])->assertStatus(200);
+
+        $this->assertSame('', \App\Services\AsistenteWhatsappSettings::texto_de_soporte_desconectado());
+
+        // Un build del panel que no conoce el campo no lo manda, y entonces no se toca.
+        \App\Models\AdminSetting::set(\App\Services\AsistenteWhatsappSettings::KEY_DESCONECTADO_TEXTO, 'Otro texto');
+        $this->putJson('/api/admin/settings/support-ai', ['suggestions_enabled' => true])->assertStatus(200);
+
+        $this->assertSame('Otro texto', \App\Services\AsistenteWhatsappSettings::texto_de_soporte_desconectado());
+    }
 }

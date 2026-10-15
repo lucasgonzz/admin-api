@@ -109,4 +109,30 @@ class FirmaDelWebhookPorNumeroTest extends BaseDelCanal
             ''
         )->assertStatus(401);
     }
+
+    /**
+     * 🔴 El webhook usa su cubeta propia y NO la de toda la API: el grupo `api` ya trae `throttle:api`, y sin
+     * `withoutMiddleware()` aplican las dos (60 por minuto por IP repartidos entre los dos números).
+     *
+     * @return void
+     */
+    public function test_el_webhook_no_comparte_la_cubeta_de_toda_la_api(): void
+    {
+        $router = app('router');
+        $ruta   = null;
+
+        foreach ($router->getRoutes() as $candidata) {
+            if ($candidata->uri() === 'api/webhook/whatsapp' && in_array('POST', $candidata->methods(), true)) {
+                $ruta = $candidata;
+            }
+        }
+
+        $this->assertNotNull($ruta);
+
+        $middlewares = $router->gatherRouteMiddleware($ruta);
+
+        /* Ya resueltos: `throttle:xxx` se convierte en `ThrottleRequests:xxx`. */
+        $this->assertContains('Illuminate\Routing\Middleware\ThrottleRequests:whatsapp-webhook', $middlewares);
+        $this->assertNotContains('Illuminate\Routing\Middleware\ThrottleRequests:api', $middlewares);
+    }
 }

@@ -227,31 +227,6 @@ class ComandosDeWhatsappTest extends BaseDelCanal
     }
 
     /**
-     * Si Kapso no deja borrar el webhook viejo, no se registra nada nuevo ni se toca la fila.
-     *
-     * @return void
-     */
-    public function test_si_no_se_puede_borrar_no_se_registra_nada(): void
-    {
-        $this->crear_config_asistente(['webhook_secret' => null]);
-        $this->fakear_http([
-            '*/webhooks/*' => Http::response(['error' => 'no'], 404),
-            '*/webhooks*'  => Http::response(['data' => [[
-                'id' => '8d3f1a9e-0000-0000-0000-000000000001', 'url' => 'https://x.ngrok-free.app/a', 'events' => [], 'active' => true,
-            ]]], 200),
-            '*/health'     => Http::response(['status' => 'healthy'], 200),
-        ]);
-
-        list($codigo) = $this->correr('whatsapp:registrar-webhook', ['--proposito' => 'asistente', '--reemplazar' => true]);
-
-        $this->assertSame(1, $codigo);
-        Http::assertNotSent(function ($request) {
-            return $request->method() === 'POST';
-        });
-        $this->assertNull(WhatsappConfig::porProposito('asistente')->webhook_secret);
-    }
-
-    /**
      * Sin webhooks previos, el alta va directo y deja la fila lista para atender.
      *
      * @return void
@@ -270,5 +245,241 @@ class ComandosDeWhatsappTest extends BaseDelCanal
 
         $this->assertSame(0, $codigo);
         $this->assertNotNull(WhatsappConfig::canalListo('asistente'), 'Con el secreto guardado el número queda listo.');
+    }
+
+    /**
+     * 🔴 Primero se da de alta el nuestro y recién DESPUÉS se borra el viejo: si el alta falla, el número
+     * sigue como estaba y no se borró nada.
+     *
+     * @return void
+     */
+    public function test_si_el_alta_falla_no_se_borra_nada(): void
+    {
+        $this->crear_config_asistente(['webhook_secret' => null]);
+
+        $this->fakear_http([
+            '*/webhooks/*' => Http::response('', 204),
+            '*/webhooks*'  => Http::sequence()
+                ->push(['data' => [[
+                    'id' => '8d3f1a9e-0000-0000-0000-000000000001', 'url' => 'https://x.ngrok-free.app/a', 'events' => [], 'active' => true, 'kind' => 'kapso',
+                ]]], 200)
+                ->push(['error' => 'invalid'], 422),
+            '*/health'     => Http::response(['status' => 'healthy'], 200),
+        ]);
+
+        list($codigo) = $this->correr('whatsapp:registrar-webhook', [
+            '--proposito'  => 'asistente',
+            '--reemplazar' => true,
+            '--url'        => 'https://api-admin.ejemplo.test/public/api/webhook/whatsapp',
+        ]);
+
+        $this->assertSame(1, $codigo);
+        Http::assertNotSent(function ($request) {
+            return $request->method() === 'DELETE';
+        });
+        $this->assertNull(WhatsappConfig::porProposito('asistente')->webhook_secret);
+    }
+
+    /**
+     * 🔴 `--reemplazar` conserva el webhook de eventos crudos de Meta (`kind: meta`, el de la atribución de
+     * los anuncios) y cualquier webhook de este admin con otra ruta; borra el de otro host y el viejo de
+     * mensajes de este admin.
+     *
+     * @return void
+     */
+    public function test_reemplazar_conserva_lo_que_no_es_de_mensajes(): void
+    {
+        $this->crear_config_asistente(['webhook_secret' => null]);
+
+        $nuestro = 'https://api-admin.ejemplo.test/public/api/webhook/whatsapp';
+
+        $this->fakear_kapso([
+            ['id' => 'aaaaaaaa-0000-0000-0000-000000000001', 'url' => 'https://abc.ngrok-free.app/api/webhook/whatsapp', 'kind' => 'kapso', 'events' => [], 'active' => true],
+            ['id' => 'bbbbbbbb-0000-0000-0000-000000000002', 'url' => $nuestro, 'kind' => 'kapso', 'events' => [], 'active' => true],
+            ['id' => 'cccccccc-0000-0000-0000-000000000003', 'url' => 'https://api-admin.ejemplo.test/public/api/webhook/meta-raw/TOKEN', 'kind' => 'meta', 'events' => [], 'active' => true],
+            ['id' => 'dddddddd-0000-0000-0000-000000000004', 'url' => 'https://api-admin.ejemplo.test/public/api/otra/ruta', 'kind' => 'kapso', 'events' => [], 'active' => true],
+        ]);
+
+        list($codigo, $salida) = $this->correr('whatsapp:registrar-webhook', [
+            '--proposito'  => 'asistente',
+            '--reemplazar' => true,
+            '--url'        => $nuestro,
+        ]);
+
+        $this->assertSame(0, $codigo);
+
+        foreach (['aaaaaaaa', 'bbbbbbbb'] as $borrado) {
+            Http::assertSent(function ($request) use ($borrado) {
+                return $request->method() === 'DELETE' && strpos($request->url(), '/webhooks/' . $borrado) !== false;
+            });
+        }
+
+        foreach (['cccccccc', 'dddddddd'] as $conservado) {
+            Http::assertNotSent(function ($request) use ($conservado) {
+                return $request->method() === 'DELETE' && strpos($request->url(), '/webhooks/' . $conservado) !== false;
+            });
+        }
+
+        $this->assertStringNotContainsString('TOKEN', $salida, 'El token del path de un webhook ajeno no se imprime.');
+    }
+
+    /**
+     * Si Kapso no deja borrar uno viejo después del alta, el comando lo dice y sale con error, pero el
+     * secreto nuevo ya quedó guardado (el nuestro está registrado).
+     *
+     * @return void
+     */
+    public function test_si_no_se_puede_borrar_el_viejo_el_alta_queda_y_se_avisa(): void
+    {
+        $this->crear_config_asistente(['webhook_secret' => null]);
+
+        $this->fakear_http([
+            '*/webhooks/*' => Http::response(['error' => 'no'], 500),
+            '*/webhooks*'  => Http::response(['data' => [[
+                'id' => '8d3f1a9e-0000-0000-0000-000000000001', 'url' => 'https://x.ngrok-free.app/a', 'events' => [], 'active' => true, 'kind' => 'kapso',
+            ]]], 200),
+            '*/health'     => Http::response(['status' => 'healthy'], 200),
+        ]);
+
+        list($codigo, $salida) = $this->correr('whatsapp:registrar-webhook', [
+            '--proposito'  => 'asistente',
+            '--reemplazar' => true,
+            '--url'        => 'https://api-admin.ejemplo.test/public/api/webhook/whatsapp',
+        ]);
+
+        $this->assertSame(1, $codigo);
+        $this->assertStringContainsString('queda VIVO', $salida);
+        $this->assertNotNull(WhatsappConfig::porProposito('asistente')->webhook_secret);
+    }
+
+    /**
+     * 🔴 `--reemplazar` no existe para el número de leads y clientes: su webhook no se toca desde este comando.
+     *
+     * @return void
+     */
+    public function test_reemplazar_se_niega_para_el_principal(): void
+    {
+        $this->fakear_kapso([['id' => 'x', 'url' => 'https://a.test/api/webhook/whatsapp', 'kind' => 'kapso', 'events' => [], 'active' => true]]);
+
+        list($codigo, $salida) = $this->correr('whatsapp:registrar-webhook', ['--proposito' => 'principal', '--reemplazar' => true]);
+
+        $this->assertSame(1, $codigo);
+        $this->assertStringContainsString('solo se usa con --proposito=asistente', $salida);
+        Http::assertNothingSent();
+    }
+
+    /**
+     * El estado avisa de un webhook de PROYECTO (los que no cuelgan de un número): recibiría los mensajes de
+     * los dos.
+     *
+     * @return void
+     */
+    public function test_el_estado_avisa_de_un_webhook_de_proyecto(): void
+    {
+        $this->fakear_http([
+            '*/phone_numbers/*' => Http::response(['data' => [], 'status' => 'ok'], 200),
+            '*/whatsapp/webhooks*' => Http::response(['data' => [
+                ['id' => 'p1', 'url' => 'https://api-admin.ejemplo.test/public/api/webhook/whatsapp', 'kind' => 'kapso', 'active' => true, 'phone_number_id' => null],
+                ['id' => 'n1', 'url' => 'https://otro.test/x', 'kind' => 'kapso', 'active' => true, 'phone_number_id' => self::PHONE_NUMBER_ID_PRINCIPAL],
+            ]], 200),
+        ]);
+
+        list(, $salida) = $this->correr('whatsapp:estado');
+
+        $this->assertStringContainsString('webhook de PROYECTO: api-admin.ejemplo.test', $salida);
+        $this->assertStringNotContainsString('otro.test', $salida, 'Los de número no se listan como de proyecto.');
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // whatsapp:probar-envio
+    // ---------------------------------------------------------------------------------------------
+
+    /**
+     * Sin `--enviar` no sale nada: solo muestra qué se mandaría.
+     *
+     * @return void
+     */
+    public function test_probar_envio_sin_enviar_es_un_ensayo(): void
+    {
+        $this->crear_config_asistente(['webhook_secret' => null]);
+        Http::fake();
+
+        list($codigo, $salida) = $this->correr('whatsapp:probar-envio', [
+            'telefono'    => '+5493444123456',
+            '--plantilla' => 'cc_sistema_actualizado',
+            '--variable'  => ['Lucas'],
+        ]);
+
+        $this->assertSame(0, $codigo);
+        $this->assertStringContainsString('Ensayo: no se mandó nada', $salida);
+        Http::assertNothingSent();
+    }
+
+    /**
+     * Con `--enviar` sale por el número pedido aunque todavía no esté «listo» (envía, aunque no reciba), y
+     * dice que aceptado no es entregado.
+     *
+     * @return void
+     */
+    public function test_probar_envio_sale_por_el_numero_del_asistente(): void
+    {
+        $this->crear_config_asistente(['webhook_secret' => null]);
+        $this->fakear_http([
+            '*/messages' => Http::response(['messages' => [['id' => 'wamid.PRUEBA']]], 200),
+        ]);
+
+        list($codigo, $salida) = $this->correr('whatsapp:probar-envio', [
+            'telefono'    => '+5493444123456',
+            '--plantilla' => 'cc_sistema_actualizado',
+            '--variable'  => ['Lucas'],
+            '--enviar'    => true,
+        ]);
+
+        $this->assertSame(0, $codigo);
+        $this->assertStringContainsString('wamid.PRUEBA', $salida);
+        $this->assertStringContainsString('Aceptado no es entregado', $salida);
+        Http::assertSent(function ($request) {
+            return strpos($request->url(), self::PHONE_NUMBER_ID_ASISTENTE . '/messages') !== false
+                && $request['type'] === 'template'
+                && $request['template']['name'] === 'cc_sistema_actualizado';
+        });
+    }
+
+    /**
+     * Si Meta lo rechaza, sale con error y dice el motivo.
+     *
+     * @return void
+     */
+    public function test_probar_envio_dice_cuando_meta_lo_rechaza(): void
+    {
+        $this->crear_config_asistente();
+        $this->fakear_http([
+            '*/messages' => Http::response(['error' => ['message' => 'Re-engagement message']], 400),
+        ]);
+
+        list($codigo, $salida) = $this->correr('whatsapp:probar-envio', [
+            'telefono' => '+5493444123456',
+            '--texto'  => 'Hola',
+            '--enviar' => true,
+        ]);
+
+        $this->assertSame(1, $codigo);
+        $this->assertStringContainsString('NO aceptó', $salida);
+    }
+
+    /**
+     * Hay que elegir una sola cosa para mandar.
+     *
+     * @return void
+     */
+    public function test_probar_envio_pide_plantilla_o_texto(): void
+    {
+        $this->crear_config_asistente();
+        Http::fake();
+
+        list($codigo) = $this->correr('whatsapp:probar-envio', ['telefono' => '+5493444123456', '--enviar' => true]);
+
+        $this->assertSame(1, $codigo);
+        Http::assertNothingSent();
     }
 }

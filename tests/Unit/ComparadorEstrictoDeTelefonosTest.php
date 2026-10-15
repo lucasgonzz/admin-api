@@ -24,7 +24,7 @@ class ComparadorEstrictoDeTelefonosTest extends TestCase
     {
         $remitente = '5493411234567';
 
-        foreach (['+5493411234567', '5493411234567', '+54 9 341 123-4567', '3411234567', '03411234567', '+54 341 123-4567'] as $ficha) {
+        foreach (['+5493411234567', '5493411234567', '+54 9 341 123-4567', '3411234567', '03411234567', '+54 341 123-4567', '93411234567'] as $ficha) {
             $this->assertTrue(
                 WhatsappNormalizer::equals_estricto($ficha, $remitente),
                 'La ficha "' . $ficha . '" es el mismo número que ' . $remitente

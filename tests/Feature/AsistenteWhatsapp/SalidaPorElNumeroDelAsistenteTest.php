@@ -11,6 +11,7 @@ use App\Models\LeadMessage;
 use App\Models\WhatsappConfig;
 use App\Services\AsistenteInformesService;
 use App\Services\AsistenteWhatsappSettings;
+use App\Services\WhatsappSendService;
 use App\Services\WhatsappSessionWindowService;
 use Illuminate\Support\Facades\Http;
 
@@ -183,7 +184,7 @@ class SalidaPorElNumeroDelAsistenteTest extends BaseDelCanal
         $espia  = $this->espiar_sender();
         $client = $this->crear_cliente();
         $this->crear_config_asistente();
-        $fila = $this->fila_entrante($client);
+        $fila = $this->fila_entrante($client, self::PHONE_NUMBER_ID_ASISTENTE);
 
         $this->correr_la_respuesta($fila, $espia);
 
@@ -193,6 +194,25 @@ class SalidaPorElNumeroDelAsistenteTest extends BaseDelCanal
             ->where('direccion', ClientAssistantMessage::DIRECCION_SALIENTE)
             ->first();
         $this->assertSame(self::PHONE_NUMBER_ID_ASISTENTE, $saliente->phone_number_id);
+    }
+
+    /**
+     * 🔴 La respuesta sale por el MISMO número por el que entró el mensaje: un mensaje que el dueño mandó al
+     * número de leads y clientes —en vuelo el día del corte, o de un dueño al que el número del asistente
+     * no reconoce— se contesta por ahí aunque el del asistente ya esté listo. Por el número nuevo sería
+     * texto libre fuera de ventana, que Meta rechaza.
+     *
+     * @return void
+     */
+    public function test_un_mensaje_que_entro_por_el_principal_se_contesta_por_el_principal(): void
+    {
+        $espia  = $this->espiar_sender();
+        $client = $this->crear_cliente();
+        $this->crear_config_asistente();
+
+        $this->correr_la_respuesta($this->fila_entrante($client, self::PHONE_NUMBER_ID_PRINCIPAL), $espia);
+
+        $this->assertSame([self::PHONE_NUMBER_ID_PRINCIPAL], $espia->destinos);
     }
 
     /**
@@ -222,7 +242,7 @@ class SalidaPorElNumeroDelAsistenteTest extends BaseDelCanal
         $espia  = $this->espiar_sender();
         $client = $this->crear_cliente();
         $this->crear_config_asistente(['webhook_secret' => null]);
-        $fila = $this->fila_entrante($client);
+        $fila = $this->fila_entrante($client, self::PHONE_NUMBER_ID_ASISTENTE);
 
         $this->correr_la_respuesta($fila, $espia);
 
@@ -256,11 +276,12 @@ class SalidaPorElNumeroDelAsistenteTest extends BaseDelCanal
      *
      * @return ClientAssistantMessage
      */
-    private function fila_entrante($client): ClientAssistantMessage
+    private function fila_entrante($client, ?string $phone_number_id = null): ClientAssistantMessage
     {
         $fila                      = new ClientAssistantMessage();
         $fila->client_id           = $client->id;
         $fila->telefono            = (string) $client->phone;
+        $fila->phone_number_id     = $phone_number_id;
         $fila->direccion           = ClientAssistantMessage::DIRECCION_ENTRANTE;
         $fila->whatsapp_message_id = 'wamid.ENTRANTE1';
         $fila->tipo                = 'text';
@@ -360,6 +381,7 @@ class SalidaPorElNumeroDelAsistenteTest extends BaseDelCanal
     public function test_la_ventana_se_mide_por_numero(): void
     {
         $client = $this->crear_cliente();
+        $this->crear_config_asistente();
 
         /* Una instancia nueva por consulta: el servicio cachea las filas de cada canal por instancia. */
         $this->assertFalse((new WhatsappSessionWindowService())->is_open((string) $client->phone, WhatsappConfig::PROPOSITO_ASISTENTE));
@@ -372,5 +394,111 @@ class SalidaPorElNumeroDelAsistenteTest extends BaseDelCanal
             (new WhatsappSessionWindowService())->is_open((string) $client->phone),
             'Sin propósito se miran las tres tablas de siempre, no el hilo del asistente.'
         );
+    }
+
+    /**
+     * 🔴 Lo que el dueño le escribió al asistente por el número de LEADS Y CLIENTES (antes de que existiera
+     * el número nuevo) no abre la ventana del número nuevo: Meta la abre por par de números. Contarlo daría
+     * la ventana por abierta el día del corte y el informe saldría como texto libre, que Meta rechaza.
+     *
+     * @return void
+     */
+    public function test_lo_que_entro_por_el_principal_no_abre_la_ventana_del_asistente(): void
+    {
+        $client = $this->crear_cliente();
+        $this->crear_config_asistente();
+
+        foreach ([self::PHONE_NUMBER_ID_PRINCIPAL, null] as $numero) {
+            $fila                      = new ClientAssistantMessage();
+            $fila->client_id           = $client->id;
+            $fila->telefono            = (string) $client->phone;
+            $fila->phone_number_id     = $numero;
+            $fila->direccion           = ClientAssistantMessage::DIRECCION_ENTRANTE;
+            $fila->whatsapp_message_id = 'wamid.VIEJO.' . ($numero === null ? 'null' : 'principal');
+            $fila->tipo                = 'text';
+            $fila->texto               = 'Hola';
+            $fila->estado              = ClientAssistantMessage::ESTADO_RESPONDIDO;
+            $fila->save();
+        }
+
+        $this->assertFalse(
+            (new WhatsappSessionWindowService())->is_open((string) $client->phone, WhatsappConfig::PROPOSITO_ASISTENTE),
+            'Ni el que entró por el principal ni el que no sabe por dónde entró abren la ventana del asistente.'
+        );
+
+        $this->abrir_ventana_del_asistente($client);
+
+        $this->assertTrue((new WhatsappSessionWindowService())->is_open((string) $client->phone, WhatsappConfig::PROPOSITO_ASISTENTE));
+    }
+
+    /**
+     * Sin fila del asistente no hay ventana del asistente que medir, tenga lo que tenga el hilo.
+     *
+     * @return void
+     */
+    public function test_sin_fila_del_asistente_la_ventana_del_asistente_esta_cerrada(): void
+    {
+        $client = $this->crear_cliente();
+        $this->abrir_ventana_del_asistente($client);
+
+        $this->assertFalse((new WhatsappSessionWindowService())->is_open((string) $client->phone, WhatsappConfig::PROPOSITO_ASISTENTE));
+    }
+
+    /**
+     * 🔴 El modo de prueba de un número simula LOS ENVÍOS DE ESE NÚMERO y no los del otro. Antes, el corte
+     * simulado de `send_text()` miraba siempre «la config activa» (la principal): con el asistente en
+     * prueba, el envío no se simulaba y fallaba sin motivo.
+     *
+     * @return void
+     */
+    public function test_el_modo_de_prueba_es_de_cada_numero(): void
+    {
+        $this->crear_config_asistente(['test_mode' => true]);
+
+        Http::fake();
+
+        $id = (new WhatsappSendService())
+            ->paraProposito(WhatsappConfig::PROPOSITO_ASISTENTE)
+            ->send_text('+5493411234567', 'Hola');
+
+        $this->assertNotNull($id, 'En modo de prueba el envío del asistente se simula y devuelve un id.');
+        $this->assertStringStartsWith('test-', (string) $id);
+        Http::assertNothingSent();
+
+        // Y el principal, que NO está en prueba, sale de verdad por SU número.
+        $this->fakear_http([
+            '*/messages' => Http::response(['messages' => [['id' => 'wamid.REAL']]], 200),
+        ]);
+
+        $real = (new WhatsappSendService())->send_text('+5493411234567', 'Hola');
+
+        $this->assertSame('wamid.REAL', $real);
+        Http::assertSent(function ($request) {
+            return strpos($request->url(), self::PHONE_NUMBER_ID_PRINCIPAL . '/messages') !== false;
+        });
+    }
+
+    /**
+     * Al revés: el principal en prueba no simula lo que sale por el asistente.
+     *
+     * @return void
+     */
+    public function test_el_principal_en_prueba_no_simula_los_envios_del_asistente(): void
+    {
+        \App\Models\WhatsappConfig::where('phone_number_id', self::PHONE_NUMBER_ID_PRINCIPAL)->update(['test_mode' => true]);
+        $this->crear_config_asistente();
+
+        $this->fakear_http([
+            '*/messages' => Http::response(['messages' => [['id' => 'wamid.DEL.ASISTENTE']]], 200),
+        ]);
+
+        $id = (new WhatsappSendService())
+            ->paraProposito(WhatsappConfig::PROPOSITO_ASISTENTE)
+            ->send_text('+5493411234567', 'Hola');
+
+        $this->assertSame('wamid.DEL.ASISTENTE', $id);
+        Http::assertSent(function ($request) {
+            return strpos($request->url(), self::PHONE_NUMBER_ID_ASISTENTE . '/messages') !== false;
+        });
     }
 }
