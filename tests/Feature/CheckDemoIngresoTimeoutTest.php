@@ -3,8 +3,12 @@
 namespace Tests\Feature;
 
 use App\Models\AdminSetting;
+use App\Models\Demo;
 use App\Models\Lead;
+use App\Models\LeadMessage;
+use App\Services\DemoHitosService;
 use App\Services\LeadDemoSettings;
+use App\Services\WhatsappSendService;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\DB;
@@ -134,9 +138,13 @@ class CheckDemoIngresoTimeoutTest extends TestCase
         /* Cambio de comportamiento (misión demo-agendado-directo, 10/9/2026): la ventana extendida
          * sigue excluida del timeout corto, pero desde esa misión toda ventana extendida de la
          * dinámica nueva es una demo DIRECTA, y a los 60 minutos del inicio sin ingreso (setting
-         * demo_directa_no_show_minutos) pierde el turno para liberar la instancia. Antes de esa
-         * misión este test afirmaba que a las 3 horas seguía agendada; hoy eso sería una instancia
-         * bloqueada media tarde por un lead que no entró. */
+         * demo_directa_no_show_minutos) pasa a demo_pendiente_de_ingreso. Antes de esa misión este
+         * test afirmaba que a las 3 horas seguía agendada.
+         *
+         * 13/10/2026 (misión demo-dos-horas-y-experiencia): lo que ese vencimiento ya NO hace es
+         * soltar el turno — acá se afirma que el turno sobrevive, que es lo contrario de lo que
+         * decía esta misma línea hasta hoy ("el no-show libera la instancia"). El caso completo, con
+         * la instancia y el mensaje, está en test_el_no_show_conserva_el_turno_y_manda_el_check(). */
         \App\Models\AdminSetting::set(\App\Services\LeadDemoSettings::KEY_DEMO_DIRECTA_NO_SHOW_MINUTOS, '60');
         Carbon::setTestNow($inicio->copy()->addHours(3));
 
@@ -144,7 +152,8 @@ class CheckDemoIngresoTimeoutTest extends TestCase
 
         $lead->refresh();
         $this->assertSame('demo_pendiente_de_ingreso', $lead->status);
-        $this->assertNull($lead->demo_id, 'El no-show libera la instancia.');
+        $this->assertNotNull($lead->demo_date, 'El no-show ya no suelta el turno: la instancia sigue reservada.');
+        $this->assertSame('10:00', substr((string) $lead->demo_start_time, 0, 5));
     }
 
     /**
@@ -248,5 +257,246 @@ class CheckDemoIngresoTimeoutTest extends TestCase
         $lead->refresh();
         $this->assertSame('demo_en_curso', $lead->status, 'El comando no puede pisar de vuelta a demo_pendiente_de_ingreso un lead que ya entró de verdad.');
         $this->assertFalse((bool) $lead->demo_no_ingreso_notificado, 'No corresponde marcar el anti-duplicado de "no ingresó" sobre un lead que sí ingresó.');
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* El no-show de la demo DIRECTA, misión demo-dos-horas-y-experiencia    */
+    /* (13/10/2026)                                                          */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * 🔴 El cambio de conducta: a los 60 minutos sin ingreso el lead pasa a
+     * `demo_pendiente_de_ingreso` pero CONSERVA el turno, y se le manda el "¿pudiste entrar?" con
+     * la plantilla aprobada `cc_check_ingreso_demo`.
+     *
+     * Hasta hoy este vencimiento nuleaba `demo_id`/`demo_date`/`demo_start_time`/`demo_end_time`,
+     * apagaba `demo_flexible` y volvía `demo_setup_status` a `pendiente`, y no mandaba ningún
+     * mensaje. Con la reserva en dos horas eso le apagaba el botón al lead justo cuando se sentaba,
+     * después de haberle prometido las dos horas enteras.
+     *
+     * Se mide todo junto porque es un solo comportamiento: el turno sobrevive, el mensaje sale, y
+     * el lead puede entrar después (el evento real `demo.ingreso` lo lleva a `demo_en_curso` desde
+     * `demo_pendiente_de_ingreso`, sin tocar ningún gate). Que la instancia vuelva al pool recién
+     * al terminar la ventana lo cubre `DemoDirectaTest::test_el_no_show_conserva_el_turno_y_la_instancia_sigue_reservada()`,
+     * que es donde vive la aritmética de ocupación.
+     *
+     * @return void
+     */
+    public function test_el_no_show_conserva_el_turno_y_manda_el_check(): void
+    {
+        $espia  = $this->espiar_whatsapp();
+        $inicio = Carbon::parse('2026-10-13 10:00:00', 'America/Argentina/Buenos_Aires');
+        $lead   = $this->crear_lead_de_demo_directa($inicio);
+
+        Carbon::setTestNow($inicio->copy()->addMinutes(60));
+
+        $this->artisan('leads:check-demo-ingreso-timeout')->assertExitCode(0);
+
+        $lead->refresh();
+        $this->assertSame('demo_pendiente_de_ingreso', $lead->status);
+        $this->assertTrue((bool) $lead->demo_no_ingreso_notificado);
+
+        /* El turno, intacto. */
+        $this->assertNotNull($lead->demo_id, 'El turno se conserva: la instancia sigue reservada para él.');
+        $this->assertNotNull($lead->demo_date);
+        $this->assertSame('10:00', substr((string) $lead->demo_start_time, 0, 5));
+        $this->assertSame('12:00', substr((string) $lead->demo_end_time, 0, 5));
+        $this->assertTrue((bool) $lead->demo_flexible);
+        $this->assertSame('exitoso', (string) $lead->demo_setup_status);
+
+        /* El "¿pudiste entrar?", con la plantilla aprobada y el nombre de pila. */
+        $this->assertCount(1, $espia->plantillas);
+        $this->assertSame('cc_check_ingreso_demo', $espia->plantillas[0]['template_name']);
+        $this->assertSame(['Guillermo'], $espia->plantillas[0]['variables']);
+        $this->assertTrue((bool) $lead->demo_check_ingreso_enviado);
+        $this->assertNotNull($lead->demo_check_ingreso_enviado_at);
+        $this->assertDatabaseHas('lead_messages', [
+            'lead_id' => $lead->id,
+            'sender'  => 'sistema',
+            'content' => '¡Hola Guillermo! ¿Cómo vas? ¿Pudiste entrar a la demo?',
+        ]);
+
+        /* Y en el minuto 90 entra igual: el evento real lo avanza desde demo_pendiente_de_ingreso. */
+        Carbon::setTestNow($inicio->copy()->addMinutes(90));
+        $this->postJson('/api/demo-eventos', [
+            'eventos' => [[
+                'uuid'        => (string) Str::uuid(),
+                'nombre'      => DemoHitosService::EVENTO_INGRESO,
+                'clip_id'     => null,
+                'ocurrido_at' => Carbon::now()->toIso8601String(),
+                'datos'       => [],
+            ]],
+        ], ['X-Demo-Eventos-Key' => $lead->demo_eventos_token])->assertStatus(200);
+
+        $lead->refresh();
+        $this->assertSame('demo_en_curso', $lead->status, 'El lead que no entró en la primera hora tiene que poder entrar después.');
+        $this->assertTrue((bool) $lead->demo_ingreso_confirmado);
+    }
+
+    /**
+     * Si la demo no se armó (`demo_setup_status !== 'exitoso'`) NO se le pregunta si pudo entrar —
+     * no pudo, el botón nunca se habilitó— pero el vencimiento corre igual: cambia el estado,
+     * conserva el turno y avisa a admins. Misma guarda que `CheckDemoIngresoPostVideo`.
+     *
+     * @return void
+     */
+    public function test_sin_setup_exitoso_no_se_le_pregunta_pero_el_vencimiento_corre(): void
+    {
+        $espia  = $this->espiar_whatsapp();
+        $inicio = Carbon::parse('2026-10-13 10:00:00', 'America/Argentina/Buenos_Aires');
+        $lead   = $this->crear_lead_de_demo_directa($inicio);
+        $lead->demo_setup_status = 'fallido';
+        $lead->save();
+
+        Carbon::setTestNow($inicio->copy()->addMinutes(60));
+
+        $this->artisan('leads:check-demo-ingreso-timeout')->assertExitCode(0);
+
+        $lead->refresh();
+        $this->assertSame('demo_pendiente_de_ingreso', $lead->status, 'El vencimiento corre igual.');
+        $this->assertNotNull($lead->demo_id, 'Y el turno se conserva igual.');
+        $this->assertCount(0, $espia->plantillas, 'Sin demo armada no se le pregunta si pudo entrar.');
+        $this->assertFalse((bool) $lead->demo_check_ingreso_enviado);
+    }
+
+    /**
+     * Si `CheckDemoIngresoPostVideo` ya le preguntó (flag `demo_check_ingreso_enviado` en true), el
+     * no-show no insiste: los dos comandos comparten el flag justamente para no mandar el mismo
+     * mensaje dos veces.
+     *
+     * @return void
+     */
+    public function test_si_ya_se_le_pregunto_el_no_show_no_insiste(): void
+    {
+        $espia  = $this->espiar_whatsapp();
+        $inicio = Carbon::parse('2026-10-13 10:00:00', 'America/Argentina/Buenos_Aires');
+        $lead   = $this->crear_lead_de_demo_directa($inicio);
+        $lead->demo_check_ingreso_enviado = true;
+        $lead->save();
+
+        Carbon::setTestNow($inicio->copy()->addMinutes(60));
+
+        $this->artisan('leads:check-demo-ingreso-timeout')->assertExitCode(0);
+
+        $lead->refresh();
+        $this->assertSame('demo_pendiente_de_ingreso', $lead->status);
+        $this->assertCount(0, $espia->plantillas, 'El post-video ya preguntó: no se duplica.');
+    }
+
+    /**
+     * Con conversación en los últimos minutos (la ventana `check_ingreso_silencio_minutos`), el
+     * mensaje automático no sale: hay alguien hablando con el lead. El vencimiento sí corre.
+     *
+     * @return void
+     */
+    public function test_con_conversacion_reciente_no_sale_el_check(): void
+    {
+        $espia  = $this->espiar_whatsapp();
+        $inicio = Carbon::parse('2026-10-13 10:00:00', 'America/Argentina/Buenos_Aires');
+        $lead   = $this->crear_lead_de_demo_directa($inicio);
+
+        Carbon::setTestNow($inicio->copy()->addMinutes(60));
+
+        $mensaje              = new LeadMessage();
+        $mensaje->lead_id     = $lead->id;
+        $mensaje->sender      = 'lead';
+        $mensaje->status      = 'enviado';
+        $mensaje->is_followup = false;
+        $mensaje->content     = 'Perdón, estaba atendiendo.';
+        $mensaje->save();
+        LeadMessage::where('id', $mensaje->id)->update(['created_at' => Carbon::now()->subMinutes(3)]);
+
+        $this->artisan('leads:check-demo-ingreso-timeout')->assertExitCode(0);
+
+        $lead->refresh();
+        $this->assertSame('demo_pendiente_de_ingreso', $lead->status, 'El vencimiento corre igual.');
+        $this->assertCount(0, $espia->plantillas, 'Con conversación viva no se manda la plantilla.');
+        $this->assertFalse((bool) $lead->demo_check_ingreso_enviado);
+    }
+
+    /**
+     * Lead de demo DIRECTA listo para ser candidato del no-show: dinámica nueva, ventana extendida
+     * (`demo_flexible`), instancia asignada, setup exitoso y su token de eventos para poder entrar
+     * después.
+     *
+     * El entrante que deja el hilo se fecha ANTES del turno a propósito: con `created_at` = ahora, la
+     * ventana de silencio del check de ingreso (10 minutos por default) leería "estamos hablando con
+     * él" y el mensaje no saldría. Eso se prueba aparte, en
+     * test_con_conversacion_reciente_no_sale_el_check().
+     *
+     * @param Carbon $inicio Inicio del turno.
+     *
+     * @return Lead
+     */
+    private function crear_lead_de_demo_directa(Carbon $inicio): Lead
+    {
+        $demo                    = new Demo();
+        $demo->uuid              = (string) Str::uuid();
+        $demo->erp_spa_url       = 'https://demo-noshow.test';
+        $demo->erp_api_url       = 'https://demo-noshow-api.test';
+        $demo->ecommerce_spa_url = 'https://tienda-noshow.test';
+        $demo->ecommerce_api_url = 'https://tienda-noshow-api.test';
+        $demo->save();
+
+        $lead                                = new Lead();
+        $lead->uuid                          = (string) Str::uuid();
+        $lead->contact_name                  = 'Guillermo González';
+        $lead->phone                         = '5493511234567';
+        $lead->status                        = 'demo_agendada';
+        $lead->save();
+
+        /* Después del save: el hook `creating` estampa la dinámica por defecto. */
+        $lead->demo_experiencia              = Lead::EXPERIENCIA_NUEVA;
+        $lead->demo_id                       = $demo->id;
+        $lead->demo_date                     = $inicio->copy()->format('Y-m-d');
+        $lead->demo_start_time               = $inicio->format('H:i');
+        $lead->demo_end_time                 = $inicio->copy()->addHours(2)->format('H:i');
+        $lead->demo_flexible                 = true;
+        $lead->demo_setup_status             = 'exitoso';
+        $lead->demo_eventos_token            = Str::random(64);
+        $lead->automatizaciones_demo_activas = true;
+        $lead->auto_check_ingreso_demo       = true;
+        $lead->tiene_sugerencia_pendiente    = false;
+        $lead->demo_ingreso_confirmado       = false;
+        $lead->demo_no_ingreso_notificado    = false;
+        $lead->demo_check_ingreso_enviado    = false;
+        $lead->save();
+
+        $entrante              = new LeadMessage();
+        $entrante->lead_id     = $lead->id;
+        $entrante->sender      = 'lead';
+        $entrante->status      = 'enviado';
+        $entrante->is_followup = false;
+        $entrante->content     = 'Dale, hagámosla ahora.';
+        $entrante->save();
+        LeadMessage::where('id', $entrante->id)->update(['created_at' => $inicio->copy()->subMinutes(20)]);
+
+        return $lead->refresh();
+    }
+
+    /**
+     * Doble de `WhatsappSendService` que anota las plantillas en vez de mandarlas, igual que el que
+     * usa `CheckDemoIngresoPostVideoTest`. Se registra en el contenedor para que el comando lo
+     * reciba por su constructor.
+     *
+     * @return WhatsappSendService
+     */
+    private function espiar_whatsapp(): WhatsappSendService
+    {
+        $espia = new class extends WhatsappSendService {
+            /** @var array<int, array<string, mixed>> */
+            public $plantillas = [];
+
+            public function send_template(string $to, string $template_name, array $variables = [], string $language_code = 'es_AR', ?string $context = null): ?string
+            {
+                $this->plantillas[] = ['to' => $to, 'template_name' => $template_name, 'variables' => $variables];
+
+                return 'wamid.plantilla.' . count($this->plantillas);
+            }
+        };
+
+        $this->app->instance(WhatsappSendService::class, $espia);
+
+        return $espia;
     }
 }
