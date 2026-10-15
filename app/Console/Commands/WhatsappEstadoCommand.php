@@ -76,6 +76,7 @@ class WhatsappEstadoCommand extends Command
         $this->bloque_de_numero('Leads y clientes (principal)', $principal, $sin_red, false);
         $this->bloque_de_numero('Agente personal de los dueños (asistente)', $asistente, $sin_red, true);
 
+        $this->bloque_de_webhooks_de_proyecto($principal !== null ? $principal : $asistente, $sin_red);
         $this->bloque_de_plantillas($principal, $asistente, $sin_red);
         $this->bloque_de_salidas($asistente);
 
@@ -194,6 +195,70 @@ class WhatsappEstadoCommand extends Command
                 . ' · ' . (! empty($webhook['active']) ? 'activo' : 'inactivo')
                 . ' · ' . (isset($webhook['events']) && is_array($webhook['events']) ? count($webhook['events']) . ' eventos' : 'sin eventos'));
         }
+    }
+
+    /**
+     * Webhooks de PROYECTO de Kapso: los que no cuelgan de un número.
+     *
+     * 🔴 Los webhooks por número (los que miran los dos bloques de arriba) no son los únicos: si el del
+     * ***4199 estuviera dado de alta a nivel proyecto, recibiría también los mensajes del número nuevo,
+     * firmados con el secreto del principal, y el admin los trataría como de leads. Es lo único que los
+     * listados por número no ven, y por eso se mira aparte. Solo host y eventos, nunca la URL entera.
+     *
+     * @param WhatsappConfig|null $config Fila con la clave de Kapso del proyecto.
+     * @param bool                $sin_red
+     *
+     * @return void
+     */
+    private function bloque_de_webhooks_de_proyecto(?WhatsappConfig $config, bool $sin_red): void
+    {
+        $this->newLine();
+        $this->info('== Webhooks de proyecto en Kapso (reciben los eventos de TODOS los números) ==');
+
+        if ($sin_red) {
+            $this->line('  (no consultado: --sin-red)');
+
+            return;
+        }
+
+        $api_key = $config !== null ? trim((string) $config->kapso_api_key) : '';
+        if ($api_key === '') {
+            $this->line('  (sin clave de Kapso cargada no se puede consultar)');
+
+            return;
+        }
+
+        $respuesta = KapsoHttpClient::make($api_key, self::TIMEOUT)->get(
+            'https://api.kapso.ai/platform/v1/whatsapp/webhooks',
+            ['per_page' => 100]
+        );
+
+        if (! $respuesta->successful()) {
+            $this->warn('  no se pudieron leer (HTTP ' . $respuesta->status() . ').');
+
+            return;
+        }
+
+        $de_proyecto = [];
+        foreach ((array) $respuesta->json('data') as $webhook) {
+            if (is_array($webhook) && (! isset($webhook['phone_number_id']) || $webhook['phone_number_id'] === null || $webhook['phone_number_id'] === '')) {
+                $de_proyecto[] = $webhook;
+            }
+        }
+
+        if ($de_proyecto === []) {
+            $this->line('  ninguno: cada número recibe solo lo suyo.');
+
+            return;
+        }
+
+        foreach ($de_proyecto as $webhook) {
+            $host = parse_url((string) (isset($webhook['url']) ? $webhook['url'] : ''), PHP_URL_HOST);
+            $this->warn('  webhook de PROYECTO: ' . (is_string($host) && $host !== '' ? $host : '(url ilegible)')
+                . ' · ' . (! empty($webhook['active']) ? 'activo' : 'inactivo')
+                . ' · ' . (isset($webhook['kind']) ? $webhook['kind'] : 'kapso'));
+        }
+        $this->line('  Si alguno apunta a este admin, el número nuevo YA está entregando acá antes de darlo de alta.');
     }
 
     /**

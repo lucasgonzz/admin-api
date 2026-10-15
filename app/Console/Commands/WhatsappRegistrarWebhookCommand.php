@@ -38,8 +38,13 @@ use Illuminate\Console\Command;
  * 🔴 **Tampoco se crea un webhook encima de otro.** Si el número ya tiene webhooks, el comando corta y
  * dice cómo seguir: duplicar uno que apunta a este mismo admin haría que cada mensaje llegue dos veces,
  * y dejar vivo uno a otro host (un `ngrok` de desarrollo, por ejemplo) mandaría los mensajes de los
- * dueños también a la máquina de quien lo registró. `--listar` los muestra y `--reemplazar` los borra
- * antes de dar de alta el nuestro.
+ * dueños también a la máquina de quien lo registró. `--listar` los muestra y `--reemplazar` da de alta
+ * el nuestro y DESPUÉS borra los que apuntan a otro host y el viejo de este admin (el que recibe los
+ * mensajes). Nunca borra uno de eventos crudos de Meta (`kind: meta`) ni uno de este admin con otra
+ * ruta: el de atribución de anuncios vive ahí. Y `--reemplazar` solo existe para el número del
+ * asistente: el webhook del número de leads y clientes no se toca desde este comando.
+ *
+ * Primero se crea y después se borra a propósito: si el alta falla, el número sigue como estaba.
  *
  * Ejemplos:
  *
@@ -64,7 +69,7 @@ class WhatsappRegistrarWebhookCommand extends Command
                             {--secreto= : Secreto a usar; por defecto se genera uno nuevo}
                             {--solo-health : Solo consulta el health del número y no registra nada}
                             {--listar : Solo muestra los webhooks que ya tiene el número en Kapso (host y eventos, sin URLs completas ni secretos)}
-                            {--reemplazar : Borra los webhooks que ya tenga el número antes de dar de alta el nuestro}
+                            {--reemplazar : Da de alta el nuestro y después borra los webhooks viejos que apuntan a otro host (solo para el asistente)}
                             {--dry-run : Imprime qué se iba a mandar sin salir a la red}';
 
     /**
@@ -117,6 +122,12 @@ class WhatsappRegistrarWebhookCommand extends Command
         $proposito = trim((string) $this->option('proposito'));
         if ($proposito === '') {
             $proposito = WhatsappConfig::PROPOSITO_ASISTENTE;
+        }
+
+        if ((bool) $this->option('reemplazar') && $proposito !== WhatsappConfig::PROPOSITO_ASISTENTE) {
+            $this->error('--reemplazar solo se usa con --proposito=asistente: el webhook del número de leads y clientes no se toca desde acá.');
+
+            return 1;
         }
 
         $config = WhatsappConfig::porProposito($proposito);
@@ -194,10 +205,10 @@ class WhatsappRegistrarWebhookCommand extends Command
             $this->newLine();
             $this->warn('--dry-run: no se llamó a Kapso y no se guardó nada.');
             $this->line('  GET  ' . $this->endpoint_de_webhooks($phone_number_id) . '   (para ver si ya hay webhooks)');
-            if ((bool) $this->option('reemplazar')) {
-                $this->line('  DELETE ' . $this->endpoint_de_webhooks($phone_number_id) . '/{id}   (uno por cada webhook existente)');
-            }
             $this->line('  POST ' . $this->endpoint_de_webhooks($phone_number_id));
+            if ((bool) $this->option('reemplazar')) {
+                $this->line('  DELETE ' . $this->endpoint_de_webhooks($phone_number_id) . '/{id}   (después del POST, solo los que apuntan a otro host y el viejo de este admin)');
+            }
             if ($generado) {
                 $this->line('  El secreto se habría generado en esta corrida (nunca se muestra).');
             }
@@ -211,6 +222,8 @@ class WhatsappRegistrarWebhookCommand extends Command
             return 1;
         }
 
+        $a_borrar = [];
+
         if ($existentes !== []) {
             $this->newLine();
             $this->mostrar_webhooks($existentes);
@@ -218,25 +231,16 @@ class WhatsappRegistrarWebhookCommand extends Command
             if (! (bool) $this->option('reemplazar')) {
                 $this->newLine();
                 $this->error('Este número ya tiene webhooks en Kapso y no se registró ninguno nuevo.');
-                $this->line('Si hay que reemplazarlos, volvé a correr con --reemplazar: los borra y da de alta el nuestro.');
+                $this->line('Si hay que reemplazarlos, volvé a correr con --reemplazar: da de alta el nuestro y después borra los viejos que apuntan a otro host.');
 
                 return 1;
             }
 
-            foreach ($existentes as $existente) {
-                $borrado = KapsoHttpClient::make($api_key, self::TIMEOUT)->delete(
-                    $this->endpoint_de_webhooks($phone_number_id) . '/' . rawurlencode((string) $existente['id'])
-                );
+            $a_borrar = $this->los_que_se_reemplazan($existentes, $url);
 
-                if (! $borrado->successful()) {
-                    $this->error('Kapso no dejó borrar el webhook ' . $this->id_corto($existente) . ' (HTTP ' . $borrado->status() . ').');
-                    $this->warn('No se registró nada nuevo y no se tocó la fila.');
-
-                    return 1;
-                }
-
-                $this->info('Borrado el webhook ' . $this->id_corto($existente) . ' (' . $this->host_de($existente) . ').');
-            }
+            $this->newLine();
+            $this->line(count($a_borrar) . ' webhook(s) se borran DESPUÉS de dar de alta el nuestro; '
+                . (count($existentes) - count($a_borrar)) . ' se conservan.');
         }
 
         $respuesta = KapsoHttpClient::make($api_key, self::TIMEOUT)->post(
@@ -256,13 +260,30 @@ class WhatsappRegistrarWebhookCommand extends Command
              * que Kapso no conoce, y eso no es "a medio configurar": es el webhook rechazando con
              * 401 todos los mensajes de ese número, que es más difícil de diagnosticar que no tener
              * secreto. */
-            $this->warn('No se guardó ningún secreto: la fila quedó como estaba.');
+            $this->warn('No se guardó ningún secreto y no se borró ningún webhook: todo quedó como estaba.');
 
             return 1;
         }
 
         $config->webhook_secret = $secreto;
         $config->save();
+
+        $quedaron_sin_borrar = 0;
+        foreach ($a_borrar as $viejo) {
+            $borrado = KapsoHttpClient::make($api_key, self::TIMEOUT)->delete(
+                $this->endpoint_de_webhooks($phone_number_id) . '/' . rawurlencode((string) $viejo['id'])
+            );
+
+            if ($borrado->successful()) {
+                $this->info('Borrado el webhook ' . $this->id_corto($viejo) . ' (' . $this->host_de($viejo) . ').');
+
+                continue;
+            }
+
+            $quedaron_sin_borrar++;
+            $this->warn('Kapso no dejó borrar el webhook ' . $this->id_corto($viejo) . ' (HTTP ' . $borrado->status() . '): '
+                . 'queda VIVO. Borralo a mano en app.kapso.ai.');
+        }
 
         $this->newLine();
         $this->info('Webhook registrado en Kapso y secreto guardado en la configuración "' . $proposito . '".');
@@ -279,7 +300,48 @@ class WhatsappRegistrarWebhookCommand extends Command
                 . 'pero conviene mirar el estado del número en app.kapso.ai antes de darlo por listo.');
         }
 
-        return 0;
+        return $quedaron_sin_borrar === 0 ? 0 : 1;
+    }
+
+    /**
+     * Cuáles de los webhooks que ya tiene el número se reemplazan.
+     *
+     * Se reemplaza un webhook de mensajes (`kind: kapso`) que apunta a OTRO host (una máquina de
+     * desarrollo, por ejemplo) y el viejo de ESTE admin que recibe los mensajes (`…/api/webhook/whatsapp`),
+     * que queda reemplazado por el que se acaba de crear con secreto nuevo.
+     *
+     * 🔴 Se conservan los de eventos crudos de Meta (`kind: meta`) —el que lleva la atribución de los
+     * anuncios de clic a WhatsApp— y cualquier webhook de este admin con una ruta que no es la de los
+     * mensajes: borrar uno de esos se pierde en silencio, sin que ningún mensaje deje de llegar.
+     *
+     * @param array<int, array<string, mixed>> $existentes Webhooks que Kapso dice que tiene el número.
+     * @param string                           $url        URL del webhook que se está dando de alta.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function los_que_se_reemplazan(array $existentes, string $url): array
+    {
+        $nuestro_host = (string) parse_url($url, PHP_URL_HOST);
+        $a_borrar     = [];
+
+        foreach ($existentes as $webhook) {
+            if ((isset($webhook['kind']) ? (string) $webhook['kind'] : 'kapso') === 'meta') {
+                continue;
+            }
+
+            $host = $this->host_de($webhook);
+            $ruta = (string) parse_url((string) (isset($webhook['url']) ? $webhook['url'] : ''), PHP_URL_PATH);
+
+            $es_ajeno = $host !== $nuestro_host;
+            $es_el_viejo_de_mensajes = $host === $nuestro_host
+                && preg_match('#^/(?:public/)?api/webhook/whatsapp/?$#', $ruta) === 1;
+
+            if ($es_ajeno || $es_el_viejo_de_mensajes) {
+                $a_borrar[] = $webhook;
+            }
+        }
+
+        return $a_borrar;
     }
 
     /**
@@ -372,7 +434,9 @@ class WhatsappRegistrarWebhookCommand extends Command
             $activo  = ! empty($webhook['active']) ? 'activo' : 'inactivo';
             $es_de_este_admin = $nuestro_host !== '' && $host === $nuestro_host ? 'es de este admin' : 'APUNTA A OTRO HOST';
 
-            $this->line('  - ' . $this->id_corto($webhook) . ' · ' . $host . $this->ruta_si_es_la_de_este_admin($webhook) . ' · ' . $activo . ' · ' . $es_de_este_admin);
+            $kind = isset($webhook['kind']) ? (string) $webhook['kind'] : 'kapso';
+
+            $this->line('  - ' . $this->id_corto($webhook) . ' · ' . $host . $this->ruta_si_es_la_de_este_admin($webhook) . ' · ' . $kind . ' · ' . $activo . ' · ' . $es_de_este_admin);
             $this->line('      eventos: ' . $eventos);
         }
     }
