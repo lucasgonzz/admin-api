@@ -190,20 +190,17 @@ class AsistenteInformesService
             return $this->resultado($client, 'sin_informes', 0, 'No hay informes del día sin avisar.');
         }
 
-        /* 🔴 **Esta ventana se mide todavía sobre las TRES TABLAS del número institucional, y
-         * eso es deuda conocida de la misión whatsapp-dos-numeros (13/10/2026).** La ventana de 24
-         * hs de Meta es por par de números: lo que el dueño le escribió al número de leads no
-         * habilita texto libre por el número del asistente, que es por donde sale este informe desde
-         * esta misión. `WhatsappSessionWindowService::is_open()` ya acepta el propósito
-         * (`is_open($telefono, WhatsappConfig::PROPOSITO_ASISTENTE)`) y devuelve lo correcto; lo que
-         * falta es el lado de las pruebas: `InformesDeLaMananaTest::abrir_la_ventana()` abre la
-         * ventana sembrando un `LeadMessage`, así que el cambio de una línea de acá pone 11 pruebas
-         * en rojo hasta que ese helper siembre un `ClientAssistantMessage` entrante.
+        /* 🔴 **La ventana de 24 hs se mide sobre el número POR EL QUE SALE el informe** (misión
+         * asistente-segundo-numero, 15/10/2026). La ventana de Meta es por par de números: lo que el
+         * dueño le escribió al número de leads y clientes NO habilita texto libre por el número del
+         * asistente, que es por donde sale este informe cuando ese número está listo.
          *
-         * Mientras el número del asistente no exista, las dos formas de medir dan lo mismo: los
-         * mensajes de los dueños siguen entrando por el institucional. El día que el +1 esté de alta
-         * hay que pasar el propósito acá, y ese día es cuando empieza a importar. */
-        $abierta = $this->ventana->is_open($telefono);
+         * `propositoEfectivoDelAsistente()` devuelve `asistente` solo cuando el número está listo
+         * (fila + clave + secreto del webhook) y `principal` mientras no, y `paraProposito()` de más
+         * abajo hace la MISMA elección: los dos tienen que coincidir o se mide un número y se manda por
+         * el otro. Por eso mientras el segundo número no exista la ventana se sigue midiendo como
+         * siempre y ninguna prueba existente cambia. */
+        $abierta = $this->ventana->is_open($telefono, WhatsappConfig::propositoEfectivoDelAsistente());
 
         if ($abierta) {
             $enviado = $this->enviar_como_texto($client, $telefono, $informes);

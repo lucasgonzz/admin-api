@@ -10,6 +10,7 @@ use App\Models\ClientVersionUpgrade;
 use App\Models\Implementation;
 use App\Models\Version;
 use App\Models\VersionNotification;
+use App\Models\WhatsappConfig;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 
@@ -561,7 +562,26 @@ class AvisoDeActualizacionService
         }
 
         try {
-            $estado_de_la_ventana = $this->ventana->window_state($telefono);
+            /*
+             * 🔴 EL AVISO SALE POR EL NÚMERO DEL ASISTENTE, y la ventana de 24 hs se mide sobre ESE
+             * número (decisión de Lucas, 15/10/2026, misión asistente-segundo-numero).
+             *
+             * Antes salía por el número de leads y clientes, y la ventana se medía sobre lo que el dueño
+             * le había escrito a ese número. La ventana de Meta es por PAR de números: un dueño que le
+             * escribió ayer al número de leads NO habilita texto libre por el del asistente, así que
+             * medir con uno y mandar por el otro manda un texto libre que Meta rechaza.
+             *
+             * El propósito se resuelve ACÁ y no se asume `asistente`: `propositoEfectivoDelAsistente()`
+             * devuelve `principal` hasta que el número del asistente esté listo (fila + clave + secreto
+             * del webhook), y `paraProposito()` hace la misma elección para el envío. Los dos tienen
+             * que decidir igual o se vuelve al desajuste de arriba; por eso se llama una sola vez y el
+             * valor se usa para las dos cosas. Mientras el segundo número no exista, el aviso se
+             * comporta exactamente como antes de esta misión.
+             */
+            $proposito = WhatsappConfig::propositoEfectivoDelAsistente();
+            $this->whatsapp->paraProposito($proposito);
+
+            $estado_de_la_ventana = $this->ventana->window_state($telefono, $proposito);
             $abierta = ! empty($estado_de_la_ventana['open']);
 
             if ($abierta) {
