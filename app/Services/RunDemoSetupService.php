@@ -288,9 +288,19 @@ class RunDemoSetupService
              * cuando más falta hace.
              *
              * El resto de los códigos no exitosos sigue yendo a `fallido`, como siempre. */
+            /* 🔴 El cuerpo pasa por tapar_credenciales_de_demo() ANTES de guardarse: este texto va a
+             * `leads.demo_setup_last_error`, que el panel muestra. El payload que mandamos lleva las
+             * credenciales de prueba de Zipnova y de Mercado Pago, y si el otro lado alguna vez
+             * devolviera en un error algo que las contenga, no tienen que quedar guardadas. */
             return $this->mark_failed(
                 $lead,
-                'HTTP ' . $response->status() . ': ' . substr($response->body(), 0, 2000)
+                'HTTP ' . $response->status() . ': ' . substr(
+                    // Se tapa ANTES de recortar: recortar primero puede partir una credencial en el
+                    // límite y dejar un prefijo que ya no coincide con el valor entero.
+                    ImplementationSettings::tapar_credenciales_de_demo((string) $response->body()),
+                    0,
+                    2000
+                )
             );
         } catch (ConnectionException $e) {
             /* 🔴 ANTES del catch genérico, y no es orden estético: un timeout de la llamada no es
@@ -307,7 +317,8 @@ class RunDemoSetupService
             Log::warning('RunDemoSetupService@run: sin respuesta del setup (timeout o conexión caída). La corrida puede seguir viva.', [
                 'lead_id' => $lead->id,
                 'demo_id' => $demo->id,
-                'error'   => $e->getMessage(),
+                // Tapado por el mismo motivo que el cuerpo del HTTP no exitoso (ver más arriba).
+                'error'   => ImplementationSettings::tapar_credenciales_de_demo($e->getMessage()),
             ]);
 
             return $this->mark_sin_confirmar(
@@ -315,12 +326,16 @@ class RunDemoSetupService
                 'Sin respuesta del setup (timeout). La corrida puede seguir viva en la instancia.'
             );
         } catch (\Throwable $e) {
-            Log::error('RunDemoSetupService@run error: ' . $e->getMessage(), [
+            // El mensaje de una excepción puede traer fragmentos de la respuesta o del pedido: se tapa
+            // antes de loguearlo y antes de guardarlo en `demo_setup_last_error`.
+            $mensaje_tapado = ImplementationSettings::tapar_credenciales_de_demo($e->getMessage());
+
+            Log::error('RunDemoSetupService@run error: ' . $mensaje_tapado, [
                 'lead_id'   => $lead->id,
                 'demo_id'   => $demo->id,
             ]);
 
-            return $this->mark_failed($lead, 'Excepción: ' . $e->getMessage());
+            return $this->mark_failed($lead, 'Excepción: ' . $mensaje_tapado);
         }
     }
 
@@ -523,6 +538,14 @@ class RunDemoSetupService
             $payload['serper_api_key'] = $serper_api_key;
         }
 
+        /* Credenciales de PRUEBA de Zipnova y de Mercado Pago de las demos (misión
+         * credenciales-demo-zipnova-mp). Viajan solo si están cargadas, de a pares completos
+         * (token + secret; access token + public key), y se agregan SIN tocar ningún campo de
+         * arriba. Sin nada cargado el array es vacío y el payload queda idéntico al de antes.
+         * Solo el demo-setup las manda: ningún armado de user-setup llama a esto, porque son
+         * credenciales de una cuenta de demostración. Mismo criterio en payload_de_defaults(). */
+        $payload = array_merge($payload, ImplementationSettings::get_credenciales_de_demo_para_el_payload());
+
         // El merge va AL FINAL, después de todas las claves de siempre, y no al principio: las
         // claves recalculadas de la dinámica nueva (use_price_lists, use_deposits,
         // usan_cuentas_corrientes) tienen que pisar a las viejas, no al revés. Para la dinámica
@@ -651,6 +674,10 @@ class RunDemoSetupService
         if ($serper_api_key !== '') {
             $payload['serper_api_key'] = $serper_api_key;
         }
+
+        // Credenciales de prueba de Zipnova y de Mercado Pago de las demos: solo si están cargadas y
+        // completas. Mismo criterio y misma fuente que build_payload().
+        $payload = array_merge($payload, ImplementationSettings::get_credenciales_de_demo_para_el_payload());
 
         return $payload;
     }

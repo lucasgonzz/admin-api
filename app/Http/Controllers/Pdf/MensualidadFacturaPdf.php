@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Pdf;
 
 use App\Models\ComerciocityAfipConfig;
 use App\Models\MensualidadInvoice;
+use App\Services\Afip\AfipFacturacionService;
 use fpdf;
 
 require_once __DIR__.'/../CommonLaravel/fpdf/fpdf.php';
@@ -194,25 +195,55 @@ class MensualidadFacturaPdf extends fpdf
     }
 
     /**
+     * ¿El comprobante se emitió a Consumidor Final sin identificar (DocTipo 99)?
+     *
+     * Se decide por lo que quedó GUARDADO en la factura (`doc_tipo`) y no por el tilde actual del
+     * cliente: el tilde se puede destildar después de emitir, y el PDF de una factura ya autorizada
+     * tiene que seguir mostrando a quién se le facturó. El `isset()` (y no un acceso directo) es
+     * por los dobles de prueba que arman la factura como objeto plano sin `doc_tipo`: ahí es
+     * "no, con CUIT", igual que una factura vieja con la columna en null.
+     *
+     * @return bool
+     */
+    protected function es_consumidor_final()
+    {
+        return isset($this->invoice->doc_tipo)
+            && (int) $this->invoice->doc_tipo === AfipFacturacionService::DOC_TIPO_CONSUMIDOR_FINAL;
+    }
+
+    /**
      * Datos del receptor (Client): CUIT, condición IVA, razón social y domicilio.
      * Réplica de `SaleAfipTicketPdf::printClientInfo()`.
+     *
+     * Para una factura a Consumidor Final no se imprime el CUIT ni el domicilio (no hay dato que
+     * mostrar) y la condición IVA y el nombre son los de un Consumidor Final, NO los que el
+     * cliente tenga cargados: son los datos de la factura, no de la ficha.
      *
      * @return void
      */
     protected function print_client_info()
     {
+        $consumidor_final = $this->es_consumidor_final();
+
         $this->SetY(53);
         $this->SetX(6);
-        $this->SetFont('Arial', 'B', 8);
-        $this->Cell(10, 5, 'CUIT:', 0, 0, 'L');
-        $this->SetFont('Arial', '', 8);
-        $this->Cell(20, 5, (string) $this->client->afip_cuit, 0, 1, 'C');
+
+        if ($consumidor_final) {
+            // Sin renglón de CUIT: se baja a la altura donde estaba el renglón de la condición IVA
+            // para que el recuadro y el resto del comprobante queden en el mismo lugar.
+            $this->SetY(58);
+        } else {
+            $this->SetFont('Arial', 'B', 8);
+            $this->Cell(10, 5, 'CUIT:', 0, 0, 'L');
+            $this->SetFont('Arial', '', 8);
+            $this->Cell(20, 5, (string) $this->client->afip_cuit, 0, 1, 'C');
+        }
 
         $this->SetX(6);
         $this->SetFont('Arial', 'B', 8);
         $this->Cell(37, 5, 'Condición frente al IVA:', 0, 0, 'L');
         $this->SetFont('Arial', '', 8);
-        $this->Cell(50, 5, (string) $this->client->afip_condicion_iva, 0, 1, 'L');
+        $this->Cell(50, 5, $consumidor_final ? 'Consumidor Final' : (string) $this->client->afip_condicion_iva, 0, 1, 'L');
 
         // Ojo con el orden: SetY() resetea X al margen izquierdo por default,
         // por eso va primero acá (si no, pisa el SetX(80) siguiente y este
@@ -222,13 +253,16 @@ class MensualidadFacturaPdf extends fpdf
         $this->SetFont('Arial', 'B', 8);
         $this->Cell(47, 5, 'Apellido y Nombre / Razón Social:', 0, 0, 'L');
         // El valor arranca en x=127 y el recuadro cierra en x=205: 78mm útiles.
-        $this->print_valor_ajustado((string) $this->client->afip_razon_social, 78);
+        $this->print_valor_ajustado($consumidor_final ? 'Consumidor Final' : (string) $this->client->afip_razon_social, 78);
 
-        $this->SetX(80);
-        $this->SetFont('Arial', 'B', 8);
-        $this->Cell(30, 5, 'Domicilio Comercial:', 0, 0, 'L');
-        // El valor arranca en x=110 y el recuadro cierra en x=205: 95mm útiles.
-        $this->print_valor_ajustado((string) $this->client->afip_domicilio, 95);
+        // A Consumidor Final sin identificar no se le imprime domicilio.
+        if (! $consumidor_final) {
+            $this->SetX(80);
+            $this->SetFont('Arial', 'B', 8);
+            $this->Cell(30, 5, 'Domicilio Comercial:', 0, 0, 'L');
+            // El valor arranca en x=110 y el recuadro cierra en x=205: 95mm útiles.
+            $this->print_valor_ajustado((string) $this->client->afip_domicilio, 95);
+        }
 
         // Líneas del recuadro de receptor (igual que `printClientLines`).
         $this->SetLineWidth(.3);
@@ -367,6 +401,23 @@ class MensualidadFacturaPdf extends fpdf
         $img_width = 40;
         $img_start_x = 5;
 
+        /* Receptor del QR. Sale de lo que quedó guardado en la factura: `doc_tipo`/`doc_nro` (Consumidor
+         * Final = 99/0). Las facturas viejas tienen `doc_tipo = 80` y `doc_nro = CUIT`, así que
+         * salen idénticas a antes; si por algún motivo `doc_tipo` o `doc_nro` están vacíos (un
+         * registro anterior a esas columnas) se cae al CUIT y al 80 de siempre. `isset()` y no
+         * `empty()` para `doc_nro`: el '0' de Consumidor Final es "vacío" para `empty()`. */
+        if ($this->es_consumidor_final()) {
+            $tipo_doc_receptor = AfipFacturacionService::DOC_TIPO_CONSUMIDOR_FINAL;
+            $nro_doc_receptor = 0;
+        } else {
+            $tipo_doc_receptor = isset($this->invoice->doc_tipo) && (int) $this->invoice->doc_tipo > 0
+                ? (int) $this->invoice->doc_tipo
+                : AfipFacturacionService::DOC_TIPO_CUIT;
+            $nro_doc_receptor = isset($this->invoice->doc_nro) && $this->invoice->doc_nro !== ''
+                ? $this->invoice->doc_nro
+                : $this->invoice->cuit_cliente;
+        }
+
         // Datos exigidos por AFIP para el QR del comprobante (mismo formato que `AfipQrPdf`).
         $data = [
             'ver'        => 1,
@@ -378,8 +429,8 @@ class MensualidadFacturaPdf extends fpdf
             'importe'    => (float) $this->invoice->importe_total,
             'moneda'     => 'PES',
             'ctz'        => 1,
-            'tipoDocRec' => 80,
-            'nroDocRec'  => $this->invoice->cuit_cliente,
+            'tipoDocRec' => $tipo_doc_receptor,
+            'nroDocRec'  => $nro_doc_receptor,
             'codAut'     => $this->invoice->cae,
         ];
 

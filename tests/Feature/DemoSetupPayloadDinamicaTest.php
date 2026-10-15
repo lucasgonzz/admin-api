@@ -13,9 +13,12 @@ use Tests\TestCase;
 /**
  * Qué claves del payload del demo setup recibe cada dinámica (misión 48, pieza 4).
  *
- * El requisito duro: un lead de la dinámica ACTUAL no recibe ni una clave nueva. Se prueba acá y
- * no en el unit test que ya existe (`RunDemoSetupServiceRespuestasTest`) porque el bloque de la
- * dinámica nueva ahora resuelve el mapa de multimedia contra la base.
+ * El requisito duro era que un lead de la dinámica ACTUAL no recibiera ni una clave nueva. Se
+ * probaba acá y no en el unit test que ya existe (`RunDemoSetupServiceRespuestasTest`) porque el
+ * bloque de la dinámica nueva resuelve el mapa de multimedia contra la base.
+ *
+ * ACTUALIZACIÓN 14/10/2026 (misión demo-solo-experiencia-nueva): la dinámica ACTUAL se retiró, así
+ * que los dos tests de ese requisito (dinámica actual y dinámica nula o desconocida) se eliminaron.
  */
 class DemoSetupPayloadDinamicaTest extends TestCase
 {
@@ -54,32 +57,6 @@ class DemoSetupPayloadDinamicaTest extends TestCase
         $metodo->setAccessible(true);
 
         return $metodo->invoke(new RunDemoSetupService(), $lead);
-    }
-
-    /**
-     * Caso 14: el lead de la dinámica actual no recibe ninguna de las claves nuevas — ni siquiera
-     * teniendo token y plan cargados en sus columnas.
-     */
-    public function test_la_dinamica_actual_no_recibe_ninguna_clave_nueva(): void
-    {
-        $lead = $this->crear_lead(Lead::EXPERIENCIA_ACTUAL);
-
-        $this->assertSame([], $this->claves($lead));
-    }
-
-    /**
-     * Y tampoco con la columna en null o con un valor desconocido: es el fallback duro de
-     * `demo_experiencia_efectiva()`, que es lo que protege a los leads reales de producción.
-     */
-    public function test_la_dinamica_nula_o_desconocida_tampoco_recibe_nada(): void
-    {
-        $lead_nulo = $this->crear_lead(Lead::EXPERIENCIA_ACTUAL);
-        $lead_nulo->demo_experiencia = null;
-        $this->assertSame([], $this->claves($lead_nulo));
-
-        $lead_raro = $this->crear_lead(Lead::EXPERIENCIA_ACTUAL);
-        $lead_raro->demo_experiencia = 'una-dinamica-que-no-existe';
-        $this->assertSame([], $this->claves($lead_raro));
     }
 
     /**

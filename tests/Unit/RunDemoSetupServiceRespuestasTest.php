@@ -42,37 +42,6 @@ class RunDemoSetupServiceRespuestasTest extends TestCase
     }
 
     /**
-     * Un lead con la dinámica actual no recibe ni una clave nueva: su payload tiene que quedar
-     * idéntico al de siempre.
-     */
-    public function test_dinamica_actual_no_agrega_nada(): void
-    {
-        $lead = new Lead();
-        $lead->demo_experiencia = Lead::EXPERIENCIA_ACTUAL;
-
-        $this->assertSame([], $this->respuestas_para_payload($lead));
-    }
-
-    /**
-     * Y tampoco la recibe un lead con la columna en null o con un valor inventado: es el fallback
-     * duro de `demo_experiencia_efectiva()`. Este es el test que protege a los leads reales de
-     * producción mientras la dinámica nueva no esté activada.
-     */
-    public function test_dinamica_desconocida_o_nula_tampoco_agrega_nada(): void
-    {
-        $lead_nulo = new Lead();
-        $lead_nulo->demo_experiencia = null;
-        $this->assertSame([], $this->respuestas_para_payload($lead_nulo));
-
-        $lead_inventado = new Lead();
-        $lead_inventado->demo_experiencia = 'una-dinamica-que-no-existe';
-        $this->assertSame([], $this->respuestas_para_payload($lead_inventado));
-
-        // Y el caso del lead recién instanciado, sin tocar la columna.
-        $this->assertSame([], $this->respuestas_para_payload(new Lead()));
-    }
-
-    /**
      * Dinámica nueva con el formulario ya completado: viajan las nueve respuestas del lead,
      * `demo_form_completado => true` y los tres legados recalculados desde esas respuestas.
      */
@@ -149,37 +118,6 @@ class RunDemoSetupServiceRespuestasTest extends TestCase
         $this->assertFalse($resultado['use_price_lists']);
         $this->assertFalse($resultado['use_deposits']);
         $this->assertTrue($resultado['usan_cuentas_corrientes']);
-    }
-
-    /**
-     * El requisito duro del grupo, comprobado ejecutando y no leyendo el diff: para un lead con la
-     * dinámica actual, el merge que hace `build_payload()` al final deja el payload igual —mismas
-     * claves, mismos valores y mismo orden—, sin una sola clave de más.
-     *
-     * Se usa una muestra del payload real (no se puede armar el de verdad sin base: lee settings y
-     * la relación `demo`), porque lo que se está verificando es el efecto del merge, que es lo
-     * único que este prompt agregó a ese método.
-     */
-    public function test_el_merge_deja_intacto_el_payload_de_la_dinamica_actual(): void
-    {
-        $payload_de_hoy = [
-            'name'                    => 'Lucas',
-            'company_name'            => 'ComercioCity',
-            'business_type'           => 'distribuidora',
-            'iva_included'            => true,
-            'usan_cuentas_corrientes' => true,
-            'use_deposits'            => false,
-            'use_price_lists'         => true,
-            'cajas'                   => false,
-        ];
-
-        $lead = new Lead();
-        $lead->demo_experiencia = Lead::EXPERIENCIA_ACTUAL;
-
-        $mergeado = array_merge($payload_de_hoy, $this->respuestas_para_payload($lead));
-
-        $this->assertSame($payload_de_hoy, $mergeado);
-        $this->assertSame(array_keys($payload_de_hoy), array_keys($mergeado));
     }
 
     /**

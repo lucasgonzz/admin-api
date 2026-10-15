@@ -186,11 +186,15 @@ class LeadDemoSettings
     public const KEY_RECALL_BOT_MINUTOS_ANTES = 'recall_bot_minutos_antes';
 
     /**
-     * Clave: dinámica de demo con la que nacen los leads nuevos (grupo 293, prompt 01).
+     * Clave: dinámica de demo con la que nacían los leads nuevos (grupo 293, prompt 01).
      *
-     * Es la setting de "con qué dinámica se estampan los leads nuevos al crearse" — no la lee el
-     * runtime en cada mensaje, solo el hook `creating` del modelo Lead. Ver comentario de la
-     * migración `2026_07_31_140000_add_demo_experiencia_to_leads_table` para el porqué.
+     * 🔴 Desde el 14/10/2026 (misión demo-solo-experiencia-nueva) es una setting INERTE: la
+     * dinámica 'actual' está retirada y todos los leads usan la experiencia nueva, así que
+     * `get_experiencia_default()` devuelve siempre 'nueva' sin leer lo guardado y
+     * `persist_from_request()` no escribe nunca 'actual'. La clave se conserva para no romper el
+     * contrato del PUT de configuración (el SPA todavía manda `experiencia_default`) y por lo que
+     * ya hay guardado en producción. Ver comentario de la migración
+     * `2026_07_31_140000_add_demo_experiencia_to_leads_table` para el origen.
      */
     public const KEY_EXPERIENCIA_DEFAULT = 'demo_experiencia_default';
 
@@ -217,6 +221,19 @@ class LeadDemoSettings
      * agente rompe ese reconocimiento: la regla nombra el texto como ejemplo, no como literal.
      */
     public const KEY_CTA_WHATSAPP_TEXTO = 'demo_cta_whatsapp_texto';
+
+    /**
+     * Clave: lista (JSON) de las frases que el agente reconoce como un «sí» a la demo (misión
+     * origen-del-lead-y-conversiones-meta, 13/10/2026). Hoy son tres botones distintos que dejan
+     * un texto prearmado en el WhatsApp del lead: el de la página de experiencia
+     * (KEY_CTA_WHATSAPP_TEXTO), el de la web y el de Instagram.
+     *
+     * 🔴 KEY_CTA_WHATSAPP_TEXTO NO se reemplaza por esta: sigue siendo el texto del botón de la
+     * página, y el admin-spa desplegado lo edita y lo manda en el PUT. Por eso la lista que devuelve
+     * `get_cta_whatsapp_textos()` lo incluye SIEMPRE, aunque lo guardado no lo traiga: cambiar el
+     * texto del botón desde el panel viejo nunca puede dejar de ser un «sí».
+     */
+    public const KEY_CTA_WHATSAPP_TEXTOS = 'demo_cta_whatsapp_textos';
 
     /**
      * Clave: minutos desde que el lead ABRIÓ su página sin turno hasta que `leads:check-pagina-
@@ -370,8 +387,8 @@ class LeadDemoSettings
     /** Valor por defecto: minutos antes de la llamada del closer para enviar el bot de Recall.ai. */
     private const DEFAULT_RECALL_BOT_MINUTOS_ANTES = 5;
 
-    /** Valor por defecto: dinámica de demo para leads nuevos (la que hoy funciona en producción). */
-    private const DEFAULT_EXPERIENCIA = 'actual';
+    /** Valor por defecto —y único vigente— de la dinámica de demo: la experiencia nueva (14/10/2026). */
+    private const DEFAULT_EXPERIENCIA = 'nueva';
 
     /** Valor por defecto: tema de la página de experiencia — el que ya está en producción hoy. */
     private const DEFAULT_EXPERIENCIA_TEMA = 'oscuro';
@@ -397,11 +414,18 @@ class LeadDemoSettings
     /** Largo máximo del texto prearmado del CTA (caracteres, no bytes: lleva tilde). */
     public const MAX_CHARS_CTA_TEXTO = 200;
 
+    /** Máximo de frases en la lista del «sí» que se acepta por el PUT. */
+    public const MAX_CTA_WHATSAPP_TEXTOS = 10;
+
     /** Valores válidos para la frecuencia de slots (minutos). */
     public const VALID_FRECUENCIA_SLOTS = [5, 10, 15, 30, 60];
 
-    /** Valores válidos para la dinámica de demo (`demo_experiencia` / `demo_experiencia_default`). */
-    public const VALID_EXPERIENCIAS = ['actual', 'nueva'];
+    /**
+     * Valores que se aceptan GUARDAR para la dinámica de demo (`demo_experiencia_default`).
+     * Desde el 14/10/2026 solo 'nueva': 'actual' está retirada y un PUT que la mande (un SPA
+     * anterior a la misión) se ignora en silencio en vez de guardarla.
+     */
+    public const VALID_EXPERIENCIAS = ['nueva'];
 
     /** Valores válidos para el tema de la página de experiencia (`demo_experiencia_tema`). */
     public const VALID_TEMAS = ['oscuro', 'claro'];
@@ -474,6 +498,7 @@ class LeadDemoSettings
             'experiencia_tema'                    => self::get_experiencia_tema(),
             'whatsapp_numero_leads'               => self::get_whatsapp_numero_leads(),
             'cta_whatsapp_texto'                  => self::get_cta_whatsapp_texto(),
+            'cta_whatsapp_textos'                 => self::get_cta_whatsapp_textos(),
             'pagina_seguimiento_minutos'          => self::get_pagina_seguimiento_minutos(),
         ];
     }
@@ -644,6 +669,9 @@ class LeadDemoSettings
         // Dinámica de demo default para leads nuevos: guarda isset obligatoria, el SPA todavía no
         // manda este campo (lo agrega el prompt 04) y el update() de settings tiene que seguir
         // funcionando igual en el intervalo entre el deploy del backend y el del front.
+        // 🔴 Desde el 14/10/2026 solo se guarda 'nueva' (VALID_EXPERIENCIAS); si llega 'actual'
+        // (un admin-spa viejo que todavía ofrece la opción) NO se guarda ni se rechaza: se ignora,
+        // así el PUT del resto de la configuración sigue andando y la dinámica retirada no vuelve.
         if (isset($data['experiencia_default'])) {
             $experiencia = (string) $data['experiencia_default'];
             if (in_array($experiencia, self::VALID_EXPERIENCIAS, true)) {
@@ -677,6 +705,16 @@ class LeadDemoSettings
             $texto = trim((string) $data['cta_whatsapp_texto']);
             if ($texto !== '') {
                 AdminSetting::set(self::KEY_CTA_WHATSAPP_TEXTO, mb_substr($texto, 0, self::MAX_CHARS_CTA_TEXTO));
+            }
+        }
+        /* Lista de frases del «sí» (misión origen-del-lead-y-conversiones-meta): mismo "isset" que
+           el resto, así el admin-spa desplegado, que no manda esta clave, no la borra. Una lista
+           vacía tampoco borra: es un no-op, igual que el texto vacío de arriba. Se guarda recortada
+           y sin repetidas (comparando normalizado); el texto del botón se suma al leerla. */
+        if (isset($data['cta_whatsapp_textos']) && is_array($data['cta_whatsapp_textos'])) {
+            $textos = self::limpiar_lista_de_textos($data['cta_whatsapp_textos']);
+            if (! empty($textos)) {
+                AdminSetting::set(self::KEY_CTA_WHATSAPP_TEXTOS, json_encode($textos, JSON_UNESCAPED_UNICODE));
             }
         }
         if (isset($data['pagina_seguimiento_minutos'])) {
@@ -1221,22 +1259,19 @@ class LeadDemoSettings
     }
 
     /**
-     * Dinámica de demo con la que se estampan los leads nuevos al crearse.
+     * Dinámica de demo de los leads.
      *
-     * Si el valor guardado en `admin_settings` no está en VALID_EXPERIENCIAS (setting corrupta o
-     * nunca configurada), devuelve 'actual': un valor basura acá nunca puede terminar sirviéndole
-     * al agente una variante que no existe.
+     * 🔴 Desde el 14/10/2026 (misión demo-solo-experiencia-nueva) devuelve SIEMPRE 'nueva', sin
+     * leer lo guardado en `admin_settings`: la dinámica 'actual' está retirada y en producción la
+     * clave `demo_experiencia_default` puede seguir guardada con cualquier valor viejo (incluso
+     * 'actual') sin que eso cambie nada. Antes devolvía lo guardado si era válido y 'actual' si
+     * no. `Lead` ya no consulta este método al crear (su hook `saving` fuerza 'nueva'); se
+     * conserva porque `to_array()` lo expone al panel de configuración.
      *
-     * @return string
+     * @return string Siempre 'nueva'.
      */
     public static function get_experiencia_default(): string
     {
-        $stored = (string) AdminSetting::get(self::KEY_EXPERIENCIA_DEFAULT, self::DEFAULT_EXPERIENCIA);
-
-        if (in_array($stored, self::VALID_EXPERIENCIAS, true)) {
-            return $stored;
-        }
-
         return self::DEFAULT_EXPERIENCIA;
     }
 
@@ -1298,6 +1333,70 @@ class LeadDemoSettings
         }
 
         return mb_substr($texto, 0, self::MAX_CHARS_CTA_TEXTO);
+    }
+
+    /**
+     * Las frases que el agente reconoce como un «sí» a la demo (misión
+     * origen-del-lead-y-conversiones-meta, 13/10/2026).
+     *
+     * Sin nada guardado, el default son los tres botones: el texto del botón de la página de
+     * experiencia, la frase de la web (la nueva de M6a y la vieja, que es la misma que el texto del
+     * botón por defecto) y la de Instagram. Las frases de origen salen de `LeadOrigenService`, que
+     * es quien las usa para leer de dónde vino cada lead.
+     *
+     * 🔴 El texto del botón de la página va SIEMPRE, primero, aunque lo guardado no lo traiga: lo
+     * edita el panel viejo por su propia clave y cambiarlo no puede dejar de ser un «sí».
+     *
+     * @return array<int, string> Sin repetidas (comparando normalizado), en el orden guardado.
+     */
+    public static function get_cta_whatsapp_textos(): array
+    {
+        $guardadas = [];
+        $crudo     = AdminSetting::get(self::KEY_CTA_WHATSAPP_TEXTOS);
+        if (is_string($crudo) && trim($crudo) !== '') {
+            $decodificado = json_decode($crudo, true);
+            if (is_array($decodificado)) {
+                $guardadas = self::limpiar_lista_de_textos($decodificado);
+            }
+        }
+
+        if (empty($guardadas)) {
+            $guardadas = [
+                LeadOrigenService::FRASE_LANDING,
+                LeadOrigenService::FRASE_LANDING_VIEJA,
+                LeadOrigenService::FRASE_INSTAGRAM,
+            ];
+        }
+
+        return self::limpiar_lista_de_textos(array_merge([self::get_cta_whatsapp_texto()], $guardadas));
+    }
+
+    /**
+     * Recorta, descarta vacíos y no-strings, corta a MAX_CHARS_CTA_TEXTO y saca repetidas
+     * comparando normalizado («Hola Martín» y «hola martin» son la misma frase): queda la primera.
+     *
+     * @param array<int, mixed> $textos
+     *
+     * @return array<int, string>
+     */
+    private static function limpiar_lista_de_textos(array $textos): array
+    {
+        $limpias = [];
+        $vistas  = [];
+        foreach ($textos as $texto) {
+            if (! is_string($texto)) {
+                continue;
+            }
+            $texto = mb_substr(trim($texto), 0, self::MAX_CHARS_CTA_TEXTO);
+            $clave = LeadOrigenService::normalizar($texto);
+            if ($clave === '' || isset($vistas[$clave])) {
+                continue;
+            }
+            $vistas[$clave] = true;
+            $limpias[]      = $texto;
+        }
+
+        return $limpias;
     }
 
     /**

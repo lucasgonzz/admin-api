@@ -29,6 +29,23 @@ namespace App\Services;
 class HostingerApiClient extends HostingerHttpTransport
 {
     /**
+     * Cuántas páginas de una lista acepta leer list_databases() cuando `meta` dice que hay más.
+     *
+     * Con 25 filas por página son 500 bases, contra las ~74 que tiene la cuenta hoy (13/10/2026).
+     *
+     * Ojo con lo que NO es: no es la defensa contra una API que se porte mal. El contador de
+     * páginas es local, y con un `meta` coherente (total 74, per_page 25) el bucle termina solo a la
+     * tercera vuelta aunque la API ignorara `?page` y devolviera siempre la página 1 (la lista
+     * saldría con filas repetidas, pero saldría). El tope corta de verdad solo cuando `meta.total`
+     * promete muchas más páginas que éste: una cuenta enorme, o un `meta` absurdo. Y en ese caso NO
+     * se devuelve lo que se juntó, se LANZA: una lista parcial haría creer que una base no existe,
+     * que es exactamente el bug que esta lectura paginada vino a cerrar.
+     *
+     * @var int
+     */
+    const MAX_PAGINAS_DE_LISTA = 20;
+
+    /**
      * Sonda barata del token: un GET /cron-jobs, que es lectura pura y la llamada más liviana de
      * toda la API.
      *
@@ -178,14 +195,74 @@ class HostingerApiClient extends HostingerHttpTransport
     }
 
     /**
-     * Lista las bases de datos de la cuenta.
+     * Lista las bases de datos de la cuenta: la lista PLANA de filas de TODAS las páginas.
      *
-     * @return array<int|string, mixed>
-     * @throws \RuntimeException
+     * 🔴 La API real no devuelve una lista pelada. Medido el 13/10/2026 contra la cuenta de
+     * producción: `{"data":[...25 filas...],"meta":{"current_page":1,"per_page":25,"total":74}}`,
+     * envuelta en `data` y paginada con `?page=N` (más allá de la última página responde 200 con
+     * `data: []`). Este método leía la respuesta como si fuera la lista, así que el llamador
+     * recorría `data` y `meta` como si fueran bases y NUNCA encontró ninguna: la idempotencia de la
+     * base no funcionó jamás en producción. Y aunque hubiera desenvuelto `data`, habría visto solo
+     * la página 1 de 3. (Los cronjobs y los subdominios sí vienen como lista pelada: ese es el
+     * contraste que hace creíble suponer la forma sin mirarla.)
+     *
+     * Reglas de lectura, en orden:
+     *   - La página 1 se pide SIN query string. No es capricho: es la ruta que ya fija
+     *     HostingerApiClientTest, y pedir `?page=1` no aporta nada. Desde la 2 va `?page=N`.
+     *   - Si la respuesta trae `data` como array se usa ese; si es una lista pelada (los fakes viejos
+     *     de los tests, y por compatibilidad si Hostinger cambiara de forma) se usa tal cual y no se
+     *     pagina: sin `meta` no hay de dónde saber que falta algo.
+     *   - Se sigue pidiendo mientras `meta.total` y `meta.per_page` existan, falten filas por ver y
+     *     la página recién leída haya traído alguna (ver hay_pagina_siguiente()).
+     *   - Al llegar a MAX_PAGINAS_DE_LISTA con páginas todavía pendientes se LANZA, no se devuelve
+     *     lo juntado hasta ahí.
+     *
+     * Se pagina con el tamaño por defecto y no se sube `per_page`: la API lo respeta (se midió con
+     * 100), pero no hay un máximo documentado y no hace falta apostar a uno.
+     *
+     * ⚠️ Lo que esta lectura NO garantiza: si la API se contradice a sí misma —un `per_page`
+     * declarado distinto de las filas que de verdad sirve, una página intermedia vacía con `total`
+     * mayor, un `per_page` menor que 1— puede devolver una lista PARCIAL sin lanzar. Es una decisión
+     * y no un descuido: detectar eso exigiría desconfiar de `meta`, que es lo único que dice cuántas
+     * páginas hay. El único llamador, SharedHostingProvisioning::provision_db(), es fail-safe ante
+     * ese caso: un falso "la base no existe" lo lleva al POST, el POST da 422, el 422 se verifica
+     * de nuevo contra la lista y, si la base sigue sin figurar, se relanza el error ORIGINAL. No
+     * crea nada a ciegas ni da nada por bueno. Si aparece un segundo llamador, tiene que tener la
+     * misma red.
+     *
+     * @return array<int, mixed>  Filas de todas las páginas, en el orden en que las devolvió la API.
+     * @throws \RuntimeException Si una lectura falla, o si la lista pasa del tope de páginas.
      */
     public function list_databases(): array
     {
-        return $this->request('GET', $this->ruta_cuenta('/databases'));
+        $ruta   = $this->ruta_cuenta('/databases');
+        $filas  = [];
+        $pagina = 1;
+
+        while (true) {
+            $respuesta    = $this->request('GET', $pagina === 1 ? $ruta : $ruta . '?page=' . $pagina);
+            $de_la_pagina = $this->filas_de_la_respuesta($respuesta);
+            $filas        = array_merge($filas, $de_la_pagina);
+
+            if (! $this->hay_pagina_siguiente($respuesta, $pagina, $de_la_pagina)) {
+                return $filas;
+            }
+
+            if ($pagina >= self::MAX_PAGINAS_DE_LISTA) {
+                $meta = $respuesta['meta'];
+
+                throw new \RuntimeException(
+                    'La lista de bases de datos de Hostinger pasa del tope de ' . self::MAX_PAGINAS_DE_LISTA
+                    . ' páginas (meta.total=' . (int) $meta['total'] . ', meta.per_page='
+                    . (int) $meta['per_page'] . ') y se leyeron ' . count($filas) . ' filas. No se '
+                    . 'devuelve una lista parcial: con ella una base que existe parecería no existir y '
+                    . 'se intentaría crear de nuevo.',
+                    0
+                );
+            }
+
+            $pagina++;
+        }
     }
 
     /**
@@ -303,5 +380,49 @@ class HostingerApiClient extends HostingerHttpTransport
     protected function ruta_zona(): string
     {
         return '/api/dns/v1/zones/' . rawurlencode($this->dominio());
+    }
+
+    /**
+     * Las filas de UNA respuesta de lista, la venga envuelta en `data` o pelada.
+     *
+     * @param  array<int|string, mixed>  $respuesta
+     * @return array<int, mixed>
+     */
+    protected function filas_de_la_respuesta(array $respuesta): array
+    {
+        if (isset($respuesta['data']) && is_array($respuesta['data'])) {
+            return array_values($respuesta['data']);
+        }
+
+        return array_values($respuesta);
+    }
+
+    /**
+     * ¿Falta leer otra página después de ésta?
+     *
+     * Solo con `meta.total` y `meta.per_page` presentes y numéricos: sin ellos la respuesta es una
+     * sola página, y asumir lo contrario dejaría a los fakes viejos (y a una API que dejara de
+     * paginar) en un bucle de peticiones. Una página vacía corta siempre, aunque `meta` diga que
+     * faltan: si la API se contradice, seguir pidiendo no la va a arreglar.
+     *
+     * @param  array<int|string, mixed>  $respuesta        La página recién leída, tal cual vino.
+     * @param  int                       $pagina           Número de esa página (la primera es 1).
+     * @param  array<int, mixed>         $filas_de_la_pagina
+     * @return bool
+     */
+    protected function hay_pagina_siguiente(array $respuesta, int $pagina, array $filas_de_la_pagina): bool
+    {
+        if ($filas_de_la_pagina === [] || ! isset($respuesta['meta']) || ! is_array($respuesta['meta'])) {
+            return false;
+        }
+
+        $meta = $respuesta['meta'];
+
+        if (! isset($meta['total'], $meta['per_page']) || ! is_numeric($meta['total'])
+            || ! is_numeric($meta['per_page']) || (int) $meta['per_page'] < 1) {
+            return false;
+        }
+
+        return $pagina * (int) $meta['per_page'] < (int) $meta['total'];
     }
 }

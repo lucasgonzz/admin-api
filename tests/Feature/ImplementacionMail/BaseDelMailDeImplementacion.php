@@ -297,6 +297,9 @@ abstract class BaseDelMailDeImplementacion extends TestCase
             case 'bienvenida':
                 return $this->estados(0, 1);
 
+            case 'instalando':
+                return $this->estados(1, 2);
+
             case 'instalado':
                 return $this->estados(2, 3);
 
