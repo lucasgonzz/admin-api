@@ -33,8 +33,10 @@ class WhatsappConfigController extends Controller
      */
     public function show(): JsonResponse
     {
-        $principal = WhatsappConfig::porProposito(WhatsappConfig::PROPOSITO_PRINCIPAL);
-        $asistente = WhatsappConfig::porProposito(WhatsappConfig::PROPOSITO_ASISTENTE);
+        /* `delProposito()` y no `porProposito()`: el panel tiene que ver también la fila APAGADA, que es la
+         * que se vuelve a prender desde acá. */
+        $principal = WhatsappConfig::delProposito(WhatsappConfig::PROPOSITO_PRINCIPAL);
+        $asistente = WhatsappConfig::delProposito(WhatsappConfig::PROPOSITO_ASISTENTE);
 
         return response()->json([
             'principal' => $principal,
@@ -42,18 +44,34 @@ class WhatsappConfigController extends Controller
             /* Clave APARTE y aditiva: dice si cada número está listo y qué le falta, con la misma
              * regla que usa el resto del admin para decidir por qué número sale cada cosa
              * (`WhatsappConfig::canalListo()`). Así el panel no repite esa regla y no se desincroniza
-             * de ella. Solo trae NOMBRES de campos: nunca un valor guardado. */
+             * de ella. Solo trae NOMBRES de campos: nunca un valor guardado. `activo` en `faltan`
+             * significa que la fila existe pero está apagada. */
             'estado' => [
-                'principal' => [
-                    'listo'  => $principal !== null,
-                    'faltan' => $principal !== null ? [] : ['fila'],
-                ],
-                'asistente' => [
-                    'listo'  => $asistente !== null && $asistente->tieneLoNecesarioParaAtender(),
-                    'faltan' => $asistente !== null ? $asistente->loQueLeFaltaParaAtender() : ['fila'],
-                ],
+                'principal' => $this->estado_de($principal),
+                'asistente' => $this->estado_de($asistente),
             ],
         ]);
+    }
+
+    /**
+     * `{listo, faltan}` de una fila, o «falta la fila».
+     *
+     * @param WhatsappConfig|null $config
+     *
+     * @return array{listo: bool, faltan: array<int, string>}
+     */
+    private function estado_de(?WhatsappConfig $config): array
+    {
+        if ($config === null) {
+            return ['listo' => false, 'faltan' => ['fila']];
+        }
+
+        $faltan = $config->loQueLeFaltaParaAtender();
+        if (! $config->is_active) {
+            array_unshift($faltan, 'activo');
+        }
+
+        return ['listo' => $faltan === [], 'faltan' => $faltan];
     }
 
     /**
@@ -117,6 +135,9 @@ class WhatsappConfigController extends Controller
             'nombre'          => 'nullable|string|max:255',
             'waba_id'         => 'nullable|string|max:255',
             'usar_clave_del_principal' => 'sometimes|boolean',
+            /* El interruptor de «número activo». Apagar el del asistente es la forma de volver atrás el
+             * segundo número desde el panel (todo vuelve a salir y entrar por el principal). */
+            'is_active'       => 'sometimes|boolean',
         ];
 
         /*
@@ -142,16 +163,46 @@ class WhatsappConfigController extends Controller
 
         $validated = $request->validate($reglas);
 
+        /* 🔴 El número de leads y clientes no se apaga desde acá: sin él no entra ni sale ningún mensaje
+         * del admin, y un tilde mal puesto dejaría mudo todo el pipeline comercial. */
+        if ($proposito === WhatsappConfig::PROPOSITO_PRINCIPAL
+            && $request->has('is_active')
+            && ! $request->boolean('is_active')) {
+            return response()->json([
+                'message' => 'El número de leads y clientes no se puede apagar desde el panel.',
+                'errors'  => ['is_active' => ['El número de leads y clientes no se puede apagar desde el panel.']],
+            ], 422);
+        }
+
+        /* 🔴 El `phone_number_id` identifica al número: es lo que decide, en cada mensaje entrante, por cuál
+         * de las dos filas se valida la firma y a qué árbol de enrutado va. Si las dos filas lo tuvieran
+         * igual (un pegado del número equivocado), el webhook resolvería siempre la primera, y los
+         * comandos de alta de Kapso actuarían sobre el número de leads y clientes. */
+        $repetido = WhatsappConfig::where('phone_number_id', trim((string) $validated['phone_number_id']))
+            ->where('proposito', '!=', $proposito)
+            ->exists();
+
+        if ($repetido) {
+            return response()->json([
+                'message' => 'Ese phone number ID ya lo usa el otro número.',
+                'errors'  => ['phone_number_id' => ['Ese phone number ID ya está cargado en el otro número: cada tarjeta tiene el suyo.']],
+            ], 422);
+        }
+
         /* 🔴 La fila se resuelve POR PROPÓSITO y nunca por `getActive()`. Es el bug que cerró esta
          * misión: `getActive()` devuelve siempre la principal, así que guardar el asistente
          * sobrescribía el número de leads. Y cuando la fila no existe se crea una NUEVA con su
          * propósito puesto: en ningún camino de este método se toca la fila del otro número. */
-        $config = WhatsappConfig::porProposito($proposito);
+        $config = WhatsappConfig::delProposito($proposito);
 
         if (! $config) {
             $config = new WhatsappConfig();
             $config->proposito = $proposito;
             $config->is_active = true;
+        }
+
+        if ($request->has('is_active')) {
+            $config->is_active = $request->boolean('is_active');
         }
 
         if ($copiar_clave_del_principal) {
@@ -178,7 +229,14 @@ class WhatsappConfigController extends Controller
          * que venía a cambiar el nombre del número no puede dejar sin secreto al webhook que el
          * comando acababa de registrar en Kapso. Vaciarlo a propósito es una intervención a mano en
          * la base, y tiene que seguir siéndolo. */
-        if ($request->has('webhook_secret')) {
+        /* 🔴 El secreto del ASISTENTE no se escribe desde acá, venga lo que venga en el body. Lo escribe
+         * `whatsapp:registrar-webhook` en la misma corrida en que lo da de alta en Kapso, y es lo que
+         * hace que el número pase a «listo»: si una persona lo pudiera pegar a mano (el del principal, por
+         * ejemplo, que tiene a la vista en la tarjeta de arriba), el número se daría por listo sin
+         * webhook registrado y toda la flota empezaría a recibir los avisos por un número que no recibe.
+         * Además, un panel abierto antes de que corra el comando volvería a subir el secreto viejo y
+         * pisaría el nuevo. Para el principal sigue como siempre. */
+        if ($proposito === WhatsappConfig::PROPOSITO_PRINCIPAL && $request->has('webhook_secret')) {
             $secreto = trim((string) $request->input('webhook_secret'));
             if ($secreto !== '') {
                 $config->webhook_secret = $secreto;

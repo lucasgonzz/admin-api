@@ -113,6 +113,28 @@ class WhatsappConfig extends Model
     }
 
     /**
+     * Fila de un propósito, ACTIVA O NO. Es la que lee y escribe el panel.
+     *
+     * 🔴 Distinta de {@see porProposito()}, que solo devuelve la activa y es la que usa todo el resto del
+     * admin. El panel necesita ver también la fila APAGADA: el interruptor de «número activo» es la
+     * forma de volver atrás el segundo número sin tocar la base, y si el panel no la encontrara cuando
+     * está apagada, no habría cómo volver a prenderla (y guardar crearía una fila duplicada).
+     *
+     * @param string $proposito Uno de los PROPOSITO_* de esta clase.
+     *
+     * @return self|null
+     */
+    public static function delProposito(string $proposito): ?self
+    {
+        $proposito = trim($proposito);
+        if ($proposito === '') {
+            return null;
+        }
+
+        return self::where('proposito', $proposito)->orderBy('id')->first();
+    }
+
+    /**
      * Fila de un propósito, SOLO si ese número ya está en condiciones de atender su canal entero.
      *
      * 🔴 **«Listo» es mucho más que «hay una fila»** (misión asistente-segundo-numero, 15/10/2026), y
@@ -193,8 +215,10 @@ class WhatsappConfig extends Model
         if (trim((string) $this->webhook_secret) === '') {
             $faltan[] = 'webhook_secret';
         }
-        // «Un número que se pueda marcar»: ocho dígitos como mínimo, ignorando signos y espacios.
-        if (strlen((string) preg_replace('/\D+/', '', (string) $this->display_phone)) < 8) {
+        // «Un número que se pueda marcar»: ocho dígitos como mínimo, ignorando signos y espacios. Solo el
+        // asistente lo necesita (es lo que se le dice a un dueño que escribe por el número equivocado).
+        if ($this->proposito === self::PROPOSITO_ASISTENTE
+            && strlen((string) preg_replace('/\D+/', '', (string) $this->display_phone)) < 8) {
             $faltan[] = 'display_phone';
         }
 

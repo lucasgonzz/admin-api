@@ -111,6 +111,11 @@ class AddPropositoToWhatsappConfigTable extends Migration
         }
 
         if (Schema::hasColumn('whatsapp_config', 'proposito')) {
+            /* 🔴 Sin la columna, `getActive()` del código anterior es «la primera fila activa», y con una
+             * fila del asistente cargada podría devolver ESA y mandar los leads por el número equivocado.
+             * Se la apaga antes de perder el dato que la distingue. */
+            DB::table('whatsapp_config')->where('proposito', '!=', 'principal')->update(['is_active' => false]);
+
             Schema::table('whatsapp_config', function (Blueprint $table) {
                 $table->dropIndex(['proposito']);
                 $table->dropColumn('proposito');

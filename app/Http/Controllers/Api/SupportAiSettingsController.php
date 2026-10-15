@@ -120,13 +120,17 @@ class SupportAiSettingsController extends Controller
 
         /* El texto sí acepta CADENA VACÍA, y vacía significa NO CONTESTAR NADA (ver
          * `AsistenteWhatsappSettings::texto_de_soporte_desconectado()`): borrar el texto es una
-         * decisión válida que hay que poder tomar desde el panel, y es la que el panel manda como
-         * `""`. Un `null` explícito, en cambio, se trata como "no dijo nada" y no toca la fila,
-         * igual que el interruptor de arriba: `""` es borrar, `null` es omitir. */
-        if (array_key_exists('texto_desconectado', $validated) && $validated['texto_desconectado'] !== null) {
+         * decisión válida que hay que poder tomar desde el panel.
+         *
+         * 🔴 Lo que distingue «borralo» de «no lo toques» es que la CLAVE VIAJE, no su valor: el
+         * middleware global `ConvertEmptyStringsToNull` convierte el `""` que manda el panel en `null`
+         * antes de llegar acá, así que mirar `!== null` hacía imposible borrar el texto (volvía a
+         * aparecer y el panel decía «guardado»). Un build del SPA que no conoce el campo no manda la
+         * clave, y ese sí no toca la fila. */
+        if ($request->has('texto_desconectado')) {
             AdminSetting::set(
                 AsistenteWhatsappSettings::KEY_DESCONECTADO_TEXTO,
-                trim((string) $validated['texto_desconectado'])
+                trim((string) $request->input('texto_desconectado'))
             );
         }
 
