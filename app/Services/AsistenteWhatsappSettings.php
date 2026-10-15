@@ -63,8 +63,8 @@ class AsistenteWhatsappSettings
      * cualquiera de ellos queda esperando una respuesta que no existe: en el número del asistente
      * no se abre ticket, no se crea lead y no entra nadie a implementación.
      */
-    private const DEFAULT_ASISTENTE_TEXTO_AJENO = 'Este número es el asistente de ComercioCity '
-        . 'para dueños que ya usan el sistema; para consultas escribinos al +54 9 3444 54-4199';
+    private const DEFAULT_ASISTENTE_TEXTO_AJENO = 'Este número es el asistente de ComercioCity y atiende solo a los '
+        . 'dueños que lo tienen activado. Para consultas escribinos al +54 9 3444 54-4199';
 
     /**
      * Clave: texto con el que se le avisa a un dueño, cuando escribe al número de leads y clientes, cuál

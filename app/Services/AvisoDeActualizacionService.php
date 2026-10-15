@@ -577,8 +577,17 @@ class AvisoDeActualizacionService
              * que decidir igual o se vuelve al desajuste de arriba; por eso se llama una sola vez y el
              * valor se usa para las dos cosas. Mientras el segundo número no exista, el aviso se
              * comporta exactamente como antes de esta misión.
+             *
+             * 🔴 **Y solo para el dueño que TIENE el asistente prendido.** Este aviso le llega a todos los
+             * dueños actualizados, y la mayoría de la flota no usa el asistente: para ellos el número
+             * nuevo sería un +1 que nunca vieron, con el nombre todavía en revisión, que además —si
+             * contestan «gracias»— les respondería un texto sobre un asistente que no tienen. Esos
+             * siguen recibiendo el aviso por el número de siempre, con la ventana medida sobre ese
+             * número. Se cambia acá en una sola línea si Lucas decide que va por el asistente para todos.
              */
-            $proposito = WhatsappConfig::propositoEfectivoDelAsistente();
+            $proposito = (bool) $client->asistente_whatsapp_activo
+                ? WhatsappConfig::propositoEfectivoDelAsistente()
+                : WhatsappConfig::PROPOSITO_PRINCIPAL;
             $this->whatsapp->paraProposito($proposito);
 
             $estado_de_la_ventana = $this->ventana->window_state($telefono, $proposito);

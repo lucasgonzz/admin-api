@@ -226,10 +226,15 @@ class WhatsappSessionWindowService
      * `esperando` su instrucción es un mensaje que el dueño ya mandó, y para Meta la ventana la
      * abre el mensaje, no lo que nosotros hayamos hecho después con él.
      *
-     * No se filtra por `phone_number_id` aunque la columna exista: las filas anteriores al
-     * 13/10/2026 la tienen en null y un filtro por ella dejaría la ventana cerrada para todo dueño
-     * que escribió antes de la migración. El propósito ya está resuelto por la elección de este
-     * buscador; acá lo que hace falta es el teléfono y la fecha.
+     * 🔴 **Se filtra por el `phone_number_id` del número del asistente, y las filas con la columna en
+     * null o con el número del principal NO cuentan.** Un dueño que le escribió al asistente por el
+     * número de leads y clientes —que es lo único que pudo hacer hasta que el número nuevo existió—
+     * no abrió ninguna ventana en el número nuevo: Meta la abre por par de números. Contarlas daría la
+     * ventana por abierta el día del corte, el informe o el aviso saldrían como texto libre y Meta los
+     * rechazaría. Una versión anterior de este comentario justificaba NO filtrar con las filas viejas
+     * en null: era al revés, esas filas son justamente las que no pueden contar.
+     *
+     * Sin fila del asistente no hay ventana que medir: devuelve null.
      *
      * @param string                    $phone  Teléfono buscado.
      * @param \Illuminate\Support\Carbon $cutoff Momento a partir del cual cuenta.
@@ -238,9 +243,17 @@ class WhatsappSessionWindowService
      */
     private function find_asistente_inbound(string $phone, $cutoff)
     {
-        $rows = $this->rows_for('asistente', function () use ($cutoff) {
+        $numero_del_asistente = WhatsappConfig::porProposito(WhatsappConfig::PROPOSITO_ASISTENTE);
+        $phone_number_id      = $numero_del_asistente !== null ? trim((string) $numero_del_asistente->phone_number_id) : '';
+
+        if ($phone_number_id === '') {
+            return null;
+        }
+
+        $rows = $this->rows_for('asistente', function () use ($cutoff, $phone_number_id) {
             return DB::table('client_assistant_messages')
                 ->where('direccion', ClientAssistantMessage::DIRECCION_ENTRANTE)
+                ->where('phone_number_id', $phone_number_id)
                 ->where('created_at', '>=', $cutoff)
                 ->whereNotNull('telefono')
                 ->where('telefono', '!=', '')

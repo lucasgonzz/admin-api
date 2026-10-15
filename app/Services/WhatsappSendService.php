@@ -226,7 +226,10 @@ class WhatsappSendService
          * antes de resolve_send_context(), porque ese método ya corta a null en
          * test_mode y no expone el motivo hacia arriba.
          */
-        $active_config = WhatsappConfig::getActive();
+        /* 🔴 La fila por la que SALE este mensaje, no «la activa»: con dos números, el modo de prueba de
+         * uno no puede simular (ni dejar de simular) los envíos del otro. Misma fuente que
+         * `resolve_send_context()`. */
+        $active_config = $this->resolve_destino_config();
         if ($active_config && $active_config->is_active && $active_config->test_mode) {
             $normalized_to = WhatsappNormalizer::normalize($to);
             $to_digits = preg_replace('/\D+/', '', $normalized_to) ?? '';
@@ -519,7 +522,10 @@ class WhatsappSendService
          * porque ese método ya corta a null en test_mode y no expone el motivo hacia arriba, así
          * que el llamador no podría distinguir "no salió porque estamos probando" de un fallo real.
          */
-        $active_config = WhatsappConfig::getActive();
+        /* 🔴 La fila por la que SALE este mensaje, no «la activa»: con dos números, el modo de prueba de
+         * uno no puede simular (ni dejar de simular) los envíos del otro. Misma fuente que
+         * `resolve_send_context()`. */
+        $active_config = $this->resolve_destino_config();
         if ($active_config && $active_config->is_active && $active_config->test_mode) {
             $normalized_to = WhatsappNormalizer::normalize($to);
             $to_digits = preg_replace('/\D+/', '', $normalized_to) ?? '';
@@ -757,7 +763,10 @@ class WhatsappSendService
          * porque ese método ya corta a null en test_mode sin dejar motivo, y el llamador loguearía
          * "la foto no salió" sin nada adentro por algo que no es un fallo.
          */
-        $active_config = WhatsappConfig::getActive();
+        /* 🔴 La fila por la que SALE este mensaje, no «la activa»: con dos números, el modo de prueba de
+         * uno no puede simular (ni dejar de simular) los envíos del otro. Misma fuente que
+         * `resolve_send_context()`. */
+        $active_config = $this->resolve_destino_config();
         if ($active_config && $active_config->is_active && $active_config->test_mode) {
             $normalized_to = WhatsappNormalizer::normalize($to);
             $to_digits = preg_replace('/\D+/', '', $normalized_to) ?? '';
@@ -919,7 +928,10 @@ class WhatsappSendService
          * corta a null sin dejar motivo, y el llamador loguearía "la foto no salió" por algo que no
          * es un fallo. Acá además evita subirle un archivo real a Meta desde un entorno de prueba.
          */
-        $active_config = WhatsappConfig::getActive();
+        /* 🔴 La fila por la que SALE este mensaje, no «la activa»: con dos números, el modo de prueba de
+         * uno no puede simular (ni dejar de simular) los envíos del otro. Misma fuente que
+         * `resolve_send_context()`. */
+        $active_config = $this->resolve_destino_config();
         if ($active_config && $active_config->is_active && $active_config->test_mode) {
             $fake_message_id = 'test-' . (string) \Illuminate\Support\Str::uuid();
 
