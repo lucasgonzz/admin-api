@@ -10,10 +10,12 @@ use App\Models\LeadPipelineStatus;
 use App\Helpers\WhatsappNormalizer;
 use App\Services\DemoUrlNormalizer;
 use App\Services\LeadDemoFormMapper;
+use App\Services\Pipelines\PipelineLeadFunnelService;
 use App\Services\LeadDemoSettings;
 use App\Services\LeadWhatsappOnboardingSettings;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Prospecto comercial cargado desde el panel de admin-api.
@@ -87,13 +89,20 @@ class Lead extends Model
         'closer_activo',
     ];
 
-    /** Dinámica de demo vigente en producción: Mail 1 con credenciales y videos por link. */
+    /**
+     * Dinámica de demo histórica: Mail 1 con credenciales y videos por link.
+     *
+     * 🔴 RETIRADA el 14/10/2026 (misión demo-solo-experiencia-nueva, decisión de Lucas): ningún
+     * lead puede estar en esta dinámica. La constante se conserva solo porque otros archivos y
+     * tests todavía la nombran; nada la puede volver a escribir (ver el hook `saving` de
+     * `booted()`) ni leer como vigente (ver `demo_experiencia_efectiva()`).
+     */
     public const EXPERIENCIA_ACTUAL = 'actual';
 
-    /** Dinámica nueva en construcción: página inmersiva, formulario, panel lateral y tour. */
+    /** Dinámica vigente de TODOS los leads: página inmersiva, formulario, panel lateral y tour. */
     public const EXPERIENCIA_NUEVA = 'nueva';
 
-    /** Valores válidos de la columna `demo_experiencia`. */
+    /** Valores históricos de la columna `demo_experiencia` (hoy el único vigente es 'nueva'). */
     public const EXPERIENCIAS = [self::EXPERIENCIA_ACTUAL, self::EXPERIENCIA_NUEVA];
 
     /** Perfil "dueño" del lead (§3.17): versión por defecto de la página inmersiva. */
@@ -136,14 +145,29 @@ class Lead extends Model
             if (empty($lead->address_3)) {
                 $lead->address_3 = 'Sucursal 3';
             }
+        });
 
-            // Dinámica de demo que le toca a este lead: se estampa al nacer, con el valor que
-            // tenga la setting global en ese momento, y no vuelve a cambiar solo. Ver el
-            // comentario de la migración: leer la setting en runtime le cambiaría el guion a
-            // leads que ya tienen demo agendada con la dinámica anterior.
-            if (empty($lead->demo_experiencia)) {
-                $lead->demo_experiencia = LeadDemoSettings::get_experiencia_default();
-            }
+        // 🔴 CANDADO TOTAL de la dinámica de demo (misión demo-solo-experiencia-nueva, 14/10/2026).
+        //
+        // Lucas retiró la dinámica 'actual': TODOS los leads, los que ya existen y los que nazcan,
+        // usan siempre la página de experiencia con su formulario, y pidió que no haya forma de
+        // que un lead no la use. Por eso el valor no se "estampa al nacer con la setting global"
+        // (como antes): se FUERZA a 'nueva' en cada guardado, creación incluida. Así ninguna
+        // escritura por Eloquent puede dejar la columna en 'actual', en null ni en un valor
+        // inventado: ni un `Lead::create(['demo_experiencia' => 'actual'])`, ni un controller viejo,
+        // ni el SPA anterior que todavía ofrecía la opción, ni un script de mantenimiento.
+        //
+        // Es la primera de tres capas, a propósito redundantes:
+        //  1. Este hook (escritura por Eloquent).
+        //  2. `demo_experiencia_efectiva()` (lectura): devuelve siempre 'nueva' sin mirar la
+        //     columna, así que un UPDATE directo que se salte este hook igual no cambia el
+        //     comportamiento del lead.
+        //  3. `LeadController::set_demo_experiencia_json` y `LeadDemoSettings` (puertas de la API
+        //     y de la configuración) rechazan o ignoran 'actual'.
+        // Solo se toca `demo_experiencia`. Los `DB::table()->update` directos no pasan por acá y no
+        // se tocan (los cubre la capa 2).
+        static::saving(function (Lead $lead) {
+            $lead->demo_experiencia = self::EXPERIENCIA_NUEVA;
         });
 
         // Auto-activación de la verificación de mensajes al ENTRAR a la ventana de verificación
@@ -178,6 +202,25 @@ class Lead extends Model
             ) {
                 $lead->requiere_verificacion_mensajes = true;
             }
+        });
+
+        /* Embudo "Leads" de Pipelines (misión embudo-lead-pipelines, 13/10/2026): cuando el lead
+           confirma interés después de la demo (`closer_activo`) nace su oportunidad en el tablero
+           de Tomás, y queda donde diga el estado de sus videollamadas.
+
+           Va en `saved` y no en `saving` porque el alta necesita el `id` del lead ya guardado: una
+           oportunidad que apuntara a un lead que al final no se guardó sería una tarjeta sin sujeto.
+
+           🔴 El servicio se traga sus propios errores a propósito (ver su docblock). `saved` de Lead
+           corre en el webhook de WhatsApp, en LeadAiService y en el scheduler de seguimientos: una
+           excepción del CRM acá empezaría a tirar 500 en lugares que no tienen nada que ver con el
+           CRM. */
+        static::saved(function (Lead $lead) {
+            if (! $lead->wasChanged('status')) {
+                return;
+            }
+
+            app(PipelineLeadFunnelService::class)->al_cambiar_estado_del_lead($lead);
         });
 
         static::deleting(function (Lead $lead) {
@@ -375,6 +418,13 @@ class Lead extends Model
         // 18/9/2026). Int porque va al PDF en letras y se copia al cliente para hacer cuentas.
         'contract_meses_actualizacion'       => 'integer',
 
+        // Modalidad del contrato (misión precios-dos-modalidades, 13/10/2026). `contract_modalidad`
+        // no lleva cast: es texto ('licencia' | 'suscripcion' | null). Los sistemas contratados son
+        // un JSON de keys de CotizadorSettings::SISTEMAS, y el plazo mínimo de la Suscripción va a
+        // int porque el PDF lo escribe en letras con LeadContractPdfService::meses_en_letras().
+        'contract_sistemas'                  => 'array',
+        'contract_permanencia_meses'         => 'integer',
+
         // Foto de la cotización del sistema hecha desde la solapa Contrato (misión
         // cotizador-lead-mercado-pago, 22/9/2026): [{key, label, precio_usd, precio_ars}].
         'contract_cotizacion_items'          => 'array',
@@ -467,6 +517,32 @@ class Lead extends Model
                a los estados visibles (ver scheduled_messages()), que es lo único que se muestra. */
             'scheduled_messages'
         );
+
+        /* El último resumen de llamada del closer, para la pestaña "Resumen" (ver
+           `last_summarized_call()`). Va en una llamada aparte y no sumada al `with()` de arriba
+           porque esa forma variádica solo acepta NOMBRES de relación: una entrada con closure
+           adentro de esa lista la rompe.
+
+           🔴 CON COLUMNAS ACOTADAS Y SIN LA TRANSCRIPCIÓN. Este scope lo usa también el listado de
+           leads (hasta 500 por página) y el payload del lead se rehidrata entero después de cada
+           acción del panel y de cada evento de LeadBroadcastService. `transcript` no se pide, y
+           `call_summary` viaja SIN `transcripcion_completa`, que CallSummaryService duplica
+           adentro del resumen: una transcripción por lead con llamada, multiplicada por la
+           lista, es exactamente cómo un listado se vuelve lento sin que nadie lo vea venir. La
+           transcripción entera se lee en la ficha de la oportunidad del embudo.
+
+           `JSON_VALID` guarda el caso de un resumen que no sea JSON válido (la columna es TEXT):
+           sin la guarda, `JSON_REMOVE` tiraría error y rompería TODO listado de leads; con ella
+           ese resumen llega null y la pestaña cae a lo legado. `lead_id` va en la lista porque es
+           la clave con la que Eloquent empareja la relación. */
+        $query->with(['last_summarized_call' => function ($relacion) {
+            $relacion->select([
+                'id', 'lead_id', 'meet_url', 'estado', 'scheduled_at', 'started_at',
+                DB::raw("CASE WHEN JSON_VALID(call_summary) THEN JSON_REMOVE(call_summary, '$.transcripcion_completa') ELSE NULL END AS call_summary"),
+                'created_at', 'updated_at',
+            ]);
+        }]);
+
         $query->withUnreadLeadMessagesCount();
     }
 
@@ -972,6 +1048,32 @@ class Lead extends Model
     }
 
     /**
+     * La última llamada del closer con este lead que YA TIENE RESUMEN (la de `id` más alto con
+     * `call_summary`), o null.
+     *
+     * 🔴 Existe para que la pestaña "Resumen" del modal deje de leer `leads.call_summary`, que es
+     * una columna LEGADA que nadie escribe desde el refactor de múltiples llamadas por lead: el
+     * resumen real vive en `lead_calls.call_summary`, lo escribe `CallSummaryService` y hasta hoy
+     * esa pestaña mostraba vacío para toda llamada posterior al refactor.
+     *
+     * Es "la última CON resumen" y no "la última" a propósito: el caso frecuente es un lead en
+     * seguimiento con la primera llamada resumida y una segunda agendada; con "la última" la
+     * pestaña se quedaba sin el resumen justo antes de la segunda llamada.
+     *
+     * `orderByDesc('id')` sin `latestOfMany()` a propósito: con eager loading, `hasOne` se queda con
+     * la primera fila de cada grupo, que con ese orden es la de `id` más alto. Es el mismo
+     * resultado, sin la subconsulta agregada que arma `ofMany()`.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasOne
+     */
+    public function last_summarized_call()
+    {
+        return $this->hasOne(LeadCall::class, 'lead_id')
+            ->whereNotNull('call_summary')
+            ->orderByDesc('id');
+    }
+
+    /**
      * Oportunidades del CRM de pipelines donde este lead es el sujeto (misión pipelines-crm,
      * 27/9/2026), abiertas y cerradas, de todos los pipelines.
      *
@@ -1013,6 +1115,17 @@ class Lead extends Model
     public function whatsapp_ad_referrals()
     {
         return $this->hasMany(WhatsappAdReferral::class, 'phone', 'phone');
+    }
+
+    /**
+     * Conversiones que se le mandaron (o se le van a mandar) a Meta por este lead, si vino de un
+     * anuncio Click-to-WhatsApp: una fila por evento. Ver MetaConversionesService.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function eventos_meta()
+    {
+        return $this->hasMany(LeadEventoMeta::class, 'lead_id')->orderBy('id');
     }
 
     /**
@@ -1368,21 +1481,24 @@ class Lead extends Model
     /**
      * Dinámica de demo efectiva de este lead (grupo 293, prompt 01).
      *
-     * Devuelve el valor de la columna `demo_experiencia` si es uno de los válidos
-     * (self::EXPERIENCIAS); en cualquier otro caso (null, string vacío, valor desconocido)
-     * devuelve self::EXPERIENCIA_ACTUAL. Este fallback es la regla de seguridad del interruptor:
-     * ante cualquier duda, el lead recibe la dinámica que hoy funciona en producción, nunca una
-     * a medio construir.
+     * 🔴 Desde el 14/10/2026 (misión demo-solo-experiencia-nueva) devuelve SIEMPRE
+     * self::EXPERIENCIA_NUEVA, sin mirar la columna `demo_experiencia`. Antes devolvía el valor de
+     * la columna si era uno de los válidos y caía a 'actual' ante null o basura ("ante la duda, la
+     * dinámica que funciona en producción"); esa regla de seguridad se dio vuelta: la dinámica
+     * 'actual' está retirada, así que ante cualquier duda —columna null, 'actual', valor
+     * inventado, una fila que un UPDATE directo dejó mal— el lead usa la página de experiencia.
      *
-     * @return string
+     * Es la capa de LECTURA del candado (la de escritura es el hook `saving` de `booted()`): si
+     * alguien saca el forzado de arriba, o escribe la columna por fuera de Eloquent, el
+     * comportamiento del lead no cambia. Todo lo que decide por dinámica —y hay mucho: los
+     * comandos de ciclo de demo, el agente, el payload del setup— pasa por acá o por
+     * usa_experiencia_demo_nueva().
+     *
+     * @return string Siempre self::EXPERIENCIA_NUEVA.
      */
     public function demo_experiencia_efectiva(): string
     {
-        if (in_array($this->demo_experiencia, self::EXPERIENCIAS, true)) {
-            return $this->demo_experiencia;
-        }
-
-        return self::EXPERIENCIA_ACTUAL;
+        return self::EXPERIENCIA_NUEVA;
     }
 
     /**

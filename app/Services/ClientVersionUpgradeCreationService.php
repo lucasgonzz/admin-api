@@ -170,7 +170,8 @@ class ClientVersionUpgradeCreationService
      * - `notes`                 string|null
      * - `scheduled_date`        string|null  — si viene vacío, hoy.
      * - `target_client_api_id`  int|string|null — si viene, se valida que sea del cliente;
-     *                           si no, la primera ClientApi que no sea la activa.
+     *                           si no, el frente principal del cliente
+     *                           (resolve_default_target_client_api_id()).
      * - `created_by_admin_id`   int|null — si la clave no está, se usa `Auth::id()`
      *                           (null cuando no hay sesión, que es lo que pasa en `claude/*`).
      * - `created_via`           string|null — solo lo escribe el endpoint de creación de
@@ -236,29 +237,30 @@ class ClientVersionUpgradeCreationService
     }
 
     /**
-     * API destino por defecto: la primera ClientApi del cliente que no sea la activa en producción.
+     * API destino por defecto: el FRENTE PRINCIPAL del cliente (misión `un-solo-frente`, 14/10/2026).
+     *
+     * 🔴 Hasta el 14/10/2026 era "la primera ClientApi que no sea la activa": cada actualización
+     * rotaba de carpeta. Lucas decidió dejar de rotar —desde que se actualiza por el admin no hubo
+     * un solo rollback, y se actualiza de madrugada—, así que el default pasa a ser siempre el frente
+     * principal, y de ahí salen los dos casos:
+     *
+     *  - el cliente atiende desde su frente principal → el destino ES la activa → se actualiza EN EL
+     *    LUGAR (el `deploy/start` de Claude lo deja pasar sin `allow_deploy_to_active_api`, pero con
+     *    el gate de horario, y el pipeline respalda y pone el sistema en mantenimiento);
+     *  - el cliente atiende desde su frente 2 → el destino es el principal → es la ÚLTIMA ROTACIÓN,
+     *    del 2 al 1, y desde ahí queda en el caso de arriba.
+     *
+     * La regla de cuál es el principal vive en Client::frente_principal_entre() y solo ahí. Este
+     * método la llaman los tres caminos que crean actualizaciones: el panel (a través de
+     * build_create_attributes() cuando el formulario no manda destino), `POST claude/upgrades` y
+     * `POST claude/upgrades/batch`.
      *
      * @param  Client  $client
-     * @return int|null
+     * @return int|null  Null si el cliente no tiene ninguna ClientApi.
      */
     public function resolve_default_target_client_api_id(Client $client)
     {
-        $client->loadMissing('client_apis');
-
-        $active_id   = $client->active_client_api_id ? (int) $client->active_client_api_id : null;
-        $fallback_id = null;
-
-        foreach ($client->client_apis as $client_api) {
-            $api_id = (int) $client_api->id;
-            if ($fallback_id === null) {
-                $fallback_id = $api_id;
-            }
-            if ($active_id !== null && $api_id !== $active_id) {
-                return $api_id;
-            }
-        }
-
-        return $fallback_id;
+        return $client->resolver_frente_principal_client_api_id();
     }
 
     /**

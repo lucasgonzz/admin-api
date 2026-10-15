@@ -843,9 +843,17 @@ return [
                 'pendiente_revision_at', 'no_recibe_mensajes_at',
                 'no_recibe_mensajes_motivo',
 
+                /* De dónde vino el lead, calculado sobre su primer mensaje (misión
+                   origen-del-lead-y-conversiones-meta, 13/10/2026). NULL = todavía no se calculó. */
+                'origen', 'origen_calculado_at',
+
                 'created_at', 'updated_at',
             ],
             'columnas_opt_in' => [
+                /* El click id del anuncio Click-to-WhatsApp, copiado del referral. Opt-in con el mismo
+                   nombre de grupo que en whatsapp_ad_referral: sirve para depurar la atribución y
+                   las conversiones a Meta, y para nada más. */
+                'atribucion'       => ['ctwa_clid'],
                 /* 🔴 `uuid` NO ES UN IDENTIFICADOR INTERNO ACÁ: ES UNA CREDENCIAL AL PORTADOR, y por
                    eso es la única entrada de todo este archivo donde el uuid no va en la proyección
                    base. `routes/web.php` lo dice con todas las letras arriba de la ruta
@@ -945,6 +953,10 @@ return [
                 'ids'                            => ['columna' => 'id',                             'tipo' => 'lista_de_enteros'],
                 'creado_desde'                   => ['columna' => 'created_at',                     'tipo' => 'fecha_desde'],
                 'creado_hasta'                   => ['columna' => 'created_at',                     'tipo' => 'fecha_hasta'],
+                /* Verificado en LeadOrigenService::ORIGENES. ⚠️ Acá `desconocido` NO trae los NULL
+                   (leads sin origen calculado): este endpoint compara la columna tal cual. Para
+                   contarlos juntos está GET claude/leads?origen=desconocido. */
+                'origen'                         => ['columna' => 'origen',                         'tipo' => 'en', 'valores' => ['anuncio_whatsapp', 'landing', 'instagram', 'desconocido']],
             ],
             'relaciones'      => [
                 'demo' => [
@@ -1028,13 +1040,24 @@ return [
             'columnas'        => [
                 'id', 'estado', 'dia_numero', 'template_name', 'body_template',
                 'language_code', 'activa', 'solo_si_ingreso_confirmado',
+                /* El estado de Meta y el `uso`, desde la misión `plantillas-meta-y-leads-humano`
+                   (13/10/2026). `components` queda AFUERA a propósito: es el JSON de componentes
+                   tal cual se le mandó a Meta y acá viajaría como un string crudo que nadie lee
+                   —este endpoint usa DB::table, sin modelo, así que ni el cast ni el accessor
+                   `variables` aplican—. Para leerlo con sus ejemplos ya interpretados está
+                   `GET claude/templates/meta`. */
+                'meta_status', 'meta_category', 'meta_template_id', 'meta_rechazo',
+                'meta_synced_at', 'uso',
                 'created_at', 'updated_at',
             ],
             'clave_de_cursor' => 'id',
             'orden_default'   => 'asc',
             'limite_default'  => 200,
             'limite_max'      => 500,
-            'busqueda'        => ['template_name', 'body_template', 'estado'],
+            /* `uso` entra en la búsqueda porque es el campo por el que se ELIGE una plantilla
+               ("retomar un día acordado", "nutrición con un reel"): buscar por el cuerpo obliga a
+               saber cómo está redactada. */
+            'busqueda'        => ['template_name', 'body_template', 'estado', 'uso'],
             'filtros'         => [
                 /* 🔴 ACÁ NO VA UNA ENUMERACIÓN CERRADA, Y ES LA ASIMETRÍA DELIBERADA CON
                    followup_rule. `followup_templates.estado` mezcla slugs del pipeline con
@@ -1051,6 +1074,13 @@ return [
                 'activa'                     => ['columna' => 'activa',                     'tipo' => 'booleano'],
                 'solo_si_ingreso_confirmado' => ['columna' => 'solo_si_ingreso_confirmado', 'tipo' => 'booleano'],
                 'language_code'              => ['columna' => 'language_code',              'tipo' => 'texto_exacto'],
+                /* Mismo criterio que `estado`: enumeración ABIERTA. Los valores que manda Meta hoy
+                   son PENDING, APPROVED, REJECTED, PAUSED y DISABLED, pero los escribe
+                   `MetaTemplateService::aplicar_estado_de_meta()` tal cual vienen: declararlos acá
+                   en un `en` haría 422 el día que Meta agregue uno, y eso se descubriría recién
+                   cuando alguien intente filtrar por él. */
+                'meta_status'                => ['columna' => 'meta_status',                'tipo' => 'texto_exacto'],
+                'meta_category'              => ['columna' => 'meta_category',              'tipo' => 'texto_exacto'],
                 'ids'                        => ['columna' => 'id',                         'tipo' => 'lista_de_enteros'],
             ],
             'relaciones'      => [],
@@ -1402,6 +1432,49 @@ return [
             ],
             'relaciones'      => [],
             'nota' => '🔴 NO tiene lead_id, y es a propósito: el referral llega ANTES de que el lead exista y el vínculo es por teléfono normalizado. Para cruzarlo con un lead hay que pedir include=contacto y matchear el teléfono a mano. Y ojo: sólo el webhook CRUDO de Meta trae este bloque; el payload procesado de Kapso no lo incluye, así que una fila que falta puede ser eso y no que el lead no vino de un aviso.',
+        ],
+
+        /* ---------------------------------------------------------------
+         | lead_evento_meta — las conversiones de los leads que se le mandan a
+         | Meta por la CAPI, una fila por (lead, canal, evento). Canal whatsapp:
+         | los leads de anuncio (LeadSubmitted, QualifiedLead, Purchase). Canal
+         | web (desde el 13/10/2026): los que vinieron de la web, al dataset del
+         | píxel (Lead, Schedule, Purchase).
+         |
+         | Entra entera, y se revisó columna por columna: ninguna es un dato de
+         | una persona. `ctwa_clid` NO está en esta tabla (vive en leads, opt-in
+         | `atribucion`). `ultimo_error` es el motivo que se escribe sin el token
+         | (MetaConversionesService::sin_token) y `respuesta` es lo que contestó
+         | Meta recortado a events_received, messages, fbtrace_id y el código
+         | del error: Meta no devuelve datos personales.
+         --------------------------------------------------------------- */
+        'lead_evento_meta' => [
+            'tabla'           => 'lead_eventos_meta',
+            'descripcion'     => 'Conversiones de los leads que se le mandan a Meta por la CAPI, por canal (whatsapp: leads de anuncio Click-to-WhatsApp; web: leads que vinieron de la web, al dataset del píxel): qué evento, en qué estado quedó el envío, cuántos intentos y el motivo del último fallo.',
+            'columnas'        => [
+                'id', 'lead_id', 'canal', 'evento', 'estado', 'event_id', 'event_time',
+                'intentos', 'enviado_at', 'ultimo_error', 'respuesta',
+                'created_at', 'updated_at',
+            ],
+            'clave_de_cursor' => 'id',
+            'orden_default'   => 'desc',
+            'limite_default'  => 200,
+            'limite_max'      => 500,
+            'busqueda'        => ['ultimo_error'],
+            'filtros'         => [
+                'lead_id'      => ['columna' => 'lead_id',    'tipo' => 'entero'],
+                /* Verificado en LeadEventoMeta::CANALES, ::EVENTOS, ::EVENTOS_WEB y ::ESTADOS. */
+                'canal'        => ['columna' => 'canal',      'tipo' => 'en', 'valores' => ['whatsapp', 'web']],
+                'evento'       => ['columna' => 'evento',     'tipo' => 'en', 'valores' => ['LeadSubmitted', 'QualifiedLead', 'Lead', 'Schedule', 'Purchase']],
+                'estado'       => ['columna' => 'estado',     'tipo' => 'en', 'valores' => ['pendiente', 'enviando', 'enviado', 'error', 'sin_configurar', 'omitido']],
+                'evento_desde' => ['columna' => 'event_time', 'tipo' => 'fecha_desde'],
+                'evento_hasta' => ['columna' => 'event_time', 'tipo' => 'fecha_hasta'],
+                'ids'          => ['columna' => 'id',         'tipo' => 'lista_de_enteros'],
+                'creado_desde' => ['columna' => 'created_at', 'tipo' => 'fecha_desde'],
+                'creado_hasta' => ['columna' => 'created_at', 'tipo' => 'fecha_hasta'],
+            ],
+            'relaciones'      => [],
+            'nota' => '🔴 canal=whatsapp son los leads de anuncio (ctwa_clid); canal=web, los que vinieron de la web (origen=landing), al dataset del píxel (META_CAPI_WEB_DATASET_ID / META_CAPI_WEB_TOKEN, propias y sin caer a las de WhatsApp). sin_configurar = falta META_CAPI_TOKEN o META_CAPI_DATASET_ID (en canal=web, META_CAPI_WEB_TOKEN o META_CAPI_WEB_DATASET_ID) en el .env: no salió ninguna llamada. omitido = no se manda nunca: o es una etapa alcanzada antes de que existiera la medición (la registró el backfill del origen), o el lead cambió de canal antes de que saliera (el canal es pegajoso: un lead no se reporta en dos canales; ultimo_error empieza con "El lead cambió de canal"). leads:meta-capi-conciliar (cada diez minutos) reencola un error con intentos < 3 y un pendiente huérfano cuando llevan más de quince minutos quietos, siempre dentro de la vigencia del evento (Meta no acepta eventos de más de siete días). Para ver de dónde vino el lead: model=lead con include=atribucion.',
         ],
 
         /* ---------------------------------------------------------------
@@ -2840,17 +2913,19 @@ return [
                 'etapas' => [
                     'tipo'        => 'has_many', 'tabla' => 'pipeline_stages',
                     'clave_local' => 'id', 'clave_externa' => 'pipeline_id',
-                    'columnas'    => ['id', 'name', 'type', 'color', 'sort_order'],
+                    'columnas'    => ['id', 'name', 'stage_key', 'type', 'color', 'sort_order'],
                 ],
             ],
-            'nota' => 'include=etapas trae las etapas ordenadas por id: el orden del tablero es sort_order. `slug` solo lo usa el seeder (el pipeline "Agentes" tiene slug `agentes`).',
+            'nota' => 'include=etapas trae las etapas ordenadas por id: el orden del tablero es sort_order. `slug` es la clave estable del pipeline, la pone el seeder y ya no la usa solo él: desde la misión embudo-lead-pipelines la publica la API y la SPA acepta `?pipeline=<slug>` en el tablero. Los dos sembrados son `agentes` y `lead` (el embudo de cierre de Tomás, que se alimenta solo desde leads.status y lead_calls).',
         ],
 
         'pipeline_stage' => [
             'tabla'           => 'pipeline_stages',
             'descripcion'     => 'Etapas de cada pipeline del CRM: nombre, color, orden, tipo (open | won | lost, que ES el estado de las oportunidades que están adentro) y la definición de los campos que pide al entrar.',
             'columnas'        => [
-                'id', 'pipeline_id', 'name', 'color', 'type', 'sort_order', 'fields',
+                /* `stage_key` entró con la misión embudo-lead-pipelines (13/10/2026): clave estable
+                   que sobrevive a un renombre. NULL en toda etapa que no sembró un seeder. */
+                'id', 'pipeline_id', 'name', 'stage_key', 'color', 'type', 'sort_order', 'fields',
                 'created_at', 'updated_at',
             ],
             'clave_de_cursor' => 'id',
@@ -2862,6 +2937,7 @@ return [
                 'pipeline_id' => ['columna' => 'pipeline_id', 'tipo' => 'entero'],
                 /* Enumeración real: las claves de PipelineStage::TYPE_LABELS. */
                 'type'        => ['columna' => 'type',        'tipo' => 'en', 'valores' => ['open', 'won', 'lost']],
+                'stage_key'   => ['columna' => 'stage_key',   'tipo' => 'texto_exacto'],
                 'ids'         => ['columna' => 'id',          'tipo' => 'lista_de_enteros'],
             ],
             'relaciones'      => [
@@ -2871,7 +2947,7 @@ return [
                     'columnas'    => ['id', 'name', 'archived_at'],
                 ],
             ],
-            'nota' => '`fields` es la DEFINICIÓN de los campos ([{key, label, type, required, agenda, options}]); lo que se cargó en cada movimiento está en pipeline_activity.data (include=contenido).',
+            'nota' => '`fields` es la DEFINICIÓN de los campos ([{key, label, type, required, agenda, options}]); lo que se cargó en cada movimiento está en pipeline_activity.data (include=contenido). `stage_key` es la clave estable de la etapa: la siembra el seeder del pipeline y sobrevive a un renombre desde Configuración. Las cinco del embudo de leads son interesados, esperando_llamada, en_seguimiento, cerrado y no_avanza, y es con esas —no con el nombre— que la automatización encuentra su etapa destino. Para toda etapa creada desde el ABM va NULL.',
         ],
 
         'pipeline_opportunity' => [
@@ -2916,7 +2992,7 @@ return [
                 'etapa' => [
                     'tipo'        => 'belongs_to', 'tabla' => 'pipeline_stages',
                     'clave_local' => 'stage_id', 'clave_externa' => 'id',
-                    'columnas'    => ['id', 'name', 'type', 'color', 'sort_order'],
+                    'columnas'    => ['id', 'name', 'stage_key', 'type', 'color', 'sort_order'],
                 ],
                 'pipeline' => [
                     'tipo'        => 'belongs_to', 'tabla' => 'pipelines',

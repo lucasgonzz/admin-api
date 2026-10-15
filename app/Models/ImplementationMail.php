@@ -12,7 +12,7 @@ use Illuminate\Database\Eloquent\Model;
  * `ImplementacionMailService::enviar()` y nadie más.
  *
  * @property int         $implementation_id Implementación a la que pertenece.
- * @property string      $hito              bienvenida | instalado | acceso | imagenes | categorias | listo.
+ * @property string      $hito              bienvenida | instalando | instalado | acceso | imagenes | categorias | listo.
  * @property string      $email             Dirección a la que salió (o se intentó mandar).
  * @property string      $asunto            Asunto con el que salió.
  * @property string      $estado            enviado | error.

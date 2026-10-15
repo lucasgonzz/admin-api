@@ -596,7 +596,12 @@ class ActualizacionesYDeploymentPorClaudeTest extends TestCase
         $fila = DB::table('client_version_upgrades')->where('id', $upgrade_id)->first();
         $this->assertSame('claude', $fila->created_via);
         $this->assertNull($fila->created_by_admin_id);
-        $this->assertSame((int) $e['api_destino']->id, (int) $fila->target_client_api_id);
+        /* Destino por defecto = el FRENTE PRINCIPAL (decisión de Lucas del 14/10/2026, misión
+           `un-solo-frente`). Hasta esa fecha esta línea afirmaba `api_destino` ("la primera que no
+           sea la activa"), que era la especificación vieja de la rotación. En este escenario los
+           nombres de carpeta no son prefijo uno del otro, así que el principal es el de menor id:
+           `api_activa`, creada primero. Es decir: el default ahora actualiza en el lugar. */
+        $this->assertSame((int) $e['api_activa']->id, (int) $fila->target_client_api_id);
 
         $confirmadas = DB::table('client_version_upgrade_versions')
             ->where('client_version_upgrade_id', $upgrade_id)

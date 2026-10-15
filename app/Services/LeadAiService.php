@@ -9420,22 +9420,21 @@ BLOQUE_DEL_MANUAL;
         $frase_de_la_reserva = $this->frase_de_la_reserva($fin_para_la_frase);
 
         $bloque = "\n\nDEMO DIRECTA (dinamica nueva -- la demo se hace AHORA, sin horarios):\n"
-            . "  Su pagina (copiar textual; se puede pasar en cualquier momento): {$url_pagina}\n"
+            . LeadOrigenService::encabezado_de_la_pagina($lead, $url_pagina)
             . "  Estado de su pagina: {$estado_pagina}\n"
             . "  Tienda online conectada a su demo (copiar textual): " . ($url_tienda !== '' ? $url_tienda : '(sin tienda disponible: no la menciones)') . "\n"
             . "  Email del lead: " . ($email !== '' ? $email : '(no lo tenemos)') . "\n"
             . "  Carta de acceso por mail: " . ($lead->demo_mail_sent_at ? 'ya enviada (' . $lead->demo_mail_sent_at->copy()->setTimezone(DemoDirectaService::TZ)->format('H:i') . ')' : 'todavia no enviada') . "\n"
             . "  Demo: {$estado_demo}\n"
             . "Reglas de este turno:\n"
-            . "  - En tu PRIMERA respuesta al lead (la que reconoce lo que conto y le pide el nombre), pasale el link de su\n"
-            . "    pagina como mensaje aparte (separado con ---), presentandola como algo para que vaya viendo lo que hacemos.\n"
-            . "    Sin ofrecer la demo todavia, salvo que el lead la pida.\n"
+            . LeadOrigenService::regla_de_la_pagina_al_primer_contacto($lead)
             . "  - La demo se ofrece cuando el lead ya conto su rubro y su problema (calificado), o antes si el la pide. Si el\n"
             . "    bloque dice que ya abrio su pagina, podes nombrarlo (\"vi que le pegaste una mirada\").\n"
-            . "  - Si el lead pide la demo (por ejemplo \"" . LeadDemoSettings::get_cta_whatsapp_texto() . "\", que es lo que\n"
-            . "    manda el boton de su pagina, o cualquier frase equivalente), es un SI: en el mismo mensaje confirmale que la\n"
+            . "  - Si el lead pide la demo (por ejemplo " . LeadOrigenService::frases_de_cta_para_el_prompt() . ", que es lo que\n"
+            . "    mandan el boton de su pagina, el de la web y el de Instagram, o cualquier frase equivalente), es un SI: en el mismo mensaje confirmale que la\n"
             . "    haga desde una computadora y en un lugar tranquilo, decile que " . $frase_de_la_reserva . ", y devolve\n"
             . "    agendar_demo: {\"ahora\": true} con los dos links y el pedido del mail, como en cualquier aceptacion.\n"
+            . LeadOrigenService::linea_del_si_explicito($lead)
             . "  - Para ofrecerla: \"si queres, te la puedo tener lista en diez minutos\". Sin hora, sin grilla, sin preguntar\n"
             . "    horarios. Si el lead pregunta cuando, la respuesta es ahora mismo (o cuando se siente en la computadora).\n"
             . "  - Cuando acepta hacerla ahora: devolve agendar_demo: {\"ahora\": true} y en el MISMO mensaje pasale los dos\n"

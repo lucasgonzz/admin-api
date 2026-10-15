@@ -13,7 +13,8 @@ use Illuminate\Support\Facades\Log;
  * El contrato del cliente: cómo llega del lead y qué se deriva de él (misión modulo-cobranzas,
  * 18/9/2026).
  *
- * Tres cosas, y las tres salen de las mismas 17 columnas `contract_*` que el lead ya tenía:
+ * Tres cosas, y las tres salen de las mismas 20 columnas `contract_*` que el lead ya tenía (17
+ * desde modulo-cobranzas, más las tres de la modalidad desde precios-dos-modalidades, 13/10/2026):
  *
  *  1. **Copiarlo del lead al cliente** cuando el lead se promueve (`RunUserSetupService::
  *     ensure_production_client`) y, para atrás, con `cobranzas:copiar-contratos-de-leads`.
@@ -29,8 +30,15 @@ use Illuminate\Support\Facades\Log;
 class ClientContratoService
 {
     /**
-     * Las 17 columnas del contrato que comparten `leads` y `clients`, con el mismo nombre en las
-     * dos tablas. Es la lista que se copia y la que mira `lead_tiene_contrato()`.
+     * Las 20 columnas del contrato que comparten `leads` y `clients`, con el mismo nombre en las
+     * dos tablas. Es la lista que se copia, la que mira `lead_tiene_contrato()` y la que devuelve
+     * la pestaña Contrato del cliente (`ClientContratoController::respuesta()`).
+     *
+     * Las tres últimas son la modalidad del contrato (misión precios-dos-modalidades, 13/10/2026):
+     * `contract_modalidad` ('licencia' | 'suscripcion' | null = contrato histórico),
+     * `contract_sistemas` (keys de CotizadorSettings::SISTEMAS) y `contract_permanencia_meses`
+     * (plazo mínimo de la Suscripción). Se copian del lead al cliente como el resto: el cliente
+     * tiene que poder regenerar el MISMO contrato que firmó.
      *
      * @var array<int, string>
      */
@@ -52,6 +60,9 @@ class ClientContratoService
         'contract_precio_perfil_ecommerce',
         'contract_fecha_primer_pago_mensual',
         'contract_clausulas_particulares',
+        'contract_modalidad',
+        'contract_sistemas',
+        'contract_permanencia_meses',
     ];
 
     /**
@@ -63,9 +74,13 @@ class ClientContratoService
     /**
      * ¿El lead tiene algo cargado en el contrato?
      *
-     * Mira las 17 columnas y devuelve true con la primera que no esté vacía. Los enteros con
+     * Mira las 20 columnas y devuelve true con la primera que no esté vacía. Los enteros con
      * default 0 (`contract_usuarios_extra`, `contract_perfiles_ecommerce`) no cuentan como
      * "cargado" cuando valen 0, porque los tiene todo lead sin que nadie los haya tocado.
+     *
+     * Las tres de la modalidad no necesitan excepción: no tienen default (un lead que nadie tocó
+     * las tiene en null) y `contract_sistemas` vacío llega como `[]` por el cast, que ya cuenta
+     * como vacío. Una modalidad elegida sí es un dato cargado: alguien empezó el contrato.
      *
      * @param Lead $lead
      *
@@ -98,7 +113,7 @@ class ClientContratoService
      * No pisa un cliente que ya tenga `contract_copiado_desde_lead_at` salvo con `$pisar`: ese
      * cliente pudo haber editado el contrato en su propia pestaña después de la promoción, y el
      * backfill no tiene por qué deshacerle eso. Tampoco copia nada si el lead no tiene contrato
-     * cargado: marcaría "copiado del lead" sobre 17 nulos y la pestaña del cliente diría que hay
+     * cargado: marcaría "copiado del lead" sobre 20 nulos y la pestaña del cliente diría que hay
      * contrato cuando no lo hay.
      *
      * @param Lead   $lead   De dónde.

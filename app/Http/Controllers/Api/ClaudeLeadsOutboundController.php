@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Helpers\AppTime;
 use App\Helpers\WhatsappNormalizer;
 use App\Http\Controllers\Controller;
+use App\Models\FollowupTemplate;
 use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Services\LeadBroadcastService;
@@ -220,6 +221,16 @@ class ClaudeLeadsOutboundController extends Controller
             return response()->json(['message' => 'El contenido renderizado no puede estar vacío.'], 422);
         }
 
+        /*
+         * 🔴 Freno 9, el que faltaba: la plantilla tiene que EXISTIR, estar ACTIVA y estar APROBADA
+         * en Meta. Va antes del lead y antes del cooldown porque es validación del payload, y todas
+         * las validaciones del payload van primero.
+         */
+        $plantilla = $this->plantilla_para_enviar(trim((string) $request->input('template_name', '')));
+        if ($plantilla['error'] !== null) {
+            return $plantilla['error'];
+        }
+
         /* Lead destinatario. No se usa findOrFail para devolver un mensaje en español y no una página de error. */
         $lead = Lead::query()->find($lead_id);
         if ($lead === null) {
@@ -260,13 +271,20 @@ class ClaudeLeadsOutboundController extends Controller
         }
 
         $resultado = $this->enviar_plantilla_al_lead($sender, $lead, [
-            'template_name'        => trim((string) $request->input('template_name', '')),
-            'language_code'        => $this->resolver_idioma($request->input('language_code')),
+            'template_name'        => (string) $plantilla['fila']->template_name,
+            /*
+             * 🔴 El idioma sale de la FILA, no del request, y eso es el punto 4 de M5. Meta aprueba
+             * una plantilla para un idioma concreto: mandar `cc_coord_dia_acordado` con `es` cuando
+             * se aprobó como `es_AR` es un envío que Meta descarta por plantilla inexistente, y el
+             * admin lo contesta con 200 y `enviado=false`. Guardar el idioma y no usarlo no servía
+             * de nada; si el llamador manda otro, se ignora y se le dice en la respuesta.
+             */
+            'language_code'        => $this->resolver_idioma($plantilla['fila']->language_code),
             'variables'            => $this->normalizar_variables($request->input('variables', [])),
             'content'              => $content,
             'followup_template_id' => $request->filled('followup_template_id')
                 ? (int) $request->input('followup_template_id')
-                : null,
+                : (int) $plantilla['fila']->id,
             'context'              => trim((string) $request->input('context', '')),
         ], true);
 
@@ -275,7 +293,89 @@ class ClaudeLeadsOutboundController extends Controller
             'whatsapp_message_id' => $resultado['whatsapp_message_id'],
             'error'               => $resultado['error'],
             'lead_message'        => $resultado['lead_message'],
+            /* Con qué idioma salió de verdad, para que un llamador que mandó otro lo vea. */
+            'language_code'       => $this->resolver_idioma($plantilla['fila']->language_code),
         ], 200);
+    }
+
+    /**
+     * La plantilla con la que se puede enviar, o el 422 que explica por qué no.
+     *
+     * 🔴 ESTE GATE NO EXISTÍA Y ES EL AGUJERO QUE CIERRA ESTA MISIÓN (punto 4 de M5, 13/10/2026).
+     * Medido el 13/10/2026 (ficha `seguimientos-y-plantillas.md` §2 y §5): `send-template` no
+     * chequeaba NADA —ni que la plantilla existiera, ni que estuviera activa, ni que Meta la
+     * hubiera aprobado—. Si Meta no conocía el nombre, el envío fallaba en Kapso y este endpoint
+     * contestaba **200 con `enviado=false`**: desde afuera eso se lee como un éxito parcial y una
+     * corrida de `/leads` seguía adelante creyendo que el lead recibió el mensaje. Y encima quedaba
+     * un `LeadMessage` rojo en el hilo y un aviso a los admins por cada intento.
+     *
+     * Las tres condiciones, y por qué cada una:
+     *   - FILA EXISTENTE: sin fila no hay `uso`, ni idioma aprobado, ni estado de Meta. Un nombre
+     *     tipeado a mano con una letra de más pasaba derecho hasta Meta.
+     *   - `activa`: es el interruptor que ya existía y que el panel respeta; el envío no lo miraba.
+     *   - `meta_status = APPROVED`: es lo único que prueba que Meta la va a entregar.
+     *
+     * 🔴 Y POR QUÉ ESTO NO ROMPE LO QUE YA ANDABA: la migración
+     * `2026_10_13_100100_add_meta_fields_to_followup_templates_table` deja en `APPROVED` toda fila
+     * que estaba `activa` al migrar, porque en este sistema `activa=true` ya significaba «aprobada
+     * en Meta» (las tres que Meta tenía en revisión el 3/9 quedaron en `activa=false` a propósito).
+     * Sin ese backfill, este gate dejaría a `/leads` sin poder mandar una sola plantilla entre el
+     * deploy y la primera corrida de `templates:sync-meta`, hasta una hora después.
+     *
+     * El 422 nombra siempre el próximo paso concreto (`refresh`, el listado, el alta): un freno que
+     * no dice cómo salir del freno obliga a leer código del otro lado.
+     *
+     * @param string $template_name Nombre crudo, ya trimeado por el llamador.
+     *
+     * @return array{fila: \App\Models\FollowupTemplate|null, error: \Illuminate\Http\JsonResponse|null}
+     */
+    protected function plantilla_para_enviar(string $template_name): array
+    {
+        if ($template_name === '') {
+            return ['fila' => null, 'error' => response()->json([
+                'message' => 'El nombre de la plantilla no puede estar vacío.',
+                'motivo'  => 'nombre_vacio',
+            ], 422)];
+        }
+
+        $fila = FollowupTemplate::query()->where('template_name', $template_name)->first();
+
+        if ($fila === null) {
+            return ['fila' => null, 'error' => response()->json([
+                'message' => 'No hay ninguna plantilla registrada con el nombre "' . $template_name . '": no se envió '
+                    . 'nada. GET claude/templates/meta lista las que hay con su estado y su uso. Si la plantilla ya '
+                    . 'existe en Meta pero no está registrada, POST claude/followup-templates la registra; si no '
+                    . 'existe, POST claude/templates/meta la crea.',
+                'motivo'  => 'plantilla_no_registrada',
+            ], 422)];
+        }
+
+        if ((bool) $fila->activa !== true) {
+            return ['fila' => null, 'error' => response()->json([
+                'message' => 'La plantilla "' . $template_name . '" está desactivada (activa=false): no se envió nada. '
+                    . 'Estado en Meta: ' . ($fila->meta_status !== null ? $fila->meta_status : 'sin consultar')
+                    . '. Si Meta ya la aprobó, POST claude/templates/meta/' . $template_name . '/refresh la activa.',
+                'motivo'      => 'plantilla_inactiva',
+                'meta_status' => $fila->meta_status,
+            ], 422)];
+        }
+
+        $meta_status = $fila->meta_status !== null ? strtoupper((string) $fila->meta_status) : '';
+        if ($meta_status !== 'APPROVED') {
+            return ['fila' => null, 'error' => response()->json([
+                'message' => 'La plantilla "' . $template_name . '" no está aprobada en Meta (meta_status: '
+                    . ($meta_status !== '' ? $meta_status : 'sin consultar') . '): no se envió nada, porque Meta la '
+                    . 'habría descartado y el envío habría quedado como un fallo rojo en el hilo del lead. '
+                    . 'POST claude/templates/meta/' . $template_name . '/refresh trae el estado de ahora; '
+                    . 'templates:sync-meta lo hace solo cada hora y la activa cuando pasa a APPROVED.'
+                    . ($fila->meta_rechazo !== null ? ' Lo último que dijo Meta: ' . $fila->meta_rechazo : ''),
+                'motivo'       => 'plantilla_no_aprobada',
+                'meta_status'  => $fila->meta_status,
+                'meta_rechazo' => $fila->meta_rechazo,
+            ], 422)];
+        }
+
+        return ['fila' => $fila, 'error' => null];
     }
 
     /**
@@ -370,9 +470,24 @@ class ClaudeLeadsOutboundController extends Controller
         }
 
         $template_name = trim((string) $request->input('template_name', ''));
-        if ($template_name === '') {
-            return response()->json(['message' => 'El nombre de la plantilla no puede estar vacío.'], 422);
+
+        /*
+         * 🔴 El mismo gate que el endpoint individual, y acá importa más todavía: el lote manda la
+         * MISMA plantilla a hasta 50 leads. Sin esto, una plantilla rechazada o desactivada producía
+         * cincuenta `LeadMessage` rojos en cincuenta conversaciones y cincuenta avisos a los admins,
+         * uno por uno, antes de que el corte-al-primer-fallo llegara a actuar. Va antes de resolver
+         * los destinatarios: es un error del payload y no depende de ningún lead.
+         *
+         * Se valida una sola vez para todo el lote porque `template_name` es uno solo por llamada.
+         */
+        $plantilla = $this->plantilla_para_enviar($template_name);
+        if ($plantilla['error'] !== null) {
+            return $plantilla['error'];
         }
+        /* A Meta sale el nombre de la FILA, no el que vino en el pedido: la búsqueda del gate no
+           distingue mayúsculas (collation `_ci`), y `CC_X` pasaría el gate para que Meta lo rechace
+           como inexistente. Igual que el envío individual. */
+        $template_name = (string) $plantilla['fila']->template_name;
 
         /* Ids únicos conservando el orden en que los nombró el llamador. Un id repetido se omite en
            vez de mandar dos veces el mismo mensaje al mismo teléfono. */
@@ -543,10 +658,13 @@ class ClaudeLeadsOutboundController extends Controller
         }
 
         /* --- Envío real, uno por uno. --- */
-        $language_code        = $this->resolver_idioma($request->input('language_code'));
+        /* El idioma sale de la FILA de la plantilla y no del request, por lo mismo que en el
+           endpoint individual: Meta la aprobó para un idioma y ese es el único con el que la va a
+           entregar. Ver el docblock de plantilla_para_enviar(). */
+        $language_code        = $this->resolver_idioma($plantilla['fila']->language_code);
         $followup_template_id = $request->filled('followup_template_id')
             ? (int) $request->input('followup_template_id')
-            : null;
+            : (int) $plantilla['fila']->id;
         $context_del_llamador = trim((string) $request->input('context', ''));
 
         $resultados     = [];

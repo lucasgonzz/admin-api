@@ -37,6 +37,24 @@ class AfipFacturacionService
     const DOC_TIPO_CUIT = 80;
 
     /**
+     * Tipo de documento AFIP para "Consumidor Final / Otro" (receptor sin identificar). Va siempre
+     * con `DocNro = 0`. Es lo que se usa cuando el cliente tiene el tilde `facturar_consumidor_final`
+     * (misión mensualidad-consumidor-final, 13/10/2026).
+     *
+     * @var int
+     */
+    const DOC_TIPO_CONSUMIDOR_FINAL = 99;
+
+    /**
+     * `CondicionIVAReceptorId` de AFIP para Consumidor Final. Es el mismo 5 que
+     * `CondicionIvaReceptorResolver::FALLBACK_ID`, pero acá es un dato fijo del comprobante a
+     * Consumidor Final y no un fallback: no debe cambiar si alguien toca el fallback del resolver.
+     *
+     * @var int
+     */
+    const CONDICION_IVA_CONSUMIDOR_FINAL = 5;
+
+    /**
      * Emite (o recupera, si ya está autorizada) la Factura C de la mensualidad
      * de un Client para un período dado.
      *
@@ -44,7 +62,7 @@ class AfipFacturacionService
      * @param  string $periodo Período a facturar, formato 'YYYY-MM'.
      * @return array{ok: bool, ya_facturado: bool, resultado: string|null, cae: string|null,
      *               cbte_numero: int|null, error_message: string|null, invoice_id: int|null,
-     *               importe_total: float|null}
+     *               importe_total: float|null, consumidor_final: bool|null}
      */
     public function emitir(Client $client, $periodo)
     {
@@ -62,17 +80,13 @@ class AfipFacturacionService
             return $this->respuesta_error('Falta configurar el CUIT o el punto de venta de ComercioCity antes de facturar (ver configuración fiscal).');
         }
 
-        // 3. Datos fiscales del receptor: sin CUIT no se puede armar el comprobante (DocTipo 80).
-        // El CUIT viaja a AFIP solo con dígitos: el placeholder del modal invita a escribirlo con
-        // guiones (`20-12345678-9`) y así AFIP lo rechaza (hallazgo del 31/8/2026).
-        $cuit_receptor = self::cuit_solo_digitos($client->afip_cuit);
+        // 3. Datos fiscales del receptor: con CUIT (DocTipo 80) o, si el cliente tiene el tilde
+        // `facturar_consumidor_final`, a Consumidor Final sin identificar (DocTipo 99). Toda esa
+        // decisión vive en `resolver_receptor()`; acá solo se corta si devolvió un error.
+        $receptor = $this->resolver_receptor($client);
 
-        if ($cuit_receptor === '') {
-            return $this->respuesta_error('Cargá el CUIT fiscal del cliente antes de facturar.');
-        }
-
-        if (strlen($cuit_receptor) !== 11) {
-            return $this->respuesta_error('El CUIT fiscal del cliente tiene '.strlen($cuit_receptor).' dígitos y un CUIT tiene 11. Revisalo antes de facturar.');
+        if ($receptor['error'] !== null) {
+            return $this->respuesta_error($receptor['error']);
         }
 
         // 4. Monto a facturar: el total de mensualidad ya calculado en admin (prompts 328/329).
@@ -104,9 +118,6 @@ class AfipFacturacionService
 
         $numero = $numero_result['numero_comprobante'];
 
-        // Condición IVA del receptor cacheada en el Client (texto libre → id AFIP).
-        $condicion_receptor_id = CondicionIvaReceptorResolver::resolve($client->afip_condicion_iva);
-
         // 7. Arma el FeCAEReq para Factura C monotributo: sin IVA discriminado, un único ítem conceptual.
         $invoice = [
             'FeCAEReq' => [
@@ -119,8 +130,8 @@ class AfipFacturacionService
                     'FECAEDetRequest' => [
                         // Concepto 1 = productos (igual que empresa-api).
                         'Concepto' => 1,
-                        'DocTipo' => self::DOC_TIPO_CUIT,
-                        'DocNro' => $cuit_receptor,
+                        'DocTipo' => $receptor['doc_tipo'],
+                        'DocNro' => $receptor['doc_nro'],
                         'CbteDesde' => $numero,
                         'CbteHasta' => $numero,
                         'CbteFch' => date('Ymd'),
@@ -134,7 +145,7 @@ class AfipFacturacionService
                         'ImpTrib' => 0,
                         'MonId' => 'PES',
                         'MonCotiz' => 1,
-                        'CondicionIVAReceptorId' => $condicion_receptor_id,
+                        'CondicionIVAReceptorId' => $receptor['condicion_iva_id'],
                     ],
                 ],
             ],
@@ -152,13 +163,15 @@ class AfipFacturacionService
             'cbte_numero' => $numero,
             'punto_venta' => $config->punto_venta,
             'cuit_negocio' => $config->cuit,
-            'cuit_cliente' => $cuit_receptor,
-            'doc_tipo' => self::DOC_TIPO_CUIT,
-            'doc_nro' => $cuit_receptor,
+            // A Consumidor Final `cuit_cliente` queda en null: no hay CUIT que guardar, y el PDF y el
+            // QR deciden por `doc_tipo`/`doc_nro`.
+            'cuit_cliente' => $receptor['cuit_cliente'],
+            'doc_tipo' => $receptor['doc_tipo'],
+            'doc_nro' => $receptor['doc_nro'],
             'importe_total' => $total,
             'imp_neto' => $total,
             'imp_iva' => 0,
-            'condicion_iva_receptor_id' => $condicion_receptor_id,
+            'condicion_iva_receptor_id' => $receptor['condicion_iva_id'],
             'afip_produccion' => (bool) $config->afip_produccion,
             'request' => $result['request'],
             'response' => $result['response'],
@@ -191,6 +204,85 @@ class AfipFacturacionService
         $invoice = MensualidadInvoice::create($datos_invoice);
 
         return $this->respuesta($invoice, false);
+    }
+
+    /**
+     * Decide cómo se identifica al receptor en el comprobante y valida lo que haga falta.
+     *
+     * Dos caminos, y el que se elige lo decide SOLO el tilde del cliente:
+     *
+     * - `facturar_consumidor_final` en 1: Consumidor Final sin identificar. `DocTipo 99`,
+     *   `DocNro '0'`, `CondicionIVAReceptorId 5` y `cuit_cliente` null. 🔴 NO se mira `afip_cuit` ni
+     *   `afip_condicion_iva` a propósito: el tilde es una decisión explícita de Lucas, y un CUIT
+     *   cargado de antes (o una condición "Responsable inscripto" traída de ARCA) no debe volver a
+     *   convertir la factura en una con CUIT ni mandar un `CondicionIVAReceptorId` incoherente con
+     *   un `DocTipo 99`. El dato queda guardado por si el tilde se destilda.
+     * - Sin el tilde: el camino de siempre, idéntico (mismos mensajes, mismo orden de cortes). El
+     *   CUIT viaja a AFIP solo con dígitos, porque el placeholder del modal invita a escribirlo con
+     *   guiones (`20-12345678-9`) y así AFIP lo rechaza (hallazgo del 31/8/2026), y la condición IVA
+     *   se resuelve desde el texto libre cacheado en el cliente.
+     *
+     * Público para poder probarse sin llegar a ARCA.
+     *
+     * @param  Client $client Cliente a facturar (receptor).
+     * @return array{error: string|null, doc_tipo: int|null, doc_nro: string|null,
+     *               cuit_cliente: string|null, condicion_iva_id: int|null, consumidor_final: bool}
+     *         `error` es el mensaje de corte (o null si el receptor está listo para emitir).
+     */
+    public function resolver_receptor(Client $client)
+    {
+        // Consumidor Final: no hay nada que validar del cliente (el tilde ya es la decisión).
+        if ($client->facturar_consumidor_final) {
+            return [
+                'error' => null,
+                'doc_tipo' => self::DOC_TIPO_CONSUMIDOR_FINAL,
+                'doc_nro' => '0',
+                'cuit_cliente' => null,
+                'condicion_iva_id' => self::CONDICION_IVA_CONSUMIDOR_FINAL,
+                'consumidor_final' => true,
+            ];
+        }
+
+        // Camino con CUIT (DocTipo 80): sin CUIT válido no se puede armar el comprobante.
+        $cuit_receptor = self::cuit_solo_digitos($client->afip_cuit);
+
+        if ($cuit_receptor === '') {
+            return $this->receptor_con_error('Cargá el CUIT fiscal del cliente antes de facturar.');
+        }
+
+        if (strlen($cuit_receptor) !== 11) {
+            return $this->receptor_con_error('El CUIT fiscal del cliente tiene '.strlen($cuit_receptor).' dígitos y un CUIT tiene 11. Revisalo antes de facturar.');
+        }
+
+        return [
+            'error' => null,
+            'doc_tipo' => self::DOC_TIPO_CUIT,
+            'doc_nro' => $cuit_receptor,
+            'cuit_cliente' => $cuit_receptor,
+            // Condición IVA del receptor cacheada en el Client (texto libre → id AFIP).
+            'condicion_iva_id' => CondicionIvaReceptorResolver::resolve($client->afip_condicion_iva),
+            'consumidor_final' => false,
+        ];
+    }
+
+    /**
+     * Resultado de `resolver_receptor()` cuando el receptor no se puede armar: solo trae el
+     * mensaje, con el resto de las claves en null para que quien lo lea no tenga que chequear
+     * `isset()`.
+     *
+     * @param  string $mensaje
+     * @return array
+     */
+    protected function receptor_con_error($mensaje)
+    {
+        return [
+            'error' => $mensaje,
+            'doc_tipo' => null,
+            'doc_nro' => null,
+            'cuit_cliente' => null,
+            'condicion_iva_id' => null,
+            'consumidor_final' => false,
+        ];
     }
 
     /**
@@ -327,6 +419,10 @@ class AfipFacturacionService
             'importe_total' => $invoice->importe_total !== null ? (float) $invoice->importe_total : null,
             // Ambiente de la emisión (campo nuevo, opcional para quien consume): false = homologación.
             'afip_produccion' => (bool) $invoice->afip_produccion,
+            // La factura salió a Consumidor Final sin identificar (DocTipo 99). Campo nuevo, opcional
+            // para quien consume: el confirm/aviso del front puede mostrarlo, y un front anterior
+            // lo ignora.
+            'consumidor_final' => (int) $invoice->doc_tipo === self::DOC_TIPO_CONSUMIDOR_FINAL,
         ];
     }
 

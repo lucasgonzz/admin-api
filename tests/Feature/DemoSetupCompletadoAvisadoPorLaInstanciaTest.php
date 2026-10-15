@@ -31,6 +31,9 @@ use Tests\TestCase;
  *
  * Y la quinta pata, que es requisito duro: la dinámica ACTUAL no cambia de comportamiento por
  * ningún camino.
+ *
+ * ACTUALIZACIÓN 14/10/2026 (misión demo-solo-experiencia-nueva): la dinámica ACTUAL se retiró, así
+ * que esa quinta pata (el caso 5 y el de la dinámica nula) se eliminó: ya no hay leads que la usen.
  */
 class DemoSetupCompletadoAvisadoPorLaInstanciaTest extends TestCase
 {
@@ -57,7 +60,8 @@ class DemoSetupCompletadoAvisadoPorLaInstanciaTest extends TestCase
     /**
      * Lead con su canal de eventos emitido, en la dinámica y el estado de setup que pida el caso.
      *
-     * @param string    $dinamica  Lead::EXPERIENCIA_NUEVA | Lead::EXPERIENCIA_ACTUAL.
+     * @param string    $dinamica  Lead::EXPERIENCIA_NUEVA (desde el 14/10/2026 el modelo fuerza esa dinámica en cada guardado: la
+     *     dinámica ACTUAL está retirada y ya no se puede fabricar un lead en ella).
      * @param string    $setup     Valor de `demo_setup_status`.
      * @param Demo|null $demo      Demo asignada; null = lead sin demo (camino de mark_failed).
      * @param string    $error     Valor de `demo_setup_last_error`.
@@ -230,45 +234,4 @@ class DemoSetupCompletadoAvisadoPorLaInstanciaTest extends TestCase
         $this->assertNull($lead->demo_setup_last_error);
     }
 
-    /**
-     * 5. La dinámica ACTUAL no cambia de comportamiento por ningún camino.
-     *
-     *  - El canal de eventos la rechaza con 401 aunque tenga token, así que el evento nuevo no la
-     *    alcanza ni por accidente.
-     *  - Y `mark_failed()` le sigue pisando el `exitoso` exactamente como antes de esta misión: es
-     *    lo que necesita el botón "Correr demo setup ahora" del panel, que se pulsa para re-correr
-     *    el setup a propósito y tiene que poder registrar que esta vez falló.
-     */
-    public function test_la_dinamica_actual_no_cambia_de_comportamiento(): void
-    {
-        $lead = $this->crear_lead(Lead::EXPERIENCIA_ACTUAL, 'exitoso');
-
-        $this->postear_setup_completado($lead)->assertStatus(401);
-
-        $this->assertSame(0, DemoEventoRecibido::where('lead_id', $lead->id)->count());
-        $this->assertSame('exitoso', (string) $lead->refresh()->demo_setup_status);
-
-        // Y el camino de mark_failed sigue siendo el de siempre: pisa el exitoso.
-        (new RunDemoSetupService())->run($lead);
-
-        $lead->refresh();
-
-        $this->assertSame('fallido', (string) $lead->demo_setup_status);
-        $this->assertStringContainsString('no tiene demo asignada', (string) $lead->demo_setup_last_error);
-    }
-
-    /**
-     * Y la dinámica nula o desconocida se comporta como la actual, que es el fallback duro de
-     * `demo_experiencia_efectiva()` — el que protege a los leads reales de producción.
-     */
-    public function test_la_dinamica_nula_tampoco_cambia_de_comportamiento(): void
-    {
-        $lead = $this->crear_lead(Lead::EXPERIENCIA_ACTUAL, 'exitoso');
-        $lead->demo_experiencia = null;
-        $lead->save();
-
-        (new RunDemoSetupService())->run($lead);
-
-        $this->assertSame('fallido', (string) $lead->refresh()->demo_setup_status);
-    }
 }

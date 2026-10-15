@@ -12,8 +12,9 @@ use Illuminate\Support\Facades\Log;
 
 /**
  * El contrato de un cliente ya promovido (misión modulo-cobranzas, 18/9/2026): verlo, editarlo y
- * generar el PDF, con las mismas 17 columnas `contract_*` que tiene el lead más los meses entre
- * actualizaciones por IPC.
+ * generar el PDF, con las mismas 20 columnas `contract_*` que tiene el lead (17 desde
+ * modulo-cobranzas, más modalidad, sistemas y plazo mínimo desde precios-dos-modalidades,
+ * 13/10/2026) más los meses entre actualizaciones por IPC.
  *
  * Es la pestaña Contrato del modal del cliente. El PDF sale por el mismo `LeadContractPdfService`
  * del lead, que desde esta misión acepta un `Client`.
@@ -67,6 +68,15 @@ class ClientContratoController extends Controller
             'contract_precio_perfil_ecommerce'   => ['nullable', 'string', 'max:255'],
             'contract_fecha_primer_pago_mensual' => ['nullable', 'date'],
             'contract_meses_actualizacion'       => ['nullable', 'integer', 'min:1', 'max:60'],
+            /* Modalidad del contrato (misión precios-dos-modalidades, 13/10/2026). Las tres son
+             * opcionales: una SPA vieja que no las manda no las toca (solo se escriben las claves
+             * presentes, ver abajo). La modalidad y los sistemas se validan contra listas cerradas
+             * porque deciden qué cláusulas lleva el PDF; las keys de los sistemas son las de
+             * CotizadorSettings::SISTEMAS. El plazo mínimo, con el mismo rango que los meses de IPC. */
+            'contract_modalidad'                 => ['nullable', 'string', 'in:licencia,suscripcion'],
+            'contract_sistemas'                  => ['nullable', 'array'],
+            'contract_sistemas.*'                => ['string', 'in:gestion,ecommerce,agentes'],
+            'contract_permanencia_meses'         => ['nullable', 'integer', 'min:1', 'max:60'],
         ]);
 
         /* Los montos viajan como string (así los guarda el lead: "1.500", "USD 100") y los

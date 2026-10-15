@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\Pipelines\PipelineLeadFunnelService;
 use Illuminate\Database\Eloquent\Model;
 
 /**
@@ -31,6 +32,34 @@ class LeadCall extends Model
         'scheduled_at' => 'datetime',
         'started_at'   => 'datetime',
     ];
+
+    /**
+     * Embudo "Leads" de Pipelines (misión embudo-lead-pipelines, 13/10/2026): la oportunidad de
+     * Tomás se mueve con el estado de esta llamada — con `scheduled_at` pasa a "Esperando la
+     * llamada", y cuando queda `completada` pasa a "En seguimiento".
+     *
+     * Mira `wasChanged()` sobre las dos columnas que gobiernan el movimiento (y la fila recién
+     * creada) para no llamar al CRM en cada `update()` de esta tabla: `LeadCallService` escribe
+     * `meet_url`, `google_event_id` y `started_at` por su cuenta, y ninguna de esas mueve nada.
+     *
+     * 🔴 El servicio se traga sus propios errores a propósito (ver su docblock): esto corre en el
+     * webhook de Recall.ai y en los botones del panel del closer.
+     *
+     * @return void
+     */
+    protected static function booted()
+    {
+        static::saved(function (LeadCall $llamada) {
+            if (! $llamada->wasRecentlyCreated
+                && ! $llamada->wasChanged('scheduled_at')
+                && ! $llamada->wasChanged('estado')
+            ) {
+                return;
+            }
+
+            app(PipelineLeadFunnelService::class)->al_guardar_llamada($llamada);
+        });
+    }
 
     /**
      * Scope `withAll` requerido por la convención de admin-api (regla 20). Todavía no expone

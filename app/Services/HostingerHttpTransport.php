@@ -71,10 +71,30 @@ abstract class HostingerHttpTransport
      * Fragmentos, en minúscula, con los que un error de la API se reconoce como "el recurso ya
      * existía".
      *
-     * 🔴 Esta lista NO está verificada contra la API real (§10.1 del plan: el token todavía no
-     * existe). Por eso lo que no matchea acá se clasifica DESCONOCIDA y hace fallar al llamador, en
-     * vez de asumir que ya existía: asumirlo de más significaría seguir de largo creyendo que la
-     * base está creada cuando en realidad no se creó nunca.
+     * 🔴 Esta lista NO está verificada entera contra la API real (§10.1 del plan: el token todavía no
+     * existía cuando se escribió). Por eso lo que no matchea acá se clasifica DESCONOCIDA y hace
+     * fallar al llamador, en vez de asumir que ya existía: asumirlo de más significaría seguir de
+     * largo creyendo que la base está creada cuando en realidad no se creó nunca.
+     *
+     * Las dos últimas frases SÍ salen de mensajes reales de Hostinger, medidos el 13/10/2026 al
+     * instalar el esqueleto de Los Peña (cliente 73), los dos con status 422:
+     *
+     *   - `"Subdomain is already hosted"` — el POST de cada subdominio del esqueleto, porque la
+     *     instalación real del mismo cliente ya los había creado. Hostinger no dice "already
+     *     exists" sino "already hosted", y por eso caía en DESCONOCIDA.
+     *   - `"[Hosting:9999] Database name must be unique"` — el POST de la base, por lo mismo.
+     *
+     * 🔴 La segunda va entera (`database name must be unique`) y NO como `name must be unique` ni
+     * como `must be unique` pelado: lo único medido es esa frase, y las más cortas matchean cosas
+     * que no son una base existente. `name must be unique` también reconoce "Subdomain name must be
+     * unique" y "the site user name must be unique", y esta lista no es solo de Hostinger:
+     * clasificar_error() también la leen VpsDatabaseProvisioner y VpsSiteProvisioner sobre errores
+     * de `clpctl`, donde un mensaje de validación de ese estilo se daría por "el sitio ya existía"
+     * sin que exista. Ensanchar de más acá es justo lo que "nunca se adivina" prohíbe.
+     *
+     * Ojo: que un mensaje matchee NO alcanza para dar por buena la base. En SharedHostingProvisioning
+     * un 422 de la creación de la base se verifica igual contra la lista de la cuenta antes de
+     * reusarla; esta clasificación solo decide cuánto se desconfía del error.
      *
      * @var array<int, string>
      */
@@ -85,6 +105,8 @@ abstract class HostingerHttpTransport
         'has already been taken',
         'duplicate entry',
         'ya existe',
+        'already hosted',
+        'database name must be unique',
     ];
 
     /**

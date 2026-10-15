@@ -7,6 +7,7 @@ use App\Jobs\RunDeploymentJob;
 use App\Models\Client;
 use App\Models\ClientApi;
 use App\Models\ClientVersionUpgrade;
+use App\Services\DeploymentService;
 use Illuminate\Http\Request;
 
 /**
@@ -152,6 +153,20 @@ class DeploymentController extends BaseController
     {
         $upgrade = $this->find_upgrade_by_route_id($id);
 
+        /* 🔴 Misión `un-solo-frente` (14/10/2026): un despliegue en el lugar que no llegó al `artisan
+           up` no se cierra. Medido por el verificador: sobre un `failed` con el cliente en `down`, este
+           botón dejaba `completed`/`terminada` sin `up`, movía current_version y mandaba el mail al
+           dueño. Misma guarda que `claude/upgrades/{id}/deploy/configure-system`; el job además mira el
+           disco antes de cerrar. */
+        if (DeploymentService::en_el_lugar_sin_llegar_al_up($upgrade)) {
+            return response()->json([
+                'message' => 'Este despliegue va en el lugar y no llegó al artisan up: el cliente puede estar en '
+                    . 'mantenimiento, y configurar el sistema cerraría el upgrade con el sistema abajo. Terminá primero '
+                    . 'el despliegue reanudándolo desde la etapa que falló (POST claude/upgrades/' . (int) $upgrade->id
+                    . '/deploy/start con resume_from_step).',
+            ], 422);
+        }
+
         if ($upgrade->deployment_status !== 'paused_post_tasks' && $upgrade->deployment_status !== 'failed') {
             return response()->json([
                 'message' => 'El deployment no está listo para configurar el sistema (URL/versión por defecto).',
@@ -224,6 +239,20 @@ class DeploymentController extends BaseController
         if (! $has_retryable_command) {
             return response()->json([
                 'message' => 'No hay comandos automatizados pendientes o fallidos para reintentar.',
+            ], 422);
+        }
+
+        /* 🔴 Misión `un-solo-frente` (14/10/2026): en el lugar, un fallo ANTES del `artisan up` (en la
+           API, las migraciones o los seeders) dejó al cliente abajo, y este reintento correría los
+           comandos y pausaría sin levantarlo. Los comandos del en el lugar corren DESPUÉS del `up`: si
+           el que falló es uno de ellos, la marca del `up` ya está y este reintento es el camino.
+           Misma guarda que `claude/upgrades/{id}/deploy/retry-commands`. */
+        if (DeploymentService::en_el_lugar_sin_llegar_al_up($upgrade)) {
+            return response()->json([
+                'message' => 'Este despliegue va en el lugar y no llegó al artisan up: el cliente puede estar en '
+                    . 'mantenimiento, y reintentar acá correría los comandos sin levantarlo. Terminá el despliegue '
+                    . 'reanudándolo desde la etapa que falló (POST claude/upgrades/' . (int) $upgrade->id
+                    . '/deploy/start con resume_from_step).',
             ], 422);
         }
 

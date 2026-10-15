@@ -64,7 +64,18 @@ class ImplementationActionService
      * Hoy viaja solo la de Serper. La de Google está en la lista por si algún día se suma a este
      * camino: así el preview ya nace tapándola y no depende de que alguien se acuerde.
      */
-    private const CAMPOS_TAPADOS_EN_EL_PREVIEW = ['serper_api_key', 'google_custom_search_api_key'];
+    private const CAMPOS_TAPADOS_EN_EL_PREVIEW = [
+        'serper_api_key',
+        'google_custom_search_api_key',
+        // Credenciales de prueba de Zipnova y de Mercado Pago de las demos (misión
+        // credenciales-demo-zipnova-mp). Solo viajan en el demo-setup, nunca en este user-setup, así
+        // que hoy este preview no las ve; están en la lista por si algún día un armado las trae: el
+        // preview ya nace tapándolas y no depende de que alguien se acuerde.
+        'zipnova_api_token',
+        'zipnova_api_secret',
+        'mercadopago_access_token',
+        'mercadopago_public_key',
+    ];
 
     /**
      * @var ImplementationConversationService Fuente de los textos (build_*_body()) y del envío/persistencia.
