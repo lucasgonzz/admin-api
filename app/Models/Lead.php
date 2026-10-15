@@ -10,6 +10,7 @@ use App\Models\LeadPipelineStatus;
 use App\Helpers\WhatsappNormalizer;
 use App\Services\DemoUrlNormalizer;
 use App\Services\LeadDemoFormMapper;
+use App\Services\Pipelines\PipelineLeadFunnelService;
 use App\Services\LeadDemoSettings;
 use App\Services\LeadWhatsappOnboardingSettings;
 use Illuminate\Database\Eloquent\Model;
@@ -178,6 +179,25 @@ class Lead extends Model
             ) {
                 $lead->requiere_verificacion_mensajes = true;
             }
+        });
+
+        /* Embudo "Leads" de Pipelines (misión embudo-lead-pipelines, 13/10/2026): cuando el lead
+           confirma interés después de la demo (`closer_activo`) nace su oportunidad en el tablero
+           de Tomás, y queda donde diga el estado de sus videollamadas.
+
+           Va en `saved` y no en `saving` porque el alta necesita el `id` del lead ya guardado: una
+           oportunidad que apuntara a un lead que al final no se guardó sería una tarjeta sin sujeto.
+
+           🔴 El servicio se traga sus propios errores a propósito (ver su docblock). `saved` de Lead
+           corre en el webhook de WhatsApp, en LeadAiService y en el scheduler de seguimientos: una
+           excepción del CRM acá empezaría a tirar 500 en lugares que no tienen nada que ver con el
+           CRM. */
+        static::saved(function (Lead $lead) {
+            if (! $lead->wasChanged('status')) {
+                return;
+            }
+
+            app(PipelineLeadFunnelService::class)->al_cambiar_estado_del_lead($lead);
         });
 
         static::deleting(function (Lead $lead) {
@@ -467,6 +487,24 @@ class Lead extends Model
                a los estados visibles (ver scheduled_messages()), que es lo único que se muestra. */
             'scheduled_messages'
         );
+
+        /* La última llamada del closer, para la pestaña "Resumen" (ver `last_call()`). Va en una
+           llamada aparte y no sumada al `with()` de arriba porque esa forma variádica solo acepta
+           NOMBRES de relación: una entrada con closure adentro de esa lista la rompe.
+
+           🔴 CON COLUMNAS ACOTADAS, SIN `transcript`. El payload del lead se rehidrata entero
+           después de cada acción del panel y de cada evento de LeadBroadcastService; sumarle el
+           longText de la transcripción en cada vuelta sería pagar decenas de KB por algo que ya
+           viaja duplicado adentro de `call_summary.transcripcion_completa` (lo duplica
+           CallSummaryService a propósito). `lead_id` va en la lista de columnas porque es la clave
+           con la que Eloquent empareja la relación: sin ella la llamada no se adosa a ningún lead. */
+        $query->with(['last_call' => function ($relacion) {
+            $relacion->select([
+                'id', 'lead_id', 'meet_url', 'estado', 'scheduled_at', 'started_at',
+                'call_summary', 'created_at', 'updated_at',
+            ]);
+        }]);
+
         $query->withUnreadLeadMessagesCount();
     }
 
@@ -969,6 +1007,25 @@ class Lead extends Model
     public function calls()
     {
         return $this->hasMany(LeadCall::class, 'lead_id')->orderBy('id');
+    }
+
+    /**
+     * La ÚLTIMA llamada del closer con este lead (la de `id` más alto), o null.
+     *
+     * 🔴 Existe para que la pestaña "Resumen" del modal deje de leer `leads.call_summary`, que es
+     * una columna LEGADA que nadie escribe desde el refactor de múltiples llamadas por lead: el
+     * resumen real vive en `lead_calls.call_summary`, lo escribe `CallSummaryService` y hasta hoy
+     * esa pestaña mostraba vacío para toda llamada posterior al refactor.
+     *
+     * `orderByDesc('id')` sin `latestOfMany()` a propósito: con eager loading, `hasOne` se queda con
+     * la primera fila de cada grupo, que con ese orden es la de `id` más alto. Es el mismo
+     * resultado, sin la subconsulta agregada que arma `ofMany()`.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasOne
+     */
+    public function last_call()
+    {
+        return $this->hasOne(LeadCall::class, 'lead_id')->orderByDesc('id');
     }
 
     /**
