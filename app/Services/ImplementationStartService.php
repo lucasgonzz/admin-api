@@ -11,7 +11,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 /**
- * Inicia la implementación de un cliente: crea el registro, las ocho etapas y el token del
+ * Inicia la implementación de un cliente: crea el registro, las siete etapas y el token del
  * formulario, y deja la etapa 1 en curso.
  *
  * 🔴 POR QUÉ EXISTE ESTE SERVICIO (misión `implementar-cliente`, 5/10/2026). Esta lógica vivía
@@ -36,7 +36,7 @@ use Illuminate\Support\Str;
 class ImplementationStartService
 {
     /**
-     * Crea la implementación del cliente con sus ocho etapas, la etapa 1 en curso y el token del
+     * Crea la implementación del cliente con sus siete etapas, la etapa 1 en curso y el token del
      * formulario público.
      *
      * @param Client $client         Cliente destino. El llamador ya verificó que no tiene implementación.
@@ -84,8 +84,9 @@ class ImplementationStartService
                 'automation_mode'    => $automation_mode,
             ]);
 
-            // Crear las ocho etapas en estado pendiente.
-            for ($stage_number = 1; $stage_number <= 8; $stage_number++) {
+            // Crear las siete etapas (1 a ULTIMA_ETAPA) en estado pendiente. Hasta el 15/10/2026 eran ocho: las
+            // implementaciones creadas antes traen además una fila 8 que ya no es parte del flujo.
+            for ($stage_number = 1; $stage_number <= Implementation::ULTIMA_ETAPA; $stage_number++) {
                 ImplementationStage::create([
                     'implementation_id' => $implementation->id,
                     'stage_number'        => $stage_number,

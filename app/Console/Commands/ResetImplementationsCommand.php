@@ -33,11 +33,12 @@ class ResetImplementationsCommand extends Command
     protected $description = 'Elimina todas las implementaciones y crea una nueva en etapa 3 lista para avanzar';
 
     /**
-     * Número total de stages que se crean por implementación.
+     * Número total de stages que se crean por implementación: las del flujo (hoy siete, ver
+     * `Implementation::ULTIMA_ETAPA`).
      *
      * @var int
      */
-    const TOTAL_STAGES = 8;
+    const TOTAL_STAGES = Implementation::ULTIMA_ETAPA;
 
     /**
      * Etapa en la que queda posicionada la nueva implementación.
@@ -93,9 +94,9 @@ class ResetImplementationsCommand extends Command
             ]);
 
             /* ----------------------------------------------------------------
-             * Paso 4: crear los 8 stages de la implementación.
+             * Paso 4: crear los 7 stages de la implementación.
              * Las etapas 1, 2 y 3 se marcan como completadas.
-             * Las etapas 4 a 8 quedan pendientes.
+             * Las etapas 4 a 7 quedan pendientes.
              * ---------------------------------------------------------------- */
             for ($stage_number = 1; $stage_number <= self::TOTAL_STAGES; $stage_number++) {
 

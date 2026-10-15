@@ -33,7 +33,7 @@ class ImplementationController extends Controller
      * desde la tabla de configuración maestra.
      *
      * Agrega el campo virtual `ready_to_advance` (bool) en cada ítem:
-     * true cuando current_stage < 8 y la etapa activa tiene status === 'completed',
+     * true cuando current_stage < ULTIMA_ETAPA (7) y la etapa activa tiene status === 'completed',
      * lo que indica que el admin puede presionar "Avanzar etapa".
      *
      * @return JsonResponse
@@ -50,10 +50,11 @@ class ImplementationController extends Controller
 
         // Calcular ready_to_advance para cada implementación y anexarlo como atributo virtual.
         $implementations->each(function ($impl) {
-            // Solo puede avanzar si aún hay etapas por delante (current_stage < 8).
+            // Solo puede avanzar si aún hay etapas por delante (current_stage < ULTIMA_ETAPA). Una
+            // implementación anterior al flujo de siete etapas que quedó en la 8 tampoco puede avanzar.
             $ready = false;
 
-            if ($impl->current_stage < 8) {
+            if ($impl->current_stage < Implementation::ULTIMA_ETAPA) {
                 // Buscar la etapa cuyo número coincide con la etapa actual.
                 $current_stage_record = $impl->stages->first(function ($stage) use ($impl) {
                     return $stage->stage_number == $impl->current_stage;
@@ -77,7 +78,7 @@ class ImplementationController extends Controller
      *
      * Una implementación está lista para avanzar cuando:
      * - Su status es 'in_progress'
-     * - current_stage < 8
+     * - current_stage < ULTIMA_ETAPA (7)
      * - La etapa con stage_number === current_stage tiene status === 'completed'
      *
      * Este endpoint es consumido por el Nav al inicializarse para obtener el conteo inicial
@@ -87,10 +88,10 @@ class ImplementationController extends Controller
      */
     public function ready_to_advance_count(): JsonResponse
     {
-        // Traer solo las implementaciones activas que pueden avanzar (current_stage < 8).
+        // Traer solo las implementaciones activas que pueden avanzar (current_stage < ULTIMA_ETAPA).
         $implementations = Implementation::query()
             ->where('status', 'in_progress')
-            ->where('current_stage', '<', 8)
+            ->where('current_stage', '<', Implementation::ULTIMA_ETAPA)
             ->with('stages')
             ->get();
 
@@ -422,10 +423,14 @@ class ImplementationController extends Controller
      *
      * Flujo:
      *  1. Marca la etapa actual como 'completed' con completed_at = now().
-     *  2. Incrementa current_stage en 1.
-     *  3. Si current_stage > 8 → marca implementación como 'completed'.
-     *  4. Si no → marca nueva etapa como 'in_progress' con started_at = now().
-     *  5. Dispara acciones automáticas vía ImplementationConversationService::handle_stage_advance.
+     *  2. Si la etapa actual ya era la última (ULTIMA_ETAPA = 7, o la 8 de una implementación anterior al flujo de
+     *     siete etapas) → marca la implementación como 'completed', deja current_stage donde estaba y salta la
+     *     fila de la etapa 8 que haya quedado pendiente.
+     *  3. Si no → incrementa current_stage en 1 y marca la nueva etapa como 'in_progress' con started_at = now().
+     *  4. Dispara acciones automáticas vía ImplementationConversationService::handle_stage_advance.
+     *
+     * El botón del panel no se ofrece en la última etapa (ver ready_to_advance): este camino solo cierra la
+     * implementación si se lo llama directo por la API. El cierre normal es POST claude/implementations/{id}/advance.
      *
      * @param Implementation $implementation Implementación a avanzar (route model binding).
      *
@@ -447,13 +452,20 @@ class ImplementationController extends Controller
 
         // Número de la etapa siguiente.
         $next_stage = $implementation->current_stage + 1;
-        $implementation->current_stage = $next_stage;
 
-        if ($next_stage > 8) {
-            // La implementación finalizó: todas las 8 etapas cubiertas.
+        if ($next_stage > Implementation::ULTIMA_ETAPA) {
+            // La implementación finalizó: todas las etapas del flujo cubiertas. current_stage NO se mueve (queda
+            // en la última etapa, igual que cuando cierra POST claude/implementations/{id}/advance): una
+            // implementación completada con current_stage = 8 apuntaría a una etapa que ya no existe.
             $implementation->status       = 'completed';
             $implementation->completed_at = now();
+
+            // La etapa 8 heredada que haya quedado pendiente ya no es una etapa por hacer.
+            $implementation->saltar_las_etapas_heredadas();
         } else {
+            // Todavía hay etapas por delante: se avanza.
+            $implementation->current_stage = $next_stage;
+
             // Activar la etapa siguiente poniendo en marcha su cronómetro.
             $next_stage_record = ImplementationStage::where('implementation_id', $implementation->id)
                 ->where('stage_number', $next_stage)
@@ -468,8 +480,8 @@ class ImplementationController extends Controller
 
         $implementation->save();
 
-        // Acciones automáticas al activar etapas con lógica de conversación (2 a 8).
-        if ($next_stage >= 2 && $next_stage <= 8) {
+        // Acciones automáticas al activar etapas con lógica de conversación (2 a ULTIMA_ETAPA).
+        if ($next_stage >= 2 && $next_stage <= Implementation::ULTIMA_ETAPA) {
             $conversation_service = new ImplementationConversationService();
             $conversation_service->handle_stage_advance($implementation, $next_stage);
         }
@@ -481,7 +493,7 @@ class ImplementationController extends Controller
     }
 
     /**
-     * Inicia la implementación de un cliente: crea el registro y las 8 etapas.
+     * Inicia la implementación de un cliente: crea el registro y las 7 etapas.
      *
      * 🔴 La creación vive en `ImplementationStartService` desde la misión `implementar-cliente`
      * (5/10/2026), porque ahora la comparten este botón y `POST claude/implementations`. Lo que

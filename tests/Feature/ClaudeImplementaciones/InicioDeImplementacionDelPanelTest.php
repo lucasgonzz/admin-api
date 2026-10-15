@@ -106,11 +106,11 @@ class InicioDeImplementacionDelPanelTest extends TestCase
     }
 
     /**
-     * 1. La implementación nace en la etapa 1, en curso, con sus ocho etapas y su token.
+     * 1. La implementación nace en la etapa 1, en curso, con sus siete etapas y su token.
      *
      * @return void
      */
-    public function test_el_panel_crea_la_implementacion_con_sus_ocho_etapas_y_su_token(): void
+    public function test_el_panel_crea_la_implementacion_con_sus_siete_etapas_y_su_token(): void
     {
         $client = $this->crear_cliente();
 
@@ -123,7 +123,7 @@ class InicioDeImplementacionDelPanelTest extends TestCase
         $respuesta->assertJsonPath('model.automation_mode', 'manual');
 
         /* La respuesta trae la implementación con sus etapas y el cliente. */
-        $this->assertCount(8, $respuesta->json('model.stages'));
+        $this->assertCount(7, $respuesta->json('model.stages'));
         $this->assertSame((int) $client->id, (int) $respuesta->json('model.client.id'));
 
         $implementation = Implementation::where('client_id', $client->id)->first();
@@ -135,14 +135,14 @@ class InicioDeImplementacionDelPanelTest extends TestCase
         $this->assertSame(36, strlen((string) $implementation->form_token));
         $this->assertSame($implementation->form_token, $respuesta->json('model.form_token'));
 
-        /* Las ocho etapas: la 1 en curso con su cronómetro, las otras siete pendientes. */
+        /* Las siete etapas (desde el 15/10/2026; antes eran ocho): la 1 en curso con su cronómetro, las otras seis pendientes. */
         $etapas = ImplementationStage::where('implementation_id', $implementation->id)->orderBy('stage_number')->get();
-        $this->assertCount(8, $etapas);
+        $this->assertCount(7, $etapas);
 
         $this->assertSame('in_progress', $etapas[0]->status);
         $this->assertNotNull($etapas[0]->started_at);
 
-        for ($i = 1; $i < 8; $i++) {
+        for ($i = 1; $i < 7; $i++) {
             $this->assertSame($i + 1, (int) $etapas[$i]->stage_number);
             $this->assertSame('pending', $etapas[$i]->status);
             $this->assertNull($etapas[$i]->started_at);

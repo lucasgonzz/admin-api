@@ -578,7 +578,7 @@ class AltaDeImplementacionPorClaudeTest extends BaseDeImplementaciones
 
     /**
      * 2. El alta de un lead: 201 con el cliente, sus dos ClientApi (con la forma de la promoción del
-     * panel), las tareas, el lead promovido y la implementación con sus ocho etapas.
+     * panel), las tareas, el lead promovido y la implementación con sus siete etapas.
      *
      * @return void
      */
@@ -621,20 +621,20 @@ class AltaDeImplementacionPorClaudeTest extends BaseDeImplementaciones
         $this->assertSame((int) $client->id, (int) $lead->promoted_client_id);
         $this->assertSame('cerrado_ganado', $lead->status);
 
-        /* La implementación: manual, etapa 1, ocho etapas, con el link del formulario. */
+        /* La implementación: manual, etapa 1, siete etapas (desde el 15/10/2026; antes ocho), con el link del formulario. */
         $implementation = Implementation::where('client_id', $client->id)->first();
         $this->assertNotNull($implementation);
         $this->assertSame('manual', $implementation->automation_mode);
-        $this->assertSame(8, ImplementationStage::where('implementation_id', $implementation->id)->count());
+        $this->assertSame(7, ImplementationStage::where('implementation_id', $implementation->id)->count());
         $respuesta->assertJsonPath('implementation.id', (int) $implementation->id);
         $respuesta->assertJsonPath('implementation.form_link', 'https://admin.ejemplo.test/configuracion/' . $implementation->form_token);
 
-        /* Y exactamente lo que tenía que escribir: un cliente, dos APIs, una implementación, ocho etapas, tres tareas. */
+        /* Y exactamente lo que tenía que escribir: un cliente, dos APIs, una implementación, siete etapas, tres tareas. */
         $despues = $this->foto();
         $this->assertSame($antes['clientes'] + 1, $despues['clientes']);
         $this->assertSame($antes['client_apis'] + 2, $despues['client_apis']);
         $this->assertSame($antes['implementations'] + 1, $despues['implementations']);
-        $this->assertSame($antes['etapas'] + 8, $despues['etapas']);
+        $this->assertSame($antes['etapas'] + 7, $despues['etapas']);
         $this->assertSame($antes['tareas'] + 3, $despues['tareas']);
     }
 
@@ -707,7 +707,7 @@ class AltaDeImplementacionPorClaudeTest extends BaseDeImplementaciones
         $this->assertSame($antes['client_apis'], $despues['client_apis']);
         $this->assertSame($antes['tareas'], $despues['tareas']);
         $this->assertSame($antes['implementations'] + 1, $despues['implementations']);
-        $this->assertSame(8, ImplementationStage::where('implementation_id', $respuesta->json('implementation.id'))->count());
+        $this->assertSame(7, ImplementationStage::where('implementation_id', $respuesta->json('implementation.id'))->count());
     }
 
     /**

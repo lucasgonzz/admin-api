@@ -12,18 +12,24 @@ use Tests\Fakes\HttpFactorySinSalida;
  * `ImplementationConversationService::handle_stage_advance()` → `send_stage_opening_message(8)` → `send_stage_8_opening()`. Hasta el
  * 14/10/2026 ese último le mandaba al dueño «nos gustaría hacer una videollamada corta (20-30 minutos)…» y le preguntaba disponibilidad.
  *
+ * 🔴 Desde el 15/10/2026 el flujo tiene SIETE etapas (decisión de Lucas): la 8 salió y «Avanzar etapa» desde la 7 CIERRA la implementación
+ * en vez de abrirla. El primer test de este archivo (el del camino del panel) cambió por eso, y hay dos tests nuevos de ese cierre. Los
+ * demás se conservan como COMPATIBILIDAD: siguen describiendo qué pasa con una implementación anterior que ya está en la 8 (o con quien llame
+ * a `handle_stage_advance(…, 8)` directo): al cliente no le llega nada y el admin recibe el aviso.
+ *
  * Solo el modo `auto` manda cosas solo: en `manual` `handle_stage_advance()` no manda nada (eso no cambió y se fija igual).
  */
 class AperturaDeLaEtapa8DelPanelTest extends BaseDeLaEtapa8DelPanel
 {
     /**
-     * (a) 🔴 El camino del panel de punta a punta, en modo auto: avanzar de la 7 a la 8 deja la etapa en curso y al cliente sin ningún
-     * mensaje. El servicio del controller es el real (con el WhatsApp real): lo que se afirma es lo que quedó persistido y que no salió
-     * ningún pedido HTTP, ni siquiera uno frenado.
+     * (a) 🔴 El camino del panel de punta a punta, en modo auto: «Avanzar etapa» desde la 7 —ahora la última— CIERRA la implementación y al
+     * cliente no le llega ningún mensaje. Hasta el 15/10/2026 este test avanzaba de la 7 a la 8 y afirmaba que la 8 quedaba en curso; la 8 ya
+     * no existe y lo que se conserva es lo que importaba: nada para el cliente. El servicio del controller es el real (con el WhatsApp real):
+     * lo que se afirma es lo que quedó persistido y que no salió ningún pedido HTTP, ni siquiera uno frenado.
      *
      * @return void
      */
-    public function test_avanzar_a_la_etapa_8_desde_el_panel_no_le_manda_nada_al_cliente(): void
+    public function test_cerrar_la_etapa_7_desde_el_panel_cierra_la_implementacion_y_no_le_manda_nada_al_cliente(): void
     {
         $implementacion = $this->implementacion_en(7, 'auto');
 
@@ -33,11 +39,36 @@ class AperturaDeLaEtapa8DelPanelTest extends BaseDeLaEtapa8DelPanel
         $respuesta->assertStatus(200);
 
         $implementacion->refresh();
-        $this->assertSame(8, (int) $implementacion->current_stage);
-        $this->assertSame('in_progress', ImplementationStage::where('implementation_id', $implementacion->id)->where('stage_number', 8)->first()->status);
+        $this->assertSame('completed', $implementacion->status);
+        $this->assertNotNull($implementacion->completed_at);
+        $this->assertSame(7, (int) $implementacion->current_stage, 'Cerrar no mueve current_stage: queda en la última etapa, no en una 8 que no existe.');
+        $this->assertSame('completed', ImplementationStage::where('implementation_id', $implementacion->id)->where('stage_number', 7)->first()->status);
+        $this->assertSame(0, ImplementationStage::where('implementation_id', $implementacion->id)->where('stage_number', '>', 7)->count());
 
-        $this->assertSame([], $this->lo_que_recibio_el_cliente($implementacion), 'Al entrar a la etapa 8 el cliente recibió un mensaje.');
-        $this->assertSame([], HttpFactorySinSalida::frenados(), 'Al entrar a la etapa 8 salió un pedido HTTP.');
+        $this->assertSame([], $this->lo_que_recibio_el_cliente($implementacion), 'Al cerrar la etapa 7 el cliente recibió un mensaje.');
+        $this->assertSame([], HttpFactorySinSalida::frenados(), 'Al cerrar la etapa 7 salió un pedido HTTP.');
+    }
+
+    /**
+     * (a2) COMPATIBILIDAD. El mismo cierre del panel sobre una implementación ANTERIOR al 15/10/2026 (con su fila 8 pendiente) deja esa fila
+     * `skipped`: dentro de una implementación completada no queda una etapa por hacer.
+     *
+     * @return void
+     */
+    public function test_cerrar_la_etapa_7_desde_el_panel_salta_la_etapa_8_pendiente_de_una_implementacion_vieja(): void
+    {
+        $cliente        = $this->crear_cliente('Panchito Gómez', ['company_name' => 'Panchito S.A.']);
+        $implementacion = $this->llevar_a_la_etapa($this->crear_implementacion_anterior($cliente, ['automation_mode' => 'auto']), 7);
+
+        $this->actingAs($this->crear_admin(), 'sanctum')
+            ->postJson('/api/admin/implementation/' . $implementacion->id . '/advance-stage')
+            ->assertStatus(200);
+
+        $implementacion->refresh();
+        $this->assertSame('completed', $implementacion->status);
+        $this->assertSame(7, (int) $implementacion->current_stage);
+        $this->assertSame('skipped', ImplementationStage::where('implementation_id', $implementacion->id)->where('stage_number', 8)->first()->status);
+        $this->assertSame([], $this->lo_que_recibio_el_cliente($implementacion));
     }
 
     /**

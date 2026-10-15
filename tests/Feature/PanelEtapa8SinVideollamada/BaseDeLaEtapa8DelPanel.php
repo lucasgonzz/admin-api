@@ -119,9 +119,11 @@ abstract class BaseDeLaEtapa8DelPanel extends BaseDeImplementaciones
     }
 
     /**
-     * Una implementación en la etapa pedida, con su cliente (con teléfono y nombre de negocio) y sus ocho etapas.
+     * Una implementación en la etapa pedida, con su cliente (con teléfono y nombre de negocio) y sus siete etapas.
+     * Si se pide la 8 —lo que modela una implementación ANTERIOR al 15/10/2026, que quedó en la etapa 8—, la fila de
+     * esa etapa se crea (`llevar_a_la_etapa()`).
      *
-     * @param int    $etapa Etapa en la que queda (default 8).
+     * @param int    $etapa Etapa en la que queda (default 8, la de las implementaciones anteriores).
      * @param string $modo  `manual` o `auto` (default `auto`: es el único que manda cosas solo).
      *
      * @return Implementation

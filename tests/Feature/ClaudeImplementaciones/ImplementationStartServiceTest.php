@@ -101,7 +101,7 @@ class ImplementationStartServiceTest extends TestCase
     }
 
     /**
-     * Sin parámetro y sin setting: manual, sin bienvenida, con sus ocho etapas.
+     * Sin parámetro y sin setting: manual, sin bienvenida, con sus siete etapas.
      *
      * @return void
      */
@@ -117,7 +117,9 @@ class ImplementationStartServiceTest extends TestCase
         $this->assertSame('in_progress', $implementation->status);
         $this->assertSame(1, (int) $implementation->current_stage);
         $this->assertSame(36, strlen((string) $implementation->form_token));
-        $this->assertSame(8, ImplementationStage::where('implementation_id', $implementation->id)->count());
+        /* Siete desde el 15/10/2026 (decisión de Lucas): la 6 es el catálogo y la 8, la videollamada, salió del flujo. Antes, ocho. */
+        $this->assertSame(7, ImplementationStage::where('implementation_id', $implementation->id)->count());
+        $this->assertSame(0, ImplementationStage::where('implementation_id', $implementation->id)->where('stage_number', '>', 7)->count());
         $this->assertSame(0, $registro->llamadas);
     }
 
@@ -170,7 +172,8 @@ class ImplementationStartServiceTest extends TestCase
 
         $this->assertSame(1, $registro->llamadas);
         $this->assertNotNull(Implementation::find($implementation->id));
-        $this->assertSame(8, ImplementationStage::where('implementation_id', $implementation->id)->count());
+        /* Siete etapas desde el 15/10/2026 (antes ocho). */
+        $this->assertSame(7, ImplementationStage::where('implementation_id', $implementation->id)->count());
     }
 
     /**
