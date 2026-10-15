@@ -535,6 +535,34 @@ class CredencialesDeDemoZipnovaMpEnLosPayloadsDeSetupTest extends TestCase
     }
 
     /**
+     * El tapador no deja a medias un valor que contiene a otro (el token dentro del secret) y tapa también
+     * la forma escapada en JSON de una credencial con barra (así la trae un cuerpo de error JSON).
+     *
+     * @return void
+     */
+    public function test_el_tapador_tapa_valores_solapados_y_la_forma_escapada_en_json(): void
+    {
+        $token  = 'tok-de-prueba-abcdef-123456';
+        $secret = 'sec-' . $token . '-xyz';
+        AdminSetting::set(ImplementationSettings::KEYS_ZIPNOVA_DEMO['api_token'], Crypt::encryptString($token));
+        AdminSetting::set(ImplementationSettings::KEYS_ZIPNOVA_DEMO['api_secret'], Crypt::encryptString($secret));
+
+        $this->assertSame(
+            'x [credencial oculta] y',
+            ImplementationSettings::tapar_credenciales_de_demo('x ' . $secret . ' y'),
+            'El valor largo se tapa entero: el corto que lleva adentro no puede dejarlo a medias.'
+        );
+
+        $access = 'TEST-relleno/obvio-12345678901234567890';
+        AdminSetting::set(ImplementationSettings::KEYS_MERCADOPAGO_DEMO['access_token'], Crypt::encryptString($access));
+        AdminSetting::set(ImplementationSettings::KEYS_MERCADOPAGO_DEMO['public_key'], 'TEST-relleno-publica-12345678901234567890');
+
+        $cuerpo = json_encode(['error' => 'token ' . $access . ' invalido']);
+        $this->assertStringNotContainsString('obvio-1234', ImplementationSettings::tapar_credenciales_de_demo($cuerpo));
+        $this->assertStringContainsString('[credencial oculta]', ImplementationSettings::tapar_credenciales_de_demo($cuerpo));
+    }
+
+    /**
      * El preview del panel del user-setup tapa los cuatro nombres si algún día los trajera el payload
      * (hoy no los trae, pero el preview ya nace tapándolos).
      *

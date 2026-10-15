@@ -1230,7 +1230,8 @@ class DemoInstallationService
          * Zipnova y de Mercado Pago (misión credenciales-demo-zipnova-mp). */
         throw new \RuntimeException(
             'El demo-setup respondió HTTP ' . $response->status() . ': '
-            . ImplementationSettings::tapar_credenciales_de_demo(substr((string) $response->body(), 0, 2000))
+            // Se tapa ANTES de recortar (si no, una credencial partida en el límite queda a la vista).
+            . substr(ImplementationSettings::tapar_credenciales_de_demo((string) $response->body()), 0, 2000)
         );
     }
 

@@ -294,8 +294,12 @@ class RunDemoSetupService
              * devolviera en un error algo que las contenga, no tienen que quedar guardadas. */
             return $this->mark_failed(
                 $lead,
-                ImplementationSettings::tapar_credenciales_de_demo(
-                    'HTTP ' . $response->status() . ': ' . substr($response->body(), 0, 2000)
+                'HTTP ' . $response->status() . ': ' . substr(
+                    // Se tapa ANTES de recortar: recortar primero puede partir una credencial en el
+                    // límite y dejar un prefijo que ya no coincide con el valor entero.
+                    ImplementationSettings::tapar_credenciales_de_demo((string) $response->body()),
+                    0,
+                    2000
                 )
             );
         } catch (ConnectionException $e) {

@@ -349,8 +349,6 @@ class ImplementationSettings
 
     /**
      * Lee una credencial CIFRADA de admin_settings y la devuelve descifrada.
-    /**
-     * Lee una credencial CIFRADA de admin_settings y la devuelve descifrada.
      *
      * 🔴 Nunca explota ni devuelve el texto cifrado: si el valor guardado no se puede descifrar
      * (la APP_KEY del admin cambió, o alguien escribió texto plano a mano en la fila) se lee como
@@ -582,11 +580,30 @@ class ImplementationSettings
             $mercadopago['public_key'],
         ];
 
+        // Cada valor y también su forma escapada en JSON (la barra, las comillas y lo que no es ASCII
+        // se escapan): un cuerpo de error JSON la trae así y el valor crudo no la encuentra.
+        $variantes = [];
         foreach ($valores as $valor) {
             // Un valor muy corto no es una credencial real y taparlo desfiguraría el mensaje.
-            if (strlen($valor) >= 6) {
-                $texto = str_replace($valor, self::TEXTO_DE_CREDENCIAL_TAPADA, $texto);
+            if (strlen($valor) < 6) {
+                continue;
             }
+
+            $variantes[] = $valor;
+            $escapado    = substr((string) json_encode($valor), 1, -1);
+            if ($escapado !== '' && $escapado !== $valor) {
+                $variantes[] = $escapado;
+            }
+        }
+
+        // De la más larga a la más corta: si un valor contiene a otro (el token dentro del secret),
+        // tapar primero el corto dejaría al largo a medias y con el resto a la vista.
+        usort($variantes, function ($a, $b) {
+            return strlen($b) - strlen($a);
+        });
+
+        foreach ($variantes as $variante) {
+            $texto = str_replace($variante, self::TEXTO_DE_CREDENCIAL_TAPADA, $texto);
         }
 
         return $texto;
