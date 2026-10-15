@@ -6,8 +6,13 @@ use App\Models\ImplementationStageConfig;
 use Illuminate\Database\Seeder;
 
 /**
- * Catálogo de las 8 etapas del proceso de implementación de clientes.
+ * Catálogo de las 7 etapas del proceso de implementación de clientes (`Implementation::ULTIMA_ETAPA`).
  * Usa updateOrCreate por stage_number para ser idempotente en re-ejecuciones.
+ *
+ * 🔴 Eran 8 hasta el 15/10/2026. La 6 pasó de «Capacitación» a «Catálogo: categorías, imágenes y
+ * descripciones» y la 8 («Videollamada de capacitación») dejó de sembrarse. Una base que ya tenía las
+ * ocho NO se corrige con este seeder (solo crea/actualiza las siete y no toca la 8): para producción
+ * está `ImplementationStageConfigSieteEtapasSeeder`, que renombra la 6 y deja la 8 inactiva.
  */
 class ImplementationStageConfigSeeder extends Seeder
 {
@@ -59,8 +64,8 @@ class ImplementationStageConfigSeeder extends Seeder
             ],
             [
                 'stage_number'           => 6,
-                'name'                   => 'Capacitación',
-                'description'            => 'Se envían las credenciales a empleados y el link al centro de recursos.',
+                'name'                   => 'Catálogo: categorías, imágenes y descripciones',
+                'description'            => 'Se arman las categorías y se completan las fotos y descripciones de los artículos que todavía no las tienen.',
                 'alert_threshold_hours'  => 24.00,
                 'is_automated'           => false,
             ],
@@ -68,13 +73,6 @@ class ImplementationStageConfigSeeder extends Seeder
                 'stage_number'           => 7,
                 'name'                   => 'Vinculación ARCA/AFIP',
                 'description'            => 'Se conecta el sistema con AFIP para facturación electrónica.',
-                'alert_threshold_hours'  => 24.00,
-                'is_automated'           => false,
-            ],
-            [
-                'stage_number'           => 8,
-                'name'                   => 'Videollamada de capacitación',
-                'description'            => 'Llamada final para resolver dudas.',
                 'alert_threshold_hours'  => 24.00,
                 'is_automated'           => false,
             ],
