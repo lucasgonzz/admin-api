@@ -1049,6 +1049,10 @@ Route::prefix('admin')->group(function () {
         Route::post('task-notification/{id}/seen', [AdminTaskNotificationController::class, 'mark_seen_json']);
 
         // Soporte tipo bandeja estilo Front.
+        // Panel de inicio: los tres contadores (tickets sin responder, tickets abiertos hoy y leads
+        // sin responder), una consulta por tarjeta.
+        Route::get('inicio/tarjetas', [\App\Http\Controllers\Api\InicioController::class, 'tarjetas']);
+
         Route::get('support-ticket', [\App\Http\Controllers\Api\SupportTicketController::class, 'index']);
         Route::get('support-ticket/unread-badges', [\App\Http\Controllers\Api\SupportTicketController::class, 'unread_badges']);
         // Va antes de support-ticket/{id}: si no, {id} se come "whatsapp-contacts".
