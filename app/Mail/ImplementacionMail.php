@@ -12,7 +12,7 @@ use Illuminate\Support\HtmlString;
  * sistema (misión implementar-cliente, 5/10/2026).
  *
  * Hay siete hitos —bienvenida, instalando, instalado, acceso, imagenes, categorias, listo— y todos salen con
- * el mismo diseño y la misma línea de progreso de las ocho etapas. El diseño es el del prototipo
+ * el mismo diseño y la misma línea de progreso de las siete etapas. El diseño es el del prototipo
  * aprobado y comparte lenguaje con la carta de acceso a la demo (`LeadDemoAccesoMail`): Geist,
  * tarjeta blanca de 560 px, azul y violeta de la marca, el degradé solo en el botón principal y el
  * naranja una sola vez, en el acento del titular.

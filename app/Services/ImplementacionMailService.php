@@ -44,7 +44,7 @@ use Illuminate\Support\Facades\Mail;
  * ya salieron mails con ellos (sus filas siguen en `implementation_mails`) y sacarlos rompería a quien
  * todavía los pida.
  *
- * OJO: todo mail lleva además la línea de progreso con el estado real de las ocho etapas al momento
+ * OJO: todo mail lleva además la línea de progreso con el estado real de las siete etapas al momento
  * de mandarlo (`ImplementacionMailHelper::progreso()`): el mail no inventa en qué etapa está la
  * implementación, lo lee de `implementation_stages`.
  *

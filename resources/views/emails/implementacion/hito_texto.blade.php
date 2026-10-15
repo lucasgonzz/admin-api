@@ -111,7 +111,7 @@ Lo que sigue:
 Gracias por elegirnos para acompañar a tu negocio.
 @endif
 
-TU IMPLEMENTACIÓN - Etapa {{ $progreso['etapa_actual'] }} de 8
+TU IMPLEMENTACIÓN - Etapa {{ $progreso['etapa_actual'] }} de {{ $progreso['total'] }}
 @foreach($progreso['etapas'] as $etapa)
 @if($etapa['estado'] === 'completada')
 [x] {{ $etapa['nombre'] }}

@@ -1,5 +1,5 @@
 {{--
-  La línea de progreso de la implementación: el rótulo con "Etapa N de 8", la barra y las ocho etapas
+  La línea de progreso de la implementación: el rótulo con "Etapa N de 7", la barra y las siete etapas
   con su estado REAL al momento de mandar el mail.
 
   Variable: $progreso, armado por `ImplementacionMailHelper::progreso()`:
@@ -16,7 +16,7 @@
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
         <tr>
           <td style="font-family:{!! $font !!};font-size:12px;line-height:16px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#566078;">Tu implementación</td>
-          <td align="right" style="font-family:{!! $font !!};font-size:13px;line-height:16px;font-weight:600;color:#1c2333;">Etapa {{ $progreso['etapa_actual'] }} de 8</td>
+          <td align="right" style="font-family:{!! $font !!};font-size:13px;line-height:16px;font-weight:600;color:#1c2333;">Etapa {{ $progreso['etapa_actual'] }} de {{ $progreso['total'] }}</td>
         </tr>
       </table>
       {{-- La barra: lo hecho en degradé y el resto en gris. Con todo hecho, la parte gris no existe --}}

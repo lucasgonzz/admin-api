@@ -61,7 +61,7 @@ class RenderDeLosHitosTest extends BaseDelMailDeImplementacion
 
             $this->assertStringContainsString('Ferretería Los Andes', $html, $hito);
             $this->assertStringContainsString('Hola, Martina.', $html, $hito);
-            $this->assertStringContainsString('Etapa ' . $etapa_en_curso[$hito] . ' de 8', $html, $hito);
+            $this->assertStringContainsString('Etapa ' . $etapa_en_curso[$hito] . ' de 7', $html, $hito);
         }
     }
 

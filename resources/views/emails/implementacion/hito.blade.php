@@ -4,7 +4,7 @@
   Los siete hitos —bienvenida, instalando, instalado, acceso, imagenes, categorias, listo— comparten esta tarjeta y
   cambian solo el bloque del medio (`bloques/<hito>.blade.php`, que se incluye acá) y la línea de
   progreso (`partials/progreso.blade.php`), que es la misma en todos pero refleja el estado real de
-  las ocho etapas al momento de mandar.
+  las siete etapas al momento de mandar.
 
   Es el diseño del prototipo aprobado y comparte lenguaje con la carta de acceso a la demo
   (`emails/lead/demo_acceso.blade.php`): Geist con el fallback de sistema, fondo #f8f9fc, tarjeta
@@ -101,7 +101,7 @@
         {{-- El bloque propio del hito: una o más filas de la tarjeta --}}
         @include('emails.implementacion.bloques.' . $hito)
 
-        {{-- La línea de progreso: las ocho etapas con su estado real --}}
+        {{-- La línea de progreso: las siete etapas con su estado real --}}
         <tr>
           <td class="cc-lado" style="padding:40px 48px 0 48px;">
             @include('emails.implementacion.partials.progreso')

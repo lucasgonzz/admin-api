@@ -10,7 +10,7 @@ use App\Models\ImplementationStage;
  *
  * Es la parte PURA del mail: recibe datos ya validados y devuelve el arreglo que consumen las
  * vistas, con el texto de cada hito, los números con el formato argentino, el singular y el plural,
- * y la línea de progreso con el estado real de las ocho etapas. No manda nada ni escribe en ninguna
+ * y la línea de progreso con el estado real de las siete etapas. No manda nada ni escribe en ninguna
  * tabla (lo único que lee es `implementation_stages`); eso es de `ImplementacionMailService`.
  *
  * El diseño es el del prototipo aprobado (`mail-prototipo/` de la misión implementar-cliente) y el
@@ -23,19 +23,24 @@ use App\Models\ImplementationStage;
 class ImplementacionMailHelper
 {
     /**
-     * Las ocho etapas de la implementación, con el nombre que ve el comerciante.
+     * Las siete etapas de la implementación, con el nombre que ve el comerciante.
      *
-     * Son las mismas ocho del panel (`implementation_stage_configs`) pero con nombres escritos para
+     * Son las mismas siete del panel (`implementation_stage_configs`) pero con nombres escritos para
      * el dueño de un negocio y no para el equipo: "Instalamos tu sistema" y no "Instalación del
      * sistema". Mapa del panel al mail: 1 Información de la empresa, 2 Instalación del sistema,
-     * 3 Recolección de archivos, 4 Migración de datos, 5 Entrega del sistema, 6 Capacitación,
-     * 7 Vinculación ARCA/AFIP, 8 Videollamada de capacitación.
+     * 3 Recolección de archivos, 4 Migración de datos, 5 Entrega del sistema, 6 Catálogo: categorías,
+     * imágenes y descripciones, 7 Vinculación ARCA/AFIP.
      *
-     * La 6 y la 8 cambiaron de nombre con el orden nuevo de `/implementar` (Lucas, 14/10/2026). Antes
-     * eran "Tu equipo y los tutoriales" y "Videollamada de cierre". Los tutoriales ahora salen en la
-     * entrega (etapa 5), y en la 6 se termina el catálogo —categorías, fotos y descripciones—, que es
-     * cuando salen los mails de categorías y de fotos. Y la videollamada no se nombra salvo que el
-     * cliente la pida: esta línea sale en TODOS los mails, así que la 8 no puede nombrarla.
+     * La 6 cambió de nombre con el orden nuevo de `/implementar` (Lucas, 14/10/2026): antes era "Tu
+     * equipo y los tutoriales". Los tutoriales salen en la entrega (etapa 5), y en la 6 se termina el
+     * catálogo —categorías, fotos y descripciones—, que es cuando salen los mails de categorías y de
+     * fotos.
+     *
+     * 🔴 Desde el 15/10/2026 son SIETE (decisión de Lucas): la etapa 8 —que el 14/10 se mostraba como
+     * "Seguimos con soporte", y antes como "Videollamada de cierre"— salió del flujo. El soporte es por
+     * WhatsApp y la videollamada no se nombra salvo que el cliente la pida; esta línea sale en TODOS los
+     * mails. Las implementaciones creadas antes tienen una fila 8 en `implementation_stages`: se ignora
+     * (no cuenta para la barra ni para "Etapa N de 7"), así que sus mails muestran las mismas siete.
      *
      * @var array<int, string>
      */
@@ -47,7 +52,6 @@ class ImplementacionMailHelper
         5 => 'Te entregamos el sistema',
         6 => 'Terminamos tu catálogo',
         7 => 'Facturación electrónica',
-        8 => 'Seguimos con soporte',
     ];
 
     /**
@@ -305,16 +309,17 @@ class ImplementacionMailHelper
     }
 
     /**
-     * La línea de progreso: el estado REAL de las ocho etapas al momento de armar el mail.
+     * La línea de progreso: el estado REAL de las siete etapas al momento de armar el mail.
      *
      * Estado de cada etapa (el de `implementation_stages.status`): completed → completada,
      * in_progress → en_curso, skipped → salteada; cualquier otra cosa, y las etapas que no tienen
      * fila, son pendientes.
      *
-     * "Etapa N de 8" es la etapa en curso. Si ninguna está en curso, es la primera que todavía no
-     * se cerró (la que toca), y si todas están cerradas, la 8.
+     * "Etapa N de 7" es la etapa en curso. Si ninguna está en curso, es la primera que todavía no
+     * se cerró (la que toca), y si todas están cerradas, la 7. El total sale de `count(ETAPAS)` y viaja
+     * en `total`: las vistas no lo escriben a mano.
      *
-     * La barra es (completadas + salteadas) / 8, redondeada, con un piso para que una
+     * La barra es (completadas + salteadas) / 7, redondeada, con un piso para que una
      * implementación recién empezada no muestre una barra invisible. Una etapa salteada cuenta
      * como hecha: no aplicaba, y no puede dejar la barra trabada.
      *
@@ -323,7 +328,7 @@ class ImplementacionMailHelper
      * @param Implementation $implementacion Implementación de la que se lee el estado.
      * @param string         $hito           Hito del mail (define los subpasos).
      *
-     * @return array<string, mixed> etapa_actual, porcentaje, barra y etapas (numero, nombre, estado, subpasos).
+     * @return array<string, mixed> etapa_actual, total, porcentaje, barra y etapas (numero, nombre, estado, subpasos).
      */
     public static function progreso(Implementation $implementacion, string $hito): array
     {
@@ -382,6 +387,7 @@ class ImplementacionMailHelper
 
         return [
             'etapa_actual' => $etapa_actual,
+            'total'        => count(self::ETAPAS),
             'porcentaje'   => $porcentaje,
             'barra'        => max($porcentaje, self::BARRA_MINIMA),
             'etapas'       => $etapas,

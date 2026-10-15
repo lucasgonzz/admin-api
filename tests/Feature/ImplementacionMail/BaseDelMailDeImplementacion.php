@@ -17,7 +17,7 @@ use Tests\TestCase;
  * Andamiaje común de los tests del mail de hito de la implementación.
  *
  * Lo que arma: un cliente con su API activa (con la dirección de su sistema), una implementación
- * con sus ocho etapas en el estado que cada test pida, el link base del formulario y datos de
+ * con sus siete etapas en el estado que cada test pida, el link base del formulario y datos de
  * ejemplo válidos para cada hito. Todo dentro de la transacción del test.
  *
  * No termina en `Test.php` a propósito, así PHPUnit no lo corre como suite.
@@ -133,7 +133,8 @@ abstract class BaseDelMailDeImplementacion extends TestCase
     }
 
     /**
-     * Implementación del cliente con sus ocho etapas.
+     * Implementación del cliente con sus siete etapas (desde el 15/10/2026; antes eran ocho). Para armar una
+     * implementación ANTERIOR, con su fila 8, se nombra la 8 en `$etapas` (ver `poner_las_etapas()`).
      *
      * @param Client                $client
      * @param array<int, string>    $etapas    Estado de cada etapa por número (status del panel:
@@ -161,7 +162,9 @@ abstract class BaseDelMailDeImplementacion extends TestCase
     }
 
     /**
-     * Deja las ocho etapas de la implementación en el estado pedido, creando las filas que falten.
+     * Deja las siete etapas de la implementación en el estado pedido, creando las filas que falten. Si
+     * `$etapas` nombra la 8 (`Implementation::ETAPA_HEREDADA`), crea también esa fila: es como se arma una
+     * implementación anterior al 15/10/2026, que la traía.
      *
      * @param Implementation     $impl
      * @param array<int, string> $etapas Estado por número de etapa. Las que no se nombran quedan pendientes.
@@ -170,7 +173,13 @@ abstract class BaseDelMailDeImplementacion extends TestCase
      */
     protected function poner_las_etapas(Implementation $impl, array $etapas): void
     {
-        for ($numero = 1; $numero <= 8; $numero++) {
+        $hasta = Implementation::ULTIMA_ETAPA;
+
+        foreach (array_keys($etapas) as $numero) {
+            $hasta = max($hasta, (int) $numero);
+        }
+
+        for ($numero = 1; $numero <= $hasta; $numero++) {
             ImplementationStage::updateOrCreate(
                 ['implementation_id' => $impl->id, 'stage_number' => $numero],
                 ['status' => isset($etapas[$numero]) ? $etapas[$numero] : 'pending']
@@ -179,7 +188,7 @@ abstract class BaseDelMailDeImplementacion extends TestCase
     }
 
     /**
-     * Mapa de estados de etapas: las primeras `$completas` completadas, `$en_curso` en curso, las
+     * Mapa de estados de las siete etapas: las primeras `$completas` completadas, `$en_curso` en curso, las
      * `$salteadas` salteadas y el resto pendientes. Es lo que se pasa a `crear_implementacion()`.
      *
      * @param int                $completas
@@ -192,7 +201,7 @@ abstract class BaseDelMailDeImplementacion extends TestCase
     {
         $mapa = [];
 
-        for ($numero = 1; $numero <= 8; $numero++) {
+        for ($numero = 1; $numero <= Implementation::ULTIMA_ETAPA; $numero++) {
             if (in_array($numero, $salteadas, true)) {
                 $mapa[$numero] = 'skipped';
             } elseif ($numero <= $completas) {

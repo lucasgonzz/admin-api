@@ -20,7 +20,7 @@ use Illuminate\Support\Facades\Mail;
  *  2. 🔴 El centro de recursos sale recién en la entrega: `instalando` no lo lleva.
  *  3. 🔴 La videollamada no se nombra en ningún lado: ni en «lo que sigue» de la entrega (`listo`) ni
  *     en la línea de progreso, que sale en TODOS los mails (su etapa 8 se llamaba "Videollamada de
- *     cierre").
+ *     cierre"; desde el 15/10/2026 esa etapa salió del flujo y la línea de progreso tiene siete).
  *
  * Y que la entrega (`listo`) lleve la tarjeta para entrar SIN la contraseña: el mail nunca la lleva,
  * va por WhatsApp. `instalado` y `acceso` siguen aceptados (compatibilidad): lo cubren los tests de
@@ -93,7 +93,7 @@ class OrdenNuevoDeLaImplementacionTest extends BaseDelMailDeImplementacion
         }
 
         // La línea de progreso dice la verdad: la instalación está en curso.
-        $this->assertStringContainsString('Etapa 2 de 8', $mail['html']);
+        $this->assertStringContainsString('Etapa 2 de 7', $mail['html']);
     }
 
     /**
@@ -265,9 +265,9 @@ class OrdenNuevoDeLaImplementacionTest extends BaseDelMailDeImplementacion
     }
 
     /**
-     * 3. La línea de progreso sale en TODOS los mails: ninguno nombra la videollamada, y la etapa 8 se
-     * llama "Seguimos con soporte". La 6 es "Terminamos tu catálogo" (los tutoriales salen en la
-     * entrega). En la HTML y en el texto.
+     * 3. La línea de progreso sale en TODOS los mails: ninguno nombra la videollamada, y desde el 15/10/2026 tampoco
+     * la etapa 8 que la reemplazó en la lista ("Seguimos con soporte"): el flujo tiene siete etapas. La 6 es
+     * "Terminamos tu catálogo" (los tutoriales salen en la entrega). En la HTML y en el texto.
      *
      * @return void
      */
@@ -283,7 +283,7 @@ class OrdenNuevoDeLaImplementacionTest extends BaseDelMailDeImplementacion
 
             foreach (['html' => $mail['html'], 'texto' => $mail['texto']] as $version => $contenido) {
                 $this->assertStringNotContainsStringIgnoringCase('videollamada', $contenido, $hito . ' (' . $version . ')');
-                $this->assertStringContainsString('Seguimos con soporte', $contenido, $hito . ' (' . $version . ')');
+                $this->assertStringNotContainsString('Seguimos con soporte', $contenido, $hito . ' (' . $version . ')');
                 $this->assertStringContainsString('Terminamos tu catálogo', $contenido, $hito . ' (' . $version . ')');
                 $this->assertStringNotContainsString('Tu equipo y los tutoriales', $contenido, $hito . ' (' . $version . ')');
             }
