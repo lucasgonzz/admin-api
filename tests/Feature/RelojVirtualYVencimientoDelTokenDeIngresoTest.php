@@ -204,20 +204,25 @@ class RelojVirtualYVencimientoDelTokenDeIngresoTest extends TestCase
     }
 
     /**
-     * 🔴 El pedido de Lucas (11/9/2026): con bloqueo_real_minutos=180 (default), un lead con demo de
-     * 10:00 a 11:00 puede volver a entrar a las 12:30 — bien después de que duración+gracia (11:10)
-     * lo hubiera vencido antes de este cambio — porque `build_turno()`, el ÚNICO lugar que decide si
-     * se puede entrar (ver su propio docblock), ahora también respeta inicio + bloqueo_real (13:00).
-     * Antes de este fix, esto daba 409 `vencido` aunque el token siguiera vigente.
+     * 🔴 El pedido de Lucas (11/9/2026): con bloqueo_real_minutos en su default, un lead con demo de
+     * 10:00 a 11:00 puede volver a entrar bien después de que duración+gracia (11:10) lo hubiera
+     * vencido antes de ese cambio, porque `build_turno()` —el ÚNICO lugar que decide si se puede
+     * entrar, ver su propio docblock— también respeta inicio + bloqueo_real. Antes de ese fix, esto
+     * daba 409 `vencido` aunque el token siguiera vigente.
+     *
+     * 13/10/2026 (misión demo-dos-horas-y-experiencia): el default bajó de 180 a 120, así que el
+     * fin real de este turno pasó de 13:00 a 12:00 y el "ahora" del test se corrió de 12:30 a 11:40.
+     * Sigue siendo el mismo caso —una hora después del fin nominal, media hora después de que
+     * duración+gracia lo hubiera vencido— y el control de abajo cubre el otro lado del nuevo límite.
      *
      * @return void
      */
     public function test_bloqueo_real_deja_reingresar_despues_de_duracion_mas_gracia(): void
     {
-        Carbon::setTestNow(Carbon::parse('2026-08-20 12:30:00', RunDemoSetupService::TZ));
+        Carbon::setTestNow(Carbon::parse('2026-08-20 11:40:00', RunDemoSetupService::TZ));
 
         $lead = $this->crear_lead_con_token(
-            Carbon::parse('2026-08-20 13:00:00', RunDemoSetupService::TZ) // token vigente hasta el bloqueo real
+            Carbon::parse('2026-08-20 12:00:00', RunDemoSetupService::TZ) // token vigente hasta el bloqueo real
         );
 
         $respuesta = $this->postJson('/api/demo-experiencia/' . $lead->uuid . '/ingresar');
@@ -227,16 +232,20 @@ class RelojVirtualYVencimientoDelTokenDeIngresoTest extends TestCase
     }
 
     /**
-     * Control del caso anterior: pasado el bloqueo real (13:05, después de 10:00 + 180), el turno
-     * vuelve a estar "vencido" en `build_turno()` y bloquea el ingreso SIN llegar a mirar el token
-     * — que acá sigue vigente a propósito (hasta las 14:00), para probar que el gate que corta es el
-     * del turno, no el del token.
+     * Control del caso anterior: pasado el bloqueo real (12:05, cinco minutos después de
+     * 10:00 + 120), el turno vuelve a estar "vencido" en `build_turno()` y bloquea el ingreso SIN
+     * llegar a mirar el token — que acá sigue vigente a propósito (hasta las 14:00), para probar que
+     * el gate que corta es el del turno, no el del token.
+     *
+     * 13/10/2026: era 13:05 cuando el default del bloqueo real eran 180 minutos. Con 120 el límite
+     * es 12:00, y se prueba justo al lado para que este control siga siendo del límite nuevo y no de
+     * "una hora más tarde", que pasaría igual sin probar nada.
      *
      * @return void
      */
     public function test_pasado_el_bloqueo_real_el_turno_vuelve_a_estar_vencido(): void
     {
-        Carbon::setTestNow(Carbon::parse('2026-08-20 13:05:00', RunDemoSetupService::TZ));
+        Carbon::setTestNow(Carbon::parse('2026-08-20 12:05:00', RunDemoSetupService::TZ));
 
         $lead = $this->crear_lead_con_token(
             Carbon::parse('2026-08-20 14:00:00', RunDemoSetupService::TZ)

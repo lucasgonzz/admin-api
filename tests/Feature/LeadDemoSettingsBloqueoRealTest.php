@@ -13,7 +13,7 @@ use Tests\TestCase;
 /**
  * `GET/PUT settings/lead-demo` (panel de Cuenta), dos cosas del 11/9/2026:
  *
- *  1. El campo nuevo `bloqueo_real_minutos` (default 180) — separado a propósito de
+ *  1. El campo nuevo `bloqueo_real_minutos` (default 120 desde el 13/10/2026; nació en 180) — separado a propósito de
  *     `duracion_minutos`, que sigue siendo lo único que se comunica al lead.
  *  2. Regresión del hallazgo de paso: `recordatorio_silencio_minutos`, `demo_directa_no_show_minutos`
  *     y `check_ingreso_silencio_minutos` (misión demo-agendado-directo, 10/9/2026) ya los mandaba
@@ -68,18 +68,24 @@ class LeadDemoSettingsBloqueoRealTest extends TestCase
     }
 
     /**
-     * GET sin nada guardado todavía: el default de bloqueo_real_minutos es 180.
+     * GET sin nada guardado todavía: el default de bloqueo_real_minutos es 120.
+     *
+     * 🔴 Era 180 hasta el 13/10/2026 (misión demo-dos-horas-y-experiencia). Bajó a 120 porque desde
+     * esa misión la reserva de la instancia es lo que el agente le COMUNICA al lead ("la tenés
+     * reservada dos horas"), y 120 minutos son exactamente esas dos horas: el piso del bloqueo real
+     * y el techo de la ventana extendida cierran juntos. `duracion_minutos` NO cambió y sigue en 60
+     * —son dos cosas distintas, que es justo lo que este test cuida—, así que se afirma acá.
      *
      * @return void
      */
-    public function test_get_devuelve_el_default_de_bloqueo_real_en_180(): void
+    public function test_get_devuelve_el_default_de_bloqueo_real_en_120(): void
     {
         $this->autenticar();
 
         $respuesta = $this->getJson('/api/admin/settings/lead-demo');
 
         $respuesta->assertStatus(200);
-        $respuesta->assertJsonPath('bloqueo_real_minutos', 180);
+        $respuesta->assertJsonPath('bloqueo_real_minutos', 120);
         $respuesta->assertJsonPath('duracion_minutos', 60);
     }
 

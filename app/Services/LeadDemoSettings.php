@@ -229,11 +229,25 @@ class LeadDemoSettings
     private const DEFAULT_DURACION_MINUTOS = 60;
 
     /**
-     * Valor por defecto: bloqueo real, en minutos desde el inicio (11/9/2026). 180 = 3 horas: el
-     * número que pidió Lucas para cubrir la demora típica de un lead que entra tarde o quiere
-     * volver a entrar, sin tocar la 1 hora que se le comunica.
+     * Valor por defecto: bloqueo real, en minutos desde el inicio.
+     *
+     * Historia, que explica el número: nació el 11/9/2026 en **180 (3 horas)**, el número que pidió
+     * Lucas para cubrir la demora típica de un lead que entra tarde o quiere volver a entrar, sin
+     * tocar la 1 hora que se le comunica.
+     *
+     * 🔴 Bajó a **120 (2 horas) el 13/10/2026** (misión demo-dos-horas-y-experiencia). El motivo no
+     * es que tres horas fueran muchas para el lead: es que el bloqueo real y lo que se le PROMETE
+     * dejaron de ser dos cosas distintas. Desde esta misión al lead se le comunica que la demo
+     * *"dura menos de una hora"* y que *"la tenés reservada dos horas"* — y esas dos horas son
+     * exactamente DEFAULT_VENTANA_EXTENDIDA_MAX_HORAS. Con el bloqueo en 180 la instancia quedaba
+     * tomada una hora más que lo prometido, sin que nadie pudiera usarla y sin que el lead lo
+     * supiera: hora muerta pura. Con 120 el piso del bloqueo y el techo de la ventana cierran en el
+     * mismo instante, así que la reserva dura lo que se dijo y ni un minuto más.
+     *
+     * No confundir con DEFAULT_DURACION_MINUTOS, que sigue en 60 y mide otra cosa (cuánto dura la
+     * demo, que es lo que gobierna el check de fin, el hold del closer y la grilla).
      */
-    private const DEFAULT_BLOQUEO_REAL_MINUTOS = 180;
+    private const DEFAULT_BLOQUEO_REAL_MINUTOS = 120;
 
     /** Valor por defecto: setup antes del inicio (minutos). */
     private const DEFAULT_SETUP_MINUTOS_ANTES = 15;
@@ -283,8 +297,33 @@ class LeadDemoSettings
     /** Valor por defecto: la misma 1.5 que estaba hardcodeada, para no cambiar nada hasta que se edite. */
     private const DEFAULT_DEMO_INTRO_VELOCIDAD = 1.5;
 
-    /** Valor por defecto: tope de la ventana extendida, en horas (misión 47). */
-    private const DEFAULT_VENTANA_EXTENDIDA_MAX_HORAS = 6;
+    /**
+     * Valor por defecto: tope de la ventana extendida, en horas.
+     *
+     * Historia: nació en **6** en la misión 47, cuando la ventana extendida era "entrá cuando
+     * puedas" y lo único que importaba era que el lead no se quedara afuera por llegar tarde.
+     *
+     * 🔴 Bajó a **2 el 13/10/2026** (misión demo-dos-horas-y-experiencia), y el cambio es de
+     * sentido, no de número. Desde esta misión estas horas dejaron de ser un margen interno y
+     * pasaron a ser lo que se le DICE al lead: el agente le comunica que la demo *"dura menos de
+     * una hora"* y que *"la tenés reservada dos horas, hasta las HH:MM"*, con el número leído de
+     * acá (`LeadAiService::build_demo_directa_context()` lo escribe en letras). Eso trae dos
+     * consecuencias:
+     *
+     *   1. Seis horas era una promesa que no se podía sostener: con tres instancias, reservar seis
+     *      horas por lead dejaba a los siguientes "sin lugar" toda la tarde, y
+     *      `DemoDirectaService::instancia_libre()` lo tapaba recortando la ventana a lo mínimo —
+     *      o sea prometiendo una cosa y reservando otra. Con 2 h la ventana entera entra casi
+     *      siempre, así que ese recorte dejó de hacer falta (y se sacó: ver el docblock de
+     *      `instancia_libre()`).
+     *   2. Es el mismo número que DEFAULT_BLOQUEO_REAL_MINUTOS (120 min): el piso del bloqueo real
+     *      y el techo de la ventana cierran juntos, y la instancia se libera cuando se terminó lo
+     *      que se le prometió al lead.
+     *
+     * El clamp sigue siendo [MIN_HORAS_VENTANA, MAX_HORAS_VENTANA] = [1, 12]: esto es un default,
+     * no un límite, y se puede mover desde el panel.
+     */
+    private const DEFAULT_VENTANA_EXTENDIDA_MAX_HORAS = 2;
 
     /** Valor por defecto: gracia post-demo (minutos). */
     private const DEFAULT_GRACIA_MINUTOS_POST = 10;

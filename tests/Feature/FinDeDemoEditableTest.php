@@ -285,9 +285,15 @@ class FinDeDemoEditableTest extends TestCase
         $lead->refresh();
         $this->assertSame('12:00', $lead->demo_end_time);
         $this->assertSame($token_antes, $lead->demo_ingreso_token);
-        // 11/9/2026: ya no es fin(12:00)+gracia(10)=12:10 a secas -- el piso de bloqueo_real_minutos
-        // (180, desde el inicio 10:00) da 13:00, mayor que 12:10, y gana.
-        $this->assertSame('2026-08-20 13:00:00', $lead->demo_ingreso_token_expira_at->format('Y-m-d H:i:s'));
+        // 11/9/2026: ya no es fin+gracia a secas -- `calcular_expiracion()` toma el mayor entre
+        // fin+gracia y el piso de bloqueo_real_minutos desde el inicio (10:00).
+        // 13/10/2026 (misión demo-dos-horas-y-experiencia): el default de bloqueo_real_minutos bajó
+        // de 180 a 120, así que ese piso pasó de 13:00 a 12:00 y ahora el que GANA es fin(12:00) +
+        // gracia(10) = 12:10. Cambia quién de los dos manda, no el criterio: sigue siendo el máximo
+        // de los dos, que es exactamente lo que este test cuida. Este archivo escribe duración,
+        // gracia y ventana extendida en su setUp pero NO el bloqueo real, así que acá manda el
+        // default.
+        $this->assertSame('2026-08-20 12:10:00', $lead->demo_ingreso_token_expira_at->format('Y-m-d H:i:s'));
         $this->assertSame('2026-08-20 12:00:00', $lead->demo_fin_check_reprogramado_para->format('Y-m-d H:i:s'));
     }
 
