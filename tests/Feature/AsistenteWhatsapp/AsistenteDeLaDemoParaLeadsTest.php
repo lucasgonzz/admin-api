@@ -413,8 +413,8 @@ class AsistenteDeLaDemoParaLeadsTest extends BaseDelCanal
         Queue::fake();
         $espia = $this->espiar_sender();
         $demo  = $this->crear_demo();
-        $this->crear_lead($demo);
-        Demo::where('id', $demo->id)->delete();
+        // La demo "borrada": el lead apunta a una instancia que ya no existe.
+        $this->crear_lead($demo, ['demo_id' => 987654321]);
 
         $this->escribir_al_asistente(self::TELEFONO_LEAD);
 
