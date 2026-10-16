@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Client;
 use App\Models\EnvChangeBatch;
 use App\Models\EnvChangeItem;
+use App\Support\EnvSensitiveKeys;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Str;
 
@@ -32,26 +33,20 @@ class EnvBulkChangeService
     const PREVIEW_TTL_MINUTES = 30;
 
     /**
-     * Fragmentos que marcan una variable como sensible: su valor nunca se guarda ni se devuelve
-     * en claro, sólo enmascarado.
+     * Fragmentos que marcan una variable como sensible. La regla vive en EnvSensitiveKeys (la
+     * comparte con la plantilla .env); se conserva acá apuntando a la misma lista por compatibilidad.
      *
      * @var array<int, string>
      */
-    const SENSITIVE_KEY_FRAGMENTS = ['KEY', 'SECRET', 'PASSWORD', 'PASS', 'TOKEN', 'DSN', 'CREDENTIAL'];
+    const SENSITIVE_KEY_FRAGMENTS = EnvSensitiveKeys::FRAGMENTOS;
 
     /**
-     * Variables sensibles que ningún fragmento de arriba atrapa, y que igual llevan un secreto.
-     *
-     * Las `*_URL` de conexión traen `usuario:password@host` adentro: Laravel 8 soporta DATABASE_URL,
-     * REDIS_URL y MAIL_URL de forma nativa, y ninguna matchea PASSWORD ni KEY. MAIL_USERNAME parece
-     * inofensivo hasta que el proveedor es SendGrid, donde el username literal es la API key.
-     *
-     * Este endpoint acepta CUALQUIER nombre de variable, no sólo las del template, así que la lista
-     * es un piso y no una garantía: ante la duda, agregá la variable acá.
+     * Variables sensibles que ningún fragmento atrapa (DATABASE_URL, MAIL_USERNAME...). Ver
+     * EnvSensitiveKeys::NOMBRES; se conserva acá apuntando a la misma lista por compatibilidad.
      *
      * @var array<int, string>
      */
-    const SENSITIVE_KEY_NAMES = ['DATABASE_URL', 'DB_URL', 'REDIS_URL', 'MAIL_URL', 'QUEUE_URL', 'MAIL_USERNAME'];
+    const SENSITIVE_KEY_NAMES = EnvSensitiveKeys::NOMBRES;
 
     /**
      * Servicio que abre el SSH y opera el .env de cada cliente.
@@ -625,32 +620,19 @@ class EnvBulkChangeService
 
     /**
      * Indica si el valor de esa variable es un secreto que no debe guardarse ni devolverse en claro.
+     * Delega en EnvSensitiveKeys, que es la regla compartida con la plantilla .env.
      *
      * @param  string  $key
      * @return bool
      */
     private function is_sensitive_key(string $key): bool
     {
-        $upper = strtoupper($key);
-
-        if (in_array($upper, self::SENSITIVE_KEY_NAMES, true)) {
-            return true;
-        }
-
-        foreach (self::SENSITIVE_KEY_FRAGMENTS as $fragment) {
-            if (strpos($upper, $fragment) !== false) {
-                return true;
-            }
-        }
-
-        return false;
+        return EnvSensitiveKeys::es_sensible($key);
     }
 
     /**
      * Enmascara el valor si la variable es sensible; si no, lo devuelve tal cual.
-     *
-     * Las variables que no son secretas (DB_HOST, APP_URL, MAIL_PORT) se muestran enteras: son las
-     * que hace falta leer para confirmar que el cambio es el correcto.
+     * Delega en EnvSensitiveKeys, que es la regla compartida con la plantilla .env.
      *
      * @param  string  $key
      * @param  string  $value
@@ -658,19 +640,6 @@ class EnvBulkChangeService
      */
     private function mask_value(string $key, string $value): string
     {
-        if (! $this->is_sensitive_key($key)) {
-            return $value;
-        }
-
-        if ($value === '') {
-            return '(vacío)';
-        }
-
-        /* Valores cortos no muestran ningún prefijo: cuatro caracteres de una clave de ocho es mucho. */
-        if (strlen($value) <= 8) {
-            return str_repeat('*', 8);
-        }
-
-        return substr($value, 0, 4) . str_repeat('*', 8);
+        return EnvSensitiveKeys::enmascarar($key, $value);
     }
 }
