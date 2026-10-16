@@ -738,11 +738,22 @@ TXT;
      */
     public function generate_suggestion(Lead $lead, bool $is_followup, ?string $intencion_forzada = null): LeadMessage
     {
-        /* Validar que la API key esté configurada antes de cualquier llamada. */
-        $api_key = (string) config('services.anthropic.api_key');
+        /* Validar que la API key esté configurada antes de cualquier llamada. La clave es la del
+         * proveedor que corre (DeepSeek si hay clave suya cargada, Claude si no): con DeepSeek nunca
+         * llega vacía, así que este mensaje solo sale cuando el que falta es Claude. */
+        $api_key = LeadAiProveedor::api_key();
         if ($api_key === '') {
             throw new \RuntimeException('ANTHROPIC_API_KEY no está configurada.');
         }
+
+        /* Qué proveedor y modelo atienden a este lead. Sin esta línea, "¿estuvo contestando DeepSeek
+         * o Claude?" solo se sabe mirando la factura: el modo de falla conocido de esta familia es
+         * quedarse en Claude en silencio por una clave que no llegó al .env. */
+        Log::info('LeadAiService: proveedor de IA del agente de leads.', [
+            'lead_id'   => $lead->id,
+            'proveedor' => LeadAiProveedor::nombre(),
+            'modelo'    => LeadAiProveedor::modelo(),
+        ]);
 
         /* Demo directa (misión demo-agendado-directo): se resuelve una sola vez acá y viaja por
          * parámetro al system prompt, al contexto y al post-procesado del paquete. */
@@ -751,7 +762,7 @@ TXT;
         /* Pasar el estado para inyectar la sección FAQ solo cuando corresponde */
         $system       = $this->build_system_prompt($demo_directa);
         $user_content = $this->build_user_content($lead, $is_followup, '', $intencion_forzada, $demo_directa);
-        $model        = (string) config('services.anthropic.model', 'claude-sonnet-4-20250514');
+        $model        = LeadAiProveedor::modelo();
         $http         = $this->build_http_client();
 
         /* Primera llamada a Claude para obtener sugerencia base (con soporte de tool use). */
@@ -1350,7 +1361,7 @@ TXT;
         /* Pasar el estado para inyectar la sección FAQ solo cuando corresponde */
         $system       = $this->build_system_prompt();
         $user_content = $this->build_user_content($lead, $is_followup, $availability_context, $intencion_forzada);
-        $model        = (string) config('services.anthropic.model', 'claude-sonnet-4-20250514');
+        $model        = LeadAiProveedor::modelo();
         $http         = $this->build_http_client();
 
         /* Segunda llamada a Claude con disponibilidad como contexto adicional (con soporte de tool use). */
@@ -5361,16 +5372,20 @@ TXT;
     }
 
     /**
-     * Construye el cliente HTTP configurado para Anthropic.
+     * Construye el cliente HTTP configurado para el proveedor de IA que corre (Claude o DeepSeek).
      *
      * Centraliza el setup de headers, timeout y opciones TLS (necesario en WAMP/Windows)
-     * para reutilizarlo en la primera y segunda llamada a Claude.
+     * para reutilizarlo en la primera y segunda llamada al modelo.
+     *
+     * Los headers `anthropic-version` y `anthropic-beta` viajan también a DeepSeek: su endpoint
+     * compatible con Anthropic los ignora sin romper (medido en empresa-api el 22/9/2026), y así hay
+     * un solo juego de headers para los dos proveedores. Ver LeadAiProveedor.
      *
      * @return PendingRequest
      */
     protected function build_http_client(): PendingRequest
     {
-        $api_key = (string) config('services.anthropic.api_key');
+        $api_key = LeadAiProveedor::api_key();
 
         $http = Http::withHeaders([
             'x-api-key'         => $api_key,
@@ -5380,8 +5395,8 @@ TXT;
         ])->timeout(90);
 
         /* Configuración TLS según entorno (cacert para WAMP en Windows). */
-        $verify_ssl = (bool) config('services.anthropic.verify_ssl', true);
-        $ca_bundle  = config('services.anthropic.ca_bundle');
+        $verify_ssl = LeadAiProveedor::verify_ssl();
+        $ca_bundle  = LeadAiProveedor::ca_bundle();
 
         if (! $verify_ssl) {
             $http = $http->withoutVerifying();
@@ -8485,10 +8500,10 @@ TXT;
 
             /* Mismo system prompt que el flujo normal; max_tokens acotado a un mensaje corto. */
             $system = $this->build_system_prompt();
-            $model  = (string) config('services.anthropic.model', 'claude-sonnet-4-20250514');
+            $model  = LeadAiProveedor::modelo();
             $http   = $this->build_http_client();
 
-            $response = $http->post('https://api.anthropic.com/v1/messages', [
+            $response = $http->post(LeadAiProveedor::url_messages(), LeadAiProveedor::cuerpo([
                 'model'      => $model,
                 'max_tokens' => 400,
                 'system'     => [
@@ -8501,7 +8516,7 @@ TXT;
                 'messages'   => [
                     ['role' => 'user', 'content' => $user_content],
                 ],
-            ]);
+            ]));
 
             if ($response->failed()) {
                 Log::error('LeadAiService: fallo HTTP en la llamada del reagendado al próximo slot.', [
@@ -8631,10 +8646,10 @@ TXT;
 
             /* Mismo system prompt que el flujo normal; max_tokens acotado a un mensaje corto. */
             $system = $this->build_system_prompt();
-            $model  = (string) config('services.anthropic.model', 'claude-sonnet-4-20250514');
+            $model  = LeadAiProveedor::modelo();
             $http   = $this->build_http_client();
 
-            $response = $http->post('https://api.anthropic.com/v1/messages', [
+            $response = $http->post(LeadAiProveedor::url_messages(), LeadAiProveedor::cuerpo([
                 'model'      => $model,
                 'max_tokens' => 400,
                 'system'     => [
@@ -8647,7 +8662,7 @@ TXT;
                 'messages'   => [
                     ['role' => 'user', 'content' => $user_content],
                 ],
-            ]);
+            ]));
 
             if ($response->failed()) {
                 Log::error('LeadAiService: fallo HTTP en tercera llamada correctiva (slot inválido).', [
@@ -8921,21 +8936,25 @@ TXT;
         while ($iterations < self::MAX_TOOL_ITERATIONS) {
             $iterations++;
 
-            $response = $http->post('https://api.anthropic.com/v1/messages', [
+            $response = $http->post(LeadAiProveedor::url_messages(), LeadAiProveedor::cuerpo([
                 'model'      => $model,
                 'max_tokens' => $max_tokens,
                 'system'     => $system_payload,
                 'tools'      => $tools,
                 'messages'   => $messages,
-            ]);
+            ]));
 
             if ($response->failed()) {
-                Log::error('LeadAiService run_with_tools: Anthropic error', [
+                /* El texto del log y de la excepción lleva el proveedor que corre: con DeepSeek un 402
+                 * ("Insufficient Balance", pasó el 10/10/2026 en empresa) no puede leerse como un
+                 * problema de Claude. Con Claude el texto sigue siendo el de siempre. */
+                Log::error('LeadAiService run_with_tools: ' . LeadAiProveedor::etiqueta() . ' error', [
                     'status'    => $response->status(),
                     'body'      => $response->body(),
                     'iteration' => $iterations,
+                    'proveedor' => LeadAiProveedor::nombre(),
                 ]);
-                throw new \RuntimeException('Error Anthropic HTTP ' . $response->status() . ': ' . $response->body());
+                throw new \RuntimeException('Error ' . LeadAiProveedor::etiqueta() . ' HTTP ' . $response->status() . ': ' . $response->body());
             }
 
             $data        = $response->json();
@@ -8944,6 +8963,21 @@ TXT;
 
             /* Claude terminó sin tool_use: extraer el bloque de texto y retornar. */
             if ($stop_reason === 'end_turn') {
+                /* Anthropic nunca cierra un turno con `end_turn` llevando un bloque `tool_use`. Un
+                 * endpoint compatible podría hacerlo (empresa-api lo tiene como hipótesis sin confirmar
+                 * con DeepSeek, informe 20261010): no se cambia el comportamiento del loop por una
+                 * sospecha, pero si pasa tiene que quedar escrito, porque la sugerencia saldría vacía. */
+                foreach ($content as $block) {
+                    if (isset($block['type']) && (string) $block['type'] === 'tool_use') {
+                        Log::warning('LeadAiService: la respuesta trae un tool_use pero el stop_reason es end_turn; la tool NO se ejecuta.', [
+                            'proveedor' => LeadAiProveedor::nombre(),
+                            'iteration' => $iterations,
+                            'tool'      => isset($block['name']) ? (string) $block['name'] : '?',
+                        ]);
+                        break;
+                    }
+                }
+
                 foreach ($content as $block) {
                     $type = isset($block['type']) ? (string) $block['type'] : '';
                     if ($type === 'text') {
