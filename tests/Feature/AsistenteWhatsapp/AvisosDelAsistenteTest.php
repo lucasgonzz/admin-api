@@ -32,6 +32,12 @@ use Illuminate\Support\Facades\Http;
 class AvisosDelAsistenteTest extends BaseDelCanal
 {
     /**
+     * Id del aviso tal como lo manda el `empresa-api`: string opaco, `escaneo_factura:{uuid}` (por uuid
+     * y no por id de fila: las demos se resetean con `migrate:fresh` y el autoincremental se repite).
+     */
+    const ID = 'escaneo_factura:9b2c4f1e-7a3d-4c55-9e0b-2f6d8a1c3e70';
+
+    /**
      * Ruta relativa del SPA que manda el `empresa-api` en cada aviso.
      */
     const RUTA = '/proveedores/compras?compra=40&escaneo=9b2c-uuid';
@@ -96,7 +102,7 @@ class AvisosDelAsistenteTest extends BaseDelCanal
         return [
             'avisos' => [
                 [
-                    'id'                 => 'escaneo_factura:15',
+                    'id'                 => self::ID,
                     'tipo'               => 'escaneo_factura',
                     'ai_conversation_id' => $conversacion,
                     'texto'              => self::TEXTO,
@@ -163,7 +169,7 @@ class AvisosDelAsistenteTest extends BaseDelCanal
         /* La marca lleva el id del contrato, el link y el wamid. */
         $marcas = $this->pedidos_a('/asistente/avisos/avisado', 'POST');
         $this->assertCount(1, $marcas);
-        $this->assertSame('escaneo_factura:15', $marcas[0]['id']);
+        $this->assertSame(self::ID, $marcas[0]['id']);
         $this->assertSame(self::URL, $marcas[0]['url']);
         $this->assertSame('wamid.saliente.1', $marcas[0]['whatsapp_message_id']);
 
@@ -284,7 +290,7 @@ class AvisosDelAsistenteTest extends BaseDelCanal
     }
 
     /**
-     * 🔴 404 = sistema sin la función: silencio total y seis horas sin volver a preguntar.
+     * 🔴 404 = sistema sin la función: silencio total y media hora sin volver a preguntar.
      *
      * @return void
      */
@@ -305,17 +311,63 @@ class AvisosDelAsistenteTest extends BaseDelCanal
         $this->assertCount(0, $espia->textos, 'Ni al dueño ni a los admins: el 404 es la versión vieja, no un error.');
         $this->assertCount(0, $espia->plantillas);
 
-        /* Una hora después sigue en pausa: no hay segunda consulta. */
-        $this->travel(60)->minutes();
+        /* Veinte minutos después sigue en pausa: no hay segunda consulta. */
+        $this->travel(20)->minutes();
         $this->assertSame('en_pausa', $servicio->enviar_a($client)['estado']);
         $this->assertCount(1, $this->pedidos_a('/asistente/avisos-pendientes', 'GET'));
 
-        /* Pasadas las seis horas se vuelve a consultar (con una entrante nueva para seguir dentro de las 24 hs). */
-        $this->travel(301)->minutes();
-        $this->fila_entrante($client);
+        /* Pasada la media hora se vuelve a consultar. */
+        $this->travel(11)->minutes();
         $this->assertSame('degradado', $servicio->enviar_a($client)['estado']);
         $this->assertCount(2, $this->pedidos_a('/asistente/avisos-pendientes', 'GET'));
         $this->assertCount(0, $espia->textos);
+    }
+
+    /**
+     * 🔴 La pausa de un 404 NO sobrevive al upgrade: cuando el 202 de un mensaje del dueño trae
+     * `admite_avisos: true`, el job la levanta y la vuelta siguiente del barrido ya consulta. Y un
+     * 202 de un sistema viejo (sin la marca) no la toca.
+     *
+     * @return void
+     */
+    public function test_el_202_con_admite_avisos_levanta_la_pausa_del_404(): void
+    {
+        $espia  = $this->espiar_sender();
+        $this->crear_config_whatsapp();
+        $client = $this->crear_cliente();
+        $fila   = $this->fila_entrante($client);
+        $fila->estado = ClientAssistantMessage::ESTADO_RECIBIDO;
+        $fila->save();
+
+        $servicio = app(AsistenteAvisosService::class);
+
+        /* Antes del upgrade: 404 y el cliente queda en pausa. */
+        $this->fakear_http([
+            '*/asistente/avisos-pendientes*' => Http::response(['message' => 'Not Found'], 404),
+            '*/asistente/mensajes'           => Http::response(['ai_conversation_id' => 91, 'ai_message_id' => 305, 'estado' => 'pendiente'], 202),
+        ]);
+        $this->assertSame('degradado', $servicio->enviar_a($client)['estado']);
+
+        /* Un 202 sin la marca (sistema viejo) no levanta nada. */
+        $this->correr_job(new \App\Jobs\EnviarMensajeAlAsistenteJob((int) $fila->id), $espia);
+        $this->assertTrue(Cache::has(AsistenteAvisosService::clave_de_pausa_de((int) $client->id)));
+        $this->assertSame('en_pausa', $servicio->enviar_a($client)['estado']);
+
+        /* Después del upgrade: el 202 trae `admite_avisos: true` y el barrido siguiente consulta. */
+        $otra = $this->fila_entrante($client);
+        $otra->estado = ClientAssistantMessage::ESTADO_RECIBIDO;
+        $otra->save();
+
+        $this->fakear_http([
+            '*/asistente/avisos-pendientes*' => Http::response(['avisos' => []], 200),
+            '*/asistente/mensajes'           => Http::response(['ai_conversation_id' => 91, 'ai_message_id' => 306, 'estado' => 'pendiente', 'admite_avisos' => true], 202),
+        ]);
+
+        $this->correr_job(new \App\Jobs\EnviarMensajeAlAsistenteJob((int) $otra->id), $espia);
+        $this->assertFalse(Cache::has(AsistenteAvisosService::clave_de_pausa_de((int) $client->id)), 'El 202 con admite_avisos levanta la pausa.');
+
+        $this->assertSame('sin_avisos', $servicio->enviar_a($client)['estado']);
+        $this->assertCount(1, $this->pedidos_a('/asistente/avisos-pendientes', 'GET'), 'Sin pausa, el barrido vuelve a consultar.');
     }
 
     /**
@@ -491,7 +543,7 @@ class AvisosDelAsistenteTest extends BaseDelCanal
         $this->assertCount(0, $espia->textos);
         $this->assertCount(0, $espia->plantillas, 'El aviso nunca sale por plantilla.');
         $this->assertCount(0, $this->pedidos_a('/asistente/avisos/avisado', 'POST'));
-        $this->assertFalse(Cache::has($servicio->clave_de_reclamo($client, 'escaneo_factura:15')));
+        $this->assertFalse(Cache::has($servicio->clave_de_reclamo($client, self::ID)));
     }
 
     /**
@@ -564,7 +616,7 @@ class AvisosDelAsistenteTest extends BaseDelCanal
         $primera = $servicio->enviar_a($client);
         $this->assertSame('pendiente', $primera['estado']);
         $this->assertCount(0, $this->pedidos_a('/asistente/avisos/avisado', 'POST'));
-        $this->assertFalse(Cache::has($servicio->clave_de_reclamo($client, 'escaneo_factura:15')));
+        $this->assertFalse(Cache::has($servicio->clave_de_reclamo($client, self::ID)));
 
         $espia->confirma = true;
 
@@ -590,7 +642,7 @@ class AvisosDelAsistenteTest extends BaseDelCanal
         ]);
 
         $servicio = app(AsistenteAvisosService::class);
-        Cache::put($servicio->clave_de_reclamo($client, 'escaneo_factura:15'), ['estado' => AsistenteAvisosService::RECLAMO_RECLAMADO], now()->addDay());
+        Cache::put($servicio->clave_de_reclamo($client, self::ID), ['estado' => AsistenteAvisosService::RECLAMO_RECLAMADO], now()->addDay());
 
         $resultado = $servicio->enviar_a($client);
 

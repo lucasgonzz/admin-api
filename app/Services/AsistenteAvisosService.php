@@ -62,11 +62,16 @@ class AsistenteAvisosService
     /**
      * Minutos sin volver a consultar a un cliente cuyo sistema no tiene la ruta (404).
      *
-     * Seis horas: es un cliente con un `empresa-api` anterior a esta misión, y no va a tenerla en el
-     * minuto siguiente. Consultarlo cada minuto serían 360 pedidos al pedo por día contra un shared
-     * hosting que bloquea por ráfaga.
+     * Treinta minutos: es un cliente con un `empresa-api` anterior a esta misión, y consultarlo cada
+     * minuto serían 1.440 pedidos al pedo por día contra un shared hosting que bloquea por ráfaga.
+     *
+     * 🔴 Eran seis horas hasta el chequeo independiente del 16/10/2026, y no alcanzaba con bajarlas:
+     * la pausa SOBREVIVÍA AL UPGRADE. Un cliente actualizado a media mañana ya le prometía al dueño
+     * "te aviso por acá" y el admin no le preguntaba hasta la tarde. Ahora, además del techo corto,
+     * la pausa se levanta sola en cuanto el sistema del cliente dice que tiene la función: el 202 de
+     * `POST asistente/mensajes` trae `admite_avisos: true` y el job llama a `levantar_pausa()`.
      */
-    const MINUTOS_DE_PAUSA_SIN_LA_FUNCION = 360;
+    const MINUTOS_DE_PAUSA_SIN_LA_FUNCION = 30;
 
     /**
      * Minutos sin volver a consultar a un cliente que respondió con error (401/403/409/5xx/timeout).
@@ -435,8 +440,8 @@ class AsistenteAvisosService
     /**
      * Le pide al `empresa-api` del cliente los avisos pendientes.
      *
-     * Las respuestas que no son 200 dejan al cliente en pausa (ver las constantes): 404 seis horas
-     * —es un sistema sin la función, no un error, y no se le avisa a nadie—, y cualquier otra cosa
+     * Las respuestas que no son 200 dejan al cliente en pausa (ver las constantes): 404 treinta
+     * minutos —es un sistema sin la función, no un error, y no se le avisa a nadie—, y cualquier otra cosa
      * diez minutos con su log. En ningún caso se le escribe al dueño: él no pidió nada que falte.
      *
      * @param Client $client  Cliente.
@@ -468,8 +473,9 @@ class AsistenteAvisosService
 
         $status = (int) $respuesta->status();
 
-        /* 404: el cliente todavía no tiene la ruta. Es la versión vieja, no una falla: pausa larga,
-         * sin avisar a los admins ni al dueño (a él no le falta nada que haya pedido). */
+        /* 404: el cliente todavía no tiene la ruta. Es la versión vieja, no una falla: pausa más larga
+         * que la de un error, sin avisar a los admins ni al dueño (a él no le falta nada que haya
+         * pedido). La levanta el job apenas el cliente anuncia `admite_avisos`. */
         if ($status === 404) {
             Cache::put(
                 $this->clave_de_pausa($client),
@@ -763,7 +769,39 @@ class AsistenteAvisosService
      */
     private function clave_de_pausa(Client $client): string
     {
-        return self::CACHE_PAUSA . ':' . (int) $client->id;
+        return self::clave_de_pausa_de((int) $client->id);
+    }
+
+    /**
+     * Clave de pausa de un cliente, por id. Pública para que las pruebas y el job miren la misma.
+     *
+     * @param int $client_id
+     *
+     * @return string
+     */
+    public static function clave_de_pausa_de(int $client_id): string
+    {
+        return self::CACHE_PAUSA . ':' . $client_id;
+    }
+
+    /**
+     * Saca al cliente de la pausa: la próxima vuelta del barrido lo consulta.
+     *
+     * La llama `EnviarMensajeAlAsistenteJob` cuando el 202 del mensaje trae `admite_avisos: true`,
+     * o sea cuando el sistema del cliente acaba de decir que ya tiene `avisos-pendientes`. Sin esto,
+     * la pausa de un 404 de antes del upgrade seguiría corriendo después del upgrade, justo cuando el
+     * `empresa-api` ya le prometió al dueño el aviso.
+     *
+     * Levantar una pausa por ERROR también está bien: un sistema que acaba de contestar un 202 está
+     * atendiendo.
+     *
+     * @param int $client_id Cliente.
+     *
+     * @return void
+     */
+    public static function levantar_pausa(int $client_id): void
+    {
+        Cache::forget(self::clave_de_pausa_de($client_id));
     }
 
     /**

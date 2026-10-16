@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Models\Client;
 use App\Models\ClientAssistantMessage;
 use App\Models\WhatsappConfig;
+use App\Services\AsistenteAvisosService;
 use App\Services\AsistenteFotoSalienteService;
 use App\Services\AsistenteImagenesService;
 use App\Services\AsistenteWhatsappService;
@@ -752,6 +753,25 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
         $fila->save();
 
         $this->pasar_la_conversacion_a_las_agrupadas($fila);
+
+        /* 🔴 El sistema del cliente dice que ya tiene los avisos por WhatsApp (`admite_avisos: true`,
+         * chequeo independiente de la misión asistente-aviso-escaneo-factura, 16/10/2026): si el
+         * barrido lo tenía en pausa por un 404 de antes de actualizarse, la pausa se levanta acá. Sin
+         * esto, el `empresa-api` le promete al dueño "te aviso por acá" y el admin no le pregunta hasta
+         * que vence la pausa. Estricto `=== true`: un sistema viejo no manda el campo y no cambia nada.
+         *
+         * En su propio try, por lo mismo que las agrupadas: el 202 ya está aceptado y una cache que
+         * falla no puede cerrar el turno con la disculpa. */
+        if (array_key_exists('admite_avisos', $datos) && $datos['admite_avisos'] === true) {
+            try {
+                AsistenteAvisosService::levantar_pausa((int) $client->id);
+            } catch (\Throwable $exception) {
+                Log::channel('daily')->warning('AsistenteWhatsapp: no se pudo levantar la pausa de los avisos.', [
+                    'client_id' => $client->id,
+                    'error'     => $exception->getMessage(),
+                ]);
+            }
+        }
 
         Log::channel('daily')->info('AsistenteWhatsapp: mensaje aceptado por el sistema del cliente.', [
             'assistant_message_id' => $fila->id,
