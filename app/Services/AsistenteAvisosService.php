@@ -87,6 +87,27 @@ class AsistenteAvisosService
     const DIAS_DEL_RECLAMO = 7;
 
     /**
+     * Minutos hacia atrás en los que un mensaje del dueño sin contestar frena el aviso.
+     *
+     * El job se rinde a los 180 s y la espera de la foto dura minutos, así que media hora cubre
+     * cualquier turno vivo de sobra; una fila más vieja trabada en un estado no final es un turno
+     * muerto, y no puede dejar al dueño sin su aviso para siempre.
+     */
+    const MINUTOS_DE_TURNO_EN_CURSO = 30;
+
+    /**
+     * Estados de una fila entrante cuyo turno todavía no terminó: el dueño espera la respuesta.
+     *
+     * Son los NO finales de `EnviarMensajeAlAsistenteJob::es_estado_final()`. `agrupado` no está a
+     * propósito: es final (la foto viajó pegada al mensaje de otra fila, y el turno lo sigue esa otra).
+     */
+    const ESTADOS_DE_TURNO_EN_CURSO = [
+        ClientAssistantMessage::ESTADO_RECIBIDO,
+        ClientAssistantMessage::ESTADO_ENVIADO,
+        ClientAssistantMessage::ESTADO_ESPERANDO,
+    ];
+
+    /**
      * Prefijo de la clave de pausa por cliente: `asistente_avisos:pausa:{client_id}`.
      */
     const CACHE_PAUSA = 'asistente_avisos:pausa';
@@ -304,7 +325,7 @@ class AsistenteAvisosService
      * @param WhatsappSessionWindowService $ventana            Ventana de 24 hs de Meta.
      * @param string                       $spa_url            SPA del cliente, para armar el link.
      *
-     * @return string enviado | remarcado | ya_avisado | en_curso | ventana_cerrada | error
+     * @return string enviado | remarcado | ya_avisado | en_curso | turno_en_curso | ventana_cerrada | error
      */
     private function avisar(
         Client $client,
@@ -335,6 +356,15 @@ class AsistenteAvisosService
             : $proposito;
 
         $telefono = (string) $destino->telefono;
+
+        /* 🔴 El aviso no puede llegar ANTES que la respuesta del turno (chequeo independiente del
+         * 16/10/2026). El escaneo tarda unos 17 s y la respuesta del asistente puede tardar más: sin
+         * esto el dueño recibiría "terminé de leer tu factura" y recién después "creé la compra y la
+         * estoy leyendo". Mientras ese teléfono tenga un mensaje sin contestar, el aviso queda para
+         * la vuelta siguiente (sin reclamo: no salió nada). */
+        if ($this->tiene_un_turno_en_curso($client, $telefono)) {
+            return 'turno_en_curso';
+        }
 
         if (! $this->ventana_abierta($client, $telefono, $efectivo, $ventana)) {
             return 'ventana_cerrada';
@@ -639,6 +669,28 @@ class AsistenteAvisosService
             ->first();
 
         return $de_la_conversacion !== null ? $de_la_conversacion : $ultima_del_cliente;
+    }
+
+    /**
+     * Si ese teléfono del cliente tiene un mensaje al asistente que todavía no se contestó.
+     *
+     * Se compara el `telefono` tal cual: las dos filas salen de la misma tabla, que lo guarda ya
+     * normalizado por el webhook.
+     *
+     * @param Client $client   Cliente.
+     * @param string $telefono Teléfono del destino del aviso.
+     *
+     * @return bool
+     */
+    private function tiene_un_turno_en_curso(Client $client, string $telefono): bool
+    {
+        return ClientAssistantMessage::query()
+            ->where('client_id', (int) $client->id)
+            ->where('direccion', ClientAssistantMessage::DIRECCION_ENTRANTE)
+            ->where('telefono', $telefono)
+            ->whereIn('estado', self::ESTADOS_DE_TURNO_EN_CURSO)
+            ->where('created_at', '>=', now()->subMinutes(self::MINUTOS_DE_TURNO_EN_CURSO))
+            ->exists();
     }
 
     /**

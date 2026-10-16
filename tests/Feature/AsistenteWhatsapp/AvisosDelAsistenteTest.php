@@ -547,6 +547,52 @@ class AvisosDelAsistenteTest extends BaseDelCanal
     }
 
     /**
+     * 🔴 El aviso no se adelanta a la respuesta del turno: mientras ese teléfono tenga un mensaje sin
+     * contestar (de la última media hora), el aviso espera, sin reclamo. Una fila trabada de hace más
+     * de media hora no lo frena para siempre, y una foto `agrupado` (estado final) tampoco.
+     *
+     * @return void
+     */
+    public function test_el_aviso_espera_a_que_termine_el_turno_del_dueno(): void
+    {
+        $espia  = $this->espiar_sender();
+        $this->crear_config_whatsapp();
+        $client = $this->crear_cliente();
+
+        $trabada = $this->fila_entrante($client, 90, self::PHONE_NUMBER_ID_PRINCIPAL, 1);
+        $trabada->estado = ClientAssistantMessage::ESTADO_ENVIADO;
+        $trabada->save();
+
+        $agrupada = $this->fila_entrante($client);
+        $agrupada->estado = ClientAssistantMessage::ESTADO_AGRUPADO;
+        $agrupada->save();
+
+        $turno = $this->fila_entrante($client);
+        $turno->estado = ClientAssistantMessage::ESTADO_ENVIADO;
+        $turno->save();
+
+        $this->fakear_http([
+            '*/asistente/avisos-pendientes*' => Http::response($this->pendientes(), 200),
+            '*/asistente/avisos/avisado'     => Http::response(['ok' => true], 200),
+        ]);
+
+        $servicio = app(AsistenteAvisosService::class);
+
+        $primera = $servicio->enviar_a($client);
+        $this->assertStringContainsString('turno_en_curso', $primera['detalle']);
+        $this->assertCount(0, $espia->textos, 'Con la respuesta del turno en camino, el aviso espera.');
+        $this->assertFalse(Cache::has($servicio->clave_de_reclamo($client, self::ID)));
+
+        /* Llegó la respuesta del turno: la vuelta siguiente manda el aviso. La de hace una hora sigue
+         * `enviado` y la foto sigue `agrupado`, y ninguna de las dos lo frena. */
+        $turno->estado = ClientAssistantMessage::ESTADO_RESPONDIDO;
+        $turno->save();
+
+        $this->assertSame('enviado', $servicio->enviar_a($client)['estado']);
+        $this->assertCount(1, $espia->textos);
+    }
+
+    /**
      * 🔴 Si la marca falla, la vuelta siguiente NO le vuelve a escribir al dueño: reintenta solo la
      * marca, con el link y el wamid del primer envío. Y una vez marcado, no se toca más.
      *
