@@ -1445,6 +1445,8 @@ class DeploymentService
      *    un `--defaults-extra-file` con permisos 600, escrito por SFTP: 🔴 NUNCA en la línea de
      *    comandos, porque exec_ssh_session() loguea cada comando entero en `deployment_logs`, que se
      *    ve desde el panel y por `claude/*`. El archivo se borra al terminar, salga bien o mal.
+     *    ⚠️ Excepción por cliente (`services.deploy.respaldo_tablas_sin_datos`, Servian): de algunas
+     *    tablas enormes va solo la estructura, sin sus datos. Ver respaldar_base().
      *
      * 🔴 A PRUEBA DE REINTENTOS, que es donde un respaldo en el lugar se rompe de verdad:
      *  - Si en el disco ya hay un respaldo COMPLETO de ESTE upgrade, se REUSA y no se respalda de
@@ -1895,6 +1897,13 @@ class DeploymentService
      * --no-data` con la estructura de todas, en el mismo stream. Para el MySQL del VPS esto es lo que
      * evita el corte de 120 s (`max_execution_time`) sobre una tabla enorme. El código de salida es el
      * de las dos invocaciones, y la línea de éxito del respaldo avisa que la tabla va sin datos.
+     * ⚠️ Con tablas sin datos, la marca `-- Dump completed` de la última línea respalda solo a la
+     * SEGUNDA invocación: que la primera (el dump grande) no se cortó lo garantiza el código de salida.
+     * La estructura se vuelca con `--skip-add-drop-table`, para que restaurar sobre la base viva no
+     * borre la tabla. Si la tabla deja de existir (una migración la elimina), `--no-data` falla con
+     * "Couldn't find table" y el respaldo frena: hay que sacar la entrada de la config.
+     * Un cliente en base compartida (`shared_database_group_id`) dejaría sin datos esa tabla de los
+     * comercios hermanos también: Servian no la comparte.
      *
      * @param  string  $dir  Directorio del respaldo (el `.parcial`).
      * @return array{archivo: string, bytes: int, base: string, segundos: int, sin_datos: string[]}
@@ -1948,7 +1957,7 @@ class DeploymentService
                 . ($sin_datos === []
                     ? ''
                     : ' ⚠️ SIN los datos de ' . implode(', ', $sin_datos) . ' (solo su estructura): excepción configurada '
-                        . 'para este cliente, porque el SELECT de su dump pasa el tope de ejecución del MySQL del VPS.')
+                        . 'para este cliente en services.deploy.respaldo_tablas_sin_datos.')
             );
 
             /* --defaults-extra-file tiene que ser la PRIMERA opción de mysqldump. `$CC_CS` va sin
@@ -1962,7 +1971,12 @@ class DeploymentService
                 /* Dos volcados en el mismo stream: la base entera MENOS esas tablas, y después solo la
                    estructura de ellas (Percona/MySQL 8 no tiene --ignore-table-data, MariaDB sí; así
                    anda igual en los dos). El código de salida es el de las DOS invocaciones: si
-                   cualquiera falla, queda el primero distinto de 0. */
+                   cualquiera falla, queda el código del ÚLTIMO que falló (siempre distinto de 0).
+
+                   🔴 La segunda lleva `--skip-add-drop-table`: sin eso el dump trae `DROP TABLE IF
+                   EXISTS` y restaurarlo sobre la base viva vaciaría la tabla excluida (con sus datos
+                   VIVOS, no solo los del respaldo). Así, restaurar la deja intacta: el `CREATE TABLE`
+                   del final falla porque ya existe, y eso pasa cuando todo lo demás ya se restauró. */
                 $ignorar = '';
                 $tablas  = [];
                 foreach ($sin_datos as $tabla) {
@@ -1972,9 +1986,9 @@ class DeploymentService
 
                 $volcado = 'CC_RC=0; ' . $dump . $ignorar . $this->posix_single_quote($base) . ' || CC_RC=$?; '
                     . 'echo ' . $this->posix_single_quote('-- ComercioCity: los DATOS de ' . implode(', ', $sin_datos)
-                        . ' NO estan en este respaldo (solo su estructura, ver services.deploy.respaldo_tablas_sin_datos).')
+                        . ' NO estan en este respaldo (solo su estructura, sin DROP TABLE: restaurar sobre la base viva no la borra; ver services.deploy.respaldo_tablas_sin_datos).')
                     . '; '
-                    . $dump . '--no-data ' . $this->posix_single_quote($base) . ' ' . implode(' ', $tablas) . ' || CC_RC=$?; '
+                    . $dump . '--no-data --skip-add-drop-table ' . $this->posix_single_quote($base) . ' ' . implode(' ', $tablas) . ' || CC_RC=$?; '
                     . 'echo $CC_RC > ' . $this->posix_single_quote($estado);
             }
 

@@ -629,7 +629,7 @@ class RespaldoYMantenimientoEnElLugarTest extends TestCase
         );
         /* Después: solo la estructura de ellas. */
         $this->assertStringContainsString(
-            "--no-data 'u767360347_respaldo' 'article_import_result_observations' 'otra_tabla_enorme' || CC_RC=\$?; "
+            "--no-data --skip-add-drop-table 'u767360347_respaldo' 'article_import_result_observations' 'otra_tabla_enorme' || CC_RC=\$?; "
             . "echo \$CC_RC > '",
             $comando
         );
@@ -659,8 +659,139 @@ class RespaldoYMantenimientoEnElLugarTest extends TestCase
         $this->assertStringContainsString('excepción configurada para este cliente', $logs);
     }
 
-    /** Si el dump con una tabla sin datos termina con código distinto de 0, el respaldo falla igual que siempre. */
-    public function test_con_tabla_sin_datos_un_codigo_de_salida_distinto_de_cero_hace_fallar_el_respaldo(): void
+    /**
+     * 🔴 Lado shell: el comando generado se CORRE en un `sh` de verdad, con un `mysqldump` falso en el PATH que
+     * contesta el código de salida que se le pide, y se mira la última línea de la salida (la que lee el pipeline):
+     * tiene que ser el código de la invocación que falló, en cualquiera de las dos, y 0 solo si las dos andan.
+     * También se comprueba qué le llegó a cada invocación (`--ignore-table` a la primera; `--no-data
+     * --skip-add-drop-table` y la tabla a la segunda) y que el dump comprimido quedó armado.
+     *
+     * Se saltea si no hay `sh` + `gzip` (en Windows, los de Git for Windows).
+     */
+    public function test_el_comando_con_tabla_sin_datos_corre_en_un_shell_y_propaga_el_fallo_de_cualquiera_de_las_dos_invocaciones(): void
+    {
+        $git_bin = 'C:\\Program Files\\Git\\usr\\bin';
+        $sh      = is_file($git_bin . '\\sh.exe') ? $git_bin . '\\sh.exe' : 'sh';
+        $sep     = DIRECTORY_SEPARATOR === '\\' ? ';' : ':';
+
+        $e = $this->escenario();
+        config(['services.deploy.respaldo_tablas_sin_datos' => [(int) $e['client']->id => ['article_import_result_observations']]]);
+        $this->servidor_sano();
+        $this->invocar($this->servicio($e['upgrade']), 'step_backup_in_place');
+
+        $dump = $this->comandos_con('mysqldump --defaults-extra-file');
+        $this->assertCount(1, $dump);
+
+        /* Un home de mentira en una carpeta temporal, con el `.parcial` ya creado (en producción lo crea
+           el `mkdir` de la etapa, que acá corrió contra el doble). */
+        $tmp = str_replace('\\', '/', sys_get_temp_dir()) . '/cc-dump-' . uniqid();
+        $parcial_real = $this->dir_del_respaldo($e) . '.parcial';
+        $parcial      = str_replace(self::HOME_SHARED, $tmp, $parcial_real);
+        $comando      = str_replace(self::HOME_SHARED, $tmp, $dump[0]);
+        mkdir($parcial, 0777, true);
+        mkdir($tmp . '/bin', 0777, true);
+
+        /* `mysqldump` falso: `--help` contesta que conoce column-statistics; si no, registra sus argumentos,
+           escribe un trozo de dump con su footer y sale con el código pedido por entorno (uno por invocación,
+           según lleve `--no-data` o no). */
+        file_put_contents($tmp . '/bin/mysqldump', <<<'SH'
+#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "--help" ]; then echo "  --column-statistics"; exit 0; fi
+done
+modo=primera; rc=$CC_FALSO_RC_PRIMERA
+for a in "$@"; do
+  if [ "$a" = "--no-data" ]; then modo=segunda; rc=$CC_FALSO_RC_SEGUNDA; fi
+done
+echo "$modo: $*" >> "$CC_FALSO_LOG"
+echo "-- cuerpo de la $modo invocacion"
+echo "-- Dump completed"
+exit $rc
+SH
+        );
+
+        $escenarios = [
+            // [rc primera, rc segunda, última línea esperada, "-- Dump completed" al final]
+            [0, 0, '0'],
+            [2, 0, '2'],
+            [0, 3, '3'],
+            [2, 3, '3'],
+        ];
+
+        foreach ($escenarios as $caso) {
+            list($rc_primera, $rc_segunda, $esperado) = $caso;
+            $log = $tmp . '/args-' . $rc_primera . $rc_segunda . '.log';
+
+            $entorno = getenv();
+            $clave_path = 'PATH';
+            foreach (array_keys($entorno) as $k) {
+                if (strtoupper($k) === 'PATH') {
+                    $clave_path = $k;
+                }
+            }
+            $entorno[$clave_path]        = $tmp . '/bin' . $sep . (is_dir($git_bin) ? $git_bin . $sep : '') . (isset($entorno[$clave_path]) ? $entorno[$clave_path] : '');
+            $entorno['CC_FALSO_RC_PRIMERA'] = (string) $rc_primera;
+            $entorno['CC_FALSO_RC_SEGUNDA'] = (string) $rc_segunda;
+            $entorno['CC_FALSO_LOG']        = $log;
+
+            $proceso = @proc_open([$sh, '-c', $comando], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null, $entorno);
+            if (! is_resource($proceso)) {
+                $this->markTestSkipped('No hay un sh para correr el comando.');
+            }
+            $salida = stream_get_contents($pipes[1]);
+            $error  = stream_get_contents($pipes[2]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            proc_close($proceso);
+
+            if (trim($salida) === '' && stripos($error, 'gzip') !== false) {
+                $this->markTestSkipped('No hay gzip para correr el comando: ' . $error);
+            }
+
+            $lineas = preg_split('/\r?\n/', trim($salida));
+            $this->assertSame($esperado, trim((string) end($lineas)), 'rc ' . $rc_primera . '/' . $rc_segunda . ". Salida: $salida $error");
+
+            /* Las dos invocaciones corrieron SIEMPRE (la primera que falla no corta a la segunda). */
+            $args = file($log, FILE_IGNORE_NEW_LINES);
+            $this->assertCount(2, $args, 'Tenían que correr las dos invocaciones.');
+            $this->assertStringStartsWith('primera: --defaults-extra-file=', $args[0]);
+            $this->assertStringContainsString("--ignore-table=u767360347_respaldo.article_import_result_observations", $args[0]);
+            $this->assertStringNotContainsString('--no-data', $args[0]);
+            $this->assertStringStartsWith('segunda: --defaults-extra-file=', $args[1]);
+            $this->assertStringContainsString('--no-data --skip-add-drop-table u767360347_respaldo article_import_result_observations', $args[1]);
+            $this->assertStringNotContainsString('--ignore-table', $args[1]);
+
+            /* El dump comprimido: los dos trozos, en orden, con el aviso en el medio y el footer al final. */
+            $sql = gzdecode(file_get_contents($parcial . '/base.sql.gz'));
+            $this->assertSame(
+                ['-- cuerpo de la primera invocacion', '-- Dump completed', '-- ComercioCity', '-- cuerpo de la segunda invocacion', '-- Dump completed'],
+                array_map(function ($linea) {
+                    return strpos($linea, '-- ComercioCity') === 0 ? '-- ComercioCity' : $linea;
+                }, preg_split('/\r?\n/', trim($sql)))
+            );
+            @unlink($parcial . '/base.sql.gz');
+            @unlink($parcial . '/.dump-exit');
+        }
+
+        /* Limpieza de la carpeta temporal. */
+        @unlink($tmp . '/bin/mysqldump');
+        foreach (glob($tmp . '/args-*.log') ?: [] as $archivo) {
+            @unlink($archivo);
+        }
+        @rmdir($tmp . '/bin');
+        @rmdir($parcial);
+        @rmdir(dirname($parcial));
+        @rmdir(dirname(dirname($parcial)));
+        @rmdir(dirname(dirname(dirname($parcial))));
+        @rmdir($tmp);
+    }
+
+    /**
+     * Lado PHP: si el stream de salida termina con un código distinto de 0, el respaldo falla igual que siempre.
+     * El lado shell (que `|| CC_RC=$?` junte el código de las dos invocaciones) lo cubre el test que corre el
+     * comando generado en un `sh` de verdad.
+     */
+    public function test_con_tabla_sin_datos_un_codigo_de_salida_distinto_de_cero_hace_fallar_el_respaldo_lado_php(): void
     {
         $e = $this->escenario();
         config(['services.deploy.respaldo_tablas_sin_datos' => [(int) $e['client']->id => ['article_import_result_observations']]]);
