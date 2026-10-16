@@ -96,6 +96,7 @@ class LeadDemoSettingsController extends Controller
                cualquier clave sin regla, así que el panel las mostraba como guardadas sin persistir
                nada. "sometimes" por el mismo motivo que el resto: un SPA más viejo no las manda. */
             'recordatorio_silencio_minutos'    => 'sometimes|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
+            'recordatorio_ia_activo'           => 'sometimes|boolean',
             'demo_directa_no_show_minutos'     => 'sometimes|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
             'check_ingreso_silencio_minutos'   => 'sometimes|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
             /* Dinámica de demo default para leads nuevos (grupo 293, prompt 03). "sometimes" y NO
