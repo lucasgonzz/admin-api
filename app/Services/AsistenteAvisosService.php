@@ -144,10 +144,39 @@ class AsistenteAvisosService
     }
 
     /**
+     * Si a este cliente se le mandan avisos por WhatsApp: el ÚNICO criterio, compartido por las dos
+     * puntas.
+     *
+     * 🔴 Lo usan el job, para decidir si le anuncia `avisos = 1` al `empresa-api` (la promesa "te aviso
+     * por acá"), y el barrido, para decidir a quién consultar. Tienen que coincidir siempre: un
+     * cliente que recibe la promesa y nunca se consulta es un dueño esperando un aviso que no llega
+     * (chequeo independiente del 16/10/2026: el job no miraba `is_active` y el barrido sí).
+     *
+     * El criterio es activo + canal prendido + clave:
+     *   - `asistente_whatsapp_activo`: el interruptor del canal.
+     *   - `api_key`: sin ella no hay cómo consultarle nada a su sistema.
+     *   - `is_active`: se mantiene porque es la puerta de ENTRADA del canal. Los dos caminos del
+     *     webhook que le rutean un mensaje al asistente buscan al dueño solo entre clientes activos
+     *     (`WhatsappWebhookController::find_client_by_phone()` y `find_dueno_por_telefono_exacto()`),
+     *     así que un cliente inactivo no puede mandarle una factura al asistente; el único que llega
+     *     al job es el que se desactivó con un mensaje en vuelo, y a ése no se le promete nada.
+     *
+     * @param Client $client
+     *
+     * @return bool
+     */
+    public static function cliente_recibe_avisos(Client $client): bool
+    {
+        return (bool) $client->is_active
+            && (bool) $client->asistente_whatsapp_activo
+            && trim((string) $client->api_key) !== '';
+    }
+
+    /**
      * Manda los avisos pendientes de todos los clientes que pueden tenerlos.
      *
-     * 🔴 El filtro es lo que hace barato correr esto cada minuto: solo clientes activos, con el canal
-     * prendido, con clave, **y con algún mensaje entrante del dueño al asistente en las últimas 24 hs**.
+     * 🔴 El filtro es lo que hace barato correr esto cada minuto: los clientes que pasan
+     * `cliente_recibe_avisos()` **y con algún mensaje entrante del dueño al asistente en las últimas 24 hs**.
      * Sin ese mensaje no puede haber un escaneo pedido por WhatsApp ni ventana para contestarle, así
      * que preguntarle a su `empresa-api` sería un pedido HTTP para nada. En la práctica son unos pocos
      * clientes por minuto, no cuarenta.
@@ -173,7 +202,12 @@ class AsistenteAvisosService
                     ->where('client_assistant_messages.created_at', '>=', $desde);
             })
             ->orderBy('id')
-            ->get();
+            ->get()
+            /* La consulta de arriba es solo el prefiltro barato en SQL; el que decide es el criterio
+             * compartido con el job, para que las dos puntas no puedan desalinearse. */
+            ->filter(function (Client $client) {
+                return self::cliente_recibe_avisos($client);
+            });
 
         $resultados = [];
 

@@ -559,8 +559,15 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
          * de `APRENDER_NO_PARCHEAR.md`, 9/9/2026). Vacía no viaja: el cliente usa la suya o ninguna.
          *
          * Un `empresa-api` viejo los ignora: Laravel no valida en contra de los campos de más.
+         *
+         * 🔴 `avisos` viaja solo si el barrido va a consultar a este cliente: el criterio es UNO,
+         * `AsistenteAvisosService::cliente_recibe_avisos()`, el mismo que usa el barrido. Prometer sin
+         * consultar deja al dueño esperando un aviso que no llega. `spa_url` no depende de eso: también
+         * le sirve al `empresa-api` para el link de la herramienta que lee el escaneo.
          */
-        $cuerpo['avisos'] = '1';
+        if (AsistenteAvisosService::cliente_recibe_avisos($client)) {
+            $cuerpo['avisos'] = '1';
+        }
 
         $spa_url = $urls->resolve_spa_url($client);
         if ($spa_url !== '') {
