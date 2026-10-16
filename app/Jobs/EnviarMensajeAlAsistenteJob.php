@@ -1765,7 +1765,8 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
      * Todo lo que no es audio ni imagen viaja como `texto`, que es lo único que el asistente puede
      * hacer con eso: leer el caption o la transcripción que igual llegó en `texto`. Si no trae nada
      * escrito ni fotos, ni siquiera llega acá: lo contesta `contestar_que_no_se_puede_leer()`. El
-     * documento de audio sí llega, y como `audio`: `recibir()` ya lo guardó con ese tipo.
+     * documento de audio sí llega, y como `audio`; el documento con mime `image/*` llega como
+     * `imagen`, con la foto en `imagenes[]`: `recibir()` ya los guardó con esos tipos.
      *
      * @param string $tipo Tipo normalizado del webhook.
      *

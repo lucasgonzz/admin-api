@@ -471,10 +471,16 @@ class FotosDelDuenoTest extends BaseDelCanal
             $reflexion->invoke($servicio, ['type' => 'image', 'inbound_media' => $media])
         );
 
-        /* Un audio llega transcripto en el texto y un documento no es algo que el asistente pueda
-         * mirar: ninguno de los dos se intenta bajar. */
+        /* Un audio llega transcripto en el texto y un documento que no es una imagen (un PDF) no es
+         * algo que el asistente pueda mirar: ninguno de los dos se intenta bajar. */
         $this->assertSame([], $reflexion->invoke($servicio, ['type' => 'audio', 'inbound_media' => $media]));
-        $this->assertSame([], $reflexion->invoke($servicio, ['type' => 'document', 'inbound_media' => $media]));
+        $this->assertSame([], $reflexion->invoke($servicio, ['type' => 'document', 'inbound_media' => $this->media('2', 'application/pdf')]));
+
+        /* 🔴 Pero un documento con mime `image/*` SÍ es una foto: la factura que el dueño manda como
+         * archivo para que WhatsApp no la comprima (revisión independiente de la misión
+         * asistente-envios-a-clientes, 16/10/2026). Hasta entonces esta aserción decía `[]` y el dueño
+         * recibía «mandame una foto» por mandar justamente una foto. */
+        $this->assertSame([$media], $reflexion->invoke($servicio, ['type' => 'document', 'inbound_media' => $media]));
         $this->assertSame([], $reflexion->invoke($servicio, ['type' => 'image', 'inbound_media' => null]));
         $this->assertSame([], $reflexion->invoke($servicio, ['type' => 'text', 'body' => 'hola']));
     }

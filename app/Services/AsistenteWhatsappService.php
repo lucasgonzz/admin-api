@@ -207,6 +207,12 @@ class AsistenteWhatsappService
      *     viaja: del otro lado es exactamente un audio que Kapso no transcribió, y el `empresa-api`
      *     ya tiene su respuesta fija para eso. Con epígrafe no cambia nada: el epígrafe es lo que hay
      *     para contestar y viaja como siempre.
+     *   - **La foto como archivo.** El dueño que manda la factura como Documento (para que WhatsApp
+     *     no la comprima) llega como `document` con mime `image/*`. Es una foto y se trata como
+     *     foto en todo (revisión independiente de la misión, 16/10/2026): `imagenes_del_mensaje()` la
+     *     incluye con la misma descarga y los mismos límites, la fila se guarda como `tipo = image`,
+     *     sin epígrafe espera su instrucción igual que cualquier foto y con epígrafe viaja como texto
+     *     más foto. Antes de esto recibía «mandame una foto», que era justo lo que había mandado.
      *   - **La espera de las fotos.** Un mensaje que no se puede leer NO reclama las fotos que el
      *     dueño tenía esperando: no trae ninguna instrucción, y llevárselas haría que salieran sin la
      *     que el dueño todavía está por mandar. Siguen esperando su audio, o su temporizador.
@@ -229,11 +235,19 @@ class AsistenteWhatsappService
         $segundos           = $this->segundos_de_espera_de_foto();
         $espera             = $segundos > 0 && $this->es_foto_sin_epigrafe($parsed, $imagenes);
         $documento_de_audio = $this->es_documento_de_audio_sin_epigrafe($parsed);
+        $documento_de_foto  = $this->es_documento_de_imagen($parsed);
 
-        /* El documento de audio se guarda como lo que es para el asistente: un audio sin transcribir.
-         * Va ANTES de mirar si se puede leer, porque un audio sí se puede (del otro lado tiene su
-         * respuesta fija). */
-        $tipo = $documento_de_audio ? 'audio' : substr((string) ($parsed['type'] ?? 'text'), 0, 20);
+        /* El documento de audio y el de foto se guardan como lo que son para el asistente: un audio
+         * sin transcribir y una foto. Va ANTES de mirar si se puede leer, porque las dos cosas se
+         * pueden leer (el audio tiene su respuesta fija del otro lado; la foto viaja en `imagenes[]`),
+         * y la foto con `image` toma el mismo `tipo` del contrato (`imagen`) que una foto común. */
+        if ($documento_de_audio) {
+            $tipo = 'audio';
+        } elseif ($documento_de_foto) {
+            $tipo = 'image';
+        } else {
+            $tipo = substr((string) ($parsed['type'] ?? 'text'), 0, 20);
+        }
 
         /* `$espera` y esto se excluyen solos: la foto que espera trae una foto, y un mensaje con fotos
          * siempre se puede leer. */
@@ -280,6 +294,7 @@ class AsistenteWhatsappService
             'ai_conversation_id'  => $fila->ai_conversation_id,
             'espera_instruccion'  => $espera,
             'documento_de_audio'  => $documento_de_audio,
+            'documento_de_foto'   => $documento_de_foto,
             'no_se_puede_leer'    => $no_se_puede_leer,
         ]);
 
@@ -781,6 +796,39 @@ class AsistenteWhatsappService
     }
 
     /**
+     * Si el mensaje es una foto que llegó como DOCUMENTO: `document` con mime `image/*`.
+     *
+     * Es el dueño que manda la factura con Adjuntar → Documento para que WhatsApp no la comprima, que
+     * es justamente lo que conviene para escanearla. Con o sin epígrafe: el epígrafe es la
+     * instrucción, igual que en una foto común, y no cambia que el adjunto sea una foto.
+     *
+     * El mime se lee de `inbound_media`, donde lo deja el webhook, y se compara solo el principio
+     * (`image/`). Qué imágenes se aceptan de verdad (jpeg, png, webp) y hasta qué tamaño lo sigue
+     * decidiendo `AsistenteImagenesService::preparar()`, igual que para una `image`: un HEIC adjunto
+     * como documento se descarta con la misma nota que un HEIC mandado como foto. La descarga
+     * (`WhatsappInboundMediaService::descargar_binario()`) solo mira `url` y `whatsapp_media_id`, que
+     * el webhook llena igual para el nodo `document`.
+     *
+     * @param array<string, mixed> $parsed Resultado de `parse_inbound_message()`.
+     *
+     * @return bool
+     */
+    private function es_documento_de_imagen(array $parsed): bool
+    {
+        if (strtolower(trim((string) ($parsed['type'] ?? ''))) !== 'document') {
+            return false;
+        }
+
+        if (empty($parsed['inbound_media']) || ! is_array($parsed['inbound_media'])) {
+            return false;
+        }
+
+        $mime = strtolower(trim((string) ($parsed['inbound_media']['mime'] ?? '')));
+
+        return strpos($mime, 'image/') === 0;
+    }
+
+    /**
      * Si un mensaje del dueño es de los que el asistente no puede leer: sin texto, sin fotos y sin audio.
      *
      * 🔴 **Una sola regla para las dos puntas.** La usa `recibir()` para no reclamar fotos en espera y
@@ -840,7 +888,9 @@ class AsistenteWhatsappService
      * que cambiar acá.
      *
      * Solo fotos: un audio ya llega transcripto en el texto y un PDF o un video no son algo que el
-     * asistente pueda mirar, así que ni se intentan bajar.
+     * asistente pueda mirar, así que ni se intentan bajar. "Foto" es una `image` o un `document`
+     * con mime `image/*` (la factura mandada como archivo para que no se comprima; ver
+     * `es_documento_de_imagen()`): los dos se bajan y se validan igual.
      *
      * @param array<string, mixed> $parsed Resultado de `parse_inbound_message()`.
      *
@@ -848,7 +898,7 @@ class AsistenteWhatsappService
      */
     private function imagenes_del_mensaje(array $parsed): array
     {
-        if (strtolower((string) ($parsed['type'] ?? '')) !== 'image') {
+        if (strtolower((string) ($parsed['type'] ?? '')) !== 'image' && ! $this->es_documento_de_imagen($parsed)) {
             return [];
         }
 

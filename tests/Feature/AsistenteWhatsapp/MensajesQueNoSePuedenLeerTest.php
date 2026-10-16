@@ -27,7 +27,10 @@ use Illuminate\Support\Facades\Queue;
  *      disculpa y sin avisar al equipo;
  *   3. eso no rompe la espera de las fotos (no se las lleva) ni la cita (la respuesta fija queda en
  *      la conversación citada);
- *   4. con epígrafe, el documento —de audio o no— viaja como siempre.
+ *   4. con epígrafe, el documento —de audio o no— viaja como siempre;
+ *   5. la foto mandada como documento (`document` con mime `image/*`, la factura sin comprimir) es
+ *      una foto: espera su instrucción sin epígrafe, viaja en `imagenes[]` y nunca recibe el texto
+ *      fijo (revisión independiente de la misión, 16/10/2026).
  */
 class MensajesQueNoSePuedenLeerTest extends BaseDelCanal
 {
@@ -310,6 +313,115 @@ class MensajesQueNoSePuedenLeerTest extends BaseDelCanal
     }
 
     /**
+     * 🔴 La foto mandada como documento sin epígrafe es una foto: espera su instrucción como cualquier
+     * foto, y el texto que llega después se la lleva. Nunca recibe «mandame una foto».
+     *
+     * @return void
+     */
+    public function test_la_foto_como_documento_sin_epigrafe_espera_su_instruccion(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-10-16 10:00:00'));
+        $espia = $this->espiar_sender();
+        $this->crear_cliente(self::TELEFONO);
+
+        $this->postear_webhook(
+            $this->payload_de_documento('wamid.DOCFOTO1', 'image/png', 'factura-norte.png')
+        )->assertStatus(200);
+
+        $foto = $this->fila('wamid.DOCFOTO1');
+        $this->assertSame('image', $foto->tipo, 'Para el asistente es una foto, no un documento.');
+        $this->assertSame(ClientAssistantMessage::ESTADO_ESPERANDO, $foto->estado, 'Sin epígrafe espera su instrucción, igual que una foto.');
+        $this->assertSame('factura-norte.png', $foto->media_en_espera[0]['filename']);
+
+        $temporizador = $this->job_de($foto);
+        $this->assertSame(30, (int) $this->propiedad($temporizador, 'segundos_de_espera'));
+        $this->assertSame('asistente', $temporizador->queue);
+
+        Carbon::setTestNow(now()->addSeconds(5));
+        $this->postear_webhook(
+            $this->payload_de_texto(self::TELEFONO, 'Cargame esta factura', 'wamid.TEXTO1')
+        )->assertStatus(200);
+
+        $foto->refresh();
+        $texto = $this->fila('wamid.TEXTO1');
+        $this->assertSame(ClientAssistantMessage::ESTADO_AGRUPADO, $foto->estado);
+        $this->assertSame((int) $texto->id, (int) $foto->agrupado_en_id);
+        $this->assertCount(1, $this->imagenes_del_job($this->jobs_de($texto)[0]));
+
+        $this->assertSame([], $espia->textos, 'Nadie le contestó «mandame una foto».');
+
+        Carbon::setTestNow();
+    }
+
+    /**
+     * Sin espera (`ASISTENTE_WHATSAPP_ESPERA_FOTO` en 0), la foto como documento sale en el acto en
+     * `imagenes[]`, con la misma descarga que una foto, y sin texto fijo.
+     *
+     * @return void
+     */
+    public function test_la_foto_como_documento_sin_epigrafe_viaja_en_imagenes(): void
+    {
+        config(['services.asistente_whatsapp.segundos_de_espera_de_foto' => 0]);
+
+        $espia = $this->espiar_sender();
+        $this->crear_cliente(self::TELEFONO);
+
+        $this->postear_webhook(
+            $this->payload_de_documento('wamid.DOCFOTO1', 'image/png', 'factura-norte.png')
+        )->assertStatus(200);
+
+        $fila = $this->fila('wamid.DOCFOTO1');
+        $this->assertSame(ClientAssistantMessage::ESTADO_RECIBIDO, $fila->estado);
+
+        $this->fakear_http([
+            '*/asistente/mensajes' => Http::response(['ai_conversation_id' => 91, 'ai_message_id' => 305], 202),
+            '*'                    => Http::response($this->png(), 200, ['Content-Type' => 'image/png']),
+        ]);
+
+        $this->correr_job($this->job_de($fila), $espia);
+
+        $partes = $this->partes_del_post();
+        $this->assertSame('imagen', $this->parte($partes, 'tipo'));
+        $this->assertSame('', $this->parte($partes, 'texto'));
+        $this->assertSame(1, $this->contar_imagenes($partes), 'La foto viaja en `imagenes[]`.');
+
+        $this->assertSame([], $espia->textos);
+        $this->assertSame(ClientAssistantMessage::ESTADO_ENVIADO, $fila->fresh()->estado);
+    }
+
+    /**
+     * Con epígrafe, la foto como documento sale en el acto: el epígrafe como texto, más la foto.
+     *
+     * @return void
+     */
+    public function test_la_foto_como_documento_con_epigrafe_viaja_como_texto_y_foto(): void
+    {
+        $espia = $this->espiar_sender();
+        $this->crear_cliente(self::TELEFONO);
+
+        $this->postear_webhook(
+            $this->payload_de_documento('wamid.DOCFOTO1', 'image/jpeg', 'factura.jpg', 'Cargame esta compra de Norte')
+        )->assertStatus(200);
+
+        $fila = $this->fila('wamid.DOCFOTO1');
+        $this->assertSame('image', $fila->tipo);
+        $this->assertSame(ClientAssistantMessage::ESTADO_RECIBIDO, $fila->estado, 'Con epígrafe no espera.');
+
+        $this->fakear_http([
+            '*/asistente/mensajes' => Http::response(['ai_conversation_id' => 91, 'ai_message_id' => 305], 202),
+            '*'                    => Http::response($this->png(), 200, ['Content-Type' => 'image/png']),
+        ]);
+
+        $this->correr_job($this->job_de($fila), $espia);
+
+        $partes = $this->partes_del_post();
+        $this->assertSame('imagen', $this->parte($partes, 'tipo'));
+        $this->assertSame('Cargame esta compra de Norte', $this->parte($partes, 'texto'));
+        $this->assertSame(1, $this->contar_imagenes($partes));
+        $this->assertSame([], $espia->textos);
+    }
+
+    /**
      * La regla, sola: qué se puede leer y qué no.
      *
      * @return void
@@ -482,6 +594,41 @@ class MensajesQueNoSePuedenLeerTest extends BaseDelCanal
         }
 
         return $partes;
+    }
+
+    /**
+     * Cuántas partes `imagenes[]` viajaron.
+     *
+     * @param array<int, array<string, mixed>> $partes
+     *
+     * @return int
+     */
+    private function contar_imagenes(array $partes): int
+    {
+        $cuenta = 0;
+        foreach ($partes as $parte) {
+            if (isset($parte['name']) && $parte['name'] === 'imagenes[]') {
+                $cuenta++;
+            }
+        }
+
+        return $cuenta;
+    }
+
+    /**
+     * Bytes de una imagen PNG real, chiquita: lo que baja de Kapso la foto de la prueba.
+     *
+     * @return string
+     */
+    private function png(): string
+    {
+        $imagen = imagecreatetruecolor(4, 4);
+        ob_start();
+        imagepng($imagen);
+        $bytes = (string) ob_get_clean();
+        imagedestroy($imagen);
+
+        return $bytes;
     }
 
     /**
