@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Jobs\EnviarMensajeAlAsistenteJob;
 use App\Models\Client;
 use App\Models\ClientAssistantMessage;
+use App\Models\WhatsappConfig;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -692,6 +693,44 @@ class AsistenteWhatsappService
         $phone_number_id = isset($parsed['phone_number_id']) ? trim((string) $parsed['phone_number_id']) : '';
 
         return $phone_number_id !== '' ? $phone_number_id : null;
+    }
+
+    /**
+     * Por qué número se le habla al dueño a partir de un mensaje suyo: por el mismo por el que entró.
+     *
+     * 🔴 Se decide mirando la FILA y no «cuál es el número del asistente hoy». El día del corte hay
+     * mensajes en vuelo que entraron por el número de leads y clientes cuando el del asistente todavía
+     * no estaba listo; contestarlos por el número nuevo —donde ese dueño nunca escribió— sería texto
+     * libre fuera de ventana, que Meta rechaza. Lo mismo para el dueño que el webhook sigue atendiendo
+     * por el principal porque el número del asistente no lo reconoce.
+     *
+     * «Entró por el asistente» = la fila guarda el `phone_number_id` de la fila de propósito
+     * `asistente`. Sin dato (filas anteriores a la columna, o un payload que no traía el campo) o con
+     * cualquier otro número → `principal`, que es lo que este canal hacía antes de tener número propio.
+     * Y aunque la fila diga `asistente`, `WhatsappSendService::paraProposito()` cae solo al principal
+     * si ese número ya no está listo.
+     *
+     * Vivía como método privado de `EnviarMensajeAlAsistenteJob` y se mudó acá, tal cual, en la misión
+     * asistente-aviso-escaneo-factura (16/10/2026): el aviso de que terminó el escaneo de una factura
+     * (`AsistenteAvisosService`) sale por el número por el que el dueño mandó la foto, con esta misma
+     * regla. Dos copias de una regla de ruteo son dos reglas el día que alguien toque una sola.
+     *
+     * @param ClientAssistantMessage $fila Fila ENTRANTE del dueño.
+     *
+     * @return string Uno de los WhatsappConfig::PROPOSITO_*.
+     */
+    public static function proposito_de_salida(ClientAssistantMessage $fila): string
+    {
+        $phone_number_id = trim((string) $fila->phone_number_id);
+        if ($phone_number_id === '') {
+            return WhatsappConfig::PROPOSITO_PRINCIPAL;
+        }
+
+        $numero = WhatsappConfig::porPhoneNumberId($phone_number_id);
+
+        return $numero !== null && $numero->proposito === WhatsappConfig::PROPOSITO_ASISTENTE
+            ? WhatsappConfig::PROPOSITO_ASISTENTE
+            : WhatsappConfig::PROPOSITO_PRINCIPAL;
     }
 
     /**

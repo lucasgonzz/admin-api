@@ -543,6 +543,29 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             $cuerpo['ai_conversation_id'] = (int) $fila->ai_conversation_id;
         }
 
+        /*
+         * 🔴 Los dos anuncios del aviso por WhatsApp (misión asistente-aviso-escaneo-factura,
+         * 16/10/2026), y los dos son OPCIONALES del lado del cliente.
+         *
+         * `avisos = 1` le dice al `empresa-api` que este admin consulta `avisos-pendientes` cada
+         * minuto (`AsistenteAvisosService`). Con eso, cuando el dueño manda una factura a escanear,
+         * el escaneo nace marcado para avisar por acá y el asistente le dice "cuando termine te aviso
+         * por acá con el link"; sin el campo (un admin viejo) el `empresa-api` no promete nada que
+         * nadie vaya a cumplir y sigue con su "te aparece el aviso en el sistema".
+         *
+         * `spa_url` es la URL del SPA del cliente que conoce el admin (`client_apis.spa_url`), para que
+         * el link que arma el `empresa-api` apunte a SU sistema y no a un `APP_URL` (la clase de error
+         * de `APRENDER_NO_PARCHEAR.md`, 9/9/2026). Vacía no viaja: el cliente usa la suya o ninguna.
+         *
+         * Un `empresa-api` viejo los ignora: Laravel no valida en contra de los campos de más.
+         */
+        $cuerpo['avisos'] = '1';
+
+        $spa_url = $urls->resolve_spa_url($client);
+        if ($spa_url !== '') {
+            $cuerpo['spa_url'] = $spa_url;
+        }
+
         $partes                  = $this->como_multipart($cuerpo);
         $preparadas_con_descarte = false;
 
@@ -1445,22 +1468,18 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
      * Y aunque la fila diga `asistente`, `paraProposito()` cae solo al principal si ese número ya no
      * está listo.
      *
+     * La regla vive en {@see AsistenteWhatsappService::proposito_de_salida()} desde la misión
+     * asistente-aviso-escaneo-factura (16/10/2026): el aviso de que terminó el escaneo de una
+     * factura también le habla al dueño por el número por el que entró su mensaje, y la regla no
+     * se copia. Este método queda como atajo para no tocar los cinco llamadores del job.
+     *
      * @param ClientAssistantMessage $fila Fila entrante que se está procesando.
      *
      * @return string Uno de los WhatsappConfig::PROPOSITO_*.
      */
     private function proposito_de_salida(ClientAssistantMessage $fila): string
     {
-        $phone_number_id = trim((string) $fila->phone_number_id);
-        if ($phone_number_id === '') {
-            return WhatsappConfig::PROPOSITO_PRINCIPAL;
-        }
-
-        $numero = WhatsappConfig::porPhoneNumberId($phone_number_id);
-
-        return $numero !== null && $numero->proposito === WhatsappConfig::PROPOSITO_ASISTENTE
-            ? WhatsappConfig::PROPOSITO_ASISTENTE
-            : WhatsappConfig::PROPOSITO_PRINCIPAL;
+        return AsistenteWhatsappService::proposito_de_salida($fila);
     }
 
     /**
