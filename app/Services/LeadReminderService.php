@@ -2,7 +2,9 @@
 
 namespace App\Services;
 
+use App\Helpers\AppTime;
 use App\Models\Lead;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -15,8 +17,7 @@ use Illuminate\Support\Facades\Log;
  *
  *  - **Ventana de 24 hs de Meta abierta:** texto libre. Lo redacta la IA retomando el chat
  *    (`LeadReminderComposer`). Si la IA está apagada, falla, o devuelve algo que no pasa la
- *    validación, sale lo de siempre: el texto fijo si el comando tiene uno (la dinámica nueva) o la
- *    plantilla si no.
+ *    validación, sale lo de siempre: el texto fijo si el comando tiene uno o la plantilla si no.
  *  - **Ventana cerrada:** la plantilla ya armada. Meta no deja texto libre fuera de la ventana.
  *
  * 🔴 EL RESPALDO ES SIEMPRE "LO QUE SALÍA ANTES". Cualquier falla de la IA (sin clave, 402 por saldo
@@ -24,16 +25,34 @@ use Illuminate\Support\Facades\Log;
  * recordatorio nunca se pierde por culpa de la IA. Y el motivo del respaldo queda en el log: el modo
  * de falla de esta familia es "cae al respaldo en silencio", y tiene que poder verse en producción.
  *
- * 🔴 EL ESCUDO DE VERIFICACIÓN DEL LEAD (`requiere_verificacion_mensajes`) NO GOBIERNA ESTE SERVICIO,
- * y no es un descuido. El modelo `Lead` lo prende solo cuando el lead entra al tramo de la demo
- * (`demo_agendada` está en `ESTADOS_VENTANA_VERIFICACION_MENSAJES`) mientras el interruptor global
- * de Cuenta esté prendido, que es su default. Los recordatorios operan justo sobre leads en
- * `demo_agendada`, así que condicionar la IA a ese escudo la dejaría apagada para casi todos y la
- * función pedida por Lucas no haría nada. Además los recordatorios NUNCA pasaron por la
- * verificación (salen a la hora; ni siquiera la plantilla espera aprobación), y el texto de la IA
- * queda acotado por el validador de `LeadReminderComposer` (sin links, horas ni días inventados).
- * El freno es `LeadDemoSettings::get_recordatorio_ia_activo()`. Si Lucas decide que un lead
- * supervisado no debe recibir texto de la IA sin revisar, es agregar el chequeo acá.
+ * 🔴 LA VENTANA DE LA BASE NO ES LA DE META. `WhatsappSessionWindowService` la calcula con los
+ * mensajes del lead que figuran en nuestra base, y puede decir "abierta" cuando Meta ya la cerró.
+ * Por eso, si Meta rechaza el texto libre de forma DEFINITIVA (un 4xx), la cadena sigue con el
+ * respaldo siguiente en vez de insistir: IA → texto fijo → plantilla. Solo un error TRANSITORIO
+ * (409, 429, 5xx) se deja para reintentar en el próximo tick, y únicamente donde el comando lo pide
+ * (`reintentar_si_es_transitorio`), porque reintentar a ciegas repite la llamada a la IA en cada
+ * tick.
+ *
+ * 🔴 CONTROLES HUMANOS POR LEAD QUE SÍ SE RESPETAN. `claude_auto_reply = false` ("Claude no genera
+ * ni envía nada para este lead") y `requiere_intervencion_humana` (una persona está llevando el
+ * caso) apagan la IA para ese lead: ninguno está prendido por defecto, así que respetarlos no
+ * cuesta nada, y el escenario que evitan es concreto (un lead que se quejó y recibe un recordatorio
+ * alegre que "retoma" esa charla). Ese lead recibe lo de siempre.
+ *
+ * 🔴 EL ESCUDO DE VERIFICACIÓN DEL LEAD (`requiere_verificacion_mensajes`) NO GOBIERNA ESTE SERVICIO
+ * —decisión que le queda a Lucas—. El modelo `Lead` lo prende solo cuando el lead entra al tramo de
+ * la demo (`demo_agendada` está en `ESTADOS_VENTANA_VERIFICACION_MENSAJES`) mientras el interruptor
+ * global de Cuenta esté prendido, que es su default. Los recordatorios operan justo sobre leads en
+ * `demo_agendada`, así que condicionar la IA a ese escudo la dejaría apagada para casi todos. Es
+ * cierto que los recordatorios de texto fijo nunca pasaron por la verificación y estos son de texto
+ * libre; lo acota el validador de `LeadReminderComposer` (sin links, números, plazos ni plata) y lo
+ * frena el interruptor `LeadDemoSettings::get_recordatorio_ia_activo()`. Para que un lead
+ * supervisado no reciba texto de la IA sin revisar, es agregar el chequeo en `redactar_con_ia()`.
+ *
+ * 🔴 PRESUPUESTO DE IA POR CORRIDA. Los dos comandos corren en el scheduler sin `runInBackground()`, y
+ * cada lead suma una llamada de hasta ~25 s. Pasado `PRESUPUESTO_DE_IA_SEGUNDOS` de espera acumulada
+ * en esta corrida, el resto de los leads sale por el respaldo: el peor tick (las 09:00, con varios
+ * leads) no puede demorar a los comandos que vienen después.
  */
 class LeadReminderService
 {
@@ -45,6 +64,12 @@ class LeadReminderService
 
     /** Salió la plantilla de Meta. */
     const VIA_PLANTILLA = 'plantilla';
+
+    /**
+     * Segundos de espera a la IA, acumulados en una corrida del comando, a partir de los cuales el
+     * resto de los leads ya no la consulta.
+     */
+    const PRESUPUESTO_DE_IA_SEGUNDOS = 60;
 
     /**
      * Servicio de envío saliente vía Kapso/Meta. Lo pasa el comando para que sea el mismo que ya
@@ -69,6 +94,13 @@ class LeadReminderService
     private $ventana;
 
     /**
+     * Segundos que ya se esperaron a la IA en esta corrida.
+     *
+     * @var float
+     */
+    private $segundos_de_ia = 0.0;
+
+    /**
      * @param WhatsappSendService               $whatsapp_send_service Servicio de envío.
      * @param LeadReminderComposer|null         $composer              Inyección opcional (tests).
      * @param WhatsappSessionWindowService|null $ventana               Inyección opcional (tests).
@@ -90,20 +122,29 @@ class LeadReminderService
      * @param string $tipo     LeadReminderComposer::TIPO_MANANA | TIPO_PRE_DEMO.
      * @param array  $respaldo Lo que salía antes de la misión:
      *                         `texto` (?string): texto libre fijo, o null si el comando solo usaba plantilla;
+     *                         `reintentar_si_es_transitorio` (bool, opcional): si un error transitorio del
+     *                         texto libre corta la cadena (el comando lo reintenta en el próximo tick) en
+     *                         vez de seguir con el respaldo siguiente;
      *                         `plantilla` (array): `nombre`, `variables` (array), `idioma` (string),
-     *                         `contenido` (string: el texto ya renderizado de la plantilla, para el hilo).
+     *                         `contenido` (string: el texto ya renderizado de la plantilla, para el hilo) y
+     *                         `solo_antes_de` (?Carbon: pasado ese momento la plantilla ya no sale, porque su
+     *                         texto —"en unos minutos ya tenés disponible"— dejó de ser cierto).
      * @param string $contexto Etiqueta para los logs de envío ("Recordatorio demo - Lead #12 (...)").
      *
      * @return array{enviado: bool, via: string|null, contenido: string, whatsapp_message_id: string|null,
-     *         motivo: string|null, ventana_abierta: bool, proveedor: string|null, modelo: string|null}
+     *         motivo: string|null, ventana_abierta: bool, proveedor: string|null, modelo: string|null,
+     *         reintentable: bool}
      *         `contenido` es lo que REALMENTE se mandó (o se intentó mandar): lo que el comando tiene
      *         que guardar en el hilo. `motivo` explica por qué NO fue la IA (null si fue la IA).
-     *         `via` es null solo si el lead no tiene teléfono.
+     *         `via` es null si no se intentó ningún envío (lead sin teléfono, o plantilla vencida).
+     *         `reintentable` es true solo si no salió nada por un error transitorio y el comando pidió
+     *         reintentar.
      */
     public function enviar(Lead $lead, string $tipo, array $respaldo, string $contexto): array
     {
-        $plantilla = $respaldo['plantilla'];
-        $resultado = [
+        $plantilla  = $respaldo['plantilla'];
+        $reintentar = ! empty($respaldo['reintentar_si_es_transitorio']);
+        $resultado  = [
             'enviado'             => false,
             'via'                 => null,
             'contenido'           => (string) $plantilla['contenido'],
@@ -112,6 +153,7 @@ class LeadReminderService
             'ventana_abierta'     => false,
             'proveedor'           => null,
             'modelo'              => null,
+            'reintentable'        => false,
         ];
 
         $phone = trim((string) $lead->phone);
@@ -144,23 +186,53 @@ class LeadReminderService
                 }
 
                 $resultado['motivo'] = 'envio_ia_rechazado';
+
+                if ($reintentar && $this->fallo_transitorio()) {
+                    $resultado['via']          = self::VIA_IA;
+                    $resultado['contenido']    = $ia['texto'];
+                    $resultado['reintentable'] = true;
+
+                    return $this->registrar($lead, $tipo, $resultado);
+                }
             } else {
                 $resultado['motivo'] = $ia['motivo'];
             }
 
-            /* Respaldo 1: el texto libre fijo del comando (la dinámica nueva). */
+            /* Respaldo 1: el texto libre fijo del comando. */
             if ($respaldo['texto'] !== null) {
                 $id = $this->whatsapp_send_service->send_text($phone, (string) $respaldo['texto'], $contexto, true);
 
-                $resultado['enviado']             = $id !== null;
-                $resultado['via']                 = self::VIA_TEXTO_FIJO;
-                $resultado['contenido']           = (string) $respaldo['texto'];
-                $resultado['whatsapp_message_id'] = $id;
+                if ($id !== null) {
+                    $resultado['enviado']             = true;
+                    $resultado['via']                 = self::VIA_TEXTO_FIJO;
+                    $resultado['contenido']           = (string) $respaldo['texto'];
+                    $resultado['whatsapp_message_id'] = $id;
 
-                return $this->registrar($lead, $tipo, $resultado);
+                    return $this->registrar($lead, $tipo, $resultado);
+                }
+
+                if ($reintentar && $this->fallo_transitorio()) {
+                    $resultado['via']          = self::VIA_TEXTO_FIJO;
+                    $resultado['contenido']    = (string) $respaldo['texto'];
+                    $resultado['reintentable'] = true;
+
+                    return $this->registrar($lead, $tipo, $resultado);
+                }
+
+                /* Rechazo definitivo de Meta: la ventana de la base estaba mal. Sigue la plantilla. */
+                $resultado['motivo'] = 'envio_texto_rechazado';
             }
         } else {
             $resultado['motivo'] = 'ventana_cerrada';
+        }
+
+        /* La plantilla dice "en unos minutos ya tenés disponible el acceso": pasado el inicio de la
+         * demo deja de ser cierto, y es mejor no mandar nada que mandar eso. */
+        $limite = isset($plantilla['solo_antes_de']) ? $plantilla['solo_antes_de'] : null;
+        if ($limite instanceof Carbon && AppTime::now()->gte($limite)) {
+            $resultado['motivo'] = 'plantilla_vencida';
+
+            return $this->registrar($lead, $tipo, $resultado);
         }
 
         /* Respaldo 2 (o único camino con la ventana cerrada): la plantilla ya armada. */
@@ -180,6 +252,19 @@ class LeadReminderService
     }
 
     /**
+     * ¿El último envío de texto falló por algo que tiene sentido reintentar más tarde? Solo los
+     * códigos que `WhatsappSendService` declara transitorios (409 de Kapso con otro mensaje en vuelo,
+     * 429 y 5xx). Un error sin código —configuración, red caída— se trata como definitivo: reintentarlo
+     * cada cinco minutos con una llamada a la IA por tick es peor que pasar a la plantilla.
+     *
+     * @return bool
+     */
+    private function fallo_transitorio(): bool
+    {
+        return $this->whatsapp_send_service->last_send_was_transient();
+    }
+
+    /**
      * Pide el texto a la IA, o devuelve por qué no se la usa.
      *
      * @param Lead   $lead
@@ -193,11 +278,28 @@ class LeadReminderService
             return $this->sin_ia('ia_apagada');
         }
 
+        /* Controles humanos por lead: ver el docblock de la clase. `=== false` y no `! valor`: un
+         * lead sin el campo cargado (null) no es un lead con la IA apagada. */
+        if ($lead->claude_auto_reply === false) {
+            return $this->sin_ia('claude_apagado_para_el_lead');
+        }
+        if ((bool) $lead->requiere_intervencion_humana) {
+            return $this->sin_ia('requiere_intervencion_humana');
+        }
+
+        if ($this->segundos_de_ia >= self::PRESUPUESTO_DE_IA_SEGUNDOS) {
+            return $this->sin_ia('presupuesto_de_ia_agotado');
+        }
+
         if ($this->composer === null) {
             $this->composer = new LeadReminderComposer();
         }
 
-        return $this->composer->compose($lead, $tipo);
+        $inicio    = microtime(true);
+        $resultado = $this->composer->compose($lead, $tipo);
+        $this->segundos_de_ia += microtime(true) - $inicio;
+
+        return $resultado;
     }
 
     /**
@@ -228,6 +330,7 @@ class LeadReminderService
             'enviado'         => $resultado['enviado'],
             'ventana_abierta' => $resultado['ventana_abierta'],
             'motivo_respaldo' => $resultado['motivo'],
+            'reintentable'    => $resultado['reintentable'],
             'proveedor'       => $resultado['proveedor'],
             'modelo'          => $resultado['modelo'],
         ];

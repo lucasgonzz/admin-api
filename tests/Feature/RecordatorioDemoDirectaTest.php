@@ -135,6 +135,10 @@ class RecordatorioDemoDirectaTest extends TestCase
      * esté cerrada, ahí sí enviar la plantilla ya armada". No es una aserción ajustada para que pase:
      * es el requisito que se dio vuelta. La mitad de la demo vencida sigue exactamente igual.
      *
+     * La plantilla sale solo ANTES de que arranque la demo (por eso el lead de ventana cerrada tiene la
+     * demo a las 10:55 y no a las 10:10): su texto habla de "en unos minutos". Pasado el inicio no sale
+     * y no se marca; eso se prueba en RecordatoriosConConversacionTest.
+     *
      * @return void
      */
     public function test_ventana_vencida_no_sale_y_con_sesion_cerrada_sale_la_plantilla(): void
@@ -145,8 +149,10 @@ class RecordatorioDemoDirectaTest extends TestCase
         $vencida = $this->crear_lead_nueva_con_demo('08:00', '09:00');
         $this->mensaje($vencida, 'lead', Carbon::now()->subMinutes(120));
 
-        /* Sesión cerrada: el último entrante fue hace dos días. */
-        $cerrada = $this->crear_lead_nueva_con_demo('10:10', '16:10', '5493519999997');
+        /* Sesión cerrada: el último entrante fue hace dos días. La demo arranca dentro de diez minutos
+         * (10:55, y son las 10:45): la plantilla dice "en unos minutos ya tenés disponible el acceso" y
+         * solo es verdad antes del inicio. */
+        $cerrada = $this->crear_lead_nueva_con_demo('10:55', '16:10', '5493519999997');
         $this->mensaje($cerrada, 'lead', Carbon::now()->subDays(2));
 
         $this->artisan('leads:send-demo-reminders')->assertExitCode(0);

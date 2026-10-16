@@ -119,6 +119,11 @@ class SendMorningDemoReminder extends Command
      */
     public function handle(): int
     {
+        // Una corrida del comando = un servicio nuevo. El servicio lleva cuenta de lo que ya esperó a la
+        // IA en esta corrida (su presupuesto) y cachea la ventana de 24 hs de Meta que leyó: ninguna de
+        // las dos cosas tiene que sobrevivir a la corrida siguiente si el proceso se reutiliza.
+        $this->reminder_service = null;
+
         // Momento actual en timezone Argentina.
         $now = AppTime::now();
 
@@ -265,14 +270,18 @@ class SendMorningDemoReminder extends Command
         }
 
         // Registrar en el hilo del lead lo que REALMENTE se mandó (la plantilla o el texto de la IA).
-        LeadMessage::create([
-            'lead_id'             => $lead->id,
-            'sender'              => 'sistema',
-            'content'             => $envio['contenido'],
-            'status'              => 'enviado',
-            'is_followup'         => false,
-            'whatsapp_message_id' => $envio['whatsapp_message_id'],
-        ]);
+        // Si no salió nada el hilo no lo afirma: el agente lee ese hilo como conversación real, y un
+        // recordatorio "enviado" que el lead nunca recibió lo haría hablar de algo que no pasó.
+        if ($envio['enviado']) {
+            LeadMessage::create([
+                'lead_id'             => $lead->id,
+                'sender'              => 'sistema',
+                'content'             => $envio['contenido'],
+                'status'              => 'enviado',
+                'is_followup'         => false,
+                'whatsapp_message_id' => $envio['whatsapp_message_id'],
+            ]);
+        }
 
         // Marcar flag para no reenviar el recordatorio de mañana en la misma demo.
         $lead->update(['recordatorio_manana_enviado' => true]);
