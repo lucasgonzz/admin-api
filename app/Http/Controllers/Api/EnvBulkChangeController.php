@@ -4,7 +4,9 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\EnvChangeItem;
+use App\Models\EnvTemplate;
 use App\Services\EnvBulkChangeService;
+use App\Services\ProbadorDeClaves;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
@@ -33,11 +35,23 @@ class EnvBulkChangeController extends Controller
     /**
      * Previsualiza el cambio: devuelve el diff por cliente y un token. NO escribe nada.
      *
-     * @param  Request  $request  { alcance: 'todos'|'seleccion', clients?: int[], vars: {KEY: valor} }
+     * Los valores se pueden dar de dos maneras, combinables mientras no repitan variable:
+     *  - `vars`: KEY => valor en el body, como siempre.
+     *  - `plantilla.keys`: nombres de variables cuyo valor se toma de la plantilla .env del admin
+     *    (scope 'empresa', el único que este endpoint toca). Es el camino para las claves guardadas
+     *    cifradas: quien opera el endpoint nunca tiene que conocer ni dictar el secreto.
+     *
+     * Para las variables que vienen de la plantilla y tienen prueba disponible (hoy ANTHROPIC_API_KEY)
+     * se prueba la clave contra su proveedor ANTES de crear el lote: si el proveedor la rechaza, 422 y
+     * no se crea nada; si la prueba no es concluyente (red, timeout, 5xx) sigue y se informa. Se saltea
+     * con `omitir_verificacion: true`.
+     *
+     * @param  Request  $request  { alcance: 'todos'|'seleccion', clients?: int[], vars?: {KEY: valor}, plantilla?: {keys: string[]}, omitir_verificacion?: bool }
      * @param  EnvBulkChangeService  $service
-     * @return JsonResponse  { token, expira_en, clientes: [...] }
+     * @param  ProbadorDeClaves  $probador
+     * @return JsonResponse  { token, expira_en, clientes: [...], verificaciones: {KEY: {estado, mensaje}} }
      */
-    public function preview(Request $request, EnvBulkChangeService $service): JsonResponse
+    public function preview(Request $request, EnvBulkChangeService $service, ProbadorDeClaves $probador): JsonResponse
     {
         /*
          * El alcance es un campo obligatorio y explícito, no se deduce de que `clients` venga
@@ -48,16 +62,26 @@ class EnvBulkChangeController extends Controller
          * Por la misma razón `vars.*` es `string` y no `nullable`: un campo que se pierde en el
          * camino llega como null, y un null acá blanquearía esa variable en todos los clientes.
          * Vaciar una variable a propósito es una operación distinta y todavía no existe.
+         *
+         * `vars` es obligatorio salvo que se pida alguna variable de la plantilla.
          */
         $request->validate([
-            'alcance'   => 'required|in:todos,seleccion',
-            'clients'   => 'required_if:alcance,seleccion|array|min:1',
-            'clients.*' => 'integer',
-            'vars'      => 'required|array|min:1',
-            'vars.*'    => 'required|string',
+            'alcance'             => 'required|in:todos,seleccion',
+            'clients'             => 'required_if:alcance,seleccion|array|min:1',
+            'clients.*'           => 'integer',
+            'vars'                => 'required_without:plantilla|array|min:1',
+            'vars.*'              => 'required|string',
+            'plantilla'           => 'nullable|array',
+            'plantilla.keys'      => 'required_with:plantilla|array|min:1',
+            'plantilla.keys.*'    => 'required|string',
+            'omitir_verificacion' => 'nullable|boolean',
         ]);
 
         $vars = $request->input('vars');
+
+        if (! is_array($vars)) {
+            $vars = [];
+        }
 
         foreach ($vars as $key => $valor) {
             /* Valida los nombres de variable antes de que lleguen a un comando remoto. */
@@ -79,15 +103,121 @@ class EnvBulkChangeController extends Controller
             }
         }
 
+        /* Resultado de las pruebas de clave; se informa en la respuesta. */
+        $verificaciones = [];
+
+        /* Variables pedidas a la plantilla: se resuelven en el servidor, el valor nunca viaja en el body. */
+        $desde_plantilla = [];
+
+        if ($request->has('plantilla')) {
+            $resuelto = $this->resolver_desde_plantilla((array) $request->input('plantilla.keys'), $vars);
+
+            if (isset($resuelto['error'])) {
+                return response()->json(['message' => $resuelto['error']], 422);
+            }
+
+            $desde_plantilla = $resuelto['valores'];
+
+            /* Prueba las claves contra su proveedor antes de crear nada. */
+            if (! (bool) $request->input('omitir_verificacion', false)) {
+                foreach ($desde_plantilla as $key => $valor) {
+                    if (! $probador->es_soportada($key)) {
+                        continue;
+                    }
+
+                    $prueba = $probador->probar($key, $valor);
+
+                    /* El proveedor la rechazó: aplicarla rompería la IA de los clientes. No se crea ningún lote. */
+                    if ($prueba['estado'] === ProbadorDeClaves::RECHAZADA) {
+                        return response()->json([
+                            'message'        => "La clave {$key} guardada en la plantilla fue rechazada por su proveedor. "
+                                . 'No se creó ningún lote: cargá una clave válida en la plantilla. Detalle: ' . $prueba['mensaje'],
+                            'verificaciones' => [$key => ['estado' => $prueba['estado'], 'mensaje' => $prueba['mensaje']]],
+                        ], 422);
+                    }
+
+                    $verificaciones[$key] = ['estado' => $prueba['estado'], 'mensaje' => $prueba['mensaje']];
+                }
+            }
+        }
+
+        /* Los valores del body y los de la plantilla se juntan en el mapa que consume el servicio. */
+        $todas = $vars;
+        foreach ($desde_plantilla as $key => $valor) {
+            $todas[$key] = $valor;
+        }
+
         $client_ids = $request->input('alcance') === 'todos' ? null : $request->input('clients');
 
         try {
-            $preview = $service->previsualizar($vars, $client_ids, optional($request->user())->id);
+            $preview = $service->previsualizar($todas, $client_ids, optional($request->user())->id);
         } catch (\InvalidArgumentException $e) {
             return response()->json(['message' => $e->getMessage()], 422);
         }
 
+        /* Sin pruebas se responde un objeto vacío ({}), no una lista ([]). */
+        $preview['verificaciones'] = count($verificaciones) > 0 ? $verificaciones : new \stdClass();
+
         return response()->json($preview);
+    }
+
+    /**
+     * Resuelve los valores de las variables pedidas a la plantilla .env (scope 'empresa').
+     *
+     * Los mensajes de error nombran la variable, nunca su valor.
+     *
+     * @param  array  $keys  Nombres pedidos.
+     * @param  array  $vars  Variables que ya vienen en el body (no pueden repetirse).
+     * @return array  { valores: {KEY: valor} } o { error: string }
+     */
+    private function resolver_desde_plantilla(array $keys, array $vars): array
+    {
+        $valores = [];
+
+        foreach ($keys as $key) {
+            $key = (string) $key;
+
+            /* Mismo criterio de nombres que `vars`: llegan a un comando remoto. */
+            if (preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $key) !== 1) {
+                return ['error' => "El nombre de variable '{$key}' no es válido. Se esperan nombres tipo ANTHROPIC_API_KEY."];
+            }
+
+            $plantilla = EnvTemplate::where('scope', 'empresa')->where('key', $key)->first();
+
+            if (! $plantilla) {
+                return ['error' => "La variable '{$key}' no existe en la plantilla .env."];
+            }
+
+            /*
+             * Ilegible (APP_KEY cambiada, payload dañado) no es lo mismo que vacío: el accessor devuelve null
+             * en los dos casos, y aplicarla escribiría la variable vacía en el .env de los clientes.
+             */
+            if ($plantilla->esta_ilegible()) {
+                return ['error' => "El valor guardado de '{$key}' no se puede leer; volvé a cargarlo en la plantilla. No se creó ningún lote."];
+            }
+
+            /* El accessor del modelo devuelve el valor descifrado. */
+            $valor = $plantilla->value;
+
+            if ($valor === null || trim((string) $valor) === '') {
+                return ['error' => "La variable '{$key}' no tiene valor cargado en la plantilla .env."];
+            }
+
+            if (strpos((string) $valor, "\n") !== false || strpos((string) $valor, "\r") !== false) {
+                return ['error' => "El valor de '{$key}' en la plantilla tiene un salto de línea y una variable de .env es de una sola línea."];
+            }
+
+            /* Se usa el nombre canónico de la plantilla. */
+            $nombre = (string) $plantilla->key;
+
+            if (array_key_exists($nombre, $vars) || array_key_exists($nombre, $valores)) {
+                return ['error' => "La variable '{$nombre}' viene repetida (en vars y en plantilla, o dos veces en plantilla)."];
+            }
+
+            $valores[$nombre] = (string) $valor;
+        }
+
+        return ['valores' => $valores];
     }
 
     /**
