@@ -50,6 +50,9 @@ class ProbarClaveDePlantillaTest extends TestCase
     {
         parent::setUp();
 
+        /* Hermético: sin depender de filas ajenas de env_templates (se revierte con la transacción). */
+        EnvTemplate::query()->delete();
+
         $this->responder(200);
         Http::fake(function () {
             return call_user_func($this->anthropic);
@@ -180,6 +183,19 @@ class ProbarClaveDePlantillaTest extends TestCase
         $this->probar($admin, 'ANTHROPIC_API_KEY');
 
         $this->assertStringNotContainsString('0123456789ABCDEF', implode("\n", $this->logs));
+    }
+
+    public function test_la_clave_guardada_con_espacios_se_prueba_sin_espacios(): void
+    {
+        $admin = $this->crear_admin('probar-trim@test.local');
+        $this->crear_plantilla('ANTHROPIC_API_KEY', self::CLAVE . " \t");
+
+        $this->assertSame('valida', $this->probar($admin, 'ANTHROPIC_API_KEY')->json('estado'));
+
+        /* El header que llega a Anthropic es exactamente la clave, sin espacios ni tabs al borde. */
+        Http::assertSent(function (HttpRequest $request) {
+            return $request->header('x-api-key') === [self::CLAVE];
+        });
     }
 
     public function test_exige_estar_autenticado(): void
