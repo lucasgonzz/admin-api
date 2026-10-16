@@ -505,6 +505,52 @@ class DemoDirectaTest extends TestCase
         });
     }
 
+    /**
+     * (8d) La guardia anti-ráfaga: una carta que salió hace menos de 5 minutos NO se repite por un cambio de turno
+     *      sobre la misma instancia (un doble `agendar_demo`), y sí por un cambio de INSTANCIA (la carta vieja
+     *      apunta a otra tienda).
+     *
+     * @return void
+     */
+    public function test_la_guardia_de_cinco_minutos_frena_el_cambio_de_turno_pero_no_el_de_instancia(): void
+    {
+        $demo1 = $this->crear_demo(1);
+        $demo2 = $this->crear_demo(2);
+
+        // (a) Misma instancia, otro turno, carta de hace dos minutos: no se repite.
+        $lead = $this->crear_lead_de_la_dinamica_nueva();
+        $lead->email             = 'lead@test.local';
+        $lead->status            = 'calificado';
+        $lead->demo_id           = $demo1->id;
+        $lead->demo_date         = '2026-09-08';
+        $lead->demo_start_time   = '09:00';
+        $lead->demo_end_time     = '11:00';
+        $lead->demo_mail_sent_at = AppTime::now()->subMinutes(2);
+        $lead->save();
+
+        (new LeadAiService())->apply_pending_actions($this->crear_mensaje_pendiente($lead, $demo1), $this->final_actions_del_panel($lead));
+
+        Mail::assertNothingSent();
+
+        // (b) Otra instancia, carta de hace dos minutos: sí se manda (la vieja apunta a otra tienda).
+        $this->ocupar_instancia($demo1, '2026-09-08', '09:30', '13:00');
+        $otro = $this->crear_lead_de_la_dinamica_nueva();
+        $otro->phone              = '5493511239998';
+        $otro->email              = 'otro@test.local';
+        $otro->status             = 'calificado';
+        $otro->demo_id            = $demo1->id;
+        $otro->demo_date          = '2026-09-08';
+        $otro->demo_start_time    = '09:00';
+        $otro->demo_end_time      = '11:00';
+        $otro->demo_mail_sent_at  = AppTime::now()->subMinutes(2);
+        $otro->save();
+
+        (new LeadAiService())->apply_pending_actions($this->crear_mensaje_pendiente($otro, $demo2), $this->final_actions_del_panel($otro));
+
+        $this->assertSame($demo2->id, (int) $otro->refresh()->demo_id, 'La instancia ocupada se saltea: se asigna la otra.');
+        Mail::assertSent(LeadDemoAccesoMail::class, 1);
+    }
+
     /* ------------------------------------------------------------------ */
     /* 9 a 14 — lo que encontró el chequeo adversarial                       */
     /* ------------------------------------------------------------------ */

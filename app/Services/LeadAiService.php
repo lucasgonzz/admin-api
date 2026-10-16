@@ -6201,6 +6201,8 @@ TXT;
          * turno es distinta de la que el lead tenía. La carta de acceso ya enviada apunta a la
          * tienda de la instancia vieja, así que se manda otra. */
         $demo_directa_cambio_de_instancia = false;
+        /* ...y true cuando cambió SOLO el turno (misma instancia, otra fecha u hora de inicio). */
+        $demo_directa_cambio_de_turno = false;
 
         /*
          * FIX (coherencia del path correctivo de slot inválido — detectado en testing 6/7/2026,
@@ -6437,8 +6439,8 @@ TXT;
                      * cambió el TURNO (misión mail-demo-turno-y-asistente), le dice un día y una hora que ya no
                      * son los suyos. En los dos casos hay que mandar otra. Una reasignación casi siempre cae en la
                      * misma instancia (la de menor id libre) con otra hora de inicio. */
-                    $demo_directa_cambio_de_instancia = (int) $lead->demo_id !== $demo_id
-                        || ($lead->demo_date !== null ? $lead->demo_date->format('Y-m-d') : '') !== $demo_date
+                    $demo_directa_cambio_de_instancia = (int) $lead->demo_id !== $demo_id;
+                    $demo_directa_cambio_de_turno     = ($lead->demo_date !== null ? $lead->demo_date->format('Y-m-d') : '') !== $demo_date
                         || self::time_string_to_hhmm($lead->demo_start_time) !== $demo_start;
 
                     /*
@@ -8030,12 +8032,15 @@ TXT;
              * tienda). Con email nuevo: siempre que el admin no haya apagado el mail — un email
              * CORREGIDO en aprobación también cuenta como nuevo, y la carta anterior fue a una
              * casilla equivocada. Reenvío a pedido: con la guardia anti-ráfaga de 5 minutos. */
-            /* El cambio de instancia o de TURNO manda otra carta, pero con la guardia anti-ráfaga de 5 minutos: un
-             * doble `agendar_demo` (el modelo que repite, una doble aprobación) no manda dos cartas con horas
+            /* Cambió la INSTANCIA: la carta vieja apunta a otra tienda y manda siempre otra. Cambió solo el TURNO
+             * (misma instancia, otra hora): manda otra, pero con la guardia anti-ráfaga de 5 minutos, para que un
+             * doble `agendar_demo` (el modelo que repite, una doble aprobación) no mande dos cartas con horas
              * distintas. La PRIMERA carta nunca se frena. */
             $carta_reciente        = $lead->demo_mail_sent_at && $lead->demo_mail_sent_at->diffInMinutes(AppTime::now()) < 5;
             $carta_por_asignacion  = $demo_confirmada_este_turno && $enviar_mail_demo_flag
-                && (! $carta_ya_enviada || ($demo_directa_cambio_de_instancia && ! $carta_reciente));
+                && (! $carta_ya_enviada
+                    || $demo_directa_cambio_de_instancia
+                    || ($demo_directa_cambio_de_turno && ! $carta_reciente));
             $carta_por_email_nuevo = $email_nuevo && $enviar_mail_demo_flag;
             $carta_por_reenvio     = $reenviar_mail_flag
                 && ! ($lead->demo_mail_sent_at && $lead->demo_mail_sent_at->diffInMinutes(AppTime::now()) < 5);
