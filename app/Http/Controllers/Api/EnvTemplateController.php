@@ -7,6 +7,8 @@ use App\Models\Client;
 use App\Models\ClientApi;
 use App\Models\EnvTemplate;
 use App\Services\EnvSshService;
+use App\Services\ProbadorDeClaves;
+use App\Support\EnvSensitiveKeys;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
@@ -16,6 +18,10 @@ use Illuminate\Validation\Rule;
  *
  * Permite leer, actualizar y comparar las variables .env del template contra
  * los valores reales en producción de cada cliente vía SSH.
+ *
+ * 🔴 Las variables SENSIBLES (EnvSensitiveKeys) se guardan cifradas (ver EnvTemplate) y este controller
+ * nunca devuelve su valor: ni en el listado, ni en los diffs contra los clientes. Para cambiarlas desde
+ * la pantalla, un valor vacío significa "no tocar" y vaciarlas es una acción explícita (`clear_value`).
  */
 class EnvTemplateController extends Controller
 {
@@ -105,7 +111,8 @@ class EnvTemplateController extends Controller
                 'required', 'string', 'max:120',
                 Rule::unique('env_templates', 'key')->where('scope', $scope),
             ],
-            'value'               => 'nullable|string',
+            /* Una variable de .env es de una sola línea: un salto de línea rompe el parseo del .env entero. */
+            'value'               => ['nullable', 'string', $this->regla_una_sola_linea()],
             'group'               => 'required|string|max:80',
             'is_common'           => 'required|boolean',
             'is_manual_on_create' => 'required|boolean',
@@ -146,7 +153,11 @@ class EnvTemplateController extends Controller
      * ANTES de tocar la base (si alguno no pertenece, no se actualiza nada) y la
      * lista devuelta se filtra por ese mismo scope.
      *
-     * @param  Request  $request  { items: [{ id, value, is_common, is_manual_on_create, notes, group, sort_order }], scope? }
+     * 🔴 Variables sensibles: `value` ausente, null o vacío significa "no tocar" (la pantalla no conoce el
+     * valor guardado, así que no puede mandarlo de vuelta); `clear_value: true` la vacía a propósito.
+     * En las no sensibles todo sigue como siempre. Ningún `value` puede traer saltos de línea.
+     *
+     * @param  Request  $request  { items: [{ id, value, clear_value?, is_common, is_manual_on_create, notes, group, sort_order }], scope? }
      * @return JsonResponse  { models: EnvTemplate[] }
      */
     public function bulk_update(Request $request): JsonResponse
@@ -154,7 +165,8 @@ class EnvTemplateController extends Controller
         $request->validate([
             'items'                    => 'required|array',
             'items.*.id'               => 'required|integer|exists:env_templates,id',
-            'items.*.value'            => 'nullable|string',
+            'items.*.value'            => ['nullable', 'string', $this->regla_una_sola_linea()],
+            'items.*.clear_value'      => 'nullable|boolean',
             'items.*.is_common'        => 'required|boolean',
             'items.*.is_manual_on_create' => 'required|boolean',
             'items.*.notes'            => 'nullable|string',
@@ -188,7 +200,20 @@ class EnvTemplateController extends Controller
             $template = EnvTemplate::findOrFail($item['id']);
 
             /* Actualiza únicamente los campos editables desde la UI. */
-            $template->value             = $item['value'] ?? null;
+            if (EnvSensitiveKeys::es_sensible((string) $template->key)) {
+                /*
+                 * Sensible: la pantalla nunca recibió el valor, así que un value vacío es "no tocar".
+                 * Sólo se escribe si se tipeó algo, o se vacía si se pidió explícitamente.
+                 */
+                if (! empty($item['clear_value'])) {
+                    $template->value = null;
+                } elseif (isset($item['value']) && trim((string) $item['value']) !== '') {
+                    $template->value = $item['value'];
+                }
+            } else {
+                $template->value = $item['value'] ?? null;
+            }
+
             $template->is_common         = (bool) $item['is_common'];
             $template->is_manual_on_create = (bool) $item['is_manual_on_create'];
             $template->notes             = $item['notes'] ?? null;
@@ -211,7 +236,8 @@ class EnvTemplateController extends Controller
      *
      * @param  Request  $request  { client_api_id: int }
      * @param  Client   $client   Cliente resuelto por route model binding.
-     * @return JsonResponse  { diffs: [{ key, template_value, client_value }] } o { diffs: [], error: string }
+     * @return JsonResponse  { diffs: [{ key, template_value, client_value, sensitive }] } o { diffs: [], error: string }
+     *                        (en una variable sensible, template_value y client_value salen enmascarados)
      */
     public function check_diff(Request $request, Client $client): JsonResponse
     {
@@ -259,21 +285,10 @@ class EnvTemplateController extends Controller
         /* Compara cada variable común contra el valor en el .env real del cliente. */
         $diffs = [];
         foreach ($common_templates as $template) {
-            /* Valor en el template base (trimmed). */
-            $template_value = trim((string) ($template->value ?? ''));
+            $diff = $this->armar_diff($template, $client_env);
 
-            /* Valor en el .env real del cliente (trimmed); vacío si no existe la key. */
-            $client_value = isset($client_env[$template->key])
-                ? trim((string) $client_env[$template->key])
-                : '';
-
-            /* Solo reporta diferencia si los valores no coinciden (case-sensitive). */
-            if ($template_value !== $client_value) {
-                $diffs[] = [
-                    'key'            => $template->key,
-                    'template_value' => $template_value,
-                    'client_value'   => $client_value,
-                ];
+            if ($diff !== null) {
+                $diffs[] = $diff;
             }
         }
 
@@ -291,7 +306,7 @@ class EnvTemplateController extends Controller
      * @param  Client  $client  Cliente resuelto por route model binding.
      * @return JsonResponse  {
      *   results: [
-     *     { client_api_id, api_url, diffs: [{ key, template_value, client_value }], error: string|null }
+     *     { client_api_id, api_url, diffs: [{ key, template_value, client_value, sensitive }], error: string|null }
      *   ]
      * }
      */
@@ -324,21 +339,10 @@ class EnvTemplateController extends Controller
                 /* Compara cada variable común contra el valor en el .env real. */
                 $diffs = [];
                 foreach ($common_templates as $template) {
-                    /* Valor en el template base (trimmed). */
-                    $template_value = trim((string) ($template->value ?? ''));
+                    $diff = $this->armar_diff($template, $client_env);
 
-                    /* Valor en el .env real del cliente (trimmed); vacío si no existe la key. */
-                    $client_value = isset($client_env[$template->key])
-                        ? trim((string) $client_env[$template->key])
-                        : '';
-
-                    /* Solo reporta diferencia si los valores no coinciden (case-sensitive). */
-                    if ($template_value !== $client_value) {
-                        $diffs[] = [
-                            'key'            => $template->key,
-                            'template_value' => $template_value,
-                            'client_value'   => $client_value,
-                        ];
+                    if ($diff !== null) {
+                        $diffs[] = $diff;
                     }
                 }
 
@@ -480,5 +484,92 @@ class EnvTemplateController extends Controller
         $env_ssh_service->disconnect();
 
         return response()->json(['updated' => array_keys($vars_to_write)]);
+    }
+
+    /**
+     * Compara una variable de la plantilla contra el .env real de un cliente.
+     *
+     * La comparación se hace con los valores REALES; sólo la salida se tapa. Si la variable es sensible,
+     * `template_value` y `client_value` salen enmascarados (EnvSensitiveKeys::enmascarar) y el diff lleva
+     * `sensitive: true`: el diff le sirve a la pantalla para decir "difiere", no para mostrar el secreto.
+     *
+     * @param  EnvTemplate  $template    Variable de la plantilla.
+     * @param  array        $client_env  .env del cliente ya parseado (KEY => valor).
+     * @return array|null   El diff { key, template_value, client_value, sensitive }, o null si coinciden.
+     */
+    private function armar_diff(EnvTemplate $template, array $client_env): ?array
+    {
+        /* Valor en el template base (trimmed; descifrado por el accessor del modelo). */
+        $template_value = trim((string) ($template->value ?? ''));
+
+        /* Valor en el .env real del cliente (trimmed); vacío si no existe la key. */
+        $client_value = isset($client_env[$template->key])
+            ? trim((string) $client_env[$template->key])
+            : '';
+
+        /* Solo reporta diferencia si los valores no coinciden (case-sensitive). */
+        if ($template_value === $client_value) {
+            return null;
+        }
+
+        $sensible = EnvSensitiveKeys::es_sensible((string) $template->key);
+
+        return [
+            'key'            => $template->key,
+            'template_value' => $sensible ? EnvSensitiveKeys::enmascarar((string) $template->key, $template_value) : $template_value,
+            'client_value'   => $sensible ? EnvSensitiveKeys::enmascarar((string) $template->key, $client_value) : $client_value,
+            'sensitive'      => $sensible,
+        ];
+    }
+
+    /**
+     * Regla de validación: el valor no puede tener saltos de línea.
+     *
+     * Una variable de .env es de una sola línea. Un retorno de carro o un salto de línea dentro del valor
+     * rompe el parseo del .env entero (lección del 6/10/2026: una clave pegada con el salto del final
+     * dejó la línea partida).
+     *
+     * @return \Closure
+     */
+    private function regla_una_sola_linea(): \Closure
+    {
+        return function ($attribute, $value, $fail) {
+            if (is_string($value) && (strpos($value, "\r") !== false || strpos($value, "\n") !== false)) {
+                $fail('El valor no puede tener saltos de línea: una variable de .env es de una sola línea.');
+            }
+        };
+    }
+
+    /**
+     * Prueba contra su proveedor la clave GUARDADA en la plantilla, sin gastar tokens.
+     *
+     * Prueba el valor que está en la plantilla (no uno que llegue en el body), así la clave nunca viaja
+     * hacia acá y nunca vuelve en la respuesta. Hoy sólo ANTHROPIC_API_KEY tiene prueba; el resto
+     * devuelve `no_soportada`.
+     *
+     * @param  Request  $request  { key: string, scope?: 'empresa'|'tienda' }
+     * @param  ProbadorDeClaves  $probador
+     * @return JsonResponse  { estado: valida|rechazada|no_concluyente|no_soportada|sin_valor, mensaje: string, http: int|null }
+     */
+    public function probar_clave(Request $request, ProbadorDeClaves $probador): JsonResponse
+    {
+        $request->validate([
+            'key'   => 'required|string|max:120',
+            'scope' => 'nullable|string',
+        ]);
+
+        $key = strtoupper(trim((string) $request->input('key')));
+
+        /* Sin prueba disponible no hace falta ni mirar la base. */
+        if (! $probador->es_soportada($key)) {
+            return response()->json($probador->probar($key, null));
+        }
+
+        /* El valor sale del modelo, que lo descifra: la clave no pasa por el request. */
+        $plantilla = EnvTemplate::where('scope', $this->resolve_scope($request))->where('key', $key)->first();
+
+        $valor = $plantilla ? $plantilla->value : null;
+
+        return response()->json($probador->probar($key, $valor));
     }
 }

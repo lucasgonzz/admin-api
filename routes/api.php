@@ -1321,6 +1321,8 @@ Route::prefix('admin')->group(function () {
         Route::post('env-template/apply-diff/{client}', [EnvTemplateController::class, 'apply_diff']);
         Route::post('env-template/check-diff-all/{client}', [EnvTemplateController::class, 'check_diff_all']);
         Route::post('env-template/apply-diff-all/{client}', [EnvTemplateController::class, 'apply_diff_all']);
+        // Prueba contra su proveedor la clave guardada en la plantilla (sin gastar tokens y sin devolverla).
+        Route::post('env-template/probar-clave', [EnvTemplateController::class, 'probar_clave'])->middleware('throttle:20,1');
 
         // Cambio masivo de variables .env sobre varios clientes, en dos tiempos: previsualizar
         // (no escribe, devuelve el diff y un token) y aplicar (exige ese token). Es lo que consume
