@@ -193,12 +193,15 @@ class DemoReservadaDosHorasTest extends TestCase
     }
 
     /**
-     * Sin ninguna instancia cargada no hay turno ni previsión, así que no hay hora: la frase se arma
-     * sin ella. 🔴 Nunca se inventa una hora para completar la oración.
+     * Sin ninguna instancia cargada no hay turno ni previsión, así que no hay hora. 🔴 Nunca se inventa una
+     * hora para completar la oración: desde la misión mail-demo-turno-y-asistente (16/10/2026) el bloque ni
+     * siquiera pide el mail ni arma la frase de la reserva en este caso (no hay nada que reservar), y dice
+     * que no se puede asignar. La frase SIN hora de antes del turno vive ahora en el pedido del mail, y la
+     * prueba `DemoDirectaCorreoPrimeroTest::test_el_pedido_del_mail_no_nombra_una_hora`.
      *
      * @return void
      */
-    public function test_sin_turno_ni_prevista_la_frase_va_sin_hora(): void
+    public function test_sin_turno_ni_prevista_no_se_inventa_ninguna_hora(): void
     {
         $this->fijar_settings_de_la_mision();
         Carbon::setTestNow(Carbon::parse(self::AHORA, self::TZ));
@@ -207,8 +210,9 @@ class DemoReservadaDosHorasTest extends TestCase
 
         $bloque = $this->contexto_de_demo_directa($lead);
 
-        $this->assertStringContainsString('dos horas, para que la recorras tranquilo', $bloque, 'Sin hora real, la frase cierra sin la hora.');
+        $this->assertStringContainsString('es un SI, pero ahora NO se', $bloque, 'Sin instancia no hay nada que reservar.');
         $this->assertStringNotContainsString('hasta las ', $bloque);
+        $this->assertStringNotContainsString('reservada dos horas', $bloque);
     }
 
     /**

@@ -273,7 +273,7 @@ class AsistenteDemoLeadService
 
         $inicio = DemoTurnoTexto::leer_hora((string) $lead->demo_start_time);
         $fin    = DemoTurnoTexto::leer_hora((string) $lead->demo_end_time);
-        if ($inicio === null || $fin === null || $fin['minutos'] <= $inicio['minutos']) {
+        if ($inicio === null || $fin === null) {
             return null;
         }
 
@@ -392,11 +392,11 @@ class AsistenteDemoLeadService
     }
 
     /**
-     * El número del equipo (el de leads, configurable en la cuenta) tal como se lee: "+54 9 3444 54-4199".
+     * El número del equipo (el de leads, configurable en la cuenta) tal como se lee: "+54 9 3444544199".
      *
      * Sale de `LeadDemoSettings::get_whatsapp_numero_leads()` y no de una cadena escrita acá: si Lucas
-     * cambia ese número, estos textos lo siguen solos. Sin un número válido configurado devuelve 'el
-     * WhatsApp de siempre', que no manda a ningún lado pero tampoco miente.
+     * cambia ese número, estos textos lo siguen solos. Sin un número válido configurado devuelve
+     * 'WhatsApp de siempre' ("escribinos al WhatsApp de siempre"), que no manda a ningún lado pero tampoco miente.
      *
      * @return string
      */
@@ -404,18 +404,18 @@ class AsistenteDemoLeadService
     {
         $digitos = LeadDemoSettings::get_whatsapp_numero_leads();
         if ($digitos === '') {
-            return 'el WhatsApp de siempre';
+            return 'WhatsApp de siempre';
         }
 
         /* Un celular argentino cargado sin el 9 (54 + 10 dígitos, como viene por defecto) se escribe igual con el 9:
-         * así se lo dicta y así lo muestra el resto del sistema. */
+         * así se lo dicta y así lo muestra el resto del sistema. Compacto y sin guiones a propósito: el largo del
+         * prefijo de área varía (11, 351, 3444...) y un agrupado fijo lo escribiría mal para la mitad del país. */
         if (strlen($digitos) === 12 && strpos($digitos, '54') === 0 && $digitos[2] !== '9') {
             $digitos = '549' . substr($digitos, 2);
         }
 
-        /* Móvil argentino (549 + 10 dígitos): se lo escribe como se lo dicta. Cualquier otro, con el + adelante. */
         if (strlen($digitos) === 13 && strpos($digitos, '549') === 0) {
-            return '+54 9 ' . substr($digitos, 3, 4) . ' ' . substr($digitos, 7, 2) . '-' . substr($digitos, 9, 4);
+            return '+54 9 ' . substr($digitos, 3);
         }
 
         return '+' . $digitos;

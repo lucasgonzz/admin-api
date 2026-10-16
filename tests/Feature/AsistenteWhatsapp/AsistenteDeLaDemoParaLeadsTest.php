@@ -252,7 +252,7 @@ class AsistenteDeLaDemoParaLeadsTest extends BaseDelCanal
         Queue::assertNothingPushed();
         $this->assertCount(1, $espia->textos, 'Una sola respuesta cada seis horas por teléfono.');
         $this->assertStringContainsString('no tenés una demo activa', $espia->textos[0]['body']);
-        $this->assertStringContainsString('+54 9 3444 54-4199', $espia->textos[0]['body']);
+        $this->assertStringContainsString('+54 9 3444544199', $espia->textos[0]['body']);
         $this->assertSame(self::PHONE_NUMBER_ID_ASISTENTE, (string) $espia->destinos[0], 'Sale por el número por el que entró.');
     }
 
@@ -431,14 +431,14 @@ class AsistenteDeLaDemoParaLeadsTest extends BaseDelCanal
      */
     public function test_el_numero_del_equipo_en_los_textos_sigue_a_la_configuracion(): void
     {
-        $this->assertSame('+54 9 3444 54-4199', AsistenteDemoLeadService::numero_del_equipo_legible(), 'El default de la cuenta, con el 9 de celular.');
-        $this->assertStringContainsString('+54 9 3444 54-4199', AsistenteDemoLeadService::texto_sin_endpoint());
+        $this->assertSame('+54 9 3444544199', AsistenteDemoLeadService::numero_del_equipo_legible(), 'El default de la cuenta, con el 9 de celular.');
+        $this->assertStringContainsString('+54 9 3444544199', AsistenteDemoLeadService::texto_sin_endpoint());
 
         AdminSetting::set(LeadDemoSettings::KEY_WHATSAPP_NUMERO_LEADS, '5491122334455');
 
-        $this->assertSame('+54 9 1122 33-4455', AsistenteDemoLeadService::numero_del_equipo_legible());
-        $this->assertStringContainsString('+54 9 1122 33-4455', AsistenteDemoLeadService::texto_para_lead(AsistenteDemoLeadService::SITUACION_SIN_TURNO));
-        $this->assertStringContainsString('+54 9 1122 33-4455', AsistenteDemoLeadService::texto_de_disculpa());
+        $this->assertSame('+54 9 1122334455', AsistenteDemoLeadService::numero_del_equipo_legible());
+        $this->assertStringContainsString('+54 9 1122334455', AsistenteDemoLeadService::texto_para_lead(AsistenteDemoLeadService::SITUACION_SIN_TURNO));
+        $this->assertStringContainsString('+54 9 1122334455', AsistenteDemoLeadService::texto_de_disculpa());
         $this->assertStringNotContainsString('{equipo}', AsistenteDemoLeadService::texto_sin_endpoint());
     }
 

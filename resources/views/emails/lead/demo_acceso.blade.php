@@ -307,11 +307,7 @@
                     Probalo desde tu WhatsApp.
                   </h2>
                   <p style="margin:12px 0 0 0;font-family:{!! $font !!};font-size:15px;line-height:24px;color:#566078;">
-                    @if($hay_turno)
-                      Mientras dure tu turno
-                    @else
-                      Mientras dure tu demo
-                    @endif
+                    Mientras dure tu turno
                     podés escribirle al asistente de tu demo, igual que lo haría el dueño de un negocio con su sistema.
                     Escribile <strong style="color:#1c2333;font-weight:600;">desde este mismo WhatsApp</strong>, el que usás con nosotros, al
                     <strong style="color:#1c2333;font-weight:600;white-space:nowrap;">{{ $asistente_numero }}</strong>.

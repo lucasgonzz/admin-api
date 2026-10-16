@@ -8030,8 +8030,12 @@ TXT;
              * tienda). Con email nuevo: siempre que el admin no haya apagado el mail — un email
              * CORREGIDO en aprobación también cuenta como nuevo, y la carta anterior fue a una
              * casilla equivocada. Reenvío a pedido: con la guardia anti-ráfaga de 5 minutos. */
+            /* El cambio de instancia o de TURNO manda otra carta, pero con la guardia anti-ráfaga de 5 minutos: un
+             * doble `agendar_demo` (el modelo que repite, una doble aprobación) no manda dos cartas con horas
+             * distintas. La PRIMERA carta nunca se frena. */
+            $carta_reciente        = $lead->demo_mail_sent_at && $lead->demo_mail_sent_at->diffInMinutes(AppTime::now()) < 5;
             $carta_por_asignacion  = $demo_confirmada_este_turno && $enviar_mail_demo_flag
-                && (! $carta_ya_enviada || $demo_directa_cambio_de_instancia);
+                && (! $carta_ya_enviada || ($demo_directa_cambio_de_instancia && ! $carta_reciente));
             $carta_por_email_nuevo = $email_nuevo && $enviar_mail_demo_flag;
             $carta_por_reenvio     = $reenviar_mail_flag
                 && ! ($lead->demo_mail_sent_at && $lead->demo_mail_sent_at->diffInMinutes(AppTime::now()) < 5);
@@ -9522,7 +9526,9 @@ BLOQUE_DEL_MANUAL;
             $regla_del_si = "  - Si el lead pide la demo (por ejemplo " . $frases_de_los_botones . ", que es lo que\n"
                 . "    mandan el boton de su pagina, el de la web y el de Instagram, o cualquier frase equivalente), es un SI. YA LE PEDISTE EL\n"
                 . "    MAIL " . $pedidos_del_mail . " VECES y no lo paso: NO se lo pidas de nuevo. Devolve agendar_demo: {\"ahora\": true} ahora, con los\n"
-                . "    dos links, y decile que " . $frase_de_la_reserva . ". Si despues lo pasa, guardar_email solo.\n";
+                . "    dos links, y decile que " . $frase_de_la_reserva . ". Si el ULTIMO mensaje del lead trae su correo (por ejemplo, lo paso\n"
+                . "    justo despues de tu explicacion), devolve guardar_email con ese correo Y agendar_demo juntos, y deci que le mandaste el mail\n"
+                . "    con todo. Si lo pasa mas tarde, con la demo ya asignada, guardar_email solo.\n";
 
             $regla_de_aceptar = "  - Cuando acepta hacerla ahora: devolve agendar_demo: {\"ahora\": true} y en el MISMO mensaje pasale los dos\n"
                 . "    links de arriba (la pagina —aunque ya la tenga, se repite: ahi ve el formulario, el video y el boton— y la\n"
@@ -9596,7 +9602,8 @@ BLOQUE_DEL_MANUAL;
     /**
      * Cuántas veces el agente le pidió el correo a este lead en las últimas doce horas.
      *
-     * Se cuenta mirando lo que SALIÓ del agente (con `sent_at`) y nombra el mail o el correo. Es la
+     * Se cuenta mirando lo que SALIÓ del agente (con `sent_at`), nombra el mail o el correo y PREGUNTA (lleva un
+     * signo de pregunta: "te mando todo por mail" no es un pedido). Es la
      * base de la regla "a la segunda sin respuesta, links igual" del bloque DEMO DIRECTA: el modelo no
      * tiene que acordarse de cuántas veces preguntó, lo cuenta el servidor.
      *
@@ -9612,6 +9619,7 @@ BLOQUE_DEL_MANUAL;
             ->where('is_status_event', false)
             ->whereNotNull('sent_at')
             ->where('created_at', '>=', AppTime::now()->subHours(12))
+            ->where('content', 'like', '%?%')
             ->where(function ($consulta) {
                 $consulta->where('content', 'like', '%mail%')->orWhere('content', 'like', '%correo%');
             })

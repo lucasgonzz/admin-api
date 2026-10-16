@@ -368,7 +368,7 @@ class DemoDirectaCorreoPrimeroTest extends TestCase
 
         $bloque = $this->contexto($this->crear_lead());
 
-        $this->assertStringContainsString('ahora NO se', $bloque);
+        $this->assertStringContainsString('es un SI, pero ahora NO se', $bloque);
         $this->assertStringContainsString('no pidas el mail, no pases ningun link y no devuelvas', $bloque);
         $this->assertStringNotContainsString('es lo PRIMERO que se pide', $bloque);
     }
@@ -394,7 +394,25 @@ class DemoDirectaCorreoPrimeroTest extends TestCase
         $this->assertStringContainsString('2 VECES', $bloque);
         $this->assertStringContainsString('NO se lo pidas de nuevo', $bloque);
         $this->assertStringContainsString('Devolve agendar_demo: {"ahora": true} ahora', $bloque);
+        $this->assertStringContainsString('devolve guardar_email con ese correo Y agendar_demo juntos', $bloque, 'Si el mail llega justo después de la explicación, no se pierde.');
         $this->assertStringNotContainsString('es lo PRIMERO que se pide', $bloque);
+    }
+
+    /**
+     * Una mención del mail que NO pregunta ("te mandé todo por mail") no cuenta como pedido: dos de esas no
+     * dejan al agente sin pedir el correo.
+     *
+     * @return void
+     */
+    public function test_una_mencion_del_mail_sin_pregunta_no_cuenta_como_pedido(): void
+    {
+        $this->crear_demo();
+        $lead = $this->crear_lead();
+
+        $this->registrar_saliente($lead, 'Ya te mandé la propuesta por mail.', 20);
+        $this->registrar_saliente($lead, 'Te mando todo por correo cuando terminemos.', 10);
+
+        $this->assertStringContainsString('es lo PRIMERO que se pide', $this->contexto($lead));
     }
 
     /**

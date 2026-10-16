@@ -70,7 +70,9 @@ class LeadDemoAccesoMailHelper
         /* El asistente solo se ofrece DENTRO de un turno vigente (un reenvío con el turno vencido no puede
          * prometer un asistente que ya no contesta), a un lead al que se le pueda contestar y sobre una
          * instancia que pueda atenderlo. */
-        $con_asistente = $turno !== null && AsistenteDemoLeadService::disponible_para($lead, $lead->demo);
+        $con_asistente = $turno !== null
+            && $lead->demo !== null
+            && AsistenteDemoLeadService::disponible_para($lead, $lead->demo);
 
         return new LeadDemoAccesoMail(
             $nombre,
