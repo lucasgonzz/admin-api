@@ -113,8 +113,12 @@ class AsistenteWhatsappService
      * El worker de `default` NO mira esta cola: si alguien la cambia acá sin la red del Kernel y sin
      * el programa de supervisor, el canal se queda sin consumidor y nada lo avisa.
      *
-     * `release()` conserva la cola: `DatabaseJob::release()` reencola con la cola de la fila de
-     * `jobs` de la que salió, así que el polling entero vive en `asistente` sin volver a pedirlo.
+     * `release()` conserva la cola, pero ojo con el porqué: en Laravel 8.83 `DatabaseJob::release()`
+     * reencola con `$this->queue`, que NO es la columna `queue` de la fila sino la cola que el worker
+     * pidió en el `pop()` (el worker recorre su `--queue` de a una y le pasa al job la que lo
+     * encontró). Los dos workers del canal piden `--queue=asistente`, así que da lo mismo y el
+     * polling entero vive en `asistente` sin volver a pedirlo. Un worker que levantara este job desde
+     * otra cola lo reencolaría en esa otra.
      */
     const COLA_DEL_ASISTENTE = 'asistente';
 

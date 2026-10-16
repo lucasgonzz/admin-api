@@ -118,6 +118,9 @@ class ColaDelAsistenteTest extends BaseDelCanal
      * que seguir en `asistente`. Si volviera a `default`, el polling lo atendería el worker de los
      * deployments y la demora que este arreglo saca volvería por la puerta de atrás.
      *
+     * El `pop()` pide la cola `asistente`, igual que los dos workers del canal: `DatabaseJob::release()`
+     * reencola con la cola que se pidió en el `pop()` (`$this->queue`), no con la columna de la fila.
+     *
      * @return void
      */
     public function test_el_release_del_polling_conserva_la_cola_del_asistente(): void

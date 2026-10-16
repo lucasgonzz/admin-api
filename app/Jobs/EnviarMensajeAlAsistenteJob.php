@@ -43,8 +43,9 @@ use Illuminate\Support\Facades\Log;
  *
  * 🔴 **Sale por su propia cola, `asistente`** (misión asistente-envios-a-clientes, 16/10/2026), y no
  * por `default`: ver `AsistenteWhatsappService::COLA_DEL_ASISTENTE`. Los tres despachos la piden
- * explícita, y el `release()` del polling la conserva solo (`DatabaseJob::release()` reencola con la
- * cola de la fila de `jobs` de la que salió). La atienden el programa de supervisor
+ * explícita, y el `release()` del polling la conserva solo: `DatabaseJob::release()` reencola con
+ * `$this->queue`, la cola que el worker pidió en el `pop()`, y los dos workers del canal piden
+ * `--queue=asistente` (ver `AsistenteWhatsappService::COLA_DEL_ASISTENTE`). La atienden el programa de supervisor
  * `api_admin_queue_asistente` del VPS y, como red, el evento de cada minuto del Kernel.
  *
  * 🔴 **Y la degradación es la parte que más importa.** Las cuatro rutas `api/admin-sync/asistente/*`
