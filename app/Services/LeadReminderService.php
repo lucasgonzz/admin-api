@@ -252,16 +252,21 @@ class LeadReminderService
     }
 
     /**
-     * ¿El último envío de texto falló por algo que tiene sentido reintentar más tarde? Solo los
-     * códigos que `WhatsappSendService` declara transitorios (409 de Kapso con otro mensaje en vuelo,
-     * 429 y 5xx). Un error sin código —configuración, red caída— se trata como definitivo: reintentarlo
-     * cada cinco minutos con una llamada a la IA por tick es peor que pasar a la plantilla.
+     * ¿El último envío de texto falló por algo que tiene sentido reintentar más tarde?
+     *
+     * Sí si `WhatsappSendService` lo declara transitorio (409 de Kapso con otro mensaje en vuelo, 429 y
+     * 5xx) o si NO hubo respuesta (sin código HTTP: red caída, timeout). Esto último reproduce lo que
+     * hacía `SendDemoReminders` antes de esta misión —un texto que no salía se reintentaba en el
+     * próximo tick— y evita perder el recordatorio por una caída de cinco minutos. Lo que NO es
+     * transitorio es un rechazo de Meta con código (un 400: su ventana estaba cerrada aunque la
+     * nuestra figure abierta): ahí insistir con texto libre no sirve y se pasa a la plantilla.
      *
      * @return bool
      */
     private function fallo_transitorio(): bool
     {
-        return $this->whatsapp_send_service->last_send_was_transient();
+        return $this->whatsapp_send_service->last_send_was_transient()
+            || $this->whatsapp_send_service->last_send_status_code === null;
     }
 
     /**
@@ -337,6 +342,10 @@ class LeadReminderService
 
         if ($resultado['enviado']) {
             Log::info('LeadReminderService: recordatorio enviado.', $datos);
+        } elseif ($resultado['motivo'] === 'plantilla_vencida' && ! $resultado['ventana_abierta']) {
+            /* Se repite en cada tick hasta el fin de la demo (unas catorce veces por lead) y no es un
+             * problema: la ventana está cerrada y la plantilla ya no es válida. Solo debug. */
+            Log::debug('LeadReminderService: sin nada para mandar (ventana cerrada y plantilla vencida).', $datos);
         } else {
             Log::warning('LeadReminderService: el recordatorio no salió.', $datos);
         }

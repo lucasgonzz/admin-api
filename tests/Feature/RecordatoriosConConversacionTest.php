@@ -407,7 +407,8 @@ class RecordatoriosConConversacionTest extends TestCase
 
     /**
      * (7b) Un rechazo definitivo de Meta ANTES de que arranque la demo cae a la plantilla; un error
-     *      transitorio (409) no: se deja para el próximo tick, sin marcar y sin escribir nada en el hilo.
+     *      transitorio (409) o la falta de respuesta (red caída) no: se dejan para el próximo tick, sin
+     *      marcar y sin escribir nada en el hilo.
      *
      * @return void
      */
@@ -454,6 +455,26 @@ class RecordatoriosConConversacionTest extends TestCase
         $this->assertTrue((bool) $transitorio->refresh()->recordatorio_demo_enviado);
         $this->assertCount(4, $espia->textos);
         $this->assertStringContainsString('Bruno', $espia->textos[3]['body']);
+
+        /* Sin respuesta (red caída o timeout: sin código HTTP) también se reintenta, como antes de la
+         * misión: una caída de cinco minutos no tiene que costar el recordatorio. */
+        $this->simular_http([
+            'Carlos' => $this->respuesta_ia(str_replace('Guillermo', 'Carlos', self::TEXTO_PRE_DEMO_OK)),
+        ]);
+        $espia->fallar_textos   = true;
+        $espia->codigo_de_fallo = null;
+        $sin_respuesta = $this->crear_lead('Carlos Pérez', '5493519990059', '10:55');
+        $this->mensaje($sin_respuesta, 'lead', Carbon::now()->subMinutes(120), 'Hola');
+
+        $this->artisan('leads:send-demo-reminders')->assertExitCode(0);
+
+        $this->assertFalse((bool) $sin_respuesta->refresh()->recordatorio_demo_enviado, 'Sin respuesta: se reintenta, no se marca.');
+        $this->assertCount(1, $espia->plantillas, 'No se cae a la plantilla por una caída de red.');
+        $this->assertSame(0, LeadMessage::where('lead_id', $sin_respuesta->id)->where('sender', 'sistema')->count());
+
+        $espia->fallar_textos = false;
+        $this->artisan('leads:send-demo-reminders')->assertExitCode(0);
+        $this->assertTrue((bool) $sin_respuesta->refresh()->recordatorio_demo_enviado);
     }
 
     /**
