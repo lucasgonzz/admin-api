@@ -262,7 +262,7 @@
                     ['Probala pensando en tu negocio.', $url_tienda
                         ? 'Cargá un artículo en el sistema y buscalo en la tienda: es la misma base de datos, se carga una sola vez.'
                         : 'Cargá un artículo, hacé una venta y mirá cómo se mueve el stock: es tu negocio, pero con datos de ficción.'],
-                    ['Anotá tus dudas.', 'Cuando termines, te escribimos por WhatsApp para ver cómo se aplicaría a tu negocio.'],
+                    ['Anotá tus dudas.', 'Mientras la recorrés, andá anotando lo que quieras preguntar. Cuando termines, te escribimos por WhatsApp para ver cómo se aplicaría a tu negocio.'],
                 ];
             @endphp
 
