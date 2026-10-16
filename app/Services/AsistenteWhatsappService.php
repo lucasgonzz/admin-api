@@ -5,6 +5,8 @@ namespace App\Services;
 use App\Jobs\EnviarMensajeAlAsistenteJob;
 use App\Models\Client;
 use App\Models\ClientAssistantMessage;
+use App\Models\Demo;
+use App\Models\Lead;
 use App\Models\WhatsappConfig;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -222,13 +224,25 @@ class AsistenteWhatsappService
      * cualquier otra, y la respuesta fija queda como saliente de esa misma conversación (o de ninguna,
      * si el dueño no citó), así que citarla después lleva a donde el dueño estaba.
      *
+     * **El lead durante su demo** (misión mail-demo-turno-y-asistente, 16/10/2026): con `$demo` y
+     * `$lead` el hilo es el de un lead probando el asistente sobre su instancia de demostración.
+     * `$client` va en null (la demo no es un cliente: no tiene fila en `clients`), la fila queda con
+     * `client_id` 0 y con `demo_id`/`lead_id` cargados, y el job arma el destino desde la demo
+     * (`AsistenteDemoLeadService::cliente_virtual()`). Sin esos dos argumentos todo es idéntico a como era.
+     *
      * @param array<string, mixed> $parsed Resultado de `WhatsappWebhookController::parse_inbound_message()`.
-     * @param Client               $client Cliente cuyo dueño escribió.
+     * @param Client|null          $client Cliente cuyo dueño escribió; null si escribe un lead durante su demo.
+     * @param Demo|null            $demo   Instancia de demo, solo si escribe un lead durante su turno.
+     * @param Lead|null            $lead   Lead que escribió, solo con `$demo`.
      *
      * @return ClientAssistantMessage La fila entrante ya persistida.
      */
-    public function recibir(array $parsed, Client $client): ClientAssistantMessage
+    public function recibir(array $parsed, ?Client $client, ?Demo $demo = null, ?Lead $lead = null): ClientAssistantMessage
     {
+        /* El id con el que se agrupa el hilo: el del cliente, o 0 para el de una demo (el cliente virtual
+         * no existe en la base y la fila se distingue por `demo_id`). */
+        $client_id_del_hilo = $demo !== null || $client === null ? 0 : (int) $client->id;
+
         $reply_to = isset($parsed['reply_to_message_id']) ? trim((string) $parsed['reply_to_message_id']) : '';
 
         $imagenes           = $this->imagenes_del_mensaje($parsed);
@@ -254,7 +268,7 @@ class AsistenteWhatsappService
         $no_se_puede_leer = $this->no_se_puede_leer($parsed['body'] ?? null, $tipo, $imagenes);
 
         $fila                               = new ClientAssistantMessage();
-        $fila->client_id                    = (int) $client->id;
+        $fila->client_id                    = $client_id_del_hilo;
         $fila->telefono                     = (string) $parsed['from'];
         $fila->phone_number_id              = $this->phone_number_id_del_payload($parsed);
         $fila->direccion                    = ClientAssistantMessage::DIRECCION_ENTRANTE;
@@ -266,13 +280,22 @@ class AsistenteWhatsappService
             ? ClientAssistantMessage::ESTADO_ESPERANDO
             : ClientAssistantMessage::ESTADO_RECIBIDO;
 
+        /* 🔴 Las dos columnas de la demo se asignan SOLO para el hilo de un lead. Una fila de dueño no las
+         * toca ni siquiera con null: Eloquent mete en el INSERT todo atributo asignado, y con el código
+         * nuevo corriendo sobre una base que todavía no tiene la migración (la ventana de un despliegue) el
+         * INSERT de un dueño fallaría por una columna que su camino no necesita. */
+        if ($demo !== null) {
+            $fila->demo_id = (int) $demo->id;
+            $fila->lead_id = $lead !== null ? (int) $lead->id : null;
+        }
+
         /* La cita se resuelve ACÁ y no en el job a propósito: es una consulta a una tabla propia,
          * no sale a la red, y dejarla resuelta en la fila hace que el hilo se pueda leer sin
          * reconstruir nada. Null significa "no hay cita que resolver" —el dueño no citó, o citó
          * algo que no es de este canal—, y en ese caso la conversación la decide el `empresa-api`
          * con su corte por tiempo. */
         $fila->ai_conversation_id = ClientAssistantMessage::conversacion_por_cita(
-            (int) $client->id,
+            $client_id_del_hilo,
             $fila->reply_to_whatsapp_message_id
         );
 
@@ -287,7 +310,9 @@ class AsistenteWhatsappService
         $fila->save();
 
         Log::channel('daily')->info('AsistenteWhatsapp: mensaje del dueño recibido.', [
-            'client_id'           => $client->id,
+            'client_id'           => $client_id_del_hilo,
+            'demo_id'             => $fila->demo_id,
+            'lead_id'             => $fila->lead_id,
             'assistant_message_id' => $fila->id,
             'tipo'                => $fila->tipo,
             'cito'                => $fila->reply_to_whatsapp_message_id !== null,
@@ -1014,6 +1039,14 @@ class AsistenteWhatsappService
         );
 
         $fila->ai_message_id = $entrante->ai_message_id;
+
+        /* El hilo de un lead durante su demo: la respuesta hereda la demo y el lead, para leer el hilo de un
+         * vistazo. Una fila de dueño no toca estas columnas (ver `recibir()`). */
+        if ($entrante->es_de_demo()) {
+            $fila->demo_id = (int) $entrante->demo_id;
+            $fila->lead_id = $entrante->lead_id !== null ? (int) $entrante->lead_id : null;
+        }
+
         $fila->save();
 
         return $fila;
@@ -1105,6 +1138,36 @@ class AsistenteWhatsappService
             'El dueño le escribió al asistente pero su sistema todavía no tiene las rutas '
                 . 'api/admin-sync/asistente/*. Hay que actualizarlo, o apagarle la casilla '
                 . '"Habla con su asistente por WhatsApp" en su ficha.'
+        );
+
+        return true;
+    }
+
+    /**
+     * Avisa a los admins que la instancia de una DEMO no tiene el endpoint del asistente.
+     *
+     * Es el gemelo de `avisar_cliente_sin_endpoint()` para el lead que prueba el asistente durante su
+     * demo (misión mail-demo-turno-y-asistente): el aviso nombra la demo, no un cliente, y su
+     * remedio es otro (actualizar esa instancia, o cargarle `demos.api_key` si la exige). Mismo techo
+     * de uno por día y por demo: un lead entusiasmado escribe veinte veces en un turno.
+     *
+     * @param Demo $demo Instancia sin el endpoint.
+     *
+     * @return bool True si este llamado fue el primero del día para esa demo.
+     */
+    public function avisar_demo_sin_endpoint(Demo $demo): bool
+    {
+        $clave = self::CACHE_AVISO_404 . ':demo:' . (int) $demo->id . ':' . now()->toDateString();
+
+        if (! Cache::add($clave, 1, now()->addDay())) {
+            return false;
+        }
+
+        $this->avisar_a_los_admins(
+            'Asistente para leads - demo ' . $demo->display_name() . ' (demo #' . $demo->id . ')',
+            'Un lead le escribió al asistente durante su demo pero esa instancia no contestó las rutas '
+                . 'api/admin-sync/asistente/*. Hay que actualizar la instancia, o cargarle la clave en '
+                . '"API key" de la demo si su sistema la exige.'
         );
 
         return true;

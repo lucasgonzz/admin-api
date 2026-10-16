@@ -9,6 +9,7 @@ use App\Services\SupportAiSuggestionScheduler;
 use App\Models\Client;
 use App\Models\ClientAssistantMessage;
 use App\Models\ClientEmployee;
+use App\Models\Demo;
 use App\Models\EcommerceImplementation;
 use App\Models\EcommerceImplementationMessage;
 use App\Models\Implementation;
@@ -18,6 +19,7 @@ use App\Models\LeadMessage;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
 use App\Models\WhatsappConfig;
+use App\Services\AsistenteDemoLeadService;
 use App\Services\AsistenteWhatsappService;
 use App\Services\AsistenteWhatsappSettings;
 use App\Services\EcommerceImplementationBroadcastService;
@@ -1255,8 +1257,10 @@ class WhatsappWebhookController extends Controller
     /**
      * Qué se hace con un mensaje que entró por el NÚMERO DEL ASISTENTE.
      *
-     * Acá entra una sola cosa: el dueño de un cliente activo, con el canal prendido, hablando con
-     * el asistente de IA de su propio sistema. Cualquier otro remitente —un desconocido, un
+     * Acá entran dos cosas: el dueño de un cliente activo, con el canal prendido, hablando con
+     * el asistente de IA de su propio sistema; y —desde la misión mail-demo-turno-y-asistente,
+     * 16/10/2026— el LEAD que está dentro de su turno de demo, que lo prueba sobre la instancia que
+     * se le asignó (`AsistenteDemoLeadService`). Cualquier otro remitente —un desconocido, un
      * empleado del dueño, el dueño con el canal apagado, un cliente dado de baja— recibe un texto
      * fijo que le dice a dónde escribir, y nada más: no se le crea lead, no se le abre ticket y no
      * entra a ninguna rama de implementación.
@@ -1288,6 +1292,13 @@ class WhatsappWebhookController extends Controller
                 'cito'      => ! empty($parsed['reply_to_message_id']),
             ]);
 
+            return;
+        }
+
+        /* El lead dentro de su turno de demo (o el que escribe antes/después). Va DESPUÉS del dueño y ANTES
+           del texto "ajeno": un dueño que además es lead sigue por su camino de siempre, y a un lead sin
+           turno se le dice qué pasa en vez de la frase de los dueños. */
+        if ($this->handle_lead_en_demo_del_asistente($parsed, $desde)) {
             return;
         }
 
@@ -1331,6 +1342,84 @@ class WhatsappWebhookController extends Controller
                 $texto,
                 'Remitente ajeno al numero del asistente'
             );
+    }
+
+    /**
+     * Qué se hace con un mensaje del número del asistente cuando el remitente es un LEAD con demo.
+     *
+     * Tres desenlaces, y solo el primero habla con el asistente de verdad:
+     *
+     *   - **Dentro del turno y con la instancia armada**: el mensaje entra al asistente de siempre
+     *     (`AsistenteWhatsappService::recibir`), pero apuntado a la instancia de demo del lead y no a
+     *     un cliente. Nunca crea lead ni ticket.
+     *   - **Con turno pero la instancia todavía se arma**, o **sin turno vigente** (aún no empezó, ya
+     *     venció): un texto corto que le dice qué pasa. Una vez cada seis horas por teléfono, igual
+     *     que el texto de los remitentes ajenos y por la misma razón (este mensaje no se guarda en
+     *     ninguna tabla, y un reintento de Kapso o un autorespondedor armaría un bucle).
+     *   - **No es de ningún lead con demo**, o el canal para leads está apagado: devuelve false y el
+     *     llamador sigue con el texto de los remitentes ajenos, exactamente como antes.
+     *
+     * @param array<string, mixed> $parsed Mensaje entrante ya parseado.
+     * @param string               $desde  Teléfono del remitente TAL CUAL llegó en el payload.
+     *
+     * @return bool True si el mensaje quedó tramitado acá.
+     */
+    private function handle_lead_en_demo_del_asistente(array $parsed, string $desde): bool
+    {
+        if (! AsistenteDemoLeadService::interruptor_prendido()) {
+            return false;
+        }
+
+        $servicio  = app(AsistenteDemoLeadService::class);
+        $resultado = $servicio->situacion_del_lead($desde);
+        $lead      = $resultado['lead'];
+
+        if ($lead === null) {
+            return false;
+        }
+
+        if ($resultado['situacion'] === AsistenteDemoLeadService::SITUACION_ACTIVO) {
+            $demo = Demo::find((int) $lead->demo_id);
+            if ($demo !== null) {
+                app(AsistenteWhatsappService::class)->recibir($parsed, null, $demo, $lead);
+                Log::channel('daily')->info('WhatsApp webhook: mensaje del lead enrutado al asistente de su demo.', [
+                    'from'    => $parsed['from'],
+                    'type'    => $parsed['type'],
+                    'route'   => 'asistente-demo',
+                    'lead_id' => $lead->id,
+                    'demo_id' => $demo->id,
+                ]);
+
+                return true;
+            }
+
+            // La demo asignada ya no existe: sin instancia no hay a quién preguntarle.
+            $resultado['situacion'] = AsistenteDemoLeadService::SITUACION_SIN_TURNO;
+        }
+
+        Log::channel('daily')->info('WhatsApp webhook: lead con demo escribe al asistente fuera de su turno.', [
+            'from'      => $parsed['from'],
+            'route'     => 'asistente-demo-sin-turno',
+            'lead_id'   => $lead->id,
+            'situacion' => $resultado['situacion'],
+        ]);
+
+        $texto = AsistenteDemoLeadService::texto_para_lead((string) $resultado['situacion']);
+
+        /* Mismo cerrojo que el texto ajeno: una respuesta cada seis horas por teléfono y situación. */
+        if (! Cache::add('whatsapp_texto_lead_asistente_' . $resultado['situacion'] . '_' . md5((string) preg_replace('/\D+/', '', $desde)), 1, now()->addHours(6))) {
+            return true;
+        }
+
+        app(WhatsappSendService::class)
+            ->paraProposito(WhatsappConfig::PROPOSITO_ASISTENTE)
+            ->send_text(
+                $desde,
+                $texto,
+                'Lead con demo escribe al asistente fuera de su turno'
+            );
+
+        return true;
     }
 
     /**

@@ -96,6 +96,9 @@ class PaginaDelLeadDeLaWebTest extends TestCase
      */
     public function test_al_lead_de_la_web_no_se_le_pide_pasar_la_pagina_en_la_primera_respuesta(): void
     {
+        /* Con una instancia libre: sin ninguna, el bloque no pide el mail ni pasa links (otra rama). */
+        $this->crear_demo(1);
+
         $lead     = $this->crear_lead_con_origen(LeadOrigenService::ORIGEN_LANDING);
         $contexto = $this->contexto_de_demo_directa($lead);
 

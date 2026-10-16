@@ -12,7 +12,9 @@ use Illuminate\Database\Eloquent\Model;
  * tramo se cortó un mensaje que no volvió. Ver la migración `create_client_assistant_messages_table`
  * para el porqué de cada columna.
  *
- * @property int         $client_id                    Cliente dueño del hilo.
+ * @property int         $client_id                    Cliente dueño del hilo (0 en el hilo de un lead durante su demo).
+ * @property int|null    $demo_id                      Instancia de demo a la que se le habla; null = hilo de un dueño.
+ * @property int|null    $lead_id                      Lead que escribió durante su turno; null = hilo de un dueño.
  * @property string      $telefono                     E.164 normalizado del dueño.
  * @property string|null $phone_number_id              Número de WhatsApp por el que entró o salió.
  * @property string      $direccion                    'in' o 'out'.
@@ -74,6 +76,8 @@ class ClientAssistantMessage extends Model
      */
     protected $casts = [
         'client_id'          => 'integer',
+        'demo_id'            => 'integer',
+        'lead_id'            => 'integer',
         'ai_conversation_id' => 'integer',
         'ai_message_id'      => 'integer',
         'agrupado_en_id'     => 'integer',
@@ -89,6 +93,19 @@ class ClientAssistantMessage extends Model
      * @var array<int, string>
      */
     protected $hidden = ['media_en_espera'];
+
+    /**
+     * Si esta fila es del hilo de un lead durante su demo y no del de un dueño de cliente.
+     *
+     * Es la única pregunta que hace el resto del código para decidir a quién se le habla: con
+     * `demo_id` cargado el destino es la instancia de esa demo; sin él, el `Client` de siempre.
+     *
+     * @return bool
+     */
+    public function es_de_demo(): bool
+    {
+        return $this->demo_id !== null && (int) $this->demo_id > 0;
+    }
 
     /**
      * Cliente dueño del hilo.

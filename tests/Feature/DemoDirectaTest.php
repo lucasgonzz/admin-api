@@ -444,6 +444,113 @@ class DemoDirectaTest extends TestCase
         $this->assertFalse((bool) $lead->requiere_intervencion_humana);
     }
 
+    /**
+     * (8b) 🔴 `guardar_email` + `agendar_demo` en el MISMO paquete —el orden nuevo: el correo se pide ANTES de los
+     *      links (misión mail-demo-turno-y-asistente)— mandan UNA sola carta, ya con el turno asignado: el mail
+     *      sale con el día y la hora reales, no con un turno vacío ni dos veces.
+     *
+     * @return void
+     */
+    public function test_guardar_email_y_agendar_demo_juntos_mandan_una_sola_carta_con_el_turno(): void
+    {
+        $demo    = $this->crear_demo(1);
+        $lead    = $this->crear_lead_de_la_dinamica_nueva();
+        $mensaje = $this->crear_mensaje_pendiente($lead, $demo);
+
+        (new LeadAiService())->apply_pending_actions($mensaje, $this->final_actions_del_panel($lead, ['guardar_email' => 'lead@test.local']));
+
+        Mail::assertSent(LeadDemoAccesoMail::class, 1);
+        Mail::assertSent(LeadDemoAccesoMail::class, function (LeadDemoAccesoMail $mail) {
+            $mail->build();
+
+            return $mail->hasTo('lead@test.local')
+                && is_array($mail->turno)
+                && $mail->turno['hora_inicio'] === '10:10'
+                && $mail->turno['es_hoy'] === true
+                && strpos((string) $mail->subject, 'hoy a las 10:10') !== false;
+        });
+        $this->assertSame('lead@test.local', $lead->refresh()->email);
+        $this->assertNotNull($lead->demo_mail_sent_at);
+    }
+
+    /**
+     * (8c) 🔴 Al reasignar al lead —casi siempre la MISMA instancia, con otra hora de inicio— se manda otra
+     *      carta: la anterior le dice un día y una hora que ya no son los suyos (desde esta misión el mail lleva
+     *      el turno).
+     *
+     * @return void
+     */
+    public function test_al_reasignar_la_misma_instancia_con_otro_turno_se_manda_otra_carta(): void
+    {
+        $demo = $this->crear_demo(1);
+        $lead = $this->crear_lead_de_la_dinamica_nueva();
+        $lead->email             = 'lead@test.local';
+        $lead->status            = 'calificado';
+        $lead->demo_id           = $demo->id;
+        $lead->demo_date         = '2026-09-07';
+        $lead->demo_start_time   = '10:10';
+        $lead->demo_end_time     = '12:10';
+        $lead->demo_mail_sent_at = AppTime::now()->subDay();
+        $lead->save();
+        $mensaje = $this->crear_mensaje_pendiente($lead, $demo);
+
+        (new LeadAiService())->apply_pending_actions($mensaje, $this->final_actions_del_panel($lead));
+
+        $this->assertSame($demo->id, (int) $lead->refresh()->demo_id, 'Misma instancia.');
+        Mail::assertSent(LeadDemoAccesoMail::class, 1);
+        Mail::assertSent(LeadDemoAccesoMail::class, function (LeadDemoAccesoMail $mail) {
+            $mail->build();
+
+            return is_array($mail->turno) && $mail->turno['es_hoy'] === true;
+        });
+    }
+
+    /**
+     * (8d) La guardia anti-ráfaga: una carta que salió hace menos de 5 minutos NO se repite por un cambio de turno
+     *      sobre la misma instancia (un doble `agendar_demo`), y sí por un cambio de INSTANCIA (la carta vieja
+     *      apunta a otra tienda).
+     *
+     * @return void
+     */
+    public function test_la_guardia_de_cinco_minutos_frena_el_cambio_de_turno_pero_no_el_de_instancia(): void
+    {
+        $demo1 = $this->crear_demo(1);
+        $demo2 = $this->crear_demo(2);
+
+        // (a) Misma instancia, otro turno, carta de hace dos minutos: no se repite.
+        $lead = $this->crear_lead_de_la_dinamica_nueva();
+        $lead->email             = 'lead@test.local';
+        $lead->status            = 'calificado';
+        $lead->demo_id           = $demo1->id;
+        $lead->demo_date         = '2026-09-08';
+        $lead->demo_start_time   = '09:00';
+        $lead->demo_end_time     = '11:00';
+        $lead->demo_mail_sent_at = AppTime::now()->subMinutes(2);
+        $lead->save();
+
+        (new LeadAiService())->apply_pending_actions($this->crear_mensaje_pendiente($lead, $demo1), $this->final_actions_del_panel($lead));
+
+        Mail::assertNothingSent();
+
+        // (b) Otra instancia, carta de hace dos minutos: sí se manda (la vieja apunta a otra tienda).
+        $this->ocupar_instancia($demo1, '2026-09-08', '09:30', '13:00');
+        $otro = $this->crear_lead_de_la_dinamica_nueva();
+        $otro->phone              = '5493511239998';
+        $otro->email              = 'otro@test.local';
+        $otro->status             = 'calificado';
+        $otro->demo_id            = $demo1->id;
+        $otro->demo_date          = '2026-09-08';
+        $otro->demo_start_time    = '09:00';
+        $otro->demo_end_time      = '11:00';
+        $otro->demo_mail_sent_at  = AppTime::now()->subMinutes(2);
+        $otro->save();
+
+        (new LeadAiService())->apply_pending_actions($this->crear_mensaje_pendiente($otro, $demo2), $this->final_actions_del_panel($otro));
+
+        $this->assertSame($demo2->id, (int) $otro->refresh()->demo_id, 'La instancia ocupada se saltea: se asigna la otra.');
+        Mail::assertSent(LeadDemoAccesoMail::class, 1);
+    }
+
     /* ------------------------------------------------------------------ */
     /* 9 a 14 — lo que encontró el chequeo adversarial                       */
     /* ------------------------------------------------------------------ */

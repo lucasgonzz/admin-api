@@ -58,6 +58,29 @@ class Kernel extends ConsoleKernel
             ->withoutOverlapping(10)
             ->runInBackground();
 
+        /* Los recordatorios de la Agenda por WhatsApp: «recordame el viernes a las 10 que…» (misión
+         * cruzada recordatorios-whatsapp, 16/10/2026).
+         *
+         * Cada cinco minutos y no cada minuto: el `empresa-api` ofrece cada recordatorio desde su hora
+         * hasta tres horas después, así que llega como mucho cinco minutos tarde. Y acá, a diferencia
+         * de los avisos, no hay filtro de actividad del dueño (el recordatorio sale justamente cuando
+         * no está hablando con el asistente): se consulta a todos los clientes con el canal prendido.
+         * La consulta además le renueva al `empresa-api` el anuncio de si hay plantilla, que él
+         * guarda dos horas.
+         *
+         * 🔴 En segundo plano y sin heredar el candado del cron (`artisan_sin_el_lock_del_cron()`),
+         * igual que los avisos: es un barrido en serie contra el `empresa-api` de cada cliente con un
+         * timeout de 15 s, y en primer plano un par de clientes lentos clavarían `schedule:run`.
+         *
+         * 🔴 Y `withoutOverlapping(10)` con el número puesto a mano, por lo mismo que los avisos: el
+         * default del candado son 24 HORAS, y una corrida que muera sin soltarlo dejaría sin
+         * recordatorios todo un día. Diez minutos cubren dos vueltas; el reclamo de la cache igual
+         * impide el doble envío si dos corridas llegaran a pisarse. */
+        $schedule->exec(self::artisan_sin_el_lock_del_cron('asistente:enviar-recordatorios'))
+            ->everyFiveMinutes()
+            ->withoutOverlapping(10)
+            ->runInBackground();
+
         /* Recolección del consumo de tokens de IA de cada cliente (misión tokens-por-cliente,
          * 17/9/2026).
          *
