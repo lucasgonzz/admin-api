@@ -60,5 +60,9 @@
         <!-- El token real de Hostinger vive en una variable de entorno de esta máquina: con force="true" 
              ningún test lo ve (tests/TestCase.php también lo vacía en config). -->
         <env name="HOSTINGER_API_TOKEN" value="" force="true"/>
+        <!-- Lo mismo con la clave de DeepSeek (misión leads-agente-deepseek): si algún día existe como variable
+             de entorno de esta máquina, los tests del agente de leads que stubean solo api.anthropic.com
+             pasarían a hablar con DeepSeek. Los que quieren DeepSeek la cargan ellos con config(). -->
+        <env name="DEEPSEEK_API_KEY" value="" force="true"/>
     </php>
 </phpunit>

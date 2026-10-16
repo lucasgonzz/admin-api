@@ -240,8 +240,6 @@ return [
         'base_url'       => env('DEEPSEEK_BASE_URL', 'https://api.deepseek.com/anthropic'),
         // Flash: el default de la plataforma para WhatsApp. Pro razona más lento y no ve imágenes.
         'model_leads'    => env('DEEPSEEK_MODEL_LEADS', 'deepseek-flash'),
-        // DeepSeek trae el razonamiento PRENDIDO por defecto; 'disabled' es el "Ágil" de empresa.
-        'thinking_leads' => env('DEEPSEEK_THINKING_LEADS', 'disabled'),
         // Mismo cacert.pem que Anthropic: es la misma máquina en desarrollo.
         'ca_bundle'      => env('DEEPSEEK_CAINFO', env('ANTHROPIC_CAINFO')),
         'verify_ssl'     => filter_var(env('DEEPSEEK_VERIFY_SSL', env('ANTHROPIC_VERIFY_SSL', true)), FILTER_VALIDATE_BOOLEAN),

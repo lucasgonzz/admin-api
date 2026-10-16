@@ -11,7 +11,9 @@ use App\Services\WhatsappProtocolService;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use Monolog\Handler\TestHandler;
 use ReflectionMethod;
 use Tests\TestCase;
 
@@ -49,7 +51,6 @@ class LeadAiProveedorTest extends TestCase
             'services.deepseek.api_key'   => '',
             'services.deepseek.base_url'  => 'https://api.deepseek.com/anthropic',
             'services.deepseek.model_leads' => 'deepseek-flash',
-            'services.deepseek.thinking_leads' => 'disabled',
             'services.lead_ai.proveedor'  => 'deepseek',
         ]);
     }
@@ -123,28 +124,43 @@ class LeadAiProveedorTest extends TestCase
     }
 
     /**
-     * El modelo y el razonamiento se cambian por config, sin tocar código; una base_url con barra
-     * final no duplica la barra; un thinking vacío cae a disabled (nunca se manda el default de
-     * DeepSeek, que es razonar).
+     * El modelo y la base del endpoint se cambian por config, sin tocar código; una base_url con
+     * barra final no duplica la barra; una variable en blanco en el .env (que llega como '', no
+     * como "no definida") cae al default en vez de dar una URL relativa o un modelo vacío.
      *
      * @return void
      */
-    public function test_modelo_thinking_y_base_url_salen_de_la_config()
+    public function test_modelo_y_base_url_salen_de_la_config_y_lo_vacio_cae_al_default()
     {
         config([
-            'services.deepseek.api_key'        => self::CLAVE_DEEPSEEK,
-            'services.deepseek.model_leads'    => 'deepseek-v4-pro',
-            'services.deepseek.thinking_leads' => 'enabled',
-            'services.deepseek.base_url'       => 'https://proxy.local/anthropic/',
+            'services.deepseek.api_key'     => self::CLAVE_DEEPSEEK,
+            'services.deepseek.model_leads' => 'deepseek-v4-pro',
+            'services.deepseek.base_url'    => 'https://proxy.local/anthropic/',
         ]);
 
         $this->assertSame('deepseek-v4-pro', LeadAiProveedor::modelo());
         $this->assertSame('https://proxy.local/anthropic/v1/messages', LeadAiProveedor::url_messages());
-        $this->assertSame(['type' => 'enabled'], LeadAiProveedor::cuerpo(['model' => 'x'])['thinking']);
 
-        config(['services.deepseek.thinking_leads' => '', 'services.deepseek.model_leads' => '']);
+        config(['services.deepseek.model_leads' => '', 'services.deepseek.base_url' => '  ']);
 
         $this->assertSame('deepseek-flash', LeadAiProveedor::modelo());
+        $this->assertSame('https://api.deepseek.com/anthropic/v1/messages', LeadAiProveedor::url_messages());
+    }
+
+    /**
+     * El razonamiento de DeepSeek va SIEMPRE apagado en el agente de leads, aunque alguien deje una
+     * config vieja `thinking_leads` o intente prenderlo: con `enabled` los tokens de razonamiento
+     * se comerían el `max_tokens` (1000 / 400) y la respuesta saldría cortada.
+     *
+     * @return void
+     */
+    public function test_el_razonamiento_de_deepseek_va_siempre_apagado()
+    {
+        config([
+            'services.deepseek.api_key'        => self::CLAVE_DEEPSEEK,
+            'services.deepseek.thinking_leads' => 'enabled',
+        ]);
+
         $this->assertSame(['type' => 'disabled'], LeadAiProveedor::cuerpo(['model' => 'x'])['thinking']);
     }
 
@@ -158,6 +174,60 @@ class LeadAiProveedorTest extends TestCase
         $cuerpo = ['model' => 'm', 'max_tokens' => 10, 'messages' => [['role' => 'user', 'content' => 'hola']]];
 
         $this->assertSame($cuerpo, LeadAiProveedor::cuerpo($cuerpo));
+    }
+
+    /**
+     * La verificación TLS y el cacert salen de la config del proveedor que corre: cada uno con la
+     * suya, sin mezclar (el de DeepSeek hereda el de Anthropic si no tiene uno propio).
+     *
+     * @return void
+     */
+    public function test_el_tls_sale_de_la_config_del_proveedor_que_corre()
+    {
+        config([
+            'services.anthropic.verify_ssl' => true,
+            'services.anthropic.ca_bundle'  => 'C:/certs/anthropic.pem',
+            'services.deepseek.verify_ssl'  => false,
+            'services.deepseek.ca_bundle'   => 'C:/certs/deepseek.pem',
+        ]);
+
+        $this->assertTrue(LeadAiProveedor::verify_ssl());
+        $this->assertSame('C:/certs/anthropic.pem', LeadAiProveedor::ca_bundle());
+
+        config(['services.deepseek.api_key' => self::CLAVE_DEEPSEEK]);
+
+        $this->assertFalse(LeadAiProveedor::verify_ssl());
+        $this->assertSame('C:/certs/deepseek.pem', LeadAiProveedor::ca_bundle());
+
+        config(['services.deepseek.ca_bundle' => '']);
+
+        $this->assertNull(LeadAiProveedor::ca_bundle());
+    }
+
+    /**
+     * 🔴 Guarda contra la regresión que ningún test de comportamiento ve: que alguno de los sitios
+     * de LeadAiService vuelva a escribir a Anthropic a mano. El caso concreto es la SEGUNDA llamada
+     * (`generate_suggestion_with_availability`, la del turno de disponibilidad): armarla de punta a
+     * punta pide agenda, demos y calendarios, y si alguien le devuelve el modelo o la URL de Claude
+     * mientras DeepSeek está prendido, DeepSeek recibe un id de modelo ajeno (lo mapea a flash en
+     * silencio) o la clave de un proveedor contra el endpoint del otro. Por eso se mira el archivo:
+     * todo lo que sea proveedor tiene que pasar por LeadAiProveedor.
+     *
+     * @return void
+     */
+    public function test_ningun_sitio_del_agente_escribe_a_anthropic_a_mano()
+    {
+        $fuente = (string) file_get_contents(base_path('app/Services/LeadAiService.php'));
+
+        $this->assertNotSame('', $fuente);
+        $this->assertStringNotContainsString('api.anthropic.com', $fuente, 'Una URL de Anthropic escrita a mano en LeadAiService.');
+        $this->assertStringNotContainsString("config('services.anthropic", $fuente, 'Una lectura de services.anthropic en LeadAiService: tiene que pasar por LeadAiProveedor.');
+        $this->assertStringNotContainsString('config("services.anthropic', $fuente);
+        $this->assertSame(
+            4,
+            substr_count($fuente, '= LeadAiProveedor::modelo();'),
+            'Los cuatro sitios que fijan el modelo (primera llamada, segunda con disponibilidad, reagendado y correctiva) tienen que pedírselo a LeadAiProveedor.'
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -275,6 +345,55 @@ class LeadAiProveedorTest extends TestCase
         $resultado = end($ultimo)['content'][0];
         $this->assertSame('tool_result', $resultado['type']);
         $this->assertStringContainsString('Contenido de prueba del recurso precios', (string) $resultado['content']);
+    }
+
+    /**
+     * Si un endpoint compatible cierra con `end_turn` llevando un bloque `tool_use` (Anthropic no lo
+     * hace; DeepSeek es una hipótesis sin confirmar), el loop NO cambia -- no ejecuta la tool --, pero
+     * deja un warning con el proveedor para que la sugerencia vacía tenga una causa a la vista.
+     *
+     * @return void
+     */
+    public function test_un_tool_use_con_end_turn_deja_un_warning_con_el_proveedor()
+    {
+        $this->sembrar_protocolo_de_leads();
+        config(['services.deepseek.api_key' => self::CLAVE_DEEPSEEK]);
+
+        Http::fake([
+            'api.deepseek.com/*' => Http::response([
+                'stop_reason' => 'end_turn',
+                'content'     => [
+                    ['type' => 'tool_use', 'id' => 'tool_1', 'name' => 'get_protocolo_recurso', 'input' => ['nombre' => 'precios']],
+                    ['type' => 'text', 'text' => json_encode($this->paquete('Dale, seguimos.'), JSON_UNESCAPED_UNICODE)],
+                ],
+            ], 200),
+            '*'                  => Http::response(['ok' => true], 200),
+        ]);
+
+        /* Un canal de log en memoria como default: Log::spy() rompería los Log::channel('x')->... que
+         * el agente usa en otros tramos. */
+        config([
+            'logging.default'                   => 'memoria_de_prueba',
+            'logging.channels.memoria_de_prueba' => ['driver' => 'monolog', 'handler' => TestHandler::class],
+        ]);
+        Log::forgetChannel('memoria_de_prueba');
+
+        $mensaje = app(LeadAiService::class)->generate_suggestion($this->crear_lead(), false);
+
+        $this->assertStringContainsString('Dale, seguimos', (string) $mensaje->content);
+
+        $avisos = [];
+        foreach (Log::channel('memoria_de_prueba')->getLogger()->getHandlers() as $handler) {
+            foreach ($handler->getRecords() as $registro) {
+                if ($registro['level_name'] === 'WARNING' && strpos($registro['message'], 'tool_use pero el stop_reason es end_turn') !== false) {
+                    $avisos[] = $registro['context'];
+                }
+            }
+        }
+
+        $this->assertCount(1, $avisos, 'Tiene que quedar exactamente un warning.');
+        $this->assertSame('deepseek', $avisos[0]['proveedor']);
+        $this->assertSame('get_protocolo_recurso', $avisos[0]['tool']);
     }
 
     /**

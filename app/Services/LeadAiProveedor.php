@@ -47,6 +47,12 @@ class LeadAiProveedor
     /** Modelo de DeepSeek si `DEEPSEEK_MODEL_LEADS` viene vacío. */
     const MODELO_DEEPSEEK_POR_DEFECTO = 'deepseek-flash';
 
+    /** Base del endpoint compatible con Anthropic si `DEEPSEEK_BASE_URL` viene vacía. */
+    const BASE_URL_DEEPSEEK_POR_DEFECTO = 'https://api.deepseek.com/anthropic';
+
+    /** Razonamiento de DeepSeek en el agente de leads: apagado (ver cuerpo()). */
+    const THINKING = 'disabled';
+
     /**
      * ¿El agente de leads corre hoy contra DeepSeek?
      *
@@ -125,7 +131,15 @@ class LeadAiProveedor
     public static function url_messages(): string
     {
         if (self::es_deepseek()) {
-            return rtrim((string) config('services.deepseek.base_url'), '/') . self::RUTA_MESSAGES;
+            /* Una `DEEPSEEK_BASE_URL=` en blanco en el .env llega como '' (env() solo usa el default
+             * cuando la variable no existe) y daría una URL relativa: todas las llamadas fallarían. */
+            $base = rtrim(trim((string) config('services.deepseek.base_url')), '/');
+
+            if ($base === '') {
+                $base = self::BASE_URL_DEEPSEEK_POR_DEFECTO;
+            }
+
+            return $base . self::RUTA_MESSAGES;
         }
 
         return self::URL_ANTHROPIC;
@@ -148,13 +162,13 @@ class LeadAiProveedor
             return $payload;
         }
 
-        $tipo = strtolower(trim((string) config('services.deepseek.thinking_leads')));
-
-        if ($tipo === '') {
-            $tipo = 'disabled';
-        }
-
-        $payload['thinking'] = ['type' => $tipo];
+        /* 🔴 Siempre 'disabled', y NO sale de la config. Un thinking 'enabled' no está soportado en
+         * este agente: los tokens de razonamiento cuentan contra `max_tokens` (1000 en la primera
+         * llamada, 400 en las directas), así que la respuesta se cortaría "sin texto", y empresa lo
+         * resuelve subiendo el techo a 8000 y mandando `budget_tokens`, cosa que acá no se hace.
+         * Una variable de entorno que lo prendiera sería una trampa; si algún día hace falta
+         * razonar, se hace con su propio techo de tokens. */
+        $payload['thinking'] = ['type' => self::THINKING];
 
         return $payload;
     }

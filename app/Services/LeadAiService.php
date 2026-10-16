@@ -8963,6 +8963,21 @@ TXT;
 
             /* Claude terminó sin tool_use: extraer el bloque de texto y retornar. */
             if ($stop_reason === 'end_turn') {
+                /* Anthropic nunca cierra un turno con `end_turn` llevando un bloque `tool_use`. Un
+                 * endpoint compatible podría hacerlo (empresa-api lo tiene como hipótesis sin confirmar
+                 * con DeepSeek, informe 20261010): no se cambia el comportamiento del loop por una
+                 * sospecha, pero si pasa tiene que quedar escrito, porque la sugerencia saldría vacía. */
+                foreach ($content as $block) {
+                    if (isset($block['type']) && (string) $block['type'] === 'tool_use') {
+                        Log::warning('LeadAiService: la respuesta trae un tool_use pero el stop_reason es end_turn; la tool NO se ejecuta.', [
+                            'proveedor' => LeadAiProveedor::nombre(),
+                            'iteration' => $iterations,
+                            'tool'      => isset($block['name']) ? (string) $block['name'] : '?',
+                        ]);
+                        break;
+                    }
+                }
+
                 foreach ($content as $block) {
                     $type = isset($block['type']) ? (string) $block['type'] : '';
                     if ($type === 'text') {
