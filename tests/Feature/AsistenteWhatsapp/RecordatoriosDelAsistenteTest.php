@@ -35,9 +35,10 @@ use Illuminate\Support\Facades\Http;
 class RecordatoriosDelAsistenteTest extends BaseDelCanal
 {
     /**
-     * Id del recordatorio tal como lo arma el `empresa-api`: `recordatorio:{pending_id}-{created_at unix}:{Y-m-d}`.
+     * Id del recordatorio tal como lo arma el `empresa-api`: `recordatorio:{pending_id}-{created_at unix}:{Y-m-d}:{HHMM}`.
+     * Para el admin es opaco: no lo parsea, lo usa de clave del reclamo y lo devuelve tal cual.
      */
-    const ID = 'recordatorio:57-1792150000:2026-10-16';
+    const ID = 'recordatorio:57-1792150000:2026-10-16:1000';
 
     /**
      * Detalle de la tarea, sin el prefijo de la hora.
@@ -605,7 +606,7 @@ class RecordatoriosDelAsistenteTest extends BaseDelCanal
         /* Otro recordatorio, ahora con un mensaje por el número del asistente: sale como texto. */
         $this->fila_entrante($client, self::PHONE_NUMBER_ID_ASISTENTE);
         $this->fakear_http([
-            '*/asistente/recordatorios-pendientes*' => Http::response($this->pendientes(self::DETALLE, 77, 'recordatorio:58-1792150000:2026-10-16'), 200),
+            '*/asistente/recordatorios-pendientes*' => Http::response($this->pendientes(self::DETALLE, 77, 'recordatorio:58-1792150000:2026-10-16:1000'), 200),
             '*/asistente/recordatorios/avisado'     => Http::response(['ok' => true], 200),
         ]);
 
@@ -635,6 +636,67 @@ class RecordatoriosDelAsistenteTest extends BaseDelCanal
 
         $this->assertCount(3, $espia->textos, 'Tres intentos y no más.');
         $this->assertCount(0, $this->pedidos_a('/asistente/recordatorios/avisado', 'POST'), 'Lo que no salió no se marca.');
+    }
+
+    /**
+     * 🔴 Un envío que explota NO corta los recordatorios que vienen atrás: el que explotó queda en
+     * `error` con el reclamo suelto (y su intento contado), y el siguiente sale en la misma vuelta.
+     *
+     * @return void
+     */
+    public function test_una_excepcion_en_un_envio_no_corta_los_demas_recordatorios(): void
+    {
+        /* Espía propio: el primer envío revienta, el segundo confirma. */
+        $espia = new class extends \App\Services\WhatsappSendService {
+            /** @var array<int, string> Cuerpos de los envíos intentados, en orden. */
+            public $intentos = [];
+
+            public function send_text(string $to, string $body, ?string $context = null, bool $skip_failure_notification = false): ?string
+            {
+                $this->intentos[] = $body;
+
+                if (count($this->intentos) === 1) {
+                    throw new \RuntimeException('Kapso reventó (simulado en la prueba).');
+                }
+
+                return 'wamid.saliente.' . count($this->intentos);
+            }
+        };
+        $this->app->instance(\App\Services\WhatsappSendService::class, $espia);
+
+        $this->crear_config_whatsapp();
+        $client = $this->crear_cliente();
+        $this->fila_entrante($client);
+
+        $otro_id = 'recordatorio:58-1792150000:2026-10-16:1100';
+        $lista   = $this->pendientes();
+        $segundo = $lista['recordatorios'][0];
+        $segundo['id']    = $otro_id;
+        $segundo['texto'] = 'Te recuerdo: pagarle a la distribuidora.';
+        $lista['recordatorios'][] = $segundo;
+
+        $this->fakear_http([
+            '*/asistente/recordatorios-pendientes*' => Http::response($lista, 200),
+            '*/asistente/recordatorios/avisado'     => Http::response(['ok' => true], 200),
+        ]);
+
+        $servicio  = app(AsistenteRecordatoriosService::class);
+        $resultado = $servicio->enviar_a($client);
+
+        $this->assertSame('enviado', $resultado['estado']);
+        $this->assertStringContainsString(self::ID . '=error', $resultado['detalle']);
+        $this->assertStringContainsString($otro_id . '=enviado_texto', $resultado['detalle']);
+        $this->assertSame(1, $resultado['enviados']);
+        $this->assertCount(2, $espia->intentos, 'El segundo recordatorio se intentó en la misma vuelta.');
+
+        /* El que explotó: reclamo suelto para la vuelta siguiente, con el intento contado. */
+        $this->assertFalse(Cache::has($servicio->clave_de_reclamo($client, self::ID)));
+        $this->assertSame(1, (int) Cache::get(AsistenteRecordatoriosService::CACHE_INTENTOS . ':' . $client->id . ':' . self::ID));
+
+        /* Solo se marcó el que salió. */
+        $marcas = $this->pedidos_a('/asistente/recordatorios/avisado', 'POST');
+        $this->assertCount(1, $marcas);
+        $this->assertSame($otro_id, $marcas[0]['id']);
     }
 
     /**

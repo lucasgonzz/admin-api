@@ -38,8 +38,10 @@ use Illuminate\Support\Facades\Log;
  * (el comportamiento de los avisos no puede cambiar por esta misión): el recordatorio se RECLAMA en
  * la cache antes de mandarlo (`Cache::add`, atómico), el reclamo se suelta solo si el envío falla y,
  * con el WhatsApp ya afuera, guarda el wamid para que una marca fallida se reintente SOLA, sin
- * volver a escribirle al dueño. El id del recordatorio trae la fecha (`recordatorio:{tarea}-{alta}:
- * {Y-m-d}`), así que la recurrente de mañana es otro reclamo.
+ * volver a escribirle al dueño. El id del recordatorio trae la fecha y la hora (`recordatorio:
+ * {tarea}-{alta}:{Y-m-d}:{HHMM}`), así que la recurrente de mañana —o la misma tarea movida a otra
+ * hora— es otro reclamo. Para el admin el id es OPACO: no se parsea en ningún lado, solo se usa como
+ * clave del reclamo y se devuelve tal cual en la marca.
  */
 class AsistenteRecordatoriosService
 {
@@ -50,7 +52,7 @@ class AsistenteRecordatoriosService
 
     /**
      * Ruta que marca un recordatorio como mandado. El id viaja en el CUERPO, no en la ruta: es un
-     * string con `:` adentro (`"recordatorio:{pending_id}-{created_at unix}:{Y-m-d}"`).
+     * string con `:` adentro (`"recordatorio:{pending_id}-{created_at unix}:{Y-m-d}:{HHMM}"`).
      */
     const RUTA_AVISADO = 'api/admin-sync/asistente/recordatorios/avisado';
 
@@ -468,10 +470,19 @@ class AsistenteRecordatoriosService
                 );
             }
         } catch (\Throwable $exception) {
-            /* No salió: cuenta como intento y, si quedan, se suelta para la vuelta siguiente. */
-            $this->registrar_fallo($client, (string) $recordatorio['id'], $clave, $exception->getMessage());
+            /* 🔴 No se relanza (chequeo independiente del 16/10/2026): relanzarla cortaba los
+             * recordatorios que venían atrás en esta misma vuelta —uno que explota no puede dejar
+             * sin aviso a los demás del dueño— y con `--client` el comando terminaba en excepción.
+             * Se registra, cuenta como intento y `registrar_fallo()` suelta el reclamo `reclamado`
+             * (el contador de intentos vive en su clave hermana y sobrevive) o, si era el último
+             * intento, lo deja `fallido`. */
+            Log::channel('daily')->error('AsistenteRecordatorios: excepción mandando un recordatorio.', [
+                'client_id'       => $client->id,
+                'recordatorio_id' => $recordatorio['id'],
+                'error'           => $exception->getMessage(),
+            ]);
 
-            throw $exception;
+            return $this->registrar_fallo($client, (string) $recordatorio['id'], $clave, $exception->getMessage());
         }
 
         if ($whatsapp_message_id === null) {
