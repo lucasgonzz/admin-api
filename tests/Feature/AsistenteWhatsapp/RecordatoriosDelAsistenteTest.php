@@ -690,4 +690,48 @@ class RecordatoriosDelAsistenteTest extends BaseDelCanal
         $this->assertSame('es_AR', AsistenteWhatsappSettings::idioma_de_la_plantilla_de_recordatorios());
         $this->assertNull(AsistenteRecordatoriosService::plantilla_configurada());
     }
+
+    /**
+     * El comando con `--client` corre el servicio sobre ese cliente y termina bien.
+     *
+     * @return void
+     */
+    public function test_el_comando_manda_los_recordatorios_de_un_cliente(): void
+    {
+        $espia  = $this->espiar_sender();
+        $this->crear_config_whatsapp();
+        $client = $this->crear_cliente();
+        $this->fila_entrante($client);
+        $this->fakear_empresa();
+
+        $codigo = Artisan::call('asistente:enviar-recordatorios', ['--client' => $client->id]);
+
+        $this->assertSame(0, $codigo);
+        $this->assertCount(1, $espia->textos);
+        $this->assertStringContainsString('enviado', Artisan::output());
+    }
+
+    /**
+     * El comando está agendado cada cinco minutos, sin superponerse, en segundo plano y sin heredar
+     * el candado del cron.
+     *
+     * @return void
+     */
+    public function test_el_comando_esta_agendado_cada_cinco_minutos_sin_superponerse(): void
+    {
+        $schedule = app(Schedule::class);
+
+        $eventos = array_values(array_filter($schedule->events(), function ($evento) {
+            return strpos((string) $evento->command, 'asistente:enviar-recordatorios') !== false;
+        }));
+
+        $this->assertCount(1, $eventos, 'Tiene que haber exactamente un barrido de recordatorios agendado.');
+
+        $evento = $eventos[0];
+        $this->assertSame('*/5 * * * *', $evento->expression);
+        $this->assertTrue($evento->withoutOverlapping);
+        $this->assertSame(10, $evento->expiresAt, 'El candado vence a los 10 minutos, no a las 24 hs del default.');
+        $this->assertTrue($evento->runInBackground);
+        $this->assertStringStartsWith('exec 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-; ', $evento->command);
+    }
 }
