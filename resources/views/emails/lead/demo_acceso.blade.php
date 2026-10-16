@@ -226,8 +226,12 @@
                 <td style="padding:2px 0 2px 16px;">
                   <p style="margin:0;font-family:{!! $font !!};font-size:16px;line-height:24px;font-weight:600;color:#1c2333;">Sistema de agentes</p>
                   <p style="margin:2px 0 0 0;font-family:{!! $font !!};font-size:15px;line-height:23px;color:#566078;">
-                    Un agente de WhatsApp que atiende a tus clientes con los datos reales de tu negocio, y un asistente
-                    personal al que le pedís cosas a tu sistema como si hablaras con un encargado.
+                    @if($mostrar_asistente)
+                      Un agente de WhatsApp que atiende a tus clientes con los datos reales de tu negocio, y un asistente
+                      personal al que le pedís cosas a tu sistema como si hablaras con un encargado.
+                    @else
+                      Un agente de WhatsApp que atiende a tus clientes con los datos reales de tu negocio.
+                    @endif
                   </p>
                 </td>
               </tr>
