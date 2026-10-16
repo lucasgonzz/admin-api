@@ -335,6 +335,8 @@ class EnvBulkDesdePlantillaTest extends TestCase
 
         $response->assertStatus(422);
         $this->assertStringContainsString('ANTHROPIC_API_KEY', $response->json('message'));
+        /* Dice que es ilegible, no que está vacía: son problemas distintos con arreglos distintos. */
+        $this->assertStringContainsString('no se puede leer', $response->json('message'));
         $this->assertSame($lotes_antes, EnvChangeBatch::count());
         $this->assertSame([], $this->ssh_fake->escrituras);
         Http::assertNothingSent();
