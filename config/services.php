@@ -223,6 +223,38 @@ return [
         'verify_ssl' => filter_var(env('ANTHROPIC_VERIFY_SSL', true), FILTER_VALIDATE_BOOLEAN),
     ],
 
+    /*
+     * DeepSeek por su endpoint COMPATIBLE CON ANTHROPIC (misión leads-agente-deepseek, 16/10/2026).
+     *
+     * Hoy lo usa solo el agente de WhatsApp de los leads (`LeadAiService`, vía `LeadAiProveedor`).
+     * Los nombres de las variables son los mismos que en `empresa-api`, así una clave que ya anda
+     * ahí se carga acá tal cual.
+     *
+     * 🔴 SIN `DEEPSEEK_API_KEY` EL AGENTE SIGUE EN CLAUDE, idéntico a antes de esta misión. Es a
+     * propósito: mergear y desplegar no cambia lo que contesta nadie; lo prende cargar la clave en
+     * el `.env` del admin. Y `LEAD_AI_PROVEEDOR=anthropic` lo vuelve a Claude sin sacar la clave.
+     */
+    'deepseek' => [
+        'api_key'        => env('DEEPSEEK_API_KEY'),
+        // El endpoint de mensajes es `{base_url}/v1/messages`, igual que el de Anthropic.
+        'base_url'       => env('DEEPSEEK_BASE_URL', 'https://api.deepseek.com/anthropic'),
+        // Flash: el default de la plataforma para WhatsApp. Pro razona más lento y no ve imágenes.
+        'model_leads'    => env('DEEPSEEK_MODEL_LEADS', 'deepseek-flash'),
+        // DeepSeek trae el razonamiento PRENDIDO por defecto; 'disabled' es el "Ágil" de empresa.
+        'thinking_leads' => env('DEEPSEEK_THINKING_LEADS', 'disabled'),
+        // Mismo cacert.pem que Anthropic: es la misma máquina en desarrollo.
+        'ca_bundle'      => env('DEEPSEEK_CAINFO', env('ANTHROPIC_CAINFO')),
+        'verify_ssl'     => filter_var(env('DEEPSEEK_VERIFY_SSL', env('ANTHROPIC_VERIFY_SSL', true)), FILTER_VALIDATE_BOOLEAN),
+    ],
+
+    /*
+     * Qué proveedor de IA atiende al agente de WhatsApp de los leads: 'deepseek' (default) o
+     * 'anthropic'. Con 'deepseek' pero sin `DEEPSEEK_API_KEY` cae a Claude (ver arriba).
+     */
+    'lead_ai' => [
+        'proveedor' => env('LEAD_AI_PROVEEDOR', 'deepseek'),
+    ],
+
     // Google Calendar OAuth2: permite que los closers conecten su calendario dedicado
     // de Google para bloquear disponibilidad de demos automáticamente.
     // Credenciales creadas en Google Cloud Console (tipo "Web application",
