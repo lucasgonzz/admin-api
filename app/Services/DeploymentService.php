@@ -1574,12 +1574,17 @@ class DeploymentService
             ? ' ⚠️ Base COMPARTIDA (grupo ' . (int) $client->shared_database_group_id . '): el dump es de la base entera, '
                 . 'con los comercios hermanos adentro.'
             : '';
+        /* Si el respaldo sale sin los datos de alguna tabla, la línea del éxito lo dice: quien restaure
+           tiene que saberlo ANTES de usar este dump. */
+        $nota_sin_datos = $dump['sin_datos'] === []
+            ? ''
+            : ' ⚠️ SIN los datos de ' . implode(', ', $dump['sin_datos']) . ' (solo su estructura).';
 
         $this->log(
             'backup_in_place',
             self::MARCA_RESPALDO_OK . $dir . ' — api.tar.gz ' . $api_bytes . ' bytes · spa.tar.gz ' . $spa_bytes
             . ' bytes · base.sql.gz ' . $dump['bytes'] . ' bytes (base ' . $dump['base'] . ', dump en ' . $dump['segundos']
-            . ' s) · total ' . (int) round(microtime(true) - $inicio) . ' s.' . $nota_base_compartida,
+            . ' s) · total ' . (int) round(microtime(true) - $inicio) . ' s.' . $nota_base_compartida . $nota_sin_datos,
             'success'
         );
 
@@ -1885,8 +1890,14 @@ class DeploymentService
      * La verificación es de UNA pasada: `gzip -dc | tail -n 1` con el estado de gzip capturado. Si
      * gzip falla a la mitad, la última línea es la marca CC_GZIP_FALLO y no `-- Dump completed`.
      *
+     * 🔴 Tablas SIN datos (excepción por cliente, `services.deploy.respaldo_tablas_sin_datos`): el
+     * dump principal lleva `--ignore-table` de cada una y, a continuación, un segundo `mysqldump
+     * --no-data` con la estructura de todas, en el mismo stream. Para el MySQL del VPS esto es lo que
+     * evita el corte de 120 s (`max_execution_time`) sobre una tabla enorme. El código de salida es el
+     * de las dos invocaciones, y la línea de éxito del respaldo avisa que la tabla va sin datos.
+     *
      * @param  string  $dir  Directorio del respaldo (el `.parcial`).
-     * @return array{archivo: string, bytes: int, base: string, segundos: int}
+     * @return array{archivo: string, bytes: int, base: string, segundos: int, sin_datos: string[]}
      * @throws \RuntimeException
      */
     private function respaldar_base(string $dir): array
@@ -1914,6 +1925,11 @@ class DeploymentService
                 . 'No se tocó nada del cliente.');
         }
 
+        /* Excepción por cliente (config): tablas cuyos DATOS no van en el respaldo. Se resuelve ANTES
+           de escribir el archivo de credenciales: si la config trae un nombre inválido, no hay nada
+           que borrar después. */
+        $sin_datos = $this->tablas_sin_datos_en_el_respaldo();
+
         $credenciales = $dir . '/' . self::ARCHIVO_DE_CREDENCIALES_DEL_DUMP;
         $archivo      = $dir . '/base.sql.gz';
         $estado       = $dir . '/.dump-exit';
@@ -1926,17 +1942,47 @@ class DeploymentService
                 $this->contenido_del_archivo_de_credenciales($usuario, $password, $host === '' ? '127.0.0.1' : $host, $puerto)
             );
 
-            $this->log('backup_in_place', 'Respaldando la base ' . $base . ' (mysqldump --single-transaction)...');
+            $this->log(
+                'backup_in_place',
+                'Respaldando la base ' . $base . ' (mysqldump --single-transaction)...'
+                . ($sin_datos === []
+                    ? ''
+                    : ' ⚠️ SIN los datos de ' . implode(', ', $sin_datos) . ' (solo su estructura): excepción configurada '
+                        . 'para este cliente, porque el SELECT de su dump pasa el tope de ejecución del MySQL del VPS.')
+            );
 
             /* --defaults-extra-file tiene que ser la PRIMERA opción de mysqldump. `$CC_CS` va sin
                comillas a propósito: vacío, no agrega nada. */
+            $dump = 'mysqldump --defaults-extra-file=' . $this->posix_single_quote($credenciales)
+                . ' --single-transaction --quick --no-tablespaces --default-character-set=utf8mb4 $CC_CS ';
+
+            if ($sin_datos === []) {
+                $volcado = $dump . $this->posix_single_quote($base) . '; echo $? > ' . $this->posix_single_quote($estado);
+            } else {
+                /* Dos volcados en el mismo stream: la base entera MENOS esas tablas, y después solo la
+                   estructura de ellas (Percona/MySQL 8 no tiene --ignore-table-data, MariaDB sí; así
+                   anda igual en los dos). El código de salida es el de las DOS invocaciones: si
+                   cualquiera falla, queda el primero distinto de 0. */
+                $ignorar = '';
+                $tablas  = [];
+                foreach ($sin_datos as $tabla) {
+                    $ignorar .= '--ignore-table=' . $this->posix_single_quote($base . '.' . $tabla) . ' ';
+                    $tablas[] = $this->posix_single_quote($tabla);
+                }
+
+                $volcado = 'CC_RC=0; ' . $dump . $ignorar . $this->posix_single_quote($base) . ' || CC_RC=$?; '
+                    . 'echo ' . $this->posix_single_quote('-- ComercioCity: los DATOS de ' . implode(', ', $sin_datos)
+                        . ' NO estan en este respaldo (solo su estructura, ver services.deploy.respaldo_tablas_sin_datos).')
+                    . '; '
+                    . $dump . '--no-data ' . $this->posix_single_quote($base) . ' ' . implode(' ', $tablas) . ' || CC_RC=$?; '
+                    . 'echo $CC_RC > ' . $this->posix_single_quote($estado);
+            }
+
             $salida = $this->run_command(
                 'backup_in_place',
                 'CC_AYUDA=$(mysqldump --help 2>/dev/null); case "$CC_AYUDA" in *column-statistics*) '
                 . 'CC_CS=--column-statistics=0 ;; *) CC_CS= ;; esac; '
-                . '{ mysqldump --defaults-extra-file=' . $this->posix_single_quote($credenciales)
-                . ' --single-transaction --quick --no-tablespaces --default-character-set=utf8mb4 $CC_CS '
-                . $this->posix_single_quote($base) . '; echo $? > ' . $this->posix_single_quote($estado) . '; } | gzip > '
+                . '{ ' . $volcado . '; } | gzip > '
                 . $this->posix_single_quote($archivo) . ' && cat ' . $this->posix_single_quote($estado)
                 . ' && rm -f ' . $this->posix_single_quote($estado)
             );
@@ -1979,11 +2025,50 @@ class DeploymentService
         }
 
         return [
-            'archivo'  => $archivo,
-            'bytes'    => $bytes,
-            'base'     => $base,
-            'segundos' => (int) round(microtime(true) - $inicio),
+            'archivo'   => $archivo,
+            'bytes'     => $bytes,
+            'base'      => $base,
+            'segundos'  => (int) round(microtime(true) - $inicio),
+            'sin_datos' => $sin_datos,
         ];
+    }
+
+    /**
+     * Tablas de la base de ESTE cliente cuyos datos no van en el respaldo (solo su estructura).
+     *
+     * Sale de `services.deploy.respaldo_tablas_sin_datos` (`client_id => [tablas]`), que existe para
+     * el caso de una tabla tan grande que su `SELECT` de dump pasa el `max_execution_time` del MySQL
+     * del VPS (120 s) y el respaldo previo moriría con el Error 3024 (Servian, 16/10/2026). Para un
+     * cliente sin entrada devuelve [] y el comando de dump queda exactamente como siempre.
+     *
+     * Cada nombre se valida contra una lista cerrada de caracteres: termina entre comillas simples
+     * dentro de un comando remoto y de un comentario SQL.
+     *
+     * @return string[]
+     * @throws \RuntimeException Si la config trae un nombre de tabla inválido.
+     */
+    private function tablas_sin_datos_en_el_respaldo(): array
+    {
+        $mapa      = config('services.deploy.respaldo_tablas_sin_datos', []);
+        $client_id = (int) $this->upgrade->client_id;
+
+        if (! is_array($mapa) || ! isset($mapa[$client_id]) || ! is_array($mapa[$client_id])) {
+            return [];
+        }
+
+        $tablas = [];
+        foreach ($mapa[$client_id] as $tabla) {
+            $tabla = trim((string) $tabla);
+
+            if (preg_match('/^[A-Za-z0-9_][A-Za-z0-9_$]{0,63}$/', $tabla) !== 1) {
+                throw new \RuntimeException('No se puede respaldar: el nombre de una tabla de services.deploy.respaldo_tablas_sin_datos '
+                    . 'para el cliente ' . $client_id . ' no es válido. No se tocó nada del cliente.');
+            }
+
+            $tablas[$tabla] = $tabla;
+        }
+
+        return array_values($tablas);
     }
 
     /**

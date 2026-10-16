@@ -563,6 +563,147 @@ class RespaldoYMantenimientoEnElLugarTest extends TestCase
         $this->assertStringNotContainsString('--events', $dump[0]);
     }
 
+    /* ------------------------------------------------------------------------------------------
+     | Tablas SIN datos en el respaldo (Servian, 16/10/2026)
+     |
+     | El MySQL del VPS corta con max_execution_time = 120 s el SELECT del mysqldump de una tabla
+     | de varios GB (article_import_result_observations de Servian, 3,1 GB): Error 3024 y el upgrade
+     | queda `failed` sin tocar nada. Lucas decidió dejar afuera los DATOS de esa tabla, por cliente,
+     | con la estructura adentro. Sin entrada en la config, el comando es el de siempre.
+     |----------------------------------------------------------------------------------------- */
+
+    /** Un cliente SIN entrada en la config: el comando de dump es el de siempre, ni un carácter de más. */
+    public function test_un_cliente_sin_tablas_sin_datos_vuelca_la_base_entera_como_siempre(): void
+    {
+        config(['services.deploy.respaldo_tablas_sin_datos' => [999999 => ['article_import_result_observations']]]);
+
+        $e = $this->escenario();
+        $this->servidor_sano();
+
+        $this->invocar($this->servicio($e['upgrade']), 'step_backup_in_place');
+
+        $dump = $this->comandos_con('mysqldump --defaults-extra-file');
+        $this->assertCount(1, $dump);
+        $this->assertSame(1, substr_count($dump[0], 'mysqldump --defaults-extra-file'));
+        $this->assertStringNotContainsString('--ignore-table', $dump[0]);
+        $this->assertStringNotContainsString('--no-data', $dump[0]);
+        $this->assertStringNotContainsString('CC_RC', $dump[0]);
+        $this->assertStringContainsString("'u767360347_respaldo'; echo \$? > '", $dump[0]);
+        $this->assertStringNotContainsString('SIN los datos', $this->logs($e['upgrade']));
+    }
+
+    /**
+     * 🔴 El cliente con entrada: la base entera MENOS esa tabla (`--ignore-table` con `base.tabla`),
+     * y a continuación SOLO la estructura de la tabla (`--no-data`), en el mismo comando y con las
+     * mismas opciones. El código de salida junta el de las dos invocaciones. La contraseña sigue
+     * fuera de todo comando, y la línea del éxito avisa que la tabla va sin datos.
+     */
+    public function test_un_cliente_con_tabla_sin_datos_vuelca_la_base_menos_esa_tabla_y_despues_su_estructura(): void
+    {
+        $e = $this->escenario();
+        config(['services.deploy.respaldo_tablas_sin_datos' => [(int) $e['client']->id => [
+            'article_import_result_observations',
+            'otra_tabla_enorme',
+        ]]]);
+        $this->servidor_sano();
+
+        $this->invocar($this->servicio($e['upgrade']), 'step_backup_in_place');
+
+        $dump = $this->comandos_con('mysqldump --defaults-extra-file');
+        $this->assertCount(1, $dump, 'Los dos volcados van en UN comando: un solo stream hacia gzip.');
+        $comando = $dump[0];
+        $cnf     = "'" . $this->dir_del_respaldo($e) . ".parcial/.cc-dump.cnf'";
+
+        $this->assertSame(2, substr_count($comando, 'mysqldump --defaults-extra-file=' . $cnf));
+        $this->assertSame(
+            2,
+            substr_count($comando, ' --single-transaction --quick --no-tablespaces --default-character-set=utf8mb4 $CC_CS '),
+            'Las dos invocaciones llevan las mismas opciones.'
+        );
+
+        /* Primero: la base entera sin esas tablas. */
+        $this->assertStringContainsString(
+            "--ignore-table='u767360347_respaldo.article_import_result_observations' "
+            . "--ignore-table='u767360347_respaldo.otra_tabla_enorme' 'u767360347_respaldo' || CC_RC=\$?; ",
+            $comando
+        );
+        /* Después: solo la estructura de ellas. */
+        $this->assertStringContainsString(
+            "--no-data 'u767360347_respaldo' 'article_import_result_observations' 'otra_tabla_enorme' || CC_RC=\$?; "
+            . "echo \$CC_RC > '",
+            $comando
+        );
+        $this->assertLessThan(
+            strpos($comando, '--no-data'),
+            strpos($comando, '--ignore-table'),
+            'El volcado de la base va antes que el de la estructura.'
+        );
+        $this->assertStringContainsString('CC_AYUDA=$(mysqldump --help 2>/dev/null); case', $comando);
+        $this->assertStringContainsString('CC_RC=0; mysqldump --defaults-extra-file=', $comando);
+        $this->assertStringContainsString('| gzip > ', $comando);
+
+        /* Un comentario en el dump avisa que esas tablas van sin datos (y sin comillas sueltas). */
+        $this->assertStringContainsString(
+            "echo '-- ComercioCity: los DATOS de article_import_result_observations, otra_tabla_enorme NO estan en este respaldo",
+            $comando
+        );
+
+        /* La contraseña sigue sin aparecer en ningún comando ni log. */
+        $this->assertStringNotContainsString('Clave-De-La-Base', $this->ssh->todo());
+        $this->assertStringNotContainsString('Clave-De-La-Base', $this->logs($e['upgrade']));
+
+        /* La línea del éxito y la del arranque lo dicen. */
+        $logs = $this->logs($e['upgrade']);
+        $this->assertStringContainsString(DeploymentService::MARCA_RESPALDO_OK, $logs);
+        $this->assertStringContainsString('SIN los datos de article_import_result_observations, otra_tabla_enorme (solo su estructura).', $logs);
+        $this->assertStringContainsString('excepción configurada para este cliente', $logs);
+    }
+
+    /** Si el dump con una tabla sin datos termina con código distinto de 0, el respaldo falla igual que siempre. */
+    public function test_con_tabla_sin_datos_un_codigo_de_salida_distinto_de_cero_hace_fallar_el_respaldo(): void
+    {
+        $e = $this->escenario();
+        config(['services.deploy.respaldo_tablas_sin_datos' => [(int) $e['client']->id => ['article_import_result_observations']]]);
+        /* Antes que servidor_sano(): el doble contesta con la primera regla que coincide. */
+        $this->ssh->responder('mysqldump', "mysqldump: Couldn't find table: \"article_import_result_observations\"\n2");
+        $this->servidor_sano();
+
+        try {
+            $this->invocar($this->servicio($e['upgrade']), 'step_backup_in_place');
+            $this->fail('El respaldo tenía que fallar.');
+        } catch (\RuntimeException $error) {
+            $this->assertStringContainsString('mysqldump no terminó bien', $error->getMessage());
+            $this->assertStringContainsString('No se tocó nada del cliente', $error->getMessage());
+        }
+
+        /* El archivo de credenciales se borra aunque el dump haya fallado. */
+        $this->assertNotEmpty($this->comandos_con("rm -f '" . $this->dir_del_respaldo($e) . ".parcial/.cc-dump.cnf'"));
+        $this->assertSame([], $this->comandos_con('mv '));
+    }
+
+    /**
+     * Un nombre de tabla inválido en la config frena el respaldo ANTES de escribir el archivo de
+     * credenciales y de mandar ningún mysqldump: el nombre termina entre comillas en un comando remoto.
+     */
+    public function test_un_nombre_de_tabla_invalido_en_la_config_frena_el_respaldo_sin_dumpear(): void
+    {
+        $e = $this->escenario();
+        config(['services.deploy.respaldo_tablas_sin_datos' => [(int) $e['client']->id => ["tabla'; rm -rf /; echo '"]]]);
+        $this->servidor_sano();
+
+        try {
+            $this->invocar($this->servicio($e['upgrade']), 'step_backup_in_place');
+            $this->fail('El respaldo tenía que frenar.');
+        } catch (\RuntimeException $error) {
+            $this->assertStringContainsString('respaldo_tablas_sin_datos', $error->getMessage());
+            $this->assertStringContainsString('No se tocó nada del cliente', $error->getMessage());
+        }
+
+        $this->assertSame([], $this->comandos_con('mysqldump --defaults-extra-file'));
+        $this->assertArrayNotHasKey($this->dir_del_respaldo($e) . '.parcial/.cc-dump.cnf', $this->sftp->archivos);
+        $this->assertStringNotContainsString('rm -rf /', $this->ssh->todo());
+    }
+
     /** Un nombre de base que empieza con `-` se rechaza: mysqldump lo leería como una opción. */
     public function test_un_nombre_de_base_que_empieza_con_guion_se_rechaza(): void
     {
