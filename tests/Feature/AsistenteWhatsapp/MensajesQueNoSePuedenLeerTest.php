@@ -325,11 +325,11 @@ class MensajesQueNoSePuedenLeerTest extends BaseDelCanal
         $this->assertFalse($servicio->no_se_puede_leer(null, 'audio', []), 'Un audio tiene su respuesta del otro lado.');
         $this->assertFalse($servicio->no_se_puede_leer('', 'ptt', []));
         $this->assertFalse($servicio->no_se_puede_leer(null, 'image', []), 'Una foto sin metadata es una falla, no un tipo que no se lee.');
+        $this->assertFalse($servicio->no_se_puede_leer(null, 'text', []), 'Un texto vacío es una falla del parser, no un tipo que no se lee.');
 
         $this->assertTrue($servicio->no_se_puede_leer(null, 'document', []));
         $this->assertTrue($servicio->no_se_puede_leer('   ', 'video', []));
         $this->assertTrue($servicio->no_se_puede_leer(null, 'sticker', []));
-        $this->assertTrue($servicio->no_se_puede_leer(null, 'text', []));
     }
 
     /**

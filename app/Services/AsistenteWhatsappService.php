@@ -802,6 +802,11 @@ class AsistenteWhatsappService
      *     no mandó ni URL ni id, o la metadata de la espera no se pudo descifrar— y no un tipo de
      *     mensaje que no se sepa leer: decirle al dueño que «ese tipo de mensaje» no se lee sería
      *     mentirle sobre una foto. Sigue su camino de siempre y, si falla, avisa al equipo.
+     *   - **Un texto (`text`) sin texto**: tampoco entra, por lo mismo (revisión independiente de la
+     *     misión, 16/10/2026). Un mensaje de texto llega CON texto; si llega vacío es que el parser no
+     *     lo encontró —Kapso cambió la forma del payload, una ruta que dejó de existir— y eso es una
+     *     falla que alguien tiene que ver. Contestarle «ese tipo de mensaje no lo puedo leer» la
+     *     taparía: sigue su camino de siempre (422 → disculpa + aviso al equipo).
      *
      * Todo lo demás —un PDF, un video, un sticker, un contacto, un documento cualquiera— sin nada
      * escrito no tiene con qué viajar.
@@ -822,7 +827,7 @@ class AsistenteWhatsappService
             return false;
         }
 
-        return ! in_array(strtolower(trim($tipo)), ['audio', 'ptt', 'voice', 'image'], true);
+        return ! in_array(strtolower(trim($tipo)), ['audio', 'ptt', 'voice', 'image', 'text'], true);
     }
 
     /**
