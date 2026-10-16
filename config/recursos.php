@@ -62,6 +62,16 @@ return [
         'holgura_final'       => 1,
     ],
 
+    // Registro de lo que se busca en el buscador de la página (misión busquedas-centro-recursos,
+    // 16/10/2026). Se guarda la consulta normalizada y qué pasó con ella, para afinar los sinónimos del
+    // buscador con datos reales. Nada de datos personales: lo que parece uno se descarta antes de guardar.
+    'busquedas' => [
+        // Cuántos días se conserva una búsqueda (`recursos:purgar-busquedas`, diario).
+        'retencion_dias' => 90,
+        // Largo máximo de la consulta que se guarda, en caracteres (ya normalizada).
+        'max_consulta'   => 120,
+    ],
+
     // Borrador de respuesta con IA (panel → "Proponer respuesta").
     'borrador' => [
         'max_tokens' => 700,
