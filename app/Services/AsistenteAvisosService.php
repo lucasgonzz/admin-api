@@ -48,7 +48,7 @@ class AsistenteAvisosService
 
     /**
      * Ruta que marca un aviso como mandado. El id viaja en el cuerpo, no en la ruta: es un string
-     * con `:` adentro (`"escaneo_factura:15"`).
+     * con `:` adentro (`"escaneo_factura:{uuid}"`).
      */
     const RUTA_AVISADO = 'api/admin-sync/asistente/avisos/avisado';
 
