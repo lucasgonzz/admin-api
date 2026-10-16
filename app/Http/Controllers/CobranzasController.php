@@ -51,6 +51,9 @@ class CobranzasController extends Controller
      * `rango` es el tramo de meses que la tira de arriba ofrece para elegir: desde el inicio más
      * viejo de todos los clientes (o 12 meses atrás) hasta el corriente más 3.
      *
+     * `resumen` son las dos tarjetas de plata —lo cobrado y lo que falta cobrar— relativas al mes más
+     * reciente de `meses` (ver `CobranzasMensualidadService::resumen_cobranza()`).
+     *
      * @param  Request                     $request
      * @param  CobranzasMensualidadService $service
      * @return \Illuminate\Http\JsonResponse
@@ -83,6 +86,10 @@ class CobranzasController extends Controller
                 'desde' => $desde,
                 'hasta' => $ahora->copy()->addMonthsNoOverflow(CobranzasMensualidadService::MESES_ADELANTE_DEFAULT)->format('Y-m'),
             ],
+            // Las dos tarjetas de plata (cobrado y falta cobrar) relativas al mes más reciente de los
+            // pedidos, que es el que el front toma como mes de referencia. Clave NUEVA y opcional para
+            // el front: un SPA viejo la ignora (misión cobranzas-cobrado-y-falta-cobrar, 16/10/2026).
+            'resumen'       => $service->resumen_cobranza(end($meses)),
         ]);
     }
 
