@@ -41,6 +41,9 @@ class PlantillaEnvControladorSensibleTest extends TestCase
     {
         parent::setUp();
 
+        /* Hermético: sin depender de filas ajenas de env_templates (se revierte con la transacción). */
+        EnvTemplate::query()->delete();
+
         $this->ssh_fake = new EnvSshServiceFake();
 
         /* El controlador resuelve el servicio SSH por el container: nada abre una conexión real. */
@@ -273,6 +276,136 @@ class PlantillaEnvControladorSensibleTest extends TestCase
         ])->assertStatus(200);
 
         $this->assertSame(self::CLAVE, $this->ssh_fake->escrituras[$api_id]['ANTHROPIC_API_KEY']);
+    }
+
+    public function test_un_legado_en_claro_no_sale_en_el_listado_y_figura_como_cargado(): void
+    {
+        $admin = $this->crear_admin('plantilla-legado@test.local');
+
+        /* Fila de antes de la migración: sensible, en claro, escrita por fuera del modelo. */
+        $id = DB::table('env_templates')->insertGetId([
+            'key' => 'DEEPSEEK_API_KEY', 'value' => 'sk-legado-en-claro-0123456789', 'group' => 'ia',
+            'scope' => 'empresa', 'is_common' => false, 'is_manual_on_create' => false, 'sort_order' => 1,
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $response = $this->actingAs($admin, 'sanctum')->getJson('/api/admin/env-template');
+
+        $response->assertStatus(200);
+        $this->assertStringNotContainsString('sk-legado-en-claro', $response->getContent());
+
+        $modelo = collect($response->json('models'))->firstWhere('id', $id);
+        $this->assertArrayNotHasKey('value', $modelo);
+        $this->assertTrue($modelo['value_set']);
+        $this->assertFalse($modelo['value_ilegible']);
+    }
+
+    public function test_el_listado_marca_como_ilegible_un_cifrado_que_no_se_puede_descifrar(): void
+    {
+        $admin     = $this->crear_admin('plantilla-ilegible-index@test.local');
+        $plantilla = $this->crear_plantilla('ANTHROPIC_API_KEY', self::CLAVE);
+        $this->romper($plantilla);
+
+        $response = $this->actingAs($admin, 'sanctum')->getJson('/api/admin/env-template');
+
+        $response->assertStatus(200);
+        $modelo = collect($response->json('models'))->firstWhere('key', 'ANTHROPIC_API_KEY');
+        $this->assertTrue($modelo['value_ilegible']);
+        $this->assertFalse($modelo['value_set']);
+        $this->assertArrayNotHasKey('value', $modelo);
+    }
+
+    public function test_apply_diff_y_apply_diff_all_se_niegan_a_escribir_una_ilegible(): void
+    {
+        $admin  = $this->crear_admin('plantilla-ilegible-apply@test.local');
+        $client = $this->crear_cliente("ANTHROPIC_API_KEY=sk-ant-test-VIEJA-clave-0000\nMAIL_HOST=smtp.viejo.test\n");
+        $api_id = $client->active_client_api->id;
+
+        $this->romper($this->crear_plantilla('ANTHROPIC_API_KEY', self::CLAVE, 'empresa', true));
+        $this->crear_plantilla('MAIL_HOST', 'smtp.ejemplo.test', 'empresa', true);
+
+        /* Aunque se pida junto con una variable sana, no se escribe NADA. */
+        $uno = $this->actingAs($admin, 'sanctum')->postJson('/api/admin/env-template/apply-diff/' . $client->id, [
+            'client_api_id' => $api_id,
+            'keys'          => ['MAIL_HOST', 'ANTHROPIC_API_KEY'],
+        ]);
+        $uno->assertStatus(422);
+        $this->assertStringContainsString('ANTHROPIC_API_KEY', $uno->json('message'));
+
+        $todos = $this->actingAs($admin, 'sanctum')->postJson('/api/admin/env-template/apply-diff-all/' . $client->id, [
+            'keys' => ['MAIL_HOST', 'ANTHROPIC_API_KEY'],
+        ]);
+        $todos->assertStatus(422);
+        $this->assertStringContainsString('ANTHROPIC_API_KEY', $todos->json('message'));
+
+        $this->assertSame([], $this->ssh_fake->escrituras);
+        $this->assertStringContainsString('sk-ant-test-VIEJA-clave-0000', $this->ssh_fake->envs[$api_id]);
+    }
+
+    public function test_check_diff_marca_la_ilegible_y_no_la_presenta_como_vacia(): void
+    {
+        $admin  = $this->crear_admin('plantilla-ilegible-diff@test.local');
+        /* El cliente tiene el valor vacío: una plantilla "vacía" coincidiría, una ilegible NO. */
+        $client = $this->crear_cliente("ANTHROPIC_API_KEY=\n");
+
+        $this->romper($this->crear_plantilla('ANTHROPIC_API_KEY', self::CLAVE, 'empresa', true));
+
+        $response = $this->actingAs($admin, 'sanctum')
+            ->postJson('/api/admin/env-template/check-diff/' . $client->id, ['client_api_id' => $client->active_client_api->id]);
+
+        $response->assertStatus(200);
+        $this->assertCount(1, $response->json('diffs'));
+        $this->assertTrue($response->json('diffs.0.ilegible'));
+        $this->assertSame('(ilegible)', $response->json('diffs.0.template_value'));
+
+        $todos = $this->actingAs($admin, 'sanctum')->postJson('/api/admin/env-template/check-diff-all/' . $client->id);
+        $this->assertTrue($todos->json('results.0.diffs.0.ilegible'));
+    }
+
+    public function test_el_salto_de_linea_solo_se_valida_en_lo_que_cambia(): void
+    {
+        $admin = $this->crear_admin('plantilla-heredada@test.local');
+
+        /* Fila no sensible heredada con un salto de línea guardado (de antes de la regla). */
+        $id = DB::table('env_templates')->insertGetId([
+            'key' => 'MAIL_FROM_NAME', 'value' => "Comercio\nCity", 'group' => 'mail',
+            'scope' => 'empresa', 'is_common' => false, 'is_manual_on_create' => false, 'sort_order' => 1,
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        $heredada = EnvTemplate::find($id);
+        $otra     = $this->crear_plantilla('MAIL_HOST', 'smtp.ejemplo.test');
+
+        /* La pantalla la manda de vuelta sin cambios junto con otra fila que sí cambia: guarda todo. */
+        $this->actingAs($admin, 'sanctum')->postJson('/api/admin/env-template/bulk-update', [
+            'items' => [
+                $this->item($heredada, ['value' => "Comercio\nCity"]),
+                $this->item($otra, ['value' => 'smtp.nuevo.test']),
+            ],
+        ])->assertStatus(200);
+        $this->assertSame('smtp.nuevo.test', EnvTemplate::find($otra->id)->value);
+        $this->assertSame("Comercio\nCity", EnvTemplate::find($id)->value);
+
+        /* Si se cambia a otro valor que también trae salto de línea: 422, y no se guarda nada del batch. */
+        $this->actingAs($admin, 'sanctum')->postJson('/api/admin/env-template/bulk-update', [
+            'items' => [
+                $this->item($otra, ['value' => 'smtp.otro.test']),
+                $this->item($heredada, ['value' => "Otro\nNombre"]),
+            ],
+        ])->assertStatus(422)->assertJsonValidationErrors(['items.1.value']);
+
+        $this->assertSame('smtp.nuevo.test', EnvTemplate::find($otra->id)->value);
+        $this->assertSame("Comercio\nCity", EnvTemplate::find($id)->value);
+    }
+
+    /**
+     * Deja el valor guardado de una fila como un cifrado que no se puede descifrar.
+     *
+     * @param  EnvTemplate  $plantilla
+     * @return void
+     */
+    private function romper(EnvTemplate $plantilla): void
+    {
+        DB::table('env_templates')->where('id', $plantilla->id)->update(['value' => 'enc:v1:payload-roto']);
     }
 
     /**

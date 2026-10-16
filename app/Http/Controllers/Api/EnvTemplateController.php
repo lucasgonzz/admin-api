@@ -12,6 +12,7 @@ use App\Support\EnvSensitiveKeys;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 /**
  * Gestión de la plantilla base de variables .env del sistema.
@@ -36,6 +37,11 @@ class EnvTemplateController extends Controller
      * la compatibilidad de los clientes que todavía no mandan el parámetro.
      */
     private const VALID_SCOPES = ['empresa', 'tienda'];
+
+    /**
+     * Mensaje cuando un valor trae saltos de línea (una variable de .env es de una sola línea).
+     */
+    private const MENSAJE_UNA_SOLA_LINEA = 'El valor no puede tener saltos de línea: una variable de .env es de una sola línea.';
 
     /**
      * Resuelve el scope solicitado por el request contra la lista blanca.
@@ -168,7 +174,8 @@ class EnvTemplateController extends Controller
         $request->validate([
             'items'                    => 'required|array',
             'items.*.id'               => 'required|integer|exists:env_templates,id',
-            'items.*.value'            => ['nullable', 'string', $this->regla_una_sola_linea()],
+            /* La regla de "una sola línea" no va acá: se aplica abajo, sólo a lo que efectivamente cambia. */
+            'items.*.value'            => 'nullable|string',
             'items.*.clear_value'      => 'nullable|boolean',
             'items.*.is_common'        => 'required|boolean',
             'items.*.is_manual_on_create' => 'required|boolean',
@@ -196,6 +203,33 @@ class EnvTemplateController extends Controller
             return response()->json([
                 'message' => 'Se intentó guardar variables que no pertenecen a esta plantilla.',
             ], 422);
+        }
+
+        /*
+         * Una variable de .env es de una sola línea, pero la regla se aplica sólo a lo que
+         * efectivamente cambia: una fila heredada que ya tenía un salto de línea guardado no puede
+         * trabar el guardado de todas las demás cuando la pantalla la manda de vuelta sin cambios.
+         * Las sensibles se validan siempre (su valor nunca vuelve a la pantalla, así que si llega
+         * algo es porque se tipeó). Se valida todo ANTES de escribir nada.
+         */
+        $errores_de_linea = [];
+        foreach ($items as $indice => $item) {
+            $valor_recibido = isset($item['value']) ? $item['value'] : null;
+
+            if (! is_string($valor_recibido) || ! $this->tiene_salto_de_linea($valor_recibido)) {
+                continue;
+            }
+
+            $guardada = EnvTemplate::findOrFail($item['id']);
+            $cambia   = EnvSensitiveKeys::es_sensible((string) $guardada->key) || $guardada->value !== $valor_recibido;
+
+            if ($cambia) {
+                $errores_de_linea['items.' . $indice . '.value'] = [self::MENSAJE_UNA_SOLA_LINEA];
+            }
+        }
+
+        if (count($errores_de_linea) > 0) {
+            throw ValidationException::withMessages($errores_de_linea);
         }
 
         /* Procesa cada item del array y actualiza su registro en BD. */
@@ -394,6 +428,12 @@ class EnvTemplateController extends Controller
         $keys_to_apply = $request->input('keys');
         $templates     = EnvTemplate::where('scope', 'empresa')->whereIn('key', $keys_to_apply)->get()->keyBy('key');
 
+        /* Una variable ilegible no se aplica: se escribiría vacía en el .env de los clientes. */
+        $mensaje_ilegible = $this->mensaje_si_hay_ilegible($templates, $keys_to_apply);
+        if ($mensaje_ilegible !== null) {
+            return response()->json(['message' => $mensaje_ilegible], 422);
+        }
+
         /* Construye el array KEY => valor_del_template para escribir en cada .env. */
         $vars_to_write = [];
         foreach ($keys_to_apply as $key) {
@@ -467,6 +507,12 @@ class EnvTemplateController extends Controller
         $keys_to_apply = $request->input('keys');
         $templates     = EnvTemplate::where('scope', 'empresa')->whereIn('key', $keys_to_apply)->get()->keyBy('key');
 
+        /* Una variable ilegible no se aplica: se escribiría vacía en el .env del cliente. */
+        $mensaje_ilegible = $this->mensaje_si_hay_ilegible($templates, $keys_to_apply);
+        if ($mensaje_ilegible !== null) {
+            return response()->json(['message' => $mensaje_ilegible], 422);
+        }
+
         /* Construye el array KEY => valor_del_template para escribir en el .env del cliente. */
         $vars_to_write = [];
         foreach ($keys_to_apply as $key) {
@@ -502,6 +548,8 @@ class EnvTemplateController extends Controller
      */
     private function armar_diff(EnvTemplate $template, array $client_env): ?array
     {
+        $ilegible = $template->esta_ilegible();
+
         /* Valor en el template base (trimmed; descifrado por el accessor del modelo). */
         $template_value = trim((string) ($template->value ?? ''));
 
@@ -510,8 +558,11 @@ class EnvTemplateController extends Controller
             ? trim((string) $client_env[$template->key])
             : '';
 
-        /* Solo reporta diferencia si los valores no coinciden (case-sensitive). */
-        if ($template_value === $client_value) {
+        /*
+         * Una plantilla ilegible NO es una plantilla vacía: se informa siempre como diferencia, marcada,
+         * para que nadie la lea como "la plantilla no tiene valor" ni la aplique a ciegas.
+         */
+        if (! $ilegible && $template_value === $client_value) {
             return null;
         }
 
@@ -519,10 +570,40 @@ class EnvTemplateController extends Controller
 
         return [
             'key'            => $template->key,
-            'template_value' => $sensible ? EnvSensitiveKeys::enmascarar((string) $template->key, $template_value) : $template_value,
+            'template_value' => $ilegible ? '(ilegible)' : ($sensible ? EnvSensitiveKeys::enmascarar((string) $template->key, $template_value) : $template_value),
             'client_value'   => $sensible ? EnvSensitiveKeys::enmascarar((string) $template->key, $client_value) : $client_value,
             'sensitive'      => $sensible,
+            'ilegible'       => $ilegible,
         ];
+    }
+
+    /**
+     * Si alguna de las variables pedidas está ilegible en la plantilla, arma el mensaje de error.
+     *
+     * @param  \Illuminate\Support\Collection  $templates  Plantillas encontradas, indexadas por key.
+     * @param  array  $keys  Variables pedidas.
+     * @return string|null  El mensaje (nombra la variable, nunca el valor) o null si todas se pueden leer.
+     */
+    private function mensaje_si_hay_ilegible($templates, array $keys): ?string
+    {
+        foreach ($keys as $key) {
+            if ($templates->has($key) && $templates[$key]->esta_ilegible()) {
+                return 'El valor guardado de ' . $key . ' no se puede leer; volvé a cargarlo en la plantilla. No se escribió nada.';
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Indica si un texto tiene un retorno de carro o un salto de línea.
+     *
+     * @param  string  $valor
+     * @return bool
+     */
+    private function tiene_salto_de_linea(string $valor): bool
+    {
+        return strpos($valor, "\r") !== false || strpos($valor, "\n") !== false;
     }
 
     /**
@@ -537,8 +618,8 @@ class EnvTemplateController extends Controller
     private function regla_una_sola_linea(): \Closure
     {
         return function ($attribute, $value, $fail) {
-            if (is_string($value) && (strpos($value, "\r") !== false || strpos($value, "\n") !== false)) {
-                $fail('El valor no puede tener saltos de línea: una variable de .env es de una sola línea.');
+            if (is_string($value) && $this->tiene_salto_de_linea($value)) {
+                $fail(self::MENSAJE_UNA_SOLA_LINEA);
             }
         };
     }
