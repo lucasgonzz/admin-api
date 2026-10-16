@@ -170,6 +170,16 @@ class LeadDemoSettings
     public const KEY_RECORDATORIO_SILENCIO_MINUTOS = 'demo_recordatorio_silencio_minutos';
 
     /**
+     * Clave: interruptor de apagado de la IA en los recordatorios de demo (misión
+     * recordatorios-demo-con-conversacion, 16/10/2026). Prendido ('1', el default), con la ventana de
+     * 24 hs abierta el recordatorio lo redacta la IA retomando la conversación con el lead; apagado
+     * ('0') vuelve al texto o plantilla fijos de siempre. Existe porque esos mensajes salen solos,
+     * sin que nadie los revise: si la IA empezara a escribir algo que no corresponde, esto lo frena
+     * sin deploy.
+     */
+    public const KEY_RECORDATORIO_IA_ACTIVO = 'demo_recordatorio_ia_activo';
+
+    /**
      * Clave: minutos desde el inicio de una demo DIRECTA sin que el lead entre para dar por
      * perdido el turno y liberar la instancia (misión demo-agendado-directo). Sin esto un "dale"
      * que no entra bloqueaba la instancia hasta el fin de la ventana extendida (hasta seis horas).
@@ -418,6 +428,9 @@ class LeadDemoSettings
     /** Valor por defecto: ventana de "conversación viva" para el recordatorio de demo (minutos). */
     private const DEFAULT_RECORDATORIO_SILENCIO_MINUTOS = 30;
 
+    /** Valor por defecto: la IA redacta los recordatorios de demo ('1' = prendido). */
+    private const DEFAULT_RECORDATORIO_IA_ACTIVO = '1';
+
     /** Valor por defecto: no-show de una demo directa (minutos desde el inicio sin entrar). */
     private const DEFAULT_DEMO_DIRECTA_NO_SHOW_MINUTOS = 60;
 
@@ -532,6 +545,7 @@ class LeadDemoSettings
             'fin_check_silencio_minutos'          => self::get_fin_check_silencio_minutos(),
             'check_ingreso_silencio_minutos'      => self::get_check_ingreso_silencio_minutos(),
             'recordatorio_silencio_minutos'       => self::get_recordatorio_silencio_minutos(),
+            'recordatorio_ia_activo'              => self::get_recordatorio_ia_activo(),
             'demo_directa_no_show_minutos'        => self::get_demo_directa_no_show_minutos(),
             'fin_check_demora_default_minutos'    => self::get_fin_check_demora_default_minutos(),
             'experiencia_default'                 => self::get_experiencia_default(),
@@ -699,6 +713,10 @@ class LeadDemoSettings
         if (isset($data['recordatorio_silencio_minutos'])) {
             AdminSetting::set(self::KEY_RECORDATORIO_SILENCIO_MINUTOS, (string) self::clamp((int) $data['recordatorio_silencio_minutos']));
         }
+        // Interruptor de la IA en los recordatorios: "isset" y NO obligatorio, el SPA todavía no lo manda.
+        if (isset($data['recordatorio_ia_activo'])) {
+            AdminSetting::set(self::KEY_RECORDATORIO_IA_ACTIVO, $data['recordatorio_ia_activo'] ? '1' : '0');
+        }
         if (isset($data['demo_directa_no_show_minutos'])) {
             AdminSetting::set(self::KEY_DEMO_DIRECTA_NO_SHOW_MINUTOS, (string) self::clamp((int) $data['demo_directa_no_show_minutos']));
         }
@@ -858,6 +876,9 @@ class LeadDemoSettings
         }
         if (AdminSetting::get(self::KEY_RECORDATORIO_SILENCIO_MINUTOS) === null) {
             AdminSetting::set(self::KEY_RECORDATORIO_SILENCIO_MINUTOS, (string) self::DEFAULT_RECORDATORIO_SILENCIO_MINUTOS);
+        }
+        if (AdminSetting::get(self::KEY_RECORDATORIO_IA_ACTIVO) === null) {
+            AdminSetting::set(self::KEY_RECORDATORIO_IA_ACTIVO, self::DEFAULT_RECORDATORIO_IA_ACTIVO);
         }
         if (AdminSetting::get(self::KEY_DEMO_DIRECTA_NO_SHOW_MINUTOS) === null) {
             AdminSetting::set(self::KEY_DEMO_DIRECTA_NO_SHOW_MINUTOS, (string) self::DEFAULT_DEMO_DIRECTA_NO_SHOW_MINUTOS);
@@ -1024,6 +1045,20 @@ class LeadDemoSettings
     public static function get_recordatorio_silencio_minutos(): int
     {
         return self::clamp((int) AdminSetting::get(self::KEY_RECORDATORIO_SILENCIO_MINUTOS, (string) self::DEFAULT_RECORDATORIO_SILENCIO_MINUTOS));
+    }
+
+    /**
+     * ¿Redacta la IA los recordatorios de demo cuando la ventana de 24 hs está abierta?
+     *
+     * 🔴 Solo un '0' explícito lo apaga. Ausente, vacío o cualquier otro valor cuenta como prendido:
+     * es el comportamiento pedido por Lucas, y un setting que se pierde (base restaurada, seed que
+     * no corrió) no puede apagarlo en silencio.
+     *
+     * @return bool
+     */
+    public static function get_recordatorio_ia_activo(): bool
+    {
+        return AdminSetting::get(self::KEY_RECORDATORIO_IA_ACTIVO, self::DEFAULT_RECORDATORIO_IA_ACTIVO) !== '0';
     }
 
     /**

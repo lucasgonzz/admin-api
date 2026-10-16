@@ -6,10 +6,11 @@ use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Services\LeadBroadcastService;
 use App\Services\LeadDemoSettings;
+use App\Services\LeadReminderComposer;
+use App\Services\LeadReminderService;
 use App\Services\SystemErrorWhatsappService;
 use App\Helpers\AppTime;
 use App\Services\WhatsappSendService;
-use App\Services\WhatsappSessionWindowService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
@@ -19,17 +20,26 @@ use Illuminate\Support\Facades\Log;
  *
  * Se ejecuta cada 5 minutos, con dos comportamientos según la dinámica del lead:
  *
- * - Dinámica ACTUAL (Mail 1 con credenciales): igual que siempre. Leads con demo agendada en los
- *   próximos X minutos (configurable) reciben la plantilla Meta `cc_recordatorio_demo_` ("empezá por
- *   el video introductorio que te mandamos al mail").
+ * - Dinámica ACTUAL (Mail 1 con credenciales): leads con demo agendada en los próximos X minutos
+ *   (configurable) reciben el recordatorio ("empezá por el video introductorio que te mandamos al
+ *   mail").
  * - Dinámica NUEVA (demo directa, misión demo-agendado-directo, 10/9/2026): el lead ya tiene los
  *   links por WhatsApp y —si pasó el mail— la carta de acceso. El recordatorio es un empujón para
- *   el que todavía no entró: texto libre nuevo (saluda por el nombre de pila, le recuerda que los
- *   accesos están en el mail, o en el chat si no hay mail, y que escriba por acá cualquier duda),
- *   elegible desde X minutos antes del inicio hasta que la ventana de la demo vence, y SOLO si no
- *   hubo mensajes en ninguna dirección en los últimos N minutos (setting, default 30). Es texto
- *   libre y no plantilla: el lead acaba de escribir, así que la ventana de 24 hs está abierta; si
- *   no lo está, se saltea sin marcarlo y se reintenta en el próximo tick.
+ *   el que todavía no entró (le recuerda que los accesos están en el mail, o en el chat si no hay
+ *   mail, y que escriba por acá cualquier duda), elegible desde X minutos antes del inicio hasta
+ *   que la ventana de la demo vence, y SOLO si no hubo mensajes en ninguna dirección en los últimos
+ *   N minutos (setting, default 30).
+ *
+ * Canal (misión recordatorios-demo-con-conversacion, 16/10/2026, pedido de Lucas): lo decide
+ * {@see LeadReminderService} igual para las dos dinámicas. Con la ventana de 24 hs de Meta abierta
+ * el recordatorio es un texto libre que redacta la IA retomando la conversación con el lead; si la
+ * IA está apagada, falla, o el lead tiene un control humano prendido (`claude_auto_reply` apagado o
+ * `requiere_intervencion_humana`), sale lo de siempre (la plantilla `cc_recordatorio_demo_` en la
+ * dinámica actual; el texto fijo en la nueva). El escudo de verificación de mensajes NO frena a la
+ * IA: ver el docblock de {@see LeadReminderService}. Con la ventana CERRADA sale la plantilla, y
+ * solo antes de que arranque la demo (su texto dice "en unos minutos ya tenés disponible"). Hasta
+ * esa misión la dinámica nueva con la ventana cerrada no mandaba nada y se reintentaba en cada
+ * tick, o sea, nunca salía.
  *
  * El flag `recordatorio_demo_enviado` evita que se envíe más de un recordatorio por demo.
  */
@@ -41,6 +51,15 @@ class SendDemoReminders extends Command
      * @var string
      */
     private const TEMPLATE_NAME = 'cc_recordatorio_demo_';
+
+    /** El recordatorio de la dinámica nueva salió: se guarda en el hilo y se marca. */
+    private const ENVIO_OK = 'ok';
+
+    /** No salió nada ahora y tiene sentido volver a mirar en el próximo tick (no se marca). */
+    private const ENVIO_PENDIENTE = 'pendiente';
+
+    /** No salió nada y no se va a insistir: se marca para no repetir intentos fallidos cada tick. */
+    private const ENVIO_ABANDONADO = 'abandonado';
 
     /**
      * Nombre del comando artisan.
@@ -79,6 +98,11 @@ class SendDemoReminders extends Command
      */
     public function handle(): int
     {
+        // Una corrida del comando = un servicio nuevo. El servicio lleva cuenta de lo que ya esperó a la
+        // IA en esta corrida (su presupuesto) y cachea la ventana de 24 hs de Meta que leyó: ninguna de
+        // las dos cosas tiene que sobrevivir a la corrida siguiente si el proceso se reutiliza.
+        $this->reminder_service = null;
+
         // Momento actual y límite superior de la ventana de anticipación (timezone Argentina).
         $now = AppTime::now();
 
@@ -127,7 +151,6 @@ class SendDemoReminders extends Command
         $silencio_minutos = LeadDemoSettings::get_recordatorio_silencio_minutos();
         $silencio_limite  = $now->copy()->subMinutes($silencio_minutos);
         $gracia_minutos   = LeadDemoSettings::get_gracia_minutos_post();
-        $ventana_sesion   = new WhatsappSessionWindowService();
 
         foreach ($candidates as $lead) {
             // Construir el datetime completo de inicio de demo combinando fecha y hora.
@@ -176,18 +199,20 @@ class SendDemoReminders extends Command
                     continue;
                 }
 
-                /* Texto libre: exige la ventana de 24 hs de Meta abierta. Cerrada, se saltea sin
-                 * marcar (no hay plantilla aprobada con este texto; la vieja habla de un mail con
-                 * el video introductorio, que en esta dinámica no existe). */
-                if (! $ventana_sesion->is_open((string) $lead->phone)) {
-                    Log::info('SendDemoReminders: recordatorio de la dinámica nueva salteado, ventana de 24 hs cerrada.', [
-                        'lead_id' => $lead->id,
-                    ]);
+                /* La ventana de 24 hs ya no se mira acá: LeadReminderService elige el canal. Hasta el
+                 * 16/10/2026 la ventana cerrada saltaba el recordatorio sin marcar (no había plantilla
+                 * con el texto de esta dinámica) y no salía nunca; ahora sale la plantilla vigente. */
+                $resultado_directa = $this->send_reminder_message_directa($lead, $demo_datetime);
 
+                if ($resultado_directa === self::ENVIO_PENDIENTE) {
                     continue;
                 }
 
-                if (! $this->send_reminder_message_directa($lead)) {
+                if ($resultado_directa === self::ENVIO_ABANDONADO) {
+                    /* No salió y no se reintenta: se marca para cortar los intentos, pero NO se anuncia
+                     * como enviado ni se cuenta (el aviso del motivo ya lo dejó el método). */
+                    $lead->update(['recordatorio_demo_enviado' => true]);
+
                     continue;
                 }
             } else {
@@ -230,91 +255,190 @@ class SendDemoReminders extends Command
     protected function send_reminder_message(Lead $lead): void
     {
         // Nombre de contacto del lead para personalizar el saludo y la variable {{1}} del template.
-        // Primer nombre, no el completo (decisión de Lucas, 8/9/2026): el lead ve "Hola Guillermo",
-        // no "Hola Guillermo González".
-        $contact_name = $lead->contact_first_name ?? 'Cliente';
+        $contact_name = $this->nombre_para_la_plantilla($lead);
 
         // Texto renderizado del template para trazabilidad en la conversación.
         $content = $this->build_reminder_content($contact_name);
 
-        // Envío directo por WhatsApp vía plantilla Meta aprobada.
-        $whatsapp_message_id = null;
-        $phone = trim((string) $lead->phone);
-        if ($phone !== '') {
-            $whatsapp_message_id = $this->whatsapp_send_service->send_template(
-                $phone,
-                self::TEMPLATE_NAME,
-                [$contact_name],
-                'es_AR',
-                "Recordatorio demo - Lead #{$lead->id} ({$lead->contact_name})"
-            );
-            // Si el envío falló, WhatsappSendService ya notifica a admins de forma centralizada.
-        } else {
+        /*
+         * Envío por el canal que corresponde (misión recordatorios-demo-con-conversacion,
+         * 16/10/2026): con la ventana de 24 hs abierta, texto libre redactado por la IA retomando la
+         * conversación; con la ventana cerrada —o si la IA no puede— la plantilla Meta aprobada de
+         * siempre. Si el envío falló, WhatsappSendService ya notifica a admins de forma centralizada.
+         */
+        $envio = $this->reminder_service()->enviar(
+            $lead,
+            LeadReminderComposer::TIPO_PRE_DEMO,
+            [
+                'texto'     => null,
+                'plantilla' => [
+                    'nombre'    => self::TEMPLATE_NAME,
+                    'variables' => [$contact_name],
+                    'idioma'    => 'es_AR',
+                    'contenido' => $content,
+                ],
+            ],
+            "Recordatorio demo - Lead #{$lead->id} ({$lead->contact_name})"
+        );
+
+        if ($envio['motivo'] === 'sin_telefono') {
             Log::warning('SendDemoReminders: lead sin teléfono', [
                 'lead_id' => $lead->id,
             ]);
         }
 
-        LeadMessage::create([
-            'lead_id'             => $lead->id,
-            'sender'              => 'sistema',
-            'content'             => $content,
-            'status'              => 'enviado',
-            'is_followup'         => false,
-            'whatsapp_message_id' => $whatsapp_message_id,
-        ]);
+        // Se guarda en el hilo lo que REALMENTE se mandó (la plantilla o el texto de la IA). Si no
+        // salió nada, el hilo no lo afirma: el agente lee ese hilo como conversación real.
+        if ($envio['enviado']) {
+            LeadMessage::create([
+                'lead_id'             => $lead->id,
+                'sender'              => 'sistema',
+                'content'             => $envio['contenido'],
+                'status'              => 'enviado',
+                'is_followup'         => false,
+                'whatsapp_message_id' => $envio['whatsapp_message_id'],
+            ]);
+        }
     }
 
     /**
-     * Recordatorio de la dinámica nueva (demo directa): texto libre por send_text().
+     * Servicio que elige el canal del recordatorio (IA con la ventana abierta, plantilla si no).
+     * Se crea recién al primer uso, con el mismo servicio de envío que tiene el comando.
+     *
+     * @var LeadReminderService|null
+     */
+    private $reminder_service;
+
+    /**
+     * @return LeadReminderService
+     */
+    protected function reminder_service(): LeadReminderService
+    {
+        if ($this->reminder_service === null) {
+            $this->reminder_service = new LeadReminderService($this->whatsapp_send_service);
+        }
+
+        return $this->reminder_service;
+    }
+
+    /**
+     * Nombre para la variable {{1}} de la plantilla y para el texto renderizado.
+     *
+     * Primer nombre, no el completo (decisión de Lucas, 8/9/2026): el lead ve "Hola Guillermo", no
+     * "Hola Guillermo González".
+     *
+     * 🔴 Un nombre vacío cuenta igual que uno ausente. `contact_first_name` devuelve '' (no null)
+     * cuando el lead no tiene nombre, el `?? 'Cliente'` que había antes no lo reemplazaba, y Meta
+     * rechaza una plantilla con un parámetro de texto vacío (`Required parameter is missing`): el
+     * recordatorio no salía. Es el mismo modo de falla de los 2.933 seguimientos de julio-agosto
+     * (ver `LeadFollowupService::NOMBRE_GENERICO`).
      *
      * @param Lead $lead
      *
-     * @return bool true si salió (y se persistió el LeadMessage); false si Meta lo rechazó, en cuyo
-     *              caso no se marca `recordatorio_demo_enviado` y se reintenta en el próximo tick.
+     * @return string
      */
-    protected function send_reminder_message_directa(Lead $lead): bool
+    protected function nombre_para_la_plantilla(Lead $lead): string
+    {
+        $nombre = trim((string) $lead->contact_first_name);
+
+        return $nombre !== '' ? $nombre : 'Cliente';
+    }
+
+    /**
+     * Recordatorio de la dinámica nueva (demo directa).
+     *
+     * El canal lo elige {@see LeadReminderService}: con la ventana de 24 hs abierta, texto libre
+     * (redactado por la IA, o el texto fijo de abajo si la IA no puede); con la ventana cerrada, la
+     * plantilla vigente.
+     *
+     * @param Lead        $lead
+     * @param Carbon|null $demo_inicio Momento en que arranca la demo: pasado ese momento la plantilla
+     *                                 ("en unos minutos ya tenés disponible el acceso") deja de ser cierta
+     *                                 y no se manda.
+     *
+     * @return string Uno de self::ENVIO_*:
+     *                - ENVIO_OK: salió y se guardó en el hilo.
+     *                - ENVIO_PENDIENTE: no salió por un error transitorio del texto libre, o no hay nada que
+     *                  mandar todavía (ventana cerrada y la plantilla ya venció): se mira de nuevo en el
+     *                  próximo tick, sin marcar.
+     *                - ENVIO_ABANDONADO: no salió y no se va a insistir (la plantilla falló, o Meta rechazó el
+     *                  texto y la plantilla ya no es válida): se marca para no repetir cada cinco minutos.
+     */
+    protected function send_reminder_message_directa(Lead $lead, ?Carbon $demo_inicio = null): string
     {
         $contact_name = trim((string) $lead->contact_first_name);
         $content      = $this->build_reminder_content_directa($contact_name, ! empty($lead->demo_mail_sent_at));
 
-        $phone = trim((string) $lead->phone);
-        if ($phone === '') {
-            Log::warning('SendDemoReminders: lead sin teléfono (dinámica nueva)', ['lead_id' => $lead->id]);
+        /* Lo que salía antes de la misión (16/10/2026) y sigue siendo el respaldo: el texto fijo de
+         * arriba con la ventana abierta, y —nuevo— la plantilla vigente con la ventana cerrada. */
+        $nombre_plantilla = $this->nombre_para_la_plantilla($lead);
 
-            return false;
-        }
-
-        /* Sin aviso a los admins por cada fallo (cuarto parámetro): este envío se REINTENTA en cada
-         * tick mientras el lead siga elegible, así que un Kapso caído durante una hora mandaría doce
-         * avisos por lead. Queda el warning de abajo; el aviso centralizado lo siguen dando los
-         * envíos que no se reintentan. */
-        $whatsapp_message_id = $this->whatsapp_send_service->send_text(
-            $phone,
-            $content,
-            "Recordatorio demo directa - Lead #{$lead->id} ({$lead->contact_name})",
-            true
+        $envio = $this->reminder_service()->enviar(
+            $lead,
+            LeadReminderComposer::TIPO_PRE_DEMO,
+            [
+                'texto'                        => $content,
+                /* Un error transitorio del texto libre se reintenta en el próximo tick, como siempre
+                 * en esta dinámica; uno definitivo (Meta dice que la ventana está cerrada) pasa a la plantilla. */
+                'reintentar_si_es_transitorio' => true,
+                'plantilla'                    => [
+                    'nombre'        => self::TEMPLATE_NAME,
+                    'variables'     => [$nombre_plantilla],
+                    'idioma'        => 'es_AR',
+                    'contenido'     => $this->build_reminder_content($nombre_plantilla),
+                    'solo_antes_de' => $demo_inicio,
+                ],
+            ],
+            "Recordatorio demo directa - Lead #{$lead->id} ({$lead->contact_name})"
         );
 
-        if ($whatsapp_message_id === null) {
-            Log::warning('SendDemoReminders: el recordatorio de la dinámica nueva no salió; se reintenta en el próximo tick.', [
+        if ($envio['motivo'] === 'sin_telefono') {
+            Log::warning('SendDemoReminders: lead sin teléfono (dinámica nueva)', ['lead_id' => $lead->id]);
+
+            return self::ENVIO_PENDIENTE;
+        }
+
+        if ($envio['enviado']) {
+            // Se guarda en el hilo lo que REALMENTE se mandó (el texto de la IA, el fijo o la plantilla).
+            LeadMessage::create([
+                'lead_id'             => $lead->id,
+                'sender'              => 'sistema',
+                'content'             => $envio['contenido'],
+                'status'              => 'enviado',
+                'is_followup'         => false,
+                'whatsapp_message_id' => $envio['whatsapp_message_id'],
+            ]);
+
+            return self::ENVIO_OK;
+        }
+
+        /* Nada salió. Tres casos, y en ninguno se escribe en el hilo algo que el lead no recibió. */
+        if ($envio['reintentable']) {
+            /* Error transitorio del texto libre: sin aviso a los admins (cuarto parámetro de send_text)
+             * justamente porque se repite; un Kapso caído durante una hora mandaría doce avisos por lead. */
+            Log::warning('SendDemoReminders: el recordatorio de la dinámica nueva no salió por un error transitorio; se reintenta en el próximo tick.', [
                 'lead_id' => $lead->id,
                 'error'   => $this->whatsapp_send_service->last_send_error,
             ]);
 
-            return false;
+            return self::ENVIO_PENDIENTE;
         }
 
-        LeadMessage::create([
-            'lead_id'             => $lead->id,
-            'sender'              => 'sistema',
-            'content'             => $content,
-            'status'              => 'enviado',
-            'is_followup'         => false,
-            'whatsapp_message_id' => $whatsapp_message_id,
+        if ($envio['via'] === null) {
+            /* La plantilla ya no es válida (arrancó la demo). Con la ventana cerrada no hay nada que
+             * hacer ahora: si el lead escribe, la ventana se abre y el próximo tick manda texto. Con
+             * la ventana abierta para nosotros pero rechazada por Meta, no se insiste. */
+            return $envio['ventana_abierta'] ? self::ENVIO_ABANDONADO : self::ENVIO_PENDIENTE;
+        }
+
+        /* La plantilla falló: send_template ya avisó a los admins. Reintentar cada cinco minutos con un
+         * nombre de plantilla mal puesto o un parámetro rechazado los inundaría. */
+        Log::warning('SendDemoReminders: la plantilla del recordatorio no salió; no se reintenta.', [
+            'lead_id' => $lead->id,
+            'error'   => $this->whatsapp_send_service->last_send_error,
         ]);
 
-        return true;
+        return self::ENVIO_ABANDONADO;
     }
 
     /**

@@ -125,12 +125,23 @@ class RecordatorioDemoDirectaTest extends TestCase
     }
 
     /**
-     * (4) Fuera de la ventana de la demo (ya vencida) no sale nada; y con la ventana de 24 hs de
-     *     Meta cerrada (sin entrante en un día) se saltea sin marcar.
+     * (4) Fuera de la ventana de la demo (ya vencida) no sale nada. Con la ventana de 24 hs de Meta
+     *     cerrada (sin entrante en un día) sale la PLANTILLA ya armada, una sola vez y marcada.
+     *
+     * 🔴 La segunda mitad de este test CAMBIÓ A PROPÓSITO el 16/10/2026 (misión
+     * recordatorios-demo-con-conversacion). Hasta entonces aseguraba lo contrario —con la ventana
+     * cerrada el recordatorio de la dinámica nueva se salteaba sin marcar y, en la práctica, no salía
+     * nunca—, y ESE era el comportamiento que Lucas pidió cambiar: "en caso de que la ventana de 24hs
+     * esté cerrada, ahí sí enviar la plantilla ya armada". No es una aserción ajustada para que pase:
+     * es el requisito que se dio vuelta. La mitad de la demo vencida sigue exactamente igual.
+     *
+     * La plantilla sale solo ANTES de que arranque la demo (por eso el lead de ventana cerrada tiene la
+     * demo a las 10:55 y no a las 10:10): su texto habla de "en unos minutos". Pasado el inicio no sale
+     * y no se marca; eso se prueba en RecordatoriosConConversacionTest.
      *
      * @return void
      */
-    public function test_ventana_vencida_o_sesion_cerrada_no_sale(): void
+    public function test_ventana_vencida_no_sale_y_con_sesion_cerrada_sale_la_plantilla(): void
     {
         $espia = $this->espiar_whatsapp();
 
@@ -138,15 +149,29 @@ class RecordatorioDemoDirectaTest extends TestCase
         $vencida = $this->crear_lead_nueva_con_demo('08:00', '09:00');
         $this->mensaje($vencida, 'lead', Carbon::now()->subMinutes(120));
 
-        /* Sesión cerrada: el último entrante fue hace dos días. */
-        $cerrada = $this->crear_lead_nueva_con_demo('10:10', '16:10', '5493519999997');
+        /* Sesión cerrada: el último entrante fue hace dos días. La demo arranca dentro de diez minutos
+         * (10:55, y son las 10:45): la plantilla dice "en unos minutos ya tenés disponible el acceso" y
+         * solo es verdad antes del inicio. */
+        $cerrada = $this->crear_lead_nueva_con_demo('10:55', '16:10', '5493519999997');
         $this->mensaje($cerrada, 'lead', Carbon::now()->subDays(2));
 
         $this->artisan('leads:send-demo-reminders')->assertExitCode(0);
 
-        $this->assertCount(0, $espia->textos);
+        /* La demo vencida no recibe nada y no se marca. */
         $this->assertFalse((bool) $vencida->refresh()->recordatorio_demo_enviado);
-        $this->assertFalse((bool) $cerrada->refresh()->recordatorio_demo_enviado);
+
+        /* La de ventana cerrada recibe la plantilla (no texto libre: Meta lo rechazaría), con el
+         * nombre de pila, y queda marcada para no repetirse. */
+        $this->assertCount(0, $espia->textos, 'Con la ventana cerrada no puede salir texto libre.');
+        $this->assertCount(1, $espia->plantillas);
+        $this->assertSame('cc_recordatorio_demo_', $espia->plantillas[0]['template_name']);
+        $this->assertSame(['Guillermo'], $espia->plantillas[0]['variables']);
+        $this->assertSame('5493519999997', $espia->plantillas[0]['to']);
+        $this->assertTrue((bool) $cerrada->refresh()->recordatorio_demo_enviado);
+
+        /* Y en el siguiente tick (cinco minutos después) no se vuelve a mandar. */
+        $this->artisan('leads:send-demo-reminders')->assertExitCode(0);
+        $this->assertCount(1, $espia->plantillas, 'La plantilla se manda una sola vez.');
     }
 
     /**

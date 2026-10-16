@@ -8,6 +8,8 @@ use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Services\LeadBroadcastService;
 use App\Services\LeadDemoSettings;
+use App\Services\LeadReminderComposer;
+use App\Services\LeadReminderService;
 use App\Services\SystemErrorWhatsappService;
 use App\Helpers\AppTime;
 use App\Services\WhatsappSendService;
@@ -16,11 +18,16 @@ use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Envía automáticamente el recordatorio de mañana de demo por WhatsApp (plantilla Meta).
+ * Envía automáticamente el recordatorio de mañana de demo por WhatsApp.
  *
- * Se ejecuta cada 5 minutos. Busca leads con demo agendada hoy y envía el template
- * `cc_recordatorio_manana_demo` a la hora configurable (default 09:00 Argentina).
- * El flag `recordatorio_manana_enviado` evita duplicar el envío por demo.
+ * Se ejecuta cada 5 minutos. Busca leads con demo agendada hoy y envía el recordatorio a la hora
+ * configurable (default 09:00 Argentina). El flag `recordatorio_manana_enviado` evita duplicar el
+ * envío por demo.
+ *
+ * Canal (misión recordatorios-demo-con-conversacion, 16/10/2026): con la ventana de 24 hs de Meta
+ * abierta —el lead escribió en el último día— el recordatorio es un texto libre que redacta la IA
+ * retomando la conversación (ver {@see LeadReminderService}); con la ventana cerrada, o si la IA no
+ * puede, sale la plantilla Meta `cc_recordatorio_manana_demo_v2` de siempre.
  */
 class SendMorningDemoReminder extends Command
 {
@@ -86,12 +93,37 @@ class SendMorningDemoReminder extends Command
     }
 
     /**
+     * Servicio que elige el canal del recordatorio (IA con la ventana abierta, plantilla si no).
+     * Se crea recién al primer uso, con el mismo servicio de envío que tiene el comando.
+     *
+     * @var LeadReminderService|null
+     */
+    private $reminder_service;
+
+    /**
+     * @return LeadReminderService
+     */
+    protected function reminder_service(): LeadReminderService
+    {
+        if ($this->reminder_service === null) {
+            $this->reminder_service = new LeadReminderService($this->whatsapp_send_service);
+        }
+
+        return $this->reminder_service;
+    }
+
+    /**
      * Procesa leads candidatos y envía el recordatorio de mañana si corresponde.
      *
      * @return int Código de salida (0 = éxito).
      */
     public function handle(): int
     {
+        // Una corrida del comando = un servicio nuevo. El servicio lleva cuenta de lo que ya esperó a la
+        // IA en esta corrida (su presupuesto) y cachea la ventana de 24 hs de Meta que leyó: ninguna de
+        // las dos cosas tiene que sobrevivir a la corrida siguiente si el proceso se reutiliza.
+        $this->reminder_service = null;
+
         // Momento actual en timezone Argentina.
         $now = AppTime::now();
 
@@ -195,7 +227,13 @@ class SendMorningDemoReminder extends Command
         // Nombre del contacto para personalizar el saludo y la variable {{1}} del template.
         // Primer nombre, no el completo (decisión de Lucas, 8/9/2026): el lead ve "Hola Guillermo",
         // no "Hola Guillermo González".
-        $contact_name = $lead->contact_first_name ?? 'Cliente';
+        // 🔴 Un nombre vacío cuenta igual que uno ausente: `contact_first_name` devuelve '' (no null)
+        // sin nombre, y Meta rechaza una plantilla con un parámetro de texto vacío. Ver el mismo
+        // criterio en SendDemoReminders::nombre_para_la_plantilla().
+        $contact_name = trim((string) $lead->contact_first_name);
+        if ($contact_name === '') {
+            $contact_name = 'Cliente';
+        }
 
         // Hora de inicio de la demo para la variable {{2}} del template (ej: "10:00").
         $demo_start_time = $lead->demo_start_time ?? '';
@@ -203,33 +241,47 @@ class SendMorningDemoReminder extends Command
         // Texto renderizado para trazabilidad en la conversación del lead.
         $content = $this->build_morning_reminder_content($contact_name, $demo_start_time);
 
-        // Envío directo por WhatsApp vía plantilla Meta aprobada.
-        $whatsapp_message_id = null;
-        $phone = trim((string) $lead->phone);
-        if ($phone !== '') {
-            $whatsapp_message_id = $this->whatsapp_send_service->send_template(
-                $phone,
-                self::TEMPLATE_NAME,
-                [$contact_name, $demo_start_time],
-                'es_AR',
-                "Recordatorio mañana demo - Lead #{$lead->id} ({$lead->contact_name})"
-            );
-            // Si el envío falló, WhatsappSendService ya notifica a admins de forma centralizada.
-        } else {
+        /*
+         * Envío por el canal que corresponde (misión recordatorios-demo-con-conversacion,
+         * 16/10/2026): con la ventana de 24 hs abierta, texto libre redactado por la IA retomando
+         * la conversación con el lead; con la ventana cerrada —o si la IA no puede— la plantilla
+         * Meta aprobada de siempre. Si el envío falló, WhatsappSendService ya notifica a admins de
+         * forma centralizada.
+         */
+        $envio = $this->reminder_service()->enviar(
+            $lead,
+            LeadReminderComposer::TIPO_MANANA,
+            [
+                'texto'     => null,
+                'plantilla' => [
+                    'nombre'    => self::TEMPLATE_NAME,
+                    'variables' => [$contact_name, $demo_start_time],
+                    'idioma'    => 'es_AR',
+                    'contenido' => $content,
+                ],
+            ],
+            "Recordatorio mañana demo - Lead #{$lead->id} ({$lead->contact_name})"
+        );
+
+        if ($envio['motivo'] === 'sin_telefono') {
             Log::warning('SendMorningDemoReminder: lead sin teléfono', [
                 'lead_id' => $lead->id,
             ]);
         }
 
-        // Registrar el mensaje enviado en el hilo del lead.
-        LeadMessage::create([
-            'lead_id'             => $lead->id,
-            'sender'              => 'sistema',
-            'content'             => $content,
-            'status'              => 'enviado',
-            'is_followup'         => false,
-            'whatsapp_message_id' => $whatsapp_message_id,
-        ]);
+        // Registrar en el hilo del lead lo que REALMENTE se mandó (la plantilla o el texto de la IA).
+        // Si no salió nada el hilo no lo afirma: el agente lee ese hilo como conversación real, y un
+        // recordatorio "enviado" que el lead nunca recibió lo haría hablar de algo que no pasó.
+        if ($envio['enviado']) {
+            LeadMessage::create([
+                'lead_id'             => $lead->id,
+                'sender'              => 'sistema',
+                'content'             => $envio['contenido'],
+                'status'              => 'enviado',
+                'is_followup'         => false,
+                'whatsapp_message_id' => $envio['whatsapp_message_id'],
+            ]);
+        }
 
         // Marcar flag para no reenviar el recordatorio de mañana en la misma demo.
         $lead->update(['recordatorio_manana_enviado' => true]);

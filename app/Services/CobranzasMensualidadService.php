@@ -251,12 +251,9 @@ class CobranzasMensualidadService
     protected function deducir_estado(Client $client, string $periodo, ?MensualidadPeriodo $fila, ?MensualidadInvoice $factura): string
     {
         // 1 a 3: lo afirmado gana a todo lo demás.
-        if ($fila !== null && in_array($fila->estado, [
-            MensualidadPeriodo::ESTADO_SIN_CARGO,
-            MensualidadPeriodo::ESTADO_PAGADO,
-            MensualidadPeriodo::ESTADO_PARCIAL,
-        ], true)) {
-            return $fila->estado;
+        $afirmado = $this->estado_afirmado($fila);
+        if ($afirmado !== null) {
+            return $afirmado;
         }
 
         // 4: hay Factura C autorizada por AFIP y nadie registró el pago.
@@ -277,6 +274,31 @@ class CobranzasMensualidadService
 
         // 7: le tocaba y no hay nada. El rojo.
         return MensualidadPeriodo::ESTADO_PENDIENTE;
+    }
+
+    /**
+     * Las reglas 1 a 3 del orden de `deducir_estado()`: si alguien AFIRMÓ algo de ese mes (sin
+     * cargo, pagado o parcial), eso es el estado, gane lo que gane el resto (factura, calendario,
+     * inicio). Es la única definición de «lo afirmado gana a todo»: la usan `deducir_estado()` y el
+     * atajo de `resumen_falta_cobrar()`, para que si el día de mañana cambia la regla no haya dos
+     * copias que se desfasen.
+     *
+     * @param MensualidadPeriodo|null $fila Lo afirmado de ese mes, si hay fila.
+     *
+     * @return string|null El estado afirmado, o null si nadie afirmó nada de ese mes (pendiente de
+     *                     deducirse por las reglas 4 a 7).
+     */
+    protected function estado_afirmado(?MensualidadPeriodo $fila): ?string
+    {
+        if ($fila !== null && in_array($fila->estado, [
+            MensualidadPeriodo::ESTADO_SIN_CARGO,
+            MensualidadPeriodo::ESTADO_PAGADO,
+            MensualidadPeriodo::ESTADO_PARCIAL,
+        ], true)) {
+            return $fila->estado;
+        }
+
+        return null;
     }
 
     /**
@@ -846,6 +868,307 @@ class CobranzasMensualidadService
             });
 
         return $resultado;
+    }
+
+    /* ------------------------------------------------------------------ *
+     |  Resumen de cobranza (cobrado y falta cobrar)
+     * ------------------------------------------------------------------ */
+
+    /**
+     * Las dos tarjetas de plata de la pantalla de Mensualidades (misión
+     * cobranzas-cobrado-y-falta-cobrar, 16/10/2026): lo que se COBRÓ y lo que FALTA COBRAR, los dos
+     * relativos a un mes de referencia R (el más reciente de los meses elegidos en la tira).
+     *
+     * 🔴 El «cobrado en total» NO es un acumulado histórico (decisión de Lucas, 16/10/2026: los
+     * meses que la planilla importó como PAGADO no tienen monto ni fecha, así que un histórico
+     * saldría muy bajo): es lo cobrado POR el mes R más lo cobrado DURANTE R por deudas de meses
+     * anteriores. OJO que no es caja estricta por fecha de cobro: lo del mes R se cuenta por el
+     * período al que se imputó (sea cual sea su fecha, igual que la tarjeta de siempre), y solo lo de
+     * meses anteriores se ubica por fecha. En el caso normal —el modal pone la fecha de hoy y se paga
+     * el mes en curso— las dos miradas coinciden; se separan con un adelanto (octubre pagado en
+     * septiembre) o un atraso (septiembre pagado en octubre), y así las dos mitades siempre suman el
+     * total sin pagos contados dos veces.
+     *
+     * - **cobrado.del_mes**: pagos con monto imputados al período R, sea cual sea su fecha de cobro
+     *   (es exactamente lo que la tarjeta ya sumaba, el número de hoy no cambia).
+     * - **cobrado.de_anteriores**: pagos con monto imputados a períodos ANTERIORES a R cuya
+     *   `fecha_pago` cae dentro del mes R. Un pago sin fecha no se puede ubicar en el mes y no cuenta.
+     * - **falta_cobrar**: lo que deben los meses desde el inicio de cada cliente hasta R inclusive,
+     *   con la misma regla de siete estados de la tabla (`estado_de()`), separado en lo del mes R y
+     *   lo de meses anteriores.
+     *
+     * Un mes posterior a R no entra en ninguna de las dos mitades: el pedido es «mes actual y meses
+     * anteriores». Eso incluye un mes futuro facturado por adelantado, que `estado_de()` marca
+     * `facturado` pero que acá ni se mira, porque el recorrido termina en R.
+     *
+     * Se resuelve en una cantidad FIJA de consultas (no crece con la cantidad de clientes): una para
+     * el cobrado, una para los clientes y las cuatro de `cargar_para()`.
+     *
+     * @param string $referencia El mes de referencia R, 'YYYY-MM'.
+     *
+     * @return array{mes_referencia: string, cobrado: array<string, mixed>, falta_cobrar: array<string, mixed>}
+     *
+     * @throws \InvalidArgumentException Si `$referencia` no es un 'YYYY-MM' válido.
+     */
+    public function resumen_cobranza(string $referencia): array
+    {
+        if (! self::es_periodo_valido($referencia)) {
+            throw new \InvalidArgumentException('Mes de referencia inválido: ' . $referencia);
+        }
+
+        return [
+            'mes_referencia' => $referencia,
+            'cobrado'        => $this->resumen_cobrado($referencia),
+            'falta_cobrar'   => $this->resumen_falta_cobrar($referencia),
+        ];
+    }
+
+    /**
+     * La mitad «cobrado» de `resumen_cobranza()`: lo imputado al mes R y lo que entró durante R por
+     * meses anteriores. Una sola consulta de pagos; la suma se hace en memoria.
+     *
+     * Solo cuentan los pagos con `monto` (los importados «PAGADO» sin monto no suman) y de clientes
+     * que existen: `mensualidad_pagos.client_id` no tiene clave foránea, así que un pago huérfano de
+     * un cliente borrado no puede inflar la tarjeta (la tabla tampoco lo muestra).
+     *
+     * @param string $referencia El mes de referencia R, 'YYYY-MM'.
+     *
+     * @return array{del_mes: float, de_anteriores: float, total: float, clientes_de_anteriores: int}
+     */
+    protected function resumen_cobrado(string $referencia): array
+    {
+        /** Primer día de R: desde acá (inclusive) «cae en el mes R» la fecha de cobro. */
+        $inicio_del_mes = $this->primer_dia($referencia)->toDateString();
+
+        /** Primer día del mes siguiente a R: hasta acá (exclusive) cae la fecha de cobro. */
+        $inicio_del_mes_siguiente = $this->primer_dia($referencia)->addMonthNoOverflow()->toDateString();
+
+        /*
+         * Los pagos que pueden sumar, en una sola consulta: los imputados a R (con cualquier fecha) y
+         * los imputados a un mes anterior que se cobraron dentro de R. Los períodos son 'YYYY-MM' y
+         * ordenan bien como texto, así que `< R` alcanza para «anteriores». Un pago sin `fecha_pago`
+         * no pasa el rango de fechas (NULL no es mayor ni menor que nada) y queda afuera solo.
+         */
+        $pagos = MensualidadPago::query()
+            ->whereNotNull('monto')
+            ->whereHas('client')
+            ->where(function ($query) use ($referencia, $inicio_del_mes, $inicio_del_mes_siguiente) {
+                $query->where('periodo', $referencia)
+                    ->orWhere(function ($anteriores) use ($referencia, $inicio_del_mes, $inicio_del_mes_siguiente) {
+                        $anteriores->where('periodo', '<', $referencia)
+                            ->where('fecha_pago', '>=', $inicio_del_mes)
+                            ->where('fecha_pago', '<', $inicio_del_mes_siguiente);
+                    });
+            })
+            ->get(['client_id', 'periodo', 'monto']);
+
+        /** Suma de lo imputado al mes R. */
+        $del_mes = 0.0;
+
+        /** Suma de lo cobrado en R que correspondía a meses anteriores. */
+        $de_anteriores = 0.0;
+
+        /** Lo cobrado en R por meses anteriores, por cliente: para contar cuántos clientes fueron. */
+        $anteriores_por_cliente = [];
+
+        foreach ($pagos as $pago) {
+            $monto = (float) $pago->monto;
+
+            // Imputado al mes R: va a «del mes». Todo lo demás que trajo la consulta es de un mes anterior.
+            if ($pago->periodo === $referencia) {
+                $del_mes += $monto;
+                continue;
+            }
+
+            $de_anteriores += $monto;
+            $anteriores_por_cliente[$pago->client_id] = ($anteriores_por_cliente[$pago->client_id] ?? 0.0) + $monto;
+        }
+
+        $del_mes = round($del_mes, 2);
+        $de_anteriores = round($de_anteriores, 2);
+
+        return [
+            'del_mes'                => $del_mes,
+            'de_anteriores'          => $de_anteriores,
+            'total'                  => round($del_mes + $de_anteriores, 2),
+            // Clientes que efectivamente aportaron plata de meses anteriores (un pago de $0 no cuenta).
+            'clientes_de_anteriores' => count(array_filter($anteriores_por_cliente, function (float $suma) {
+                return $suma > 0;
+            })),
+        ];
+    }
+
+    /**
+     * La mitad «falta cobrar» de `resumen_cobranza()`: lo que deben los meses desde el inicio de
+     * cada cliente hasta R inclusive, repartido entre el mes R y los meses anteriores.
+     *
+     * Reusa `estado_de()` celda por celda (la regla de los siete estados es una sola, la de la
+     * tabla) y `monto_adeudado()` para traducir el estado a plata. Un cliente sin
+     * `mensualidad_inicio`, o que arranca después de R, no debe nada: ni se carga.
+     *
+     * Los conteos cuentan solo lo que aportó plata: un mes que debe algo pero no tiene monto
+     * esperado (cliente sin precios cargados) no suma importe ni entra en los conteos de clientes y
+     * meses; se cuenta aparte en `sin_monto` para que la pantalla avise que el total es un piso.
+     *
+     * @param string $referencia El mes de referencia R, 'YYYY-MM'.
+     *
+     * @return array{del_mes: float, de_anteriores: float, total: float, clientes_del_mes: int, clientes_de_anteriores: int, meses_de_anteriores: int, sin_monto: int}
+     */
+    protected function resumen_falta_cobrar(string $referencia): array
+    {
+        /** Lo que deben los clientes por el mes R. */
+        $del_mes = 0.0;
+
+        /** Lo que deben los clientes por meses anteriores a R. */
+        $de_anteriores = 0.0;
+
+        /** Ids de los clientes que deben algo del mes R (clave = id, para no repetir). */
+        $clientes_del_mes = [];
+
+        /** Ids de los clientes que deben algo de algún mes anterior a R (clave = id). */
+        $clientes_de_anteriores = [];
+
+        /** Cuántos pares (cliente, mes anterior a R) tienen deuda con importe. */
+        $meses_de_anteriores = 0;
+
+        /** Cuántos meses deben algo pero no tienen monto esperado (hasta R inclusive). */
+        $sin_monto = 0;
+
+        /** Primer día del mes siguiente a R: los clientes que arrancan desde ahí no deben nada. */
+        $inicio_del_mes_siguiente = $this->primer_dia($referencia)->addMonthNoOverflow()->toDateString();
+
+        // Solo los clientes que ya arrancaron a más tardar en R: el resto no puede deber nada, no hace falta cargarlo.
+        $clientes = Client::query()
+            ->whereNotNull('mensualidad_inicio')
+            ->where('mensualidad_inicio', '<', $inicio_del_mes_siguiente)
+            ->orderBy('id')
+            ->get();
+
+        if ($clientes->isNotEmpty()) {
+            /** El inicio más viejo de todos: desde ahí hasta R se cargan filas, facturas y pagos, una sola vez. */
+            $inicio_minimo = $clientes->map(function (Client $client) {
+                return $this->mes_de_inicio($client);
+            })->min();
+
+            /** Todos los meses que algún cliente puede deber, del más viejo a R. */
+            $meses = $this->meses_entre($inicio_minimo, $referencia);
+
+            /** Filas, facturas y pagos de todos los clientes para esos meses (cuatro consultas en total). */
+            $cargado = $this->cargar_para($clientes->pluck('id')->all(), $meses);
+
+            foreach ($clientes as $client) {
+                /** El mes en que este cliente empezó a pagar: antes de ahí no debe nada. */
+                $inicio = $this->mes_de_inicio($client);
+
+                foreach ($meses as $periodo) {
+                    // Los meses van en orden: los anteriores al inicio de este cliente no le corresponden.
+                    if ($periodo < $inicio) {
+                        continue;
+                    }
+
+                    /** Lo que se afirmó de ese mes, si algo (la fila de `mensualidad_periodos`). */
+                    $fila = $cargado['filas'][$client->id][$periodo] ?? null;
+
+                    /*
+                     * Atajo de rendimiento: un mes afirmado `pagado` o `sin_cargo` no debe nada, pase lo
+                     * que pase con factura, calendario o pagos (regla «lo afirmado gana a todo»,
+                     * `estado_afirmado()`), así que no hace falta armar su celda completa. Es la gran
+                     * mayoría de las celdas —todo el historial importado de la planilla—, y armarlas
+                     * una por una multiplicaba por ocho lo que tarda la tabla. Solo se saltean los dos
+                     * estados que valen 0 en `monto_adeudado()`: `parcial` sí pasa por `estado_de()`
+                     * porque necesita su saldo.
+                     */
+                    $afirmado = $this->estado_afirmado($fila);
+                    if ($afirmado === MensualidadPeriodo::ESTADO_PAGADO || $afirmado === MensualidadPeriodo::ESTADO_SIN_CARGO) {
+                        continue;
+                    }
+
+                    /** La celda del mes, con la misma regla de estados que la tabla. */
+                    $celda = $this->estado_de(
+                        $client,
+                        $periodo,
+                        $fila,
+                        $cargado['facturas'][$client->id][$periodo] ?? null,
+                        $cargado['pagos'][$client->id][$periodo] ?? []
+                    );
+
+                    /** Lo que debe ese mes: 0 si no debe, null si debe algo pero no se sabe cuánto. */
+                    $debe = $this->monto_adeudado($celda);
+
+                    // Debe algo sin monto esperado: no se suma, se avisa en `sin_monto`.
+                    if ($debe === null) {
+                        $sin_monto++;
+                        continue;
+                    }
+
+                    if ($debe <= 0) {
+                        continue;
+                    }
+
+                    // Una deuda con importe: del mes R o de un mes anterior (no hay meses posteriores a R acá).
+                    if ($periodo === $referencia) {
+                        $del_mes += $debe;
+                        $clientes_del_mes[$client->id] = true;
+                    } else {
+                        $de_anteriores += $debe;
+                        $clientes_de_anteriores[$client->id] = true;
+                        $meses_de_anteriores++;
+                    }
+                }
+            }
+        }
+
+        $del_mes = round($del_mes, 2);
+        $de_anteriores = round($de_anteriores, 2);
+
+        return [
+            'del_mes'                => $del_mes,
+            'de_anteriores'          => $de_anteriores,
+            'total'                  => round($del_mes + $de_anteriores, 2),
+            'clientes_del_mes'       => count($clientes_del_mes),
+            'clientes_de_anteriores' => count($clientes_de_anteriores),
+            'meses_de_anteriores'    => $meses_de_anteriores,
+            'sin_monto'              => $sin_monto,
+        ];
+    }
+
+    /**
+     * Cuánto debe una celda de `estado_de()`, según su estado:
+     *
+     *   pendiente / facturado — el esperado menos lo ya pagado (nunca negativo).
+     *   parcial               — el `saldo` que `estado_de()` ya calculó.
+     *   cualquier otro        — 0 (pagado, sin cargo, no aplica, futuro: no se reclama nada).
+     *
+     * Si el mes debe algo pero no tiene monto esperado (cliente sin precios cargados) devuelve null:
+     * no se puede decir cuánto, y el que llama lo cuenta aparte en vez de sumarle un 0 engañoso.
+     *
+     * @param array<string, mixed> $celda Lo que devuelve `estado_de()`.
+     *
+     * @return float|null 0.0 si no debe, el importe si debe, null si debe y no se sabe cuánto.
+     */
+    protected function monto_adeudado(array $celda): ?float
+    {
+        // Los únicos estados que reclaman plata; el resto no debe nada.
+        if (! in_array($celda['estado'], [
+            MensualidadPeriodo::ESTADO_PENDIENTE,
+            self::ESTADO_FACTURADO,
+            MensualidadPeriodo::ESTADO_PARCIAL,
+        ], true)) {
+            return 0.0;
+        }
+
+        // Debe, pero sin monto esperado no hay contra qué calcular: se avisa con null.
+        if ($celda['monto_esperado'] === null) {
+            return null;
+        }
+
+        // Un mes parcial ya trae su saldo calculado (esperado menos lo pagado).
+        if ($celda['estado'] === MensualidadPeriodo::ESTADO_PARCIAL) {
+            return (float) $celda['saldo'];
+        }
+
+        // Pendiente o facturado: el esperado menos lo que haya entrado (si se pagó de más, no debe).
+        return round(max(0.0, $celda['monto_esperado'] - $celda['monto_pagado']), 2);
     }
 
     /* ------------------------------------------------------------------ *
