@@ -249,6 +249,46 @@ class AvisosDelAsistenteTest extends BaseDelCanal
     }
 
     /**
+     * 🔴 Una `spa_url` sucia en `client_apis` no arma el link de repuesto ni viaja en la consulta: el
+     * aviso sale sin link. Y la validación es la del `empresa-api`, con `http` solo para hosts locales.
+     *
+     * @return void
+     */
+    public function test_una_spa_url_sucia_no_arma_link(): void
+    {
+        $espia  = $this->espiar_sender();
+        $this->crear_config_whatsapp();
+        $client = $this->crear_cliente();
+        $api    = $this->crear_client_api($client);
+        $api->spa_url = 'https://ferreteria.comerciocity.com/?ref=panel';
+        $api->save();
+        $this->fila_entrante($client);
+
+        $this->fakear_http([
+            '*/asistente/avisos-pendientes*' => Http::response($this->pendientes(null), 200),
+            '*/asistente/avisos/avisado'     => Http::response(['ok' => true], 200),
+        ]);
+
+        app(AsistenteAvisosService::class)->enviar_a($client);
+
+        $this->assertCount(1, $espia->textos);
+        $this->assertSame(self::TEXTO, $espia->textos[0]['body'], 'Con la base sucia el aviso sale sin link, no con un link roto.');
+        $this->assertStringNotContainsString('spa_url', $this->pedidos_a('/asistente/avisos-pendientes', 'GET')[0]->url());
+
+        /* Los casos de la regla. */
+        $this->assertSame('https://ferreteria.comerciocity.com', AsistenteAvisosService::base_del_spa_valida('https://ferreteria.comerciocity.com/'));
+        $this->assertSame('https://ferreteria.comerciocity.com/spa', AsistenteAvisosService::base_del_spa_valida(' https://ferreteria.comerciocity.com/spa/ '));
+        $this->assertSame('http://empresa.local', AsistenteAvisosService::base_del_spa_valida('http://empresa.local'));
+        $this->assertSame('http://localhost:8080', AsistenteAvisosService::base_del_spa_valida('http://localhost:8080'));
+        $this->assertSame('', AsistenteAvisosService::base_del_spa_valida('http://ferreteria.comerciocity.com'), 'http a un dominio público no vale.');
+        $this->assertSame('', AsistenteAvisosService::base_del_spa_valida('https://ferreteria.comerciocity.com/#/inicio'));
+        $this->assertSame('', AsistenteAvisosService::base_del_spa_valida('https://usuario:clave@ferreteria.comerciocity.com'));
+        $this->assertSame('', AsistenteAvisosService::base_del_spa_valida('ftp://ferreteria.comerciocity.com'));
+        $this->assertSame('', AsistenteAvisosService::base_del_spa_valida('ferreteria.comerciocity.com'));
+        $this->assertSame('', AsistenteAvisosService::base_del_spa_valida(''));
+    }
+
+    /**
      * 🔴 Solo se consulta a quien le escribió al asistente en las últimas 24 hs, con el canal prendido.
      *
      * @return void

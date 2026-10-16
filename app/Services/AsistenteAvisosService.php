@@ -311,7 +311,9 @@ class AsistenteAvisosService
             return $this->resultado($client, 'sin_actividad', 0, 0, 'Nadie le escribió al asistente en las últimas 24 hs.');
         }
 
-        $spa_url    = $this->urls->resolve_spa_url($client);
+        /* La base del SPA, validada: la misma sirve para la `spa_url` de la consulta y para el link
+         * de repuesto. Una base sucia no viaja ni arma links (ver `base_del_spa_valida()`). */
+        $spa_url    = self::base_del_spa_valida($this->urls->resolve_spa_url($client));
         $pendientes = $this->traer_avisos($client, $spa_url);
 
         if ($pendientes['estado'] !== 'ok') {
@@ -706,7 +708,8 @@ class AsistenteAvisosService
      * mandamos), y si no vino, el SPA que conoce el admin más la `ruta` relativa. Sin ninguna de las
      * dos, el aviso sale sin link: el dueño igual se entera de que su factura está leída.
      *
-     * Una `url` que no es http/https no se usa: es un link que el dueño no puede abrir.
+     * Una `url` que no es http/https no se usa: es un link que el dueño no puede abrir. La base del
+     * repuesto ya llega validada por `base_del_spa_valida()` (sin ella, sin link).
      *
      * @param array<string, mixed> $aviso   Aviso normalizado.
      * @param string               $spa_url SPA del cliente según el admin (sin barra final).
@@ -726,6 +729,76 @@ class AsistenteAvisosService
         }
 
         return rtrim($spa_url, '/') . '/' . ltrim($ruta, '/');
+    }
+
+    /**
+     * La base del SPA del cliente si sirve para armarle un link al dueño, o vacío.
+     *
+     * 🔴 `client_apis.spa_url` es un dato cargado a mano y puede venir sucio (chequeo independiente
+     * del 16/10/2026): con query o fragmento, pegarle la ruta deja un link roto (`...?x=1/proveedores/
+     * compras?...`); con credenciales en la URL, se las mandaría por WhatsApp; con `http` a un dominio
+     * público, el link abre sin cifrar o no abre. Se valida igual que el `empresa-api`
+     * (`AvisosDelAsistenteHelper::url_valida()`: http/https con host, sin query, sin fragmento, sin
+     * usuario, hasta 255 caracteres) y además `http` solo vale para hosts locales de desarrollo. Si no
+     * valida, el aviso sale sin link: el dueño igual se entera de que su factura está leída.
+     *
+     * Pública y estática porque la usan también el job (la `spa_url` que le anuncia al `empresa-api`)
+     * y las pruebas: la base que el admin le entrega a otro sistema es una sola.
+     *
+     * @param string $url Base candidata (por ejemplo, la de `resolve_spa_url()`).
+     *
+     * @return string Base sin barra final, o vacío si no sirve.
+     */
+    public static function base_del_spa_valida(string $url): string
+    {
+        $url = trim($url);
+        if ($url === '' || mb_strlen($url) > 255) {
+            return '';
+        }
+
+        $partes = parse_url($url);
+        if (! is_array($partes) || ! isset($partes['scheme'], $partes['host']) || trim((string) $partes['host']) === '') {
+            return '';
+        }
+
+        if (isset($partes['query']) || isset($partes['fragment']) || isset($partes['user']) || isset($partes['pass'])) {
+            return '';
+        }
+
+        $esquema = strtolower((string) $partes['scheme']);
+        if ($esquema !== 'https' && $esquema !== 'http') {
+            return '';
+        }
+
+        if ($esquema === 'http' && ! self::es_host_local((string) $partes['host'])) {
+            return '';
+        }
+
+        return rtrim($url, '/');
+    }
+
+    /**
+     * Si un host es de desarrollo local (los únicos donde se acepta `http`).
+     *
+     * @param string $host Host tal como lo devuelve `parse_url()` (el IPv6 viene entre corchetes).
+     *
+     * @return bool
+     */
+    private static function es_host_local(string $host): bool
+    {
+        $host = strtolower(trim($host, " \t\n\r\0\x0B[]"));
+
+        if (in_array($host, ['localhost', '127.0.0.1', '::1'], true)) {
+            return true;
+        }
+
+        foreach (['.localhost', '.test', '.local'] as $sufijo) {
+            if (substr($host, -strlen($sufijo)) === $sufijo) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

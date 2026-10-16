@@ -569,7 +569,9 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             $cuerpo['avisos'] = '1';
         }
 
-        $spa_url = $urls->resolve_spa_url($client);
+        /* Validada igual que el link de repuesto del aviso: una base sucia (con query, credenciales o
+         * `http` a un dominio público) no se le entrega a otro sistema. */
+        $spa_url = AsistenteAvisosService::base_del_spa_valida($urls->resolve_spa_url($client));
         if ($spa_url !== '') {
             $cuerpo['spa_url'] = $spa_url;
         }
