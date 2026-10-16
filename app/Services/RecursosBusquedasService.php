@@ -32,8 +32,9 @@ class RecursosBusquedasService
      * Se normaliza (minúsculas, sin acentos ni emojis, espacios colapsados) y se mira si tiene pinta de
      * dato personal SOBRE LA CONSULTA YA NORMALIZADA y ANTES de recortarla, así un número largo no se
      * escapa por quedar pasado de los 120 caracteres. Descarta si:
-     *   - tiene `@` (un mail);
-     *   - tiene `http` o `www.` (un link);
+     *   - tiene `@` (un mail), también el de ancho completo, que `Str::ascii` borra en vez de pasar a `@`;
+     *   - tiene `http` o `www.` (un link), o un dominio (`mi-sitio.com.ar`);
+     *   - tiene una clave: una palabra de 20 o más caracteres con letras y números (`clave_api_4ec39…`);
      *   - tiene una corrida de 5 o más dígitos, o 7 o más dígitos en total (teléfonos, CUIT, DNI,
      *     tarjetas, aunque estén escritos con espacios, puntos o guiones);
      *   - le quedan menos de 2 caracteres alfanuméricos (vacía, solo signos o solo emojis).
@@ -52,7 +53,23 @@ class RecursosBusquedasService
         // `Str::ascii` pasa a ASCII: saca los acentos ("más" → "mas", "ñ" → "n") y descarta lo que no
         // tiene equivalente (los emojis). Se baja a minúsculas antes y después porque algunas
         // transliteraciones devuelven mayúsculas.
-        $consulta = mb_strtolower(Str::ascii(mb_strtolower($texto, 'UTF-8')), 'UTF-8');
+        $bajo = mb_strtolower($texto, 'UTF-8');
+
+        // 🔴 `Str::ascii` BORRA el `＠` y el `﹫` (arroba de ancho completo y chica) en vez de pasarlos a `@`:
+        // "juan＠gmail.com" quedaba como "juangmail.com", un mail guardado. Con NFKC se vuelven `@`, `www`, etc.;
+        // si no hay extensión `intl`, igual se cortan las dos arrobas a mano.
+        if (class_exists('Normalizer')) {
+            $compatible = \Normalizer::normalize($bajo, \Normalizer::FORM_KC);
+            if (is_string($compatible)) {
+                $bajo = $compatible;
+            }
+        }
+
+        if (preg_match('/[@\x{FF20}\x{FE6B}]/u', $bajo) === 1) {
+            return null;
+        }
+
+        $consulta = mb_strtolower(Str::ascii($bajo), 'UTF-8');
         // Controles y saltos de línea cuentan como espacio; después se colapsan.
         $consulta = trim((string) preg_replace('/[\s\x00-\x1F\x7F]+/', ' ', $consulta));
 
@@ -62,6 +79,19 @@ class RecursosBusquedasService
 
         if (strpos($consulta, 'http') !== false || strpos($consulta, 'www.') !== false) {
             return null;
+        }
+
+        // Un dominio ("mi-sitio.com.ar/xxx") o una clave larga con letras y números ("clave_api_4ec39hq…").
+        if (preg_match('/[a-z0-9-]+\.(com|net|org|ar|info|edu|gob|io|me|app|shop|store)(?![a-z0-9])/', $consulta) === 1) {
+            return null;
+        }
+
+        if (preg_match_all('/[a-z0-9_\-]{20,}/', $consulta, $palabras) > 0) {
+            foreach ($palabras[0] as $palabra) {
+                if (preg_match('/\d/', $palabra) === 1 && preg_match('/[a-z]/', $palabra) === 1) {
+                    return null;
+                }
+            }
         }
 
         if (preg_match('/\d{5,}/', $consulta) === 1 || preg_match_all('/\d/', $consulta) >= 7) {

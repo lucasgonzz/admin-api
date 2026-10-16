@@ -102,6 +102,10 @@ class BusquedasDelCentroTest extends BaseDelCentroDeRecursos
             'fiado 😀'                          => 'fiado',
             'Factura  2024'                   => 'factura 2024',
             'T5.15'                           => 't5.15',
+            // Seis dígitos sueltos NO se descartan (la regla es de siete), ni una palabra larga sin números.
+            'cod 12 34 56'                    => 'cod 12 34 56',
+            'electrocardiograma portatil'     => 'electrocardiograma portatil',
+            'ver el iva 10.5'                 => 'ver el iva 10.5',
         ];
 
         foreach ($casos as $entrada => $esperada) {
@@ -164,6 +168,15 @@ class BusquedasDelCentroTest extends BaseDelCentroDeRecursos
             'link http'                 => 'https://youtube.com/watch',
             'link sin esquema'          => 'www.misitio.com.ar',
             'http a secas'              => 'como http',
+            // Exactamente siete dígitos sueltos (la frontera de la regla de 7 en total).
+            'siete digitos sueltos'     => '11 555 12',
+            'siete digitos entre letras' => '1 a 2 b 3 c 4 d 5 e 6 f 7',
+            // `Str::ascii` borra estos caracteres: se mira antes de pasar a ASCII.
+            'arroba de ancho completo'  => "juan\u{FF20}gmail.com",
+            'arroba chica'              => "juan\u{FE6B}gmail.com",
+            'www de ancho completo'     => "\u{FF57}\u{FF57}\u{FF57}.misitio.com",
+            'dominio sin esquema'       => 'mi-sitio.com.ar/xxx',
+            'clave con letras y numeros' => 'clave_api_4ec39hqlyjwdarjtt1zdp7dc',
             'solo emojis'               => '😀😀😀',
             'muy corta'                 => 'a',
             'solo signos'               => '?? ... !!',
