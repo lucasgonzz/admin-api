@@ -9805,18 +9805,22 @@ BLOQUE_DEL_MANUAL;
     }
 
     /**
-     * Construye el contenido user con historial y datos del lead.
+     * Arma el historial de la conversación tal como lo lee un modelo de IA: una línea por turno,
+     * con fecha, quién habla y el texto.
      *
-     * Si se proporciona $availability_context, se agrega al final del contenido
-     * para que Claude pueda sugerir horarios concretos de demo al setter.
+     * 🔴 Es EL lugar donde se decide qué cuenta como conversación y qué no (mensajes borrados del
+     * contexto, bloques de error internos, reacciones, formularios de WhatsApp Flow, sugerencias
+     * que nunca se enviaron, textos editados al aprobar). Salió de `build_user_content()` sin
+     * cambiar una línea de su lógica para que lo use también el redactor de recordatorios
+     * (`LeadReminderComposer`): copiar estos filtros a otro servicio los haría divergir en silencio,
+     * y esa es justo la familia de errores del 25/8/2026 (el bug de la causa inventada). Si hay que
+     * cambiar qué ve la IA del hilo, se cambia acá y lo ven todos.
      *
-     * @param Lead   $lead                 Lead con mensajes cargados.
-     * @param bool   $is_followup          true si el trigger fue inactividad del lead.
-     * @param string $availability_context Contexto de slots disponibles; vacío si no aplica.
+     * @param Lead $lead Lead; sus mensajes se cargan por la relación `messages` si no lo estaban.
      *
-     * @return string Contenido listo para enviar como mensaje user a la API.
+     * @return string Historial, con un salto de línea al final de cada turno ('' si no hay turnos).
      */
-    protected function build_user_content(Lead $lead, bool $is_followup, string $availability_context = '', ?string $intencion_forzada = null, bool $demo_directa = false): string
+    public function historial_de_la_conversacion(Lead $lead): string
     {
         $historial = '';
         foreach ($lead->messages as $msg) {
@@ -9889,6 +9893,26 @@ BLOQUE_DEL_MANUAL;
             }
             $historial .= "[{$fecha}] {$label}: {$body}\n";
         }
+
+        return $historial;
+    }
+
+    /**
+     * Construye el contenido user con historial y datos del lead.
+     *
+     * Si se proporciona $availability_context, se agrega al final del contenido
+     * para que Claude pueda sugerir horarios concretos de demo al setter.
+     *
+     * @param Lead   $lead                 Lead con mensajes cargados.
+     * @param bool   $is_followup          true si el trigger fue inactividad del lead.
+     * @param string $availability_context Contexto de slots disponibles; vacío si no aplica.
+     *
+     * @return string Contenido listo para enviar como mensaje user a la API.
+     */
+    protected function build_user_content(Lead $lead, bool $is_followup, string $availability_context = '', ?string $intencion_forzada = null, bool $demo_directa = false): string
+    {
+        /* El historial sale de historial_de_la_conversacion(): ahí viven los filtros del hilo. */
+        $historial = $this->historial_de_la_conversacion($lead);
 
         $extra = $is_followup
             ? "\nATENCIÓN: seguimiento automático por inactividad del lead. Generá un mensaje de seguimiento apropiado.\n"
