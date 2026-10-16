@@ -4,8 +4,10 @@ namespace App\Jobs;
 
 use App\Models\Client;
 use App\Models\ClientAssistantMessage;
+use App\Models\Demo;
 use App\Models\WhatsappConfig;
 use App\Services\AsistenteAvisosService;
+use App\Services\AsistenteDemoLeadService;
 use App\Services\AsistenteFotoSalienteService;
 use App\Services\AsistenteImagenesService;
 use App\Services\AsistenteWhatsappService;
@@ -311,7 +313,7 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             return;
         }
 
-        $client = Client::find((int) $fila->client_id);
+        $client = $this->resolver_destino($fila);
         if ($client === null) {
             $this->cerrar_con_error($asistente, $fila, null, $sender, 'El cliente ya no existe.');
 
@@ -401,7 +403,7 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             return;
         }
 
-        $client = Client::find((int) $fila->client_id);
+        $client = $this->resolver_destino($fila);
 
         $this->cerrar_con_error(
             app(AsistenteWhatsappService::class),
@@ -1528,31 +1530,62 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
         WhatsappSendService $sender
     ): void {
         $fila->estado = ClientAssistantMessage::ESTADO_DEGRADADO;
-        $fila->error  = 'El empresa-api de este cliente no tiene la ruta ' . self::RUTA_MENSAJES . ' (404).';
+        $fila->error  = 'El empresa-api de ' . ($fila->es_de_demo() ? 'esta demo' : 'este cliente') . ' no tiene la ruta ' . self::RUTA_MENSAJES . ' (404).';
         $fila->save();
+
+        /* Al lead que prueba el asistente en su demo no se le habla de "tu sistema" ni de su ficha de
+         * cliente: se le dice que por ahora no está disponible en la demo. Y el aviso a los admins
+         * nombra la demo, no un cliente. */
+        $demo  = $fila->es_de_demo() ? Demo::find((int) $fila->demo_id) : null;
+        $texto = $demo !== null ? AsistenteDemoLeadService::TEXTO_SIN_ENDPOINT : AsistenteWhatsappService::TEXTO_SIN_ENDPOINT;
 
         // Por el número por el que entró, igual que la respuesta: ver el comentario de `consultar()`.
         $whatsapp_message_id = $sender->paraProposito($this->proposito_de_salida($fila))->send_text(
             (string) $fila->telefono,
-            AsistenteWhatsappService::TEXTO_SIN_ENDPOINT,
-            'Asistente por WhatsApp sin endpoint - cliente #' . $client->id
+            $texto,
+            'Asistente por WhatsApp sin endpoint - ' . ($demo !== null ? 'demo #' . $demo->id : 'cliente #' . $client->id)
         );
 
         $asistente->registrar_saliente(
             $fila,
-            AsistenteWhatsappService::TEXTO_SIN_ENDPOINT,
+            $texto,
             $whatsapp_message_id,
             ClientAssistantMessage::ESTADO_DEGRADADO,
             null,
             $sender->phone_number_id_de_destino()
         );
 
-        $asistente->avisar_cliente_sin_endpoint($client);
+        if ($demo !== null) {
+            $asistente->avisar_demo_sin_endpoint($demo);
+        } else {
+            $asistente->avisar_cliente_sin_endpoint($client);
+        }
 
         Log::channel('daily')->warning('AsistenteWhatsapp: el sistema del cliente no tiene el endpoint.', [
             'assistant_message_id' => $fila->id,
             'client_id'            => $client->id,
         ]);
+    }
+
+    /**
+     * A quién se le habla para esta fila: el cliente dueño del hilo, o —si es el hilo de un lead
+     * durante su demo— el cliente VIRTUAL de la instancia de demo.
+     *
+     * Es el único punto del job que decide eso. Una fila con `demo_id` nunca pasa por `Client::find`:
+     * su `client_id` es 0 y no hay fila en `clients` que buscar (ver `AsistenteDemoLeadService`).
+     * Una fila de dueño, con `demo_id` null, hace exactamente lo de siempre.
+     *
+     * @param ClientAssistantMessage $fila
+     *
+     * @return Client|null Null si el cliente (o la demo) ya no existe.
+     */
+    private function resolver_destino(ClientAssistantMessage $fila): ?Client
+    {
+        if ($fila->es_de_demo()) {
+            return app(AsistenteDemoLeadService::class)->destino_de_la_fila($fila);
+        }
+
+        return Client::find((int) $fila->client_id);
     }
 
     /**
