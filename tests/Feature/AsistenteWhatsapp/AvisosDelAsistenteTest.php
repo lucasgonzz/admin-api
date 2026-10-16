@@ -725,6 +725,68 @@ class AvisosDelAsistenteTest extends BaseDelCanal
     }
 
     /**
+     * 🔴 El reclamo de un aviso EN VUELO vence a los 10 minutos (si el proceso muere en medio del
+     * envío, el aviso vuelve a quedar libre), y recién cuando salió pasa a durar 7 días.
+     *
+     * No se puede matar el proceso desde la prueba, así que se mira el reclamo DESDE ADENTRO del
+     * envío: el espía, en el momento en que Meta tendría el mensaje, adelanta el reloj 11 minutos y
+     * anota si el reclamo seguía ahí. Ahí es exactamente donde lo encontraría la corrida siguiente si
+     * esta hubiera muerto.
+     *
+     * @return void
+     */
+    public function test_el_reclamo_en_vuelo_vence_a_los_diez_minutos_y_el_enviado_dura_siete_dias(): void
+    {
+        $prueba = $this;
+        $espia  = new class extends \App\Services\WhatsappSendService {
+            /** @var callable|null Lo que pasa "mientras Meta tiene el mensaje". */
+            public $durante = null;
+
+            public function send_text(string $to, string $body, ?string $context = null, bool $skip_failure_notification = false): ?string
+            {
+                if ($this->durante !== null) {
+                    call_user_func($this->durante);
+                }
+
+                return 'wamid.saliente.1';
+            }
+        };
+        $this->app->instance(\App\Services\WhatsappSendService::class, $espia);
+
+        $this->crear_config_whatsapp();
+        $client = $this->crear_cliente();
+        $this->fila_entrante($client);
+
+        $this->fakear_http([
+            '*/asistente/avisos-pendientes*' => Http::response($this->pendientes(), 200),
+            '*/asistente/avisos/avisado'     => Http::response(['message' => 'Server Error'], 500),
+        ]);
+
+        $servicio = app(AsistenteAvisosService::class);
+        $clave    = $servicio->clave_de_reclamo($client, self::ID);
+
+        $en_vuelo_al_minuto_nueve = null;
+        $en_vuelo_al_minuto_once  = null;
+        $espia->durante = function () use ($prueba, $clave, &$en_vuelo_al_minuto_nueve, &$en_vuelo_al_minuto_once) {
+            $prueba->travel(9)->minutes();
+            $en_vuelo_al_minuto_nueve = Cache::has($clave);
+            $prueba->travel(2)->minutes();
+            $en_vuelo_al_minuto_once = Cache::has($clave);
+        };
+
+        $this->assertSame('enviado', $servicio->enviar_a($client)['estado']);
+
+        $this->assertTrue($en_vuelo_al_minuto_nueve, 'Mientras el envío está en vuelo, el aviso está reclamado.');
+        $this->assertFalse($en_vuelo_al_minuto_once, 'Si el proceso muriera en medio del envío, a los 10 minutos el aviso vuelve a quedar libre.');
+
+        /* Ya salió (y la marca falló): el reclamo dura los 7 días y guarda con qué salió. */
+        $this->travel(6)->days();
+        $reclamo = Cache::get($clave);
+        $this->assertSame(AsistenteAvisosService::RECLAMO_ENVIADO, $reclamo['estado']);
+        $this->assertSame('wamid.saliente.1', $reclamo['whatsapp_message_id']);
+    }
+
+    /**
      * Un aviso que alguien ya reclamó (otra corrida en vuelo) no se manda.
      *
      * @return void

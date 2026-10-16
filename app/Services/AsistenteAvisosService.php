@@ -87,6 +87,17 @@ class AsistenteAvisosService
     const DIAS_DEL_RECLAMO = 7;
 
     /**
+     * Minutos que dura el reclamo mientras el aviso se está MANDANDO (estado `reclamado`).
+     *
+     * 🔴 Corto a propósito (chequeo independiente del 16/10/2026). Entre el `Cache::add()` y el
+     * `put()`/`forget()` que lo cierra hay un envío a Meta; si el proceso muere justo ahí (OOM, un
+     * reinicio), con los siete días del reclamo largo el aviso no saldría nunca. Diez minutos son
+     * muchísimo más que un envío (segundos) y menos que la vida útil del aviso. Los siete días los
+     * toma el reclamo recién cuando el aviso ya salió (`enviado`/`marcado`).
+     */
+    const MINUTOS_DEL_RECLAMO_EN_CURSO = 10;
+
+    /**
      * Minutos hacia atrás en los que un mensaje del dueño sin contestar frena el aviso.
      *
      * El job se rinde a los 180 s y la espera de la foto dura minutos, así que media hora cubre
@@ -145,7 +156,7 @@ class AsistenteAvisosService
     /**
      * Estados del reclamo guardado en la cache.
      *
-     * - `reclamado`: alguien lo está mandando ahora mismo (o murió en el medio: el reclamo vence solo).
+     * - `reclamado`: alguien lo está mandando ahora mismo (o murió en el medio: vence a los 10 min).
      * - `enviado`: el WhatsApp salió y falta que el `empresa-api` lo marque.
      * - `marcado`: salió y quedó marcado (o el `empresa-api` ya no lo reconoce): no hay nada más que hacer.
      * - `fallido`: Meta lo rechazó INTENTOS_MAXIMOS veces: no se reintenta más (vence a las 24 hs).
@@ -398,7 +409,7 @@ class AsistenteAvisosService
         }
 
         /* `add()` es atómico: con dos corridas pisándose, una sola manda. */
-        if (! Cache::add($clave, ['estado' => self::RECLAMO_RECLAMADO], now()->addDays(self::DIAS_DEL_RECLAMO))) {
+        if (! Cache::add($clave, ['estado' => self::RECLAMO_RECLAMADO], now()->addMinutes(self::MINUTOS_DEL_RECLAMO_EN_CURSO))) {
             return 'en_curso';
         }
 
