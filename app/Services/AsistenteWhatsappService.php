@@ -149,23 +149,22 @@ class AsistenteWhatsappService
      *
      * **El lead durante su demo** (misión mail-demo-turno-y-asistente, 16/10/2026): con `$demo` y
      * `$lead` el hilo es el de un lead probando el asistente sobre su instancia de demostración.
-     * `$client` es entonces el cliente VIRTUAL de esa demo (en memoria, sin fila en `clients`: ver
-     * `AsistenteDemoLeadService::cliente_virtual()`), la fila queda con `client_id` 0 y con
-     * `demo_id`/`lead_id` cargados, y el job sabe por ahí a quién hablarle. Sin esos dos argumentos
-     * todo es idéntico a como era.
+     * `$client` va en null (la demo no es un cliente: no tiene fila en `clients`), la fila queda con
+     * `client_id` 0 y con `demo_id`/`lead_id` cargados, y el job arma el destino desde la demo
+     * (`AsistenteDemoLeadService::cliente_virtual()`). Sin esos dos argumentos todo es idéntico a como era.
      *
      * @param array<string, mixed> $parsed Resultado de `WhatsappWebhookController::parse_inbound_message()`.
-     * @param Client               $client Cliente cuyo dueño escribió (o el virtual de la demo).
+     * @param Client|null          $client Cliente cuyo dueño escribió; null si escribe un lead durante su demo.
      * @param Demo|null            $demo   Instancia de demo, solo si escribe un lead durante su turno.
      * @param Lead|null            $lead   Lead que escribió, solo con `$demo`.
      *
      * @return ClientAssistantMessage La fila entrante ya persistida.
      */
-    public function recibir(array $parsed, Client $client, ?Demo $demo = null, ?Lead $lead = null): ClientAssistantMessage
+    public function recibir(array $parsed, ?Client $client, ?Demo $demo = null, ?Lead $lead = null): ClientAssistantMessage
     {
         /* El id con el que se agrupa el hilo: el del cliente, o 0 para el de una demo (el cliente virtual
          * no existe en la base y la fila se distingue por `demo_id`). */
-        $client_id_del_hilo = $demo !== null ? 0 : (int) $client->id;
+        $client_id_del_hilo = $demo !== null || $client === null ? 0 : (int) $client->id;
 
         $reply_to = isset($parsed['reply_to_message_id']) ? trim((string) $parsed['reply_to_message_id']) : '';
 
@@ -175,8 +174,6 @@ class AsistenteWhatsappService
 
         $fila                               = new ClientAssistantMessage();
         $fila->client_id                    = $client_id_del_hilo;
-        $fila->demo_id                      = $demo !== null ? (int) $demo->id : null;
-        $fila->lead_id                      = $demo !== null && $lead !== null ? (int) $lead->id : null;
         $fila->telefono                     = (string) $parsed['from'];
         $fila->phone_number_id              = $this->phone_number_id_del_payload($parsed);
         $fila->direccion                    = ClientAssistantMessage::DIRECCION_ENTRANTE;
@@ -187,6 +184,15 @@ class AsistenteWhatsappService
         $fila->estado                       = $espera
             ? ClientAssistantMessage::ESTADO_ESPERANDO
             : ClientAssistantMessage::ESTADO_RECIBIDO;
+
+        /* 🔴 Las dos columnas de la demo se asignan SOLO para el hilo de un lead. Una fila de dueño no las
+         * toca ni siquiera con null: Eloquent mete en el INSERT todo atributo asignado, y con el código
+         * nuevo corriendo sobre una base que todavía no tiene la migración (la ventana de un despliegue) el
+         * INSERT de un dueño fallaría por una columna que su camino no necesita. */
+        if ($demo !== null) {
+            $fila->demo_id = (int) $demo->id;
+            $fila->lead_id = $lead !== null ? (int) $lead->id : null;
+        }
 
         /* La cita se resuelve ACÁ y no en el job a propósito: es una consulta a una tabla propia,
          * no sale a la red, y dejarla resuelta en la fila hace que el hilo se pueda leer sin
@@ -797,6 +803,14 @@ class AsistenteWhatsappService
         );
 
         $fila->ai_message_id = $entrante->ai_message_id;
+
+        /* El hilo de un lead durante su demo: la respuesta hereda la demo y el lead, para leer el hilo de un
+         * vistazo. Una fila de dueño no toca estas columnas (ver `recibir()`). */
+        if ($entrante->es_de_demo()) {
+            $fila->demo_id = (int) $entrante->demo_id;
+            $fila->lead_id = $entrante->lead_id !== null ? (int) $entrante->lead_id : null;
+        }
+
         $fila->save();
 
         return $fila;

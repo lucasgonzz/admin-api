@@ -67,6 +67,11 @@ class LeadDemoAccesoMailHelper
         // Turno de la demo y asistente: los dos pueden faltar, y el mail se arma igual sin ellos.
         $turno = DemoTurnoTexto::de_lead($lead);
 
+        /* El asistente solo se ofrece DENTRO de un turno vigente (un reenvío con el turno vencido no puede
+         * prometer un asistente que ya no contesta), a un lead al que se le pueda contestar y sobre una
+         * instancia que pueda atenderlo. */
+        $con_asistente = $turno !== null && AsistenteDemoLeadService::disponible_para($lead, $lead->demo);
+
         return new LeadDemoAccesoMail(
             $nombre,
             $url_experiencia,
@@ -76,8 +81,8 @@ class LeadDemoAccesoMailHelper
             $presenter_name,
             $presenter_role,
             $turno,
-            AsistenteDemoLeadService::numero_visible(),
-            AsistenteDemoLeadService::url_whatsapp()
+            $con_asistente ? AsistenteDemoLeadService::numero_visible() : '',
+            $con_asistente ? AsistenteDemoLeadService::url_whatsapp() : ''
         );
     }
 

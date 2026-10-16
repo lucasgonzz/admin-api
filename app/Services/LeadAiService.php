@@ -6433,9 +6433,13 @@ TXT;
                     $demo_end   = $libre['fin']->format('H:i');
 
                     $demo_confirmada_este_turno = true;
-                    /* Para la carta de acceso: si cambió la instancia, la carta anterior apunta a
-                     * la tienda vieja y hay que mandar otra. */
-                    $demo_directa_cambio_de_instancia = (int) $lead->demo_id !== $demo_id;
+                    /* Para la carta de acceso: si cambió la instancia, la carta anterior apunta a la tienda vieja; y si
+                     * cambió el TURNO (misión mail-demo-turno-y-asistente), le dice un día y una hora que ya no
+                     * son los suyos. En los dos casos hay que mandar otra. Una reasignación casi siempre cae en la
+                     * misma instancia (la de menor id libre) con otra hora de inicio. */
+                    $demo_directa_cambio_de_instancia = (int) $lead->demo_id !== $demo_id
+                        || ($lead->demo_date !== null ? $lead->demo_date->format('Y-m-d') : '') !== $demo_date
+                        || self::time_string_to_hhmm($lead->demo_start_time) !== $demo_start;
 
                     /*
                      * 🔴 La asignación se PERSISTE ACÁ, adentro del lock, con un UPDATE directo por
@@ -9466,29 +9470,63 @@ BLOQUE_DEL_MANUAL;
          * Solo aplica con la demo todavía sin asignar. Con la demo ya asignada (`YA ASIGNADA`) no hay nada que
          * agendar: el lead que pasa su correo después sigue por el `guardar_email` suelto de siempre. */
         $demo_vigente_asignada = $tiene_demo_asignada && ! $demo_asignada_vencida;
-        $mail_primero          = $email === '' && ! $demo_vigente_asignada;
+
+        /* Sin instancia para asignar (todas ocupadas, no entra hoy, no hay cargadas) no tiene sentido pedir el mail:
+         * la reserva no existe. El estado `Demo:` de arriba ya dice qué responder. */
+        $hay_instancia_para_asignar = $prevista['demo'] !== null && $prevista['cabe_hoy'];
+
+        /* Cuántas veces ya se le pidió el correo (se cuenta en PHP, no se le deja contar al modelo): a la segunda
+         * sin respuesta, la regla pasa a "no insistas: links igual". Sin este contador, un lead que ignora el
+         * pedido o cambia de tema quedaría sin links indefinidamente. */
+        $pedidos_del_mail = ($email === '' && ! $demo_vigente_asignada) ? $this->contar_pedidos_del_mail($lead) : 0;
+        $ya_insistio      = $pedidos_del_mail >= 2;
+
+        $mail_primero          = $email === '' && ! $demo_vigente_asignada && $hay_instancia_para_asignar && ! $ya_insistio;
         $texto_pedido_del_mail = '"¿a qué mail te mando todo? Ahí te llegan el día y la hora de tu demo, cómo aprovecharla y el acceso"';
 
         $frases_de_los_botones = LeadOrigenService::frases_de_cta_para_el_prompt();
 
-        if ($mail_primero) {
+        if (! $demo_vigente_asignada && ! $hay_instancia_para_asignar) {
+            /* Es un sí, pero no hay nada que asignar: ni se pide el mail ni se pasan links (el estado `Demo:` dice
+             * qué contestar). */
+            $regla_del_si = "  - Si el lead pide la demo (por ejemplo " . $frases_de_los_botones . ", que es lo que\n"
+                . "    mandan el boton de su pagina, el de la web y el de Instagram, o cualquier frase equivalente), es un SI, pero ahora NO se\n"
+                . "    puede asignar ninguna instancia (ver la linea Demo: de arriba): no pidas el mail, no pases ningun link y no devuelvas\n"
+                . "    agendar_demo. Segui lo que dice esa linea.\n";
+            $regla_de_aceptar = '';
+        } elseif ($mail_primero) {
             $regla_del_si = "  - Si el lead pide la demo (por ejemplo " . $frases_de_los_botones . ", que es lo que\n"
                 . "    mandan el boton de su pagina, el de la web y el de Instagram, o cualquier frase equivalente), es un SI. TODAVIA NO\n"
                 . "    TENEMOS SU MAIL y es lo PRIMERO que se pide: en ese mensaje confirmale que si, que la haga desde una computadora\n"
                 . "    y en un lugar tranquilo, decile que " . $this->frase_de_la_reserva($fin_para_la_frase, $minutos_de_la_reserva, true) . ", y pedile el mail con\n"
-                . "    una sola pregunta: " . $texto_pedido_del_mail . ". NO devuelvas agendar_demo todavia, NO pases ningun link y\n"
-                . "    NO digas que ya la estas preparando: la demo se asigna cuando pasa el mail. No digas ninguna hora.\n";
+                . "    una sola pregunta: " . $texto_pedido_del_mail . ". NO devuelvas agendar_demo todavia, NO pases ningun link (ni el de\n"
+                . "    su pagina: esto pisa lo que diga la linea de su pagina) y NO digas que ya la estas preparando: la demo se asigna cuando pasa\n"
+                . "    el mail. No digas ninguna hora. Devolve estado_sugerido igual al que ya tenia (\"" . (string) $lead->status . "\"), NO demo_agendada:\n"
+                . "    todavia no hay ninguna demo asignada."
+                . (trim((string) $lead->contact_first_name) === '' ? " Si todavia no tenemos su nombre, pedilo en la misma pregunta." : '')
+                . "\n";
 
             $regla_de_aceptar = "  - Cuando acepta hacerla ahora y te pasa su mail (respuesta a ese pedido): devolve guardar_email con el correo Y\n"
                 . "    agendar_demo: {\"ahora\": true} EN EL MISMO paquete, y en el MISMO mensaje pasale los dos\n"
                 . "    links de arriba (la pagina —aunque ya la tenga, se repite: ahi ve el formulario, el video y el boton— y la\n"
-                . "    tienda, copiados textuales), decile que " . $frase_de_la_reserva . " y que le mandaste el mail con todo. El sistema asigna la\n"
-                . "    instancia libre al enviar y la demo arranca diez minutos despues: no inventes hora ni fecha, el mail trae las\n"
-                . "    reales. Si el correo viene con un error evidente (sin arroba, dominio cortado), pedile que lo revise y no devuelvas\n"
-                . "    nada todavia.\n"
+                . "    tienda, copiados textuales), decile que " . $frase_de_la_reserva . " y que le mandaste el mail con todo.\n"
+                . "    NO escribas \"en diez minutos\" ni \"en unos minutos\" en ese mensaje (el sistema lo toma por un horario concreto): deci\n"
+                . "    \"ya la estoy preparando\". El sistema asigna la instancia libre al enviar y la demo arranca diez minutos despues:\n"
+                . "    no inventes hora ni fecha, el mail trae las reales. Si el correo viene con un error evidente (sin arroba, dominio\n"
+                . "    cortado), pedile que lo revise y no devuelvas nada todavia.\n"
                 . "  - Si no quiere pasar el mail (se niega, no tiene, prefiere no): explicale UNA sola vez para que sirve (el dia y la\n"
                 . "    hora de su demo, como aprovecharla y que es su llave para abrirla desde la compu). Si sigue sin querer, no\n"
                 . "    insistas: devolve agendar_demo: {\"ahora\": true} y pasale los dos links igual, sin volver a pedirle el mail.\n";
+        } elseif ($email === '' && ! $demo_vigente_asignada) {
+            /* Ya se le pidió el correo dos veces o más y no lo dio: se sigue sin él. */
+            $regla_del_si = "  - Si el lead pide la demo (por ejemplo " . $frases_de_los_botones . ", que es lo que\n"
+                . "    mandan el boton de su pagina, el de la web y el de Instagram, o cualquier frase equivalente), es un SI. YA LE PEDISTE EL\n"
+                . "    MAIL " . $pedidos_del_mail . " VECES y no lo paso: NO se lo pidas de nuevo. Devolve agendar_demo: {\"ahora\": true} ahora, con los\n"
+                . "    dos links, y decile que " . $frase_de_la_reserva . ". Si despues lo pasa, guardar_email solo.\n";
+
+            $regla_de_aceptar = "  - Cuando acepta hacerla ahora: devolve agendar_demo: {\"ahora\": true} y en el MISMO mensaje pasale los dos\n"
+                . "    links de arriba (la pagina —aunque ya la tenga, se repite: ahi ve el formulario, el video y el boton— y la\n"
+                . "    tienda, copiados textuales), sin pedirle el mail. NO escribas \"en diez minutos\" ni \"en unos minutos\" en ese mensaje.\n";
         } elseif ($email !== '' && ! $demo_vigente_asignada) {
             $regla_del_si = "  - Si el lead pide la demo (por ejemplo " . $frases_de_los_botones . ", que es lo que\n"
                 . "    mandan el boton de su pagina, el de la web y el de Instagram, o cualquier frase equivalente), es un SI. Ya tenemos\n"
@@ -9498,7 +9536,8 @@ BLOQUE_DEL_MANUAL;
 
             $regla_de_aceptar = "  - Cuando acepta hacerla ahora: devolve agendar_demo: {\"ahora\": true} y en el MISMO mensaje pasale los dos\n"
                 . "    links de arriba (la pagina —aunque ya la tenga, se repite: ahi ve el formulario, el video y el boton— y la\n"
-                . "    tienda, copiados textuales). No le pidas el mail: ya lo tenemos. El sistema asigna la instancia libre al enviar\n"
+                . "    tienda, copiados textuales). No le pidas el mail: ya lo tenemos. NO escribas \"en diez minutos\" ni \"en unos minutos\" en\n"
+                . "    ese mensaje (el sistema lo toma por un horario concreto). El sistema asigna la instancia libre al enviar\n"
                 . "    y la demo arranca diez minutos despues: no inventes hora ni fecha.\n";
         } else {
             /* Demo ya asignada: no hay nada que aceptar ni agendar; las reglas de abajo (ahora no puede, mail suelto)
@@ -9512,7 +9551,7 @@ BLOQUE_DEL_MANUAL;
         /* El asistente personal para probar durante la demo (misión mail-demo-turno-y-asistente). Solo se
          * nombra si el numero esta LISTO (`AsistenteDemoLeadService::disponible()`); si no, el agente no puede
          * prometerlo. El mail trae el detalle: el agente no lo explica por su cuenta. */
-        if (AsistenteDemoLeadService::disponible()) {
+        if (AsistenteDemoLeadService::disponible_para($lead, $demo_para_tienda)) {
             $linea_del_asistente_en_reglas = "  - Asistente personal para probar durante la demo: DISPONIBLE (" . AsistenteDemoLeadService::numero_visible() . "). El mail de\n"
                 . "    acceso se lo explica. Si el lead pregunta, decile que durante su turno puede escribirle a ese numero desde este\n"
                 . "    mismo WhatsApp y pedirle cosas sobre los datos de su demo (ventas del dia, stock, cargar un cliente). No lo ofrezcas\n"
@@ -9552,6 +9591,31 @@ BLOQUE_DEL_MANUAL;
             . "  - No existen usuario ni contrasena: todo el acceso pasa por el boton de la pagina.";
 
         return $bloque;
+    }
+
+    /**
+     * Cuántas veces el agente le pidió el correo a este lead en las últimas doce horas.
+     *
+     * Se cuenta mirando lo que SALIÓ del agente (con `sent_at`) y nombra el mail o el correo. Es la
+     * base de la regla "a la segunda sin respuesta, links igual" del bloque DEMO DIRECTA: el modelo no
+     * tiene que acordarse de cuántas veces preguntó, lo cuenta el servidor.
+     *
+     * @param Lead $lead
+     *
+     * @return int
+     */
+    private function contar_pedidos_del_mail(Lead $lead): int
+    {
+        return LeadMessage::query()
+            ->where('lead_id', (int) $lead->id)
+            ->where('sender', '!=', 'lead')
+            ->where('is_status_event', false)
+            ->whereNotNull('sent_at')
+            ->where('created_at', '>=', AppTime::now()->subHours(12))
+            ->where(function ($consulta) {
+                $consulta->where('content', 'like', '%mail%')->orWhere('content', 'like', '%correo%');
+            })
+            ->count();
     }
 
     /**
@@ -9601,16 +9665,9 @@ BLOQUE_DEL_MANUAL;
      */
     private function frase_de_la_reserva(?string $fin_hhmm, ?int $minutos_reales = null, bool $sin_hora = false): string
     {
-        $duracion_minutos = LeadDemoSettings::get_duracion_minutos();
-
-        if ($duracion_minutos <= 60) {
-            $duracion_en_palabras = 'dura menos de una hora';
-        } else {
-            /* Siguiente hora entera ESTRICTAMENTE mayor que la duración, así "menos de X" nunca
-             * miente: 90 min -> "menos de dos horas", 120 min -> "menos de tres horas". */
-            $horas_duracion       = (int) floor($duracion_minutos / 60) + 1;
-            $duracion_en_palabras = 'dura menos de ' . self::horas_en_letras($horas_duracion);
-        }
+        /* La cuenta de la duración ("menos de una hora", "menos de dos horas"...) vive en UN solo lugar, que el
+         * mail también usa: lo que el agente dice por el chat y lo que dice el mail no pueden diferir. */
+        $duracion_en_palabras = 'dura ' . DemoTurnoTexto::duracion_en_palabras();
 
         $horas_de_reserva = LeadDemoSettings::get_ventana_extendida_max_horas();
         $tiene_fin        = $fin_hhmm !== null && trim($fin_hhmm) !== '';

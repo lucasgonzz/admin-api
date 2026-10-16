@@ -63,8 +63,17 @@ class AddDemoYLeadToClientAssistantMessagesTable extends Migration
         }
 
         if (Schema::hasColumn('client_assistant_messages', 'demo_id')) {
+            /* El índice se saca primero y con su propio try: si la columna existía pero el índice no (una
+             * corrida a medias), el `down()` igual tiene que poder sacar la columna. */
+            try {
+                Schema::table('client_assistant_messages', function (Blueprint $table) {
+                    $table->dropIndex('cli_asist_msg_demo_idx');
+                });
+            } catch (\Throwable $e) {
+                // Sin índice que sacar: sigue con la columna.
+            }
+
             Schema::table('client_assistant_messages', function (Blueprint $table) {
-                $table->dropIndex('cli_asist_msg_demo_idx');
                 $table->dropColumn('demo_id');
             });
         }

@@ -444,6 +444,67 @@ class DemoDirectaTest extends TestCase
         $this->assertFalse((bool) $lead->requiere_intervencion_humana);
     }
 
+    /**
+     * (8b) 🔴 `guardar_email` + `agendar_demo` en el MISMO paquete —el orden nuevo: el correo se pide ANTES de los
+     *      links (misión mail-demo-turno-y-asistente)— mandan UNA sola carta, ya con el turno asignado: el mail
+     *      sale con el día y la hora reales, no con un turno vacío ni dos veces.
+     *
+     * @return void
+     */
+    public function test_guardar_email_y_agendar_demo_juntos_mandan_una_sola_carta_con_el_turno(): void
+    {
+        $demo    = $this->crear_demo(1);
+        $lead    = $this->crear_lead_de_la_dinamica_nueva();
+        $mensaje = $this->crear_mensaje_pendiente($lead, $demo);
+
+        (new LeadAiService())->apply_pending_actions($mensaje, $this->final_actions_del_panel($lead, ['guardar_email' => 'lead@test.local']));
+
+        Mail::assertSent(LeadDemoAccesoMail::class, 1);
+        Mail::assertSent(LeadDemoAccesoMail::class, function (LeadDemoAccesoMail $mail) {
+            $mail->build();
+
+            return $mail->hasTo('lead@test.local')
+                && is_array($mail->turno)
+                && $mail->turno['hora_inicio'] === '10:10'
+                && $mail->turno['es_hoy'] === true
+                && strpos((string) $mail->subject, 'hoy a las 10:10') !== false;
+        });
+        $this->assertSame('lead@test.local', $lead->refresh()->email);
+        $this->assertNotNull($lead->demo_mail_sent_at);
+    }
+
+    /**
+     * (8c) 🔴 Al reasignar al lead —casi siempre la MISMA instancia, con otra hora de inicio— se manda otra
+     *      carta: la anterior le dice un día y una hora que ya no son los suyos (desde esta misión el mail lleva
+     *      el turno).
+     *
+     * @return void
+     */
+    public function test_al_reasignar_la_misma_instancia_con_otro_turno_se_manda_otra_carta(): void
+    {
+        $demo = $this->crear_demo(1);
+        $lead = $this->crear_lead_de_la_dinamica_nueva();
+        $lead->email             = 'lead@test.local';
+        $lead->status            = 'calificado';
+        $lead->demo_id           = $demo->id;
+        $lead->demo_date         = '2026-09-07';
+        $lead->demo_start_time   = '10:10';
+        $lead->demo_end_time     = '12:10';
+        $lead->demo_mail_sent_at = AppTime::now()->subDay();
+        $lead->save();
+        $mensaje = $this->crear_mensaje_pendiente($lead, $demo);
+
+        (new LeadAiService())->apply_pending_actions($mensaje, $this->final_actions_del_panel($lead));
+
+        $this->assertSame($demo->id, (int) $lead->refresh()->demo_id, 'Misma instancia.');
+        Mail::assertSent(LeadDemoAccesoMail::class, 1);
+        Mail::assertSent(LeadDemoAccesoMail::class, function (LeadDemoAccesoMail $mail) {
+            $mail->build();
+
+            return is_array($mail->turno) && $mail->turno['es_hoy'] === true;
+        });
+    }
+
     /* ------------------------------------------------------------------ */
     /* 9 a 14 — lo que encontró el chequeo adversarial                       */
     /* ------------------------------------------------------------------ */

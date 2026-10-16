@@ -10,6 +10,7 @@ use App\Models\WhatsappConfig;
 use App\Services\AsistenteDemoLeadService;
 use App\Services\DemoDirectaService;
 use App\Services\DemoTurnoTexto;
+use App\Services\LeadDemoSettings;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Tests\TestCase;
@@ -45,6 +46,12 @@ class MailDeLaDemoConTurnoTest extends TestCase
         parent::setUp();
 
         Carbon::setTestNow(Carbon::parse('2026-10-16 15:00:00', self::TZ));
+
+        // Lo que define cuándo vence un turno y cuánto se reserva.
+        AdminSetting::set(LeadDemoSettings::KEY_GRACIA_MINUTOS_POST, '10');
+        AdminSetting::set(LeadDemoSettings::KEY_BLOQUEO_REAL_MINUTOS, '120');
+        AdminSetting::set(LeadDemoSettings::KEY_VENTANA_EXTENDIDA_MAX_HORAS, '2');
+        AdminSetting::set(LeadDemoSettings::KEY_DURACION_MINUTOS, '60');
     }
 
     /**
@@ -61,16 +68,18 @@ class MailDeLaDemoConTurnoTest extends TestCase
      * Demo de prueba con (o sin) tienda online.
      *
      * @param string $ecommerce_spa_url URL de la tienda, o '' para una instancia sin tienda.
+     * @param string $api_key           Clave de la demo, o '' para una instancia sin clave.
      *
      * @return Demo
      */
-    private function crear_demo(string $ecommerce_spa_url = 'https://demo-tienda.test'): Demo
+    private function crear_demo(string $ecommerce_spa_url = 'https://demo-tienda.test', string $api_key = 'clave-de-la-demo'): Demo
     {
         $demo                    = new Demo();
         $demo->erp_spa_url       = 'https://demo-erp.test';
         $demo->erp_api_url       = 'https://demo-erp-api.test';
         $demo->ecommerce_spa_url = $ecommerce_spa_url;
         $demo->ecommerce_api_url = 'https://demo-tienda-api.test';
+        $demo->api_key           = $api_key;
         $demo->save();
 
         return $demo;
@@ -84,13 +93,14 @@ class MailDeLaDemoConTurnoTest extends TestCase
      * @param string|null $inicio Hora de inicio ("HH:MM").
      * @param string|null $fin    Hora de fin ("HH:MM").
      * @param string|null $nombre Nombre completo del contacto.
+     * @param string      $telefono Teléfono del lead.
      *
      * @return Lead
      */
-    private function crear_lead(Demo $demo, ?string $fecha = '2026-10-16', ?string $inicio = '15:10', ?string $fin = '17:10', ?string $nombre = 'Guillermo González'): Lead
+    private function crear_lead(Demo $demo, ?string $fecha = '2026-10-16', ?string $inicio = '15:10', ?string $fin = '17:10', ?string $nombre = 'Guillermo González', string $telefono = '+5493417778899'): Lead
     {
         $lead                  = new Lead();
-        $lead->phone           = '+5493417778899';
+        $lead->phone           = $telefono;
         $lead->email           = 'guillermo@ejemplo.test';
         $lead->contact_name    = $nombre;
         $lead->status          = 'demo_agendada';
@@ -308,6 +318,106 @@ class MailDeLaDemoConTurnoTest extends TestCase
         $this->assertFalse(AsistenteDemoLeadService::disponible());
         $this->assertStringNotContainsString('Probalo desde tu WhatsApp', $html);
         $this->assertStringNotContainsString('wa.me', $html);
+    }
+
+    /**
+     * (2d) 🔴 Con el número listo pero SIN turno vigente (un reenvío cuando el turno ya terminó), el mail
+     * no ofrece el asistente: el número le contestaría "no tenés una demo activa".
+     *
+     * @return void
+     */
+    public function test_sin_turno_vigente_el_mail_no_ofrece_el_asistente(): void
+    {
+        $this->dejar_listo_el_asistente();
+        $lead = $this->crear_lead($this->crear_demo(), '2026-10-15', '15:10', '17:10');
+
+        $html = LeadDemoAccesoMailHelper::build($lead)->render();
+
+        $this->assertStringContainsString('Estas son tus llaves.', $html);
+        $this->assertStringNotContainsString('Probalo desde tu WhatsApp', $html);
+        $this->assertStringNotContainsString('wa.me', $html);
+        $this->assertStringNotContainsString('asistente personal', $html);
+    }
+
+    /**
+     * (2e) 🔴 Un lead con teléfono de otro país no recibe la oferta del asistente: el envío normaliza el
+     * destino como argentino y no se le podría contestar.
+     *
+     * @return void
+     */
+    public function test_a_un_lead_de_otro_pais_no_se_le_ofrece_el_asistente(): void
+    {
+        $this->dejar_listo_el_asistente();
+        $lead = $this->crear_lead($this->crear_demo(), '2026-10-16', '15:10', '17:10', 'Guillermo González', '+12015550123');
+
+        $html = LeadDemoAccesoMailHelper::build($lead)->render();
+
+        $this->assertStringContainsString('Tu demo está reservada.', $html);
+        $this->assertStringNotContainsString('Probalo desde tu WhatsApp', $html);
+        $this->assertStringNotContainsString('wa.me', $html);
+    }
+
+    /**
+     * (2f) 🔴 Sobre una instancia sin clave (`demos.api_key` vacía) el asistente no puede atender: el mail no lo
+     * promete.
+     *
+     * @return void
+     */
+    public function test_con_la_demo_sin_clave_el_mail_no_ofrece_el_asistente(): void
+    {
+        $this->dejar_listo_el_asistente();
+        $lead = $this->crear_lead($this->crear_demo('https://demo-tienda.test', ''));
+
+        $html = LeadDemoAccesoMailHelper::build($lead)->render();
+
+        $this->assertStringNotContainsString('Probalo desde tu WhatsApp', $html);
+        $this->assertStringNotContainsString('wa.me', $html);
+    }
+
+    /**
+     * (1d) El turno vence como vence el resto del ciclo de la demo (fin + gracia): a las 17:15 el turno de
+     * 15:10 a 17:10 sigue vigente (gracia de 10 minutos → 17:20) y a las 17:25 ya no.
+     *
+     * @return void
+     */
+    public function test_el_turno_vence_con_la_misma_regla_que_el_resto_de_la_demo(): void
+    {
+        $lead = $this->crear_lead($this->crear_demo());
+
+        $this->assertNotNull(DemoTurnoTexto::de_lead($lead, Carbon::parse('2026-10-16 17:15:00', self::TZ)));
+        $this->assertNull(DemoTurnoTexto::de_lead($lead, Carbon::parse('2026-10-16 17:25:00', self::TZ)));
+    }
+
+    /**
+     * Un nombre de lead hostil sale escapado: nada de HTML ni comillas sin escapar en el cuerpo.
+     *
+     * @return void
+     */
+    public function test_el_nombre_del_lead_sale_escapado(): void
+    {
+        $lead = $this->crear_lead($this->crear_demo(), '2026-10-16', '15:10', '17:10', '<img src=x onerror=alert(1)> "Guille"');
+
+        $mail = LeadDemoAccesoMailHelper::build($lead);
+        $html = $mail->render();
+
+        $this->assertStringNotContainsString('<img src=x', $html);
+        $this->assertStringNotContainsString('onerror=alert(1)>', $html);
+        $this->assertStringContainsString('&lt;img', $html);
+    }
+
+    /**
+     * Sin turno y sin tienda el mail habla de UN acceso (no promete un segundo que no está).
+     *
+     * @return void
+     */
+    public function test_sin_turno_y_sin_tienda_habla_de_un_solo_acceso(): void
+    {
+        $lead = $this->crear_lead($this->crear_demo(''), null);
+
+        $html = LeadDemoAccesoMailHelper::build($lead)->render();
+
+        $this->assertStringContainsString('Este acceso abre la demo', $html);
+        $this->assertStringNotContainsString('Son dos accesos', $html);
     }
 
     /**

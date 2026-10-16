@@ -12,8 +12,10 @@ use App\Models\SupportTicket;
 use App\Services\AsistenteDemoLeadService;
 use App\Services\AsistenteWhatsappService;
 use App\Services\DemoDirectaService;
+use App\Services\LeadDemoSettings;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 
@@ -52,6 +54,12 @@ class AsistenteDeLaDemoParaLeadsTest extends BaseDelCanal
 
         Carbon::setTestNow(Carbon::parse('2026-10-16 15:30:00', self::TZ));
         Cache::flush();
+
+        // Lo que define cuándo vence un turno (una sola definición para el mail, la página y el asistente).
+        AdminSetting::set(LeadDemoSettings::KEY_GRACIA_MINUTOS_POST, '10');
+        AdminSetting::set(LeadDemoSettings::KEY_BLOQUEO_REAL_MINUTOS, '120');
+        AdminSetting::set(LeadDemoSettings::KEY_SETUP_MINUTOS_ANTES, '15');
+        AdminSetting::set(LeadDemoSettings::KEY_VENTANA_EXTENDIDA_MAX_HORAS, '2');
 
         $this->crear_config_whatsapp();
         $this->crear_config_asistente();
@@ -180,7 +188,20 @@ class AsistenteDeLaDemoParaLeadsTest extends BaseDelCanal
         $this->espiar_sender();
         $client = $this->crear_cliente('+5493411234567', true);
 
+        $inserts = [];
+        DB::listen(function ($consulta) use (&$inserts) {
+            if (stripos($consulta->sql, 'insert into `client_assistant_messages`') === 0) {
+                $inserts[] = $consulta->sql;
+            }
+        });
+
         $this->escribir_al_asistente('5493411234567', 'Hola', 'wamid.DUENO1');
+
+        $this->assertNotEmpty($inserts);
+        foreach ($inserts as $sql) {
+            $this->assertStringNotContainsString('demo_id', $sql, 'La fila de un dueño no toca las columnas de la demo: con el código nuevo sobre una base sin la migración, su INSERT tiene que seguir andando.');
+            $this->assertStringNotContainsString('lead_id', $sql);
+        }
 
         $fila = ClientAssistantMessage::where('client_id', $client->id)->first();
         $this->assertNotNull($fila);
@@ -221,7 +242,8 @@ class AsistenteDeLaDemoParaLeadsTest extends BaseDelCanal
         Queue::fake();
         $espia = $this->espiar_sender();
         $demo  = $this->crear_demo();
-        $this->crear_lead($demo, ['demo_end_time' => '15:20']);
+        // 12:00 a 14:00: vence a las 14:10 (fin + gracia), y ahora son las 15:30.
+        $this->crear_lead($demo, ['demo_start_time' => '12:00', 'demo_end_time' => '14:00']);
 
         $this->escribir_al_asistente(self::TELEFONO_LEAD);
         $this->escribir_al_asistente(self::TELEFONO_LEAD, 'Hola otra vez', 'wamid.LEAD2');
@@ -332,8 +354,9 @@ class AsistenteDeLaDemoParaLeadsTest extends BaseDelCanal
     }
 
     /**
-     * El borde de la ventana: 15 minutos antes del inicio ya entra, 16 no; el minuto del fin entra, el
-     * siguiente no.
+     * El borde de la ventana: 15 minutos antes del inicio ya entra, 16 no; y termina cuando vence el turno
+     * para el resto del ciclo (fin 17:10 + gracia de 10 minutos = 17:20), no antes: un lead que todavía
+     * puede operar en su demo no se queda sin asistente.
      *
      * @return void
      */
@@ -345,14 +368,78 @@ class AsistenteDeLaDemoParaLeadsTest extends BaseDelCanal
         $casos = [
             '2026-10-16 14:54:00' => AsistenteDemoLeadService::SITUACION_SIN_TURNO,
             '2026-10-16 14:55:00' => AsistenteDemoLeadService::SITUACION_ACTIVO,
-            '2026-10-16 17:10:00' => AsistenteDemoLeadService::SITUACION_ACTIVO,
-            '2026-10-16 17:11:00' => AsistenteDemoLeadService::SITUACION_SIN_TURNO,
+            '2026-10-16 17:20:00' => AsistenteDemoLeadService::SITUACION_ACTIVO,
+            '2026-10-16 17:21:00' => AsistenteDemoLeadService::SITUACION_SIN_TURNO,
         ];
 
         foreach ($casos as $instante => $esperado) {
             $resultado = $servicio->situacion_del_lead(self::TELEFONO_LEAD, Carbon::parse($instante, self::TZ));
             $this->assertSame($esperado, $resultado['situacion'], 'A las ' . $instante);
         }
+    }
+
+    /**
+     * Dos leads con el mismo teléfono (hay datos reales así): entra el que tiene el turno vigente, aunque el
+     * otro sea más nuevo y esté vencido.
+     *
+     * @return void
+     */
+    public function test_con_dos_leads_del_mismo_telefono_entra_el_del_turno_vigente(): void
+    {
+        Queue::fake();
+        $this->espiar_sender();
+        $demo_vigente = $this->crear_demo();
+        $demo_vencida = $this->crear_demo();
+
+        $vigente = $this->crear_lead($demo_vigente);
+        // Más nuevo (id mayor) pero con el turno de la mañana, ya vencido.
+        $this->crear_lead($demo_vencida, ['demo_start_time' => '09:00', 'demo_end_time' => '11:00']);
+
+        $this->escribir_al_asistente(self::TELEFONO_LEAD);
+
+        $fila = ClientAssistantMessage::first();
+        $this->assertNotNull($fila);
+        $this->assertSame((int) $demo_vigente->id, (int) $fila->demo_id);
+        $this->assertSame((int) $vigente->id, (int) $fila->lead_id);
+    }
+
+    /**
+     * Un lead cuya demo se borró no abre ningún hilo: recibe el texto de "no disponible".
+     *
+     * @return void
+     */
+    public function test_con_la_demo_borrada_el_lead_no_abre_el_hilo(): void
+    {
+        Queue::fake();
+        $espia = $this->espiar_sender();
+        $demo  = $this->crear_demo();
+        $this->crear_lead($demo);
+        Demo::where('id', $demo->id)->delete();
+
+        $this->escribir_al_asistente(self::TELEFONO_LEAD);
+
+        $this->assertSame(0, ClientAssistantMessage::count());
+        Queue::assertNothingPushed();
+        $this->assertSame(AsistenteDemoLeadService::texto_sin_endpoint(), $espia->textos[0]['body']);
+    }
+
+    /**
+     * El número del equipo que dicen los textos sale de la configuración de leads (no está escrito a mano):
+     * si Lucas lo cambia, los textos lo siguen.
+     *
+     * @return void
+     */
+    public function test_el_numero_del_equipo_en_los_textos_sigue_a_la_configuracion(): void
+    {
+        $this->assertSame('+54 9 3444 54-4199', AsistenteDemoLeadService::numero_del_equipo_legible(), 'El default de la cuenta, con el 9 de celular.');
+        $this->assertStringContainsString('+54 9 3444 54-4199', AsistenteDemoLeadService::texto_sin_endpoint());
+
+        AdminSetting::set(LeadDemoSettings::KEY_WHATSAPP_NUMERO_LEADS, '5491122334455');
+
+        $this->assertSame('+54 9 1122 33-4455', AsistenteDemoLeadService::numero_del_equipo_legible());
+        $this->assertStringContainsString('+54 9 1122 33-4455', AsistenteDemoLeadService::texto_para_lead(AsistenteDemoLeadService::SITUACION_SIN_TURNO));
+        $this->assertStringContainsString('+54 9 1122 33-4455', AsistenteDemoLeadService::texto_de_disculpa());
+        $this->assertStringNotContainsString('{equipo}', AsistenteDemoLeadService::texto_sin_endpoint());
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -411,16 +498,20 @@ class AsistenteDeLaDemoParaLeadsTest extends BaseDelCanal
         // La fila saliente hereda la demo y el lead (para leer el hilo de un vistazo).
         $saliente = ClientAssistantMessage::where('direccion', ClientAssistantMessage::DIRECCION_SALIENTE)->first();
         $this->assertNotNull($saliente);
+        $this->assertSame((int) $demo->id, (int) $saliente->demo_id);
+        $this->assertSame((int) $lead->id, (int) $saliente->lead_id);
+        $this->assertSame(0, (int) $saliente->client_id);
         $this->assertSame($clientes_antes, Client::count());
     }
 
     /**
-     * Una demo sin clave no recibe ninguna llamada: el job cierra con error en vez de mandarle un pedido
-     * sin credencial a una instancia (y el lead recibe la disculpa).
+     * 🔴 Una demo sin clave (`demos.api_key` vacía) no puede atender al asistente: el webhook NO abre el hilo
+     * y le dice al lead que no está disponible (no lo manda a un error que además avisa a los admins en
+     * cada mensaje).
      *
      * @return void
      */
-    public function test_una_demo_sin_clave_no_recibe_ninguna_llamada(): void
+    public function test_una_demo_sin_clave_no_abre_el_hilo_y_el_lead_recibe_el_texto_de_no_disponible(): void
     {
         Queue::fake();
         $espia = $this->espiar_sender();
@@ -428,7 +519,35 @@ class AsistenteDeLaDemoParaLeadsTest extends BaseDelCanal
         $this->crear_lead($demo);
 
         $this->escribir_al_asistente(self::TELEFONO_LEAD);
-        $fila = ClientAssistantMessage::where('demo_id', $demo->id)->firstOrFail();
+
+        $this->assertSame(0, ClientAssistantMessage::count());
+        Queue::assertNothingPushed();
+        $this->assertCount(1, $espia->textos);
+        $this->assertSame(AsistenteDemoLeadService::texto_sin_endpoint(), $espia->textos[0]['body']);
+    }
+
+    /**
+     * Aunque una fila de demo llegara al job con la demo sin clave (se le sacó entre el webhook y el job),
+     * el job no le pega a la instancia y cierra con la disculpa PROPIA del lead.
+     *
+     * @return void
+     */
+    public function test_una_fila_de_demo_sin_clave_cierra_con_la_disculpa_del_lead(): void
+    {
+        $espia = $this->espiar_sender();
+        $demo  = $this->crear_demo('');
+
+        $fila                      = new ClientAssistantMessage();
+        $fila->client_id           = 0;
+        $fila->demo_id             = $demo->id;
+        $fila->lead_id             = 1;
+        $fila->telefono            = '+' . self::TELEFONO_LEAD;
+        $fila->direccion           = ClientAssistantMessage::DIRECCION_ENTRANTE;
+        $fila->whatsapp_message_id = 'wamid.SINCLAVE';
+        $fila->tipo                = 'text';
+        $fila->texto               = 'Hola';
+        $fila->estado              = ClientAssistantMessage::ESTADO_RECIBIDO;
+        $fila->save();
 
         $this->fakear_http();
         $this->correr_job(new EnviarMensajeAlAsistenteJob((int) $fila->id), $espia);
@@ -436,7 +555,8 @@ class AsistenteDeLaDemoParaLeadsTest extends BaseDelCanal
         Http::assertNothingSent();
         $this->assertSame(ClientAssistantMessage::ESTADO_ERROR, $fila->refresh()->estado);
         $this->assertCount(1, $espia->textos);
-        $this->assertSame(AsistenteWhatsappService::TEXTO_DE_DISCULPA, $espia->textos[0]['body']);
+        $this->assertSame(AsistenteDemoLeadService::texto_de_disculpa(), $espia->textos[0]['body']);
+        $this->assertStringNotContainsString('chat del sistema', $espia->textos[0]['body']);
     }
 
     /**
@@ -460,7 +580,7 @@ class AsistenteDeLaDemoParaLeadsTest extends BaseDelCanal
 
         $this->assertSame(ClientAssistantMessage::ESTADO_DEGRADADO, $fila->refresh()->estado);
         $this->assertCount(1, $espia->textos);
-        $this->assertSame(AsistenteDemoLeadService::TEXTO_SIN_ENDPOINT, $espia->textos[0]['body']);
+        $this->assertSame(AsistenteDemoLeadService::texto_sin_endpoint(), $espia->textos[0]['body']);
         $this->assertStringNotContainsString('tu sistema', $espia->textos[0]['body']);
 
         $asistente = app(AsistenteWhatsappService::class);

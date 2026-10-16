@@ -1381,7 +1381,7 @@ class WhatsappWebhookController extends Controller
         if ($resultado['situacion'] === AsistenteDemoLeadService::SITUACION_ACTIVO) {
             $demo = Demo::find((int) $lead->demo_id);
             if ($demo !== null) {
-                app(AsistenteWhatsappService::class)->recibir($parsed, $servicio->cliente_virtual($demo), $demo, $lead);
+                app(AsistenteWhatsappService::class)->recibir($parsed, null, $demo, $lead);
                 Log::channel('daily')->info('WhatsApp webhook: mensaje del lead enrutado al asistente de su demo.', [
                     'from'    => $parsed['from'],
                     'type'    => $parsed['type'],

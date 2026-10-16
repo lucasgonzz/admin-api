@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Helpers\AppTime;
+use App\Helpers\WhatsappNormalizer;
 use App\Models\AdminSetting;
 use App\Models\Client;
 use App\Models\ClientApi;
@@ -10,7 +11,6 @@ use App\Models\ClientAssistantMessage;
 use App\Models\Demo;
 use App\Models\Lead;
 use App\Models\WhatsappConfig;
-use App\Helpers\WhatsappNormalizer;
 use Carbon\Carbon;
 
 /**
@@ -27,7 +27,7 @@ use Carbon\Carbon;
  *      número del asistente esté LISTO (`WhatsappConfig::canalListo`). Mientras el número no exista
  *      de verdad —hoy no existe—, el mail no muestra el bloque, el agente de leads no lo menciona y
  *      el webhook ni se entera: todo queda inerte, sin prometerle al lead algo que no funciona.
- *   2. **Quién puede usarlo** (`lead_con_turno_por_telefono()`): un lead con una instancia asignada,
+ *   2. **Quién puede usarlo** (`situacion_del_lead()`): un lead con una instancia asignada,
  *      en un estado que la ocupa, con el setup terminado y DENTRO de su turno, cuyo teléfono es
  *      EXACTAMENTE el que escribe. Comparación estricta (`equals_estricto`), no los últimos ocho
  *      dígitos: acá un falso positivo le abre a una persona el asistente de la demo de otra.
@@ -51,7 +51,9 @@ class AsistenteDemoLeadService
      * El turno arranca diez minutos después del "sí" (`DemoDirectaService::MINUTOS_HASTA_EL_INICIO`)
      * y el lead recibe el mail en ese momento: si lo prueba apenas lo lee, todavía no empezó. El
      * margen cubre ese rato; el dato real que decide es `demo_setup_status`, que no sale de
-     * `exitoso` hasta que la instancia está armada.
+     * `exitoso` hasta que la instancia está armada. Nunca pasa de los minutos que la instancia se
+     * reserva antes del turno para su setup (`LeadDemoSettings::get_setup_minutos_antes()`): con un
+     * margen mayor, el asistente de un lead abriría sobre la instancia que otro todavía ocupa.
      */
     public const MINUTOS_ANTES_DEL_TURNO = 15;
 
@@ -64,17 +66,25 @@ class AsistenteDemoLeadService
     private const DEFAULT_TEXTO_PREPARANDO = 'Tu demo se está armando todavía. Apenas puedas entrar al sistema, escribime de nuevo '
         . 'por acá y lo probamos juntos.';
 
+    /** Marca de los textos fijos que se reemplaza por el número del equipo (el de leads, configurable). */
+    private const MARCA_NUMERO_DEL_EQUIPO = '{equipo}';
+
     private const DEFAULT_TEXTO_SIN_TURNO = 'Este número es el asistente personal de ComercioCity, y se puede probar durante tu demo. '
-        . 'Ahora no tenés una demo activa. Para seguir hablando con el equipo escribinos al +54 9 3444 54-4199';
+        . 'Ahora no tenés una demo activa. Para seguir hablando con el equipo escribinos al {equipo}';
 
     /** Lo que recibe el lead cuando la instancia de su demo no tiene el asistente (404 del endpoint). */
-    public const TEXTO_SIN_ENDPOINT = 'Por ahora el asistente no está disponible en tu demo. Escribinos al '
-        . '+54 9 3444 54-4199 y lo resolvemos enseguida.';
+    private const DEFAULT_TEXTO_SIN_ENDPOINT = 'Por ahora el asistente no está disponible en tu demo. Escribinos al '
+        . '{equipo} y lo resolvemos enseguida.';
+
+    /** Lo que recibe el lead cuando el asistente de su demo falla (el de los dueños lo manda al chat del sistema). */
+    private const DEFAULT_TEXTO_DE_DISCULPA = 'Uf, no pude contestarte ahora. Probá de nuevo en un ratito; si sigue igual, '
+        . 'escribinos al {equipo}.';
 
     /** Situaciones en las que puede estar un lead frente al asistente. */
     public const SITUACION_ACTIVO    = 'activo';
     public const SITUACION_PREPARANDO = 'preparando';
     public const SITUACION_SIN_TURNO = 'sin_turno';
+    public const SITUACION_SIN_CLAVE = 'sin_clave';
 
     /**
      * Si el interruptor propio de este canal está prendido.
@@ -124,6 +134,29 @@ class AsistenteDemoLeadService
     }
 
     /**
+     * Si el asistente se le puede ofrecer A ESTE LEAD: el canal disponible y un teléfono al que se le
+     * pueda contestar (argentino: el envío normaliza el destino como argentino).
+     *
+     * Lo usan el mail y el contexto del agente, para no prometerle el asistente a un lead de otro país
+     * al que el webhook no le va a abrir el hilo, ni sobre una instancia de demo sin clave.
+     *
+     * @param Lead      $lead
+     * @param Demo|null $demo Instancia asignada (o prevista) al lead, si se la conoce.
+     *
+     * @return bool
+     */
+    public static function disponible_para(Lead $lead, ?Demo $demo = null): bool
+    {
+        if (! self::disponible() || ! self::telefono_argentino((string) $lead->phone)) {
+            return false;
+        }
+
+        /* Una instancia sin clave no puede atender al asistente (el job no le pega sin credencial): no se le
+         * promete al lead lo que esa demo no puede dar. */
+        return $demo === null || trim((string) $demo->api_key) !== '';
+    }
+
+    /**
      * El número del asistente tal como se lee ("+1 201-534-4158"), o '' si no está disponible.
      *
      * @return string
@@ -169,7 +202,7 @@ class AsistenteDemoLeadService
     {
         $ahora = $ahora !== null ? $ahora->copy()->setTimezone(DemoDirectaService::TZ) : AppTime::now(DemoDirectaService::TZ);
 
-        if (! self::argentino($telefono)) {
+        if (! self::telefono_argentino($telefono)) {
             /* `WhatsappSendService::send_text()` normaliza el destino como argentino: a un número de
              * otro país no se le puede contestar, y rutearlo sería abrir un hilo mudo. */
             return ['situacion' => self::SITUACION_SIN_TURNO, 'lead' => null];
@@ -205,6 +238,14 @@ class AsistenteDemoLeadService
                 return ['situacion' => self::SITUACION_PREPARANDO, 'lead' => $lead];
             }
 
+            /* La instancia no tiene clave cargada (`demos.api_key`): el job no le habla a una demo sin
+             * credencial, así que se le dice al lead que el asistente no está disponible en vez de mandarlo a
+             * un error que además avisa a los admins en cada mensaje. */
+            $demo_del_lead = Demo::find((int) $lead->demo_id);
+            if ($demo_del_lead === null || trim((string) $demo_del_lead->api_key) === '') {
+                return ['situacion' => self::SITUACION_SIN_CLAVE, 'lead' => $lead];
+            }
+
             return ['situacion' => self::SITUACION_ACTIVO, 'lead' => $lead];
         }
 
@@ -212,26 +253,13 @@ class AsistenteDemoLeadService
     }
 
     /**
-     * El lead con turno vigente y la instancia lista cuyo teléfono es este, o null.
-     *
-     * @param string      $telefono Teléfono del remitente TAL CUAL llegó en el payload.
-     * @param Carbon|null $ahora    Instante de referencia.
-     *
-     * @return Lead|null
-     */
-    public function lead_con_turno_por_telefono(string $telefono, ?Carbon $ahora = null): ?Lead
-    {
-        $resultado = $this->situacion_del_lead($telefono, $ahora);
-
-        return $resultado['situacion'] === self::SITUACION_ACTIVO ? $resultado['lead'] : null;
-    }
-
-    /**
      * Ventana [desde, hasta] en la que el asistente atiende a este lead.
      *
-     * Sale del turno cargado en el lead (`demo_date` + `demo_start_time`/`demo_end_time`), en la zona
-     * de la demo. Un turno sin fecha, sin hora de fin o con una hora ilegible NO tiene ventana: el
-     * lado seguro es no abrirle el asistente a nadie por un dato roto.
+     * Empieza `MINUTOS_ANTES_DEL_TURNO` antes del inicio y termina cuando vence el turno, que es LA MISMA
+     * definición de "vigente" que usa el link de ingreso y el mail (`DemoTurnoTexto::vence_el_turno()`):
+     * un lead que todavía puede operar en su demo —dentro de la gracia— no se queda sin asistente. Un
+     * turno sin fecha o con una hora ilegible NO tiene ventana: el lado seguro es no abrirle el asistente
+     * a nadie por un dato roto.
      *
      * @param Lead $lead
      *
@@ -243,17 +271,17 @@ class AsistenteDemoLeadService
             return null;
         }
 
-        $inicio = self::hora_a_minutos((string) $lead->demo_start_time);
-        $fin    = self::hora_a_minutos((string) $lead->demo_end_time);
-        if ($inicio === null || $fin === null || $fin <= $inicio) {
+        $inicio = DemoTurnoTexto::leer_hora((string) $lead->demo_start_time);
+        $fin    = DemoTurnoTexto::leer_hora((string) $lead->demo_end_time);
+        if ($inicio === null || $fin === null || $fin['minutos'] <= $inicio['minutos']) {
             return null;
         }
 
         $dia = Carbon::parse($lead->demo_date->format('Y-m-d'), DemoDirectaService::TZ)->startOfDay();
 
         return [
-            'desde' => $dia->copy()->addMinutes($inicio - self::MINUTOS_ANTES_DEL_TURNO),
-            'hasta' => $dia->copy()->addMinutes($fin),
+            'desde' => $dia->copy()->addMinutes($inicio['minutos'] - min(self::MINUTOS_ANTES_DEL_TURNO, LeadDemoSettings::get_setup_minutos_antes())),
+            'hasta' => DemoTurnoTexto::vence_el_turno($lead),
         ];
     }
 
@@ -325,15 +353,84 @@ class AsistenteDemoLeadService
      */
     public static function texto_para_lead(string $situacion): string
     {
+        if ($situacion === self::SITUACION_SIN_CLAVE) {
+            return self::texto_sin_endpoint();
+        }
+
         if ($situacion === self::SITUACION_PREPARANDO) {
             $texto = trim((string) AdminSetting::get(self::KEY_TEXTO_PREPARANDO, ''));
 
-            return $texto !== '' ? $texto : self::DEFAULT_TEXTO_PREPARANDO;
+            return self::con_el_numero_del_equipo($texto !== '' ? $texto : self::DEFAULT_TEXTO_PREPARANDO);
         }
 
         $texto = trim((string) AdminSetting::get(self::KEY_TEXTO_SIN_TURNO, ''));
 
-        return $texto !== '' ? $texto : self::DEFAULT_TEXTO_SIN_TURNO;
+        return self::con_el_numero_del_equipo($texto !== '' ? $texto : self::DEFAULT_TEXTO_SIN_TURNO);
+    }
+
+    /**
+     * Lo que recibe el lead cuando la instancia de su demo no tiene el endpoint del asistente (404).
+     *
+     * @return string
+     */
+    public static function texto_sin_endpoint(): string
+    {
+        return self::con_el_numero_del_equipo(self::DEFAULT_TEXTO_SIN_ENDPOINT);
+    }
+
+    /**
+     * Lo que recibe el lead cuando el asistente de su demo falla del lado del admin o de la instancia.
+     *
+     * Es propio y no el de los dueños (`AsistenteWhatsappService::TEXTO_DE_DISCULPA`), que manda al chat
+     * del sistema: un lead no tiene un sistema propio donde seguir.
+     *
+     * @return string
+     */
+    public static function texto_de_disculpa(): string
+    {
+        return self::con_el_numero_del_equipo(self::DEFAULT_TEXTO_DE_DISCULPA);
+    }
+
+    /**
+     * El número del equipo (el de leads, configurable en la cuenta) tal como se lee: "+54 9 3444 54-4199".
+     *
+     * Sale de `LeadDemoSettings::get_whatsapp_numero_leads()` y no de una cadena escrita acá: si Lucas
+     * cambia ese número, estos textos lo siguen solos. Sin un número válido configurado devuelve 'el
+     * WhatsApp de siempre', que no manda a ningún lado pero tampoco miente.
+     *
+     * @return string
+     */
+    public static function numero_del_equipo_legible(): string
+    {
+        $digitos = LeadDemoSettings::get_whatsapp_numero_leads();
+        if ($digitos === '') {
+            return 'el WhatsApp de siempre';
+        }
+
+        /* Un celular argentino cargado sin el 9 (54 + 10 dígitos, como viene por defecto) se escribe igual con el 9:
+         * así se lo dicta y así lo muestra el resto del sistema. */
+        if (strlen($digitos) === 12 && strpos($digitos, '54') === 0 && $digitos[2] !== '9') {
+            $digitos = '549' . substr($digitos, 2);
+        }
+
+        /* Móvil argentino (549 + 10 dígitos): se lo escribe como se lo dicta. Cualquier otro, con el + adelante. */
+        if (strlen($digitos) === 13 && strpos($digitos, '549') === 0) {
+            return '+54 9 ' . substr($digitos, 3, 4) . ' ' . substr($digitos, 7, 2) . '-' . substr($digitos, 9, 4);
+        }
+
+        return '+' . $digitos;
+    }
+
+    /**
+     * Reemplaza la marca `{equipo}` de un texto fijo por el número del equipo.
+     *
+     * @param string $texto
+     *
+     * @return string
+     */
+    private static function con_el_numero_del_equipo(string $texto): string
+    {
+        return str_replace(self::MARCA_NUMERO_DEL_EQUIPO, self::numero_del_equipo_legible(), $texto);
     }
 
     /**
@@ -343,32 +440,10 @@ class AsistenteDemoLeadService
      *
      * @return bool
      */
-    private static function argentino(string $telefono): bool
+    public static function telefono_argentino(string $telefono): bool
     {
         $digitos = ltrim((string) preg_replace('/\D+/', '', $telefono), '0');
 
         return strpos($digitos, '54') === 0;
-    }
-
-    /**
-     * Minutos desde la medianoche de un texto "HH:MM" (o "HH:MM:SS"), o null si no se lee.
-     *
-     * @param string $hora
-     *
-     * @return int|null
-     */
-    private static function hora_a_minutos(string $hora): ?int
-    {
-        if (! preg_match('/^\s*(\d{1,2}):(\d{2})/', $hora, $m)) {
-            return null;
-        }
-
-        $horas   = (int) $m[1];
-        $minutos = (int) $m[2];
-        if ($horas > 23 || $minutos > 59) {
-            return null;
-        }
-
-        return $horas * 60 + $minutos;
     }
 }

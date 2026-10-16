@@ -17,9 +17,14 @@ use Carbon\Carbon;
  * chat y el que muestra la página de experiencia. Esta clase lo traduce a texto, y es el único
  * lugar que lo hace, para que el asunto y el cuerpo del mail no puedan decir dos cosas distintas.
  *
- * 🔴 No inventa nada. Si el lead no tiene fecha, hora de inicio y hora de fin legibles, devuelve
- * null y el mail sale SIN bloque de turno (y con el asunto de siempre): una hora supuesta en un
- * mail que el lead va a guardar es peor que ninguna.
+ * 🔴 No inventa nada. Si el lead no tiene fecha, hora de inicio y hora de fin legibles, o su turno
+ * ya venció, devuelve null y el mail sale SIN bloque de turno (y con el asunto de siempre): una hora
+ * supuesta en un mail que el lead va a guardar es peor que ninguna.
+ *
+ * 🔴 "Vencido" es UNA sola definición para todo el ciclo de la demo: la que ya usa el link de ingreso
+ * (`DemoIngresoTokenService::calcular_expiracion()`, el mayor entre el fin del turno más la gracia y el
+ * inicio más el bloqueo real). La comparten el mail, el asistente personal y la página; si se definiera
+ * de nuevo acá, el lead podría seguir adentro de la demo con el asistente ya cortado.
  *
  * Los números de horas van en LETRAS ("dos horas"), no en dígitos: es la misma restricción que
  * `LeadAiService::frase_de_la_reserva()` (lo que se le dice al lead no puede nombrar un número de
@@ -37,7 +42,7 @@ class DemoTurnoTexto
      * @return array{
      *     fecha_larga: string, es_hoy: bool, hora_inicio: string, hora_fin: string,
      *     reserva: string|null, duracion: string, cuando_para_el_asunto: string
-     * }|null Null si el lead no tiene un turno completo y legible, o si el turno ya terminó.
+     * }|null Null si el lead no tiene un turno completo y legible, o si el turno ya venció.
      */
     public static function de_lead(Lead $lead, ?Carbon $ahora = null): ?array
     {
@@ -45,8 +50,8 @@ class DemoTurnoTexto
             return null;
         }
 
-        $inicio = self::hhmm((string) $lead->demo_start_time);
-        $fin    = self::hhmm((string) $lead->demo_end_time);
+        $inicio = self::leer_hora((string) $lead->demo_start_time);
+        $fin    = self::leer_hora((string) $lead->demo_end_time);
         if ($inicio === null || $fin === null) {
             return null;
         }
@@ -55,14 +60,13 @@ class DemoTurnoTexto
             ? $ahora->copy()->setTimezone(DemoDirectaService::TZ)
             : AppTime::now(DemoDirectaService::TZ);
 
-        $dia  = Carbon::parse($lead->demo_date->format('Y-m-d'), DemoDirectaService::TZ)->startOfDay();
-
-        /* Un turno que ya terminó no se anuncia: el reenvío del mail al día siguiente no puede decir
+        /* Un turno que ya venció no se anuncia: el reenvío del mail al día siguiente no puede decir
          * "tu demo es hoy" con la fecha de ayer ni "es el miércoles" de una demo que pasó. */
-        if ($dia->copy()->addMinutes($fin['minutos'])->lt($ahora)) {
+        if ($ahora->gt(self::vence_el_turno($lead))) {
             return null;
         }
 
+        $dia  = Carbon::parse($lead->demo_date->format('Y-m-d'), DemoDirectaService::TZ)->startOfDay();
         $hoy  = $ahora->copy()->startOfDay();
         $dias = (int) $hoy->diffInDays($dia, false);
 
@@ -88,10 +92,26 @@ class DemoTurnoTexto
     }
 
     /**
+     * Hasta cuándo sigue vigente el turno de un lead: el mismo instante que vence su link de ingreso.
+     *
+     * Delegado en `DemoIngresoTokenService::calcular_expiracion()` a propósito (ver el docblock de la
+     * clase): nunca devuelve null, y con un turno ilegible cae a su propio fallback.
+     *
+     * @param Lead $lead
+     *
+     * @return Carbon
+     */
+    public static function vence_el_turno(Lead $lead): Carbon
+    {
+        return (new DemoIngresoTokenService())->calcular_expiracion($lead)->copy()->setTimezone(DemoDirectaService::TZ);
+    }
+
+    /**
      * Cuánto dura la demo, en palabras ("menos de una hora"), según la configuración.
      *
-     * Es la misma cuenta de `LeadAiService::frase_de_la_reserva()`: el siguiente número entero de
-     * horas ESTRICTAMENTE mayor que la duración, para que el "menos de" nunca mienta.
+     * Es la cuenta que `LeadAiService::frase_de_la_reserva()` también usa (lo que el agente dice por el
+     * chat y lo que dice el mail no pueden diferir): el siguiente número entero de horas
+     * ESTRICTAMENTE mayor que la duración, para que el "menos de" nunca mienta.
      *
      * @return string
      */
@@ -107,36 +127,15 @@ class DemoTurnoTexto
     }
 
     /**
-     * El largo del turno en letras ("dos horas"), o null si no es un número entero de horas.
-     *
-     * Cerca de la medianoche el turno viene recortado a las 23:59 y ahí "reservada dos horas" sería
-     * falso: sin un número redondo de horas se omite y el mail solo dice hasta qué hora.
-     *
-     * @param int $inicio Minutos desde la medianoche.
-     * @param int $fin    Minutos desde la medianoche.
-     *
-     * @return string|null
-     */
-    private static function reserva_en_letras(int $inicio, int $fin): ?string
-    {
-        $minutos = $fin - $inicio;
-        if ($minutos <= 0 || $minutos % 60 !== 0) {
-            return null;
-        }
-
-        $horas = intdiv($minutos, 60);
-
-        return ($horas >= 1 && $horas <= 12) ? LeadAiService::horas_en_letras($horas) : null;
-    }
-
-    /**
      * Una hora "H:MM" / "HH:MM" / "HH:MM:SS" como texto "HH:MM" y como minutos desde la medianoche.
+     *
+     * Es el único lector de horas de turno que usan el mail y el asistente personal.
      *
      * @param string $hora
      *
      * @return array{texto: string, minutos: int}|null Null si no se lee.
      */
-    private static function hhmm(string $hora): ?array
+    public static function leer_hora(string $hora): ?array
     {
         if (! preg_match('/^\s*(\d{1,2}):(\d{2})/', $hora, $m)) {
             return null;
@@ -152,5 +151,29 @@ class DemoTurnoTexto
             'texto'   => sprintf('%02d:%02d', $horas, $minutos),
             'minutos' => $horas * 60 + $minutos,
         ];
+    }
+
+    /**
+     * El largo de la reserva en letras ("dos horas"), o null si el turno quedó más corto que el tope.
+     *
+     * Misma regla que `LeadAiService::frase_de_la_reserva()`: el tope sale de la configuración
+     * (`get_ventana_extendida_max_horas()`) y el turno está "recortado" cuando dura menos que ese tope
+     * —cerca de la medianoche la ventana se corta a las 23:59—. Un turno recortado no promete ningún
+     * número de horas: el mail solo dice hasta qué hora.
+     *
+     * @param int $inicio Minutos desde la medianoche.
+     * @param int $fin    Minutos desde la medianoche.
+     *
+     * @return string|null
+     */
+    private static function reserva_en_letras(int $inicio, int $fin): ?string
+    {
+        $horas_de_reserva = LeadDemoSettings::get_ventana_extendida_max_horas();
+
+        if (($fin - $inicio) < $horas_de_reserva * 60) {
+            return null;
+        }
+
+        return LeadAiService::horas_en_letras($horas_de_reserva);
     }
 }

@@ -1536,14 +1536,15 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
         /* Al lead que prueba el asistente en su demo no se le habla de "tu sistema" ni de su ficha de
          * cliente: se le dice que por ahora no está disponible en la demo. Y el aviso a los admins
          * nombra la demo, no un cliente. */
-        $demo  = $fila->es_de_demo() ? Demo::find((int) $fila->demo_id) : null;
-        $texto = $demo !== null ? AsistenteDemoLeadService::TEXTO_SIN_ENDPOINT : AsistenteWhatsappService::TEXTO_SIN_ENDPOINT;
+        $es_de_demo = $fila->es_de_demo();
+        $demo       = $es_de_demo ? Demo::find((int) $fila->demo_id) : null;
+        $texto      = $es_de_demo ? AsistenteDemoLeadService::texto_sin_endpoint() : AsistenteWhatsappService::TEXTO_SIN_ENDPOINT;
 
         // Por el número por el que entró, igual que la respuesta: ver el comentario de `consultar()`.
         $whatsapp_message_id = $sender->paraProposito($this->proposito_de_salida($fila))->send_text(
             (string) $fila->telefono,
             $texto,
-            'Asistente por WhatsApp sin endpoint - ' . ($demo !== null ? 'demo #' . $demo->id : 'cliente #' . $client->id)
+            'Asistente por WhatsApp sin endpoint - ' . ($es_de_demo ? 'demo #' . (int) $fila->demo_id : 'cliente #' . $client->id)
         );
 
         $asistente->registrar_saliente(
@@ -1555,8 +1556,10 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             $sender->phone_number_id_de_destino()
         );
 
-        if ($demo !== null) {
-            $asistente->avisar_demo_sin_endpoint($demo);
+        if ($es_de_demo) {
+            if ($demo !== null) {
+                $asistente->avisar_demo_sin_endpoint($demo);
+            }
         } else {
             $asistente->avisar_cliente_sin_endpoint($client);
         }
@@ -1624,16 +1627,21 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             );
         }
 
+        /* Al lead de una demo no se le dice "escribime desde el chat del sistema": no tiene uno. */
+        $texto_de_disculpa = $fila->es_de_demo()
+            ? AsistenteDemoLeadService::texto_de_disculpa()
+            : AsistenteWhatsappService::TEXTO_DE_DISCULPA;
+
         // Por el número por el que entró, igual que la respuesta: ver el comentario de `consultar()`.
         $whatsapp_message_id = $sender->paraProposito($this->proposito_de_salida($fila))->send_text(
             (string) $fila->telefono,
-            AsistenteWhatsappService::TEXTO_DE_DISCULPA,
-            'Asistente por WhatsApp con error - cliente #' . ($client !== null ? $client->id : '?')
+            $texto_de_disculpa,
+            'Asistente por WhatsApp con error - ' . ($fila->es_de_demo() ? 'demo #' . (int) $fila->demo_id : 'cliente #' . ($client !== null ? $client->id : '?'))
         );
 
         $asistente->registrar_saliente(
             $fila,
-            AsistenteWhatsappService::TEXTO_DE_DISCULPA,
+            $texto_de_disculpa,
             $whatsapp_message_id,
             ClientAssistantMessage::ESTADO_ERROR,
             $fila->error,

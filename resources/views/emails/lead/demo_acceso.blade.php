@@ -30,6 +30,9 @@
     // Hay turno cuando el helper pudo armar día y horas legibles; si no, el mail sale "de llaves".
     $hay_turno = is_array($turno) && ! empty($turno['hora_inicio']) && ! empty($turno['hora_fin']);
 
+    // El asistente personal solo se explica dentro de un turno vigente: sin turno no hay a quién contestarle.
+    $con_asistente = $mostrar_asistente && $hay_turno;
+
     // El preheader es la línea que el cliente de mail muestra al lado del asunto.
     $preheader = $hay_turno
         ? 'Tu demo es ' . $turno['cuando_para_el_asunto'] . '. Acá tenés el acceso y cómo aprovecharla.'
@@ -108,8 +111,12 @@
                 No es un video ni una presentación: es <strong style="color:#1c2333;font-weight:600;">una instancia completa de la plataforma</strong>,
                 funcionando de verdad y preparada para vos. Es para que la uses con tus manos.
               @else
-                Son dos accesos. El primero abre la demo del sistema de gestión, preparada según tu negocio.
-                El segundo abre la tienda online que viene conectada a ese mismo sistema: lo que cargás en uno se ve en la otra.
+                @if($url_tienda)
+                  Son dos accesos. El primero abre la demo del sistema de gestión, preparada según tu negocio.
+                  El segundo abre la tienda online que viene conectada a ese mismo sistema: lo que cargás en uno se ve en la otra.
+                @else
+                  Este acceso abre la demo del sistema de gestión, preparada según tu negocio.
+                @endif
               @endif
             </p>
           </td>
@@ -226,11 +233,11 @@
                 <td style="padding:2px 0 2px 16px;">
                   <p style="margin:0;font-family:{!! $font !!};font-size:16px;line-height:24px;font-weight:600;color:#1c2333;">Sistema de agentes</p>
                   <p style="margin:2px 0 0 0;font-family:{!! $font !!};font-size:15px;line-height:23px;color:#566078;">
-                    @if($mostrar_asistente)
-                      Un agente de WhatsApp que atiende a tus clientes con los datos reales de tu negocio, y un asistente
-                      personal al que le pedís cosas a tu sistema como si hablaras con un encargado.
+                    @if($con_asistente)
+                      Un agente de WhatsApp que atiende a tus clientes con los datos de tu negocio, y un asistente personal al
+                      que le pedís cosas a tu sistema como si hablaras con un encargado. El asistente lo probás desde tu WhatsApp, más abajo.
                     @else
-                      Un agente de WhatsApp que atiende a tus clientes con los datos reales de tu negocio.
+                      Un agente de WhatsApp que atiende a tus clientes con los datos de tu negocio. Lo ves dentro del sistema, con datos de ficción.
                     @endif
                   </p>
                 </td>
@@ -287,7 +294,7 @@
         </tr>
 
         {{-- 4. EL ASISTENTE PERSONAL. Solo si el número está listo: nunca se promete algo que no funciona --}}
-        @if($mostrar_asistente)
+        @if($con_asistente)
         <tr>
           <td class="cc-lado" style="padding:44px 48px 0 48px;">
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-radius:16px;background-color:#f1f6ff;border:1px solid #d8e6ff;">
