@@ -133,7 +133,14 @@ class EnvTemplate extends Model
             return;
         }
 
-        $this->setAttribute('value', self::PREFIJO_CIFRADO . Crypt::encryptString((string) $crudo));
+        /*
+         * Se recorta antes de cifrar: lo que prueba ProbadorDeClaves y lo que escriben env-bulk y
+         * apply-diff tiene que ser EXACTAMENTE el mismo string, sin espacios ni tabs al borde (una
+         * clave pegada con un espacio al final es el error de carga más común).
+         */
+        $recortado = trim((string) $crudo);
+
+        $this->setAttribute('value', self::PREFIJO_CIFRADO . Crypt::encryptString($recortado));
     }
 
     /**
@@ -157,26 +164,69 @@ class EnvTemplate extends Model
             return $valor;
         }
 
-        try {
-            return Crypt::decryptString(substr((string) $valor, strlen(self::PREFIJO_CIFRADO)));
-        } catch (\Throwable $e) {
+        $descifrado = $this->intentar_descifrar((string) $valor);
+
+        if ($descifrado === null) {
             /* Ni el valor ni el mensaje de la excepción van al log: pueden traer fragmentos del secreto. */
             Log::error('EnvTemplate: no se pudo descifrar el valor de la variable.', [
                 'env_template_id' => $this->getKey(),
                 'key'             => isset($this->attributes['key']) ? $this->attributes['key'] : null,
             ]);
+        }
 
+        return $descifrado;
+    }
+
+    /**
+     * Descifra un valor crudo que trae el prefijo. Devuelve null si no se puede (sin loguear nada).
+     *
+     * @param  string  $crudo  Valor crudo con el prefijo `enc:v1:`.
+     * @return string|null
+     */
+    private function intentar_descifrar(string $crudo)
+    {
+        try {
+            return Crypt::decryptString(substr($crudo, strlen(self::PREFIJO_CIFRADO)));
+        } catch (\Throwable $e) {
             return null;
         }
     }
 
     /**
+     * Indica si el valor guardado es ILEGIBLE: la variable es sensible, el crudo trae el prefijo de
+     * cifrado y no se puede descifrar (APP_KEY del admin cambiada, payload dañado).
+     *
+     * 🔴 Distinguirlo de "vacío" importa: el accessor devuelve null en los dos casos, y quien arma un
+     * .env con ese null escribiría la variable vacía en el servidor de un cliente. Los endpoints que
+     * escriben (apply-diff*, env-bulk con plantilla) se niegan a trabajar con una variable ilegible.
+     *
+     * @return bool
+     */
+    public function esta_ilegible(): bool
+    {
+        $clave = isset($this->attributes['key']) ? (string) $this->attributes['key'] : '';
+
+        if (! EnvSensitiveKeys::es_sensible($clave)) {
+            return false;
+        }
+
+        $crudo = isset($this->attributes['value']) ? (string) $this->attributes['value'] : '';
+
+        if (strpos($crudo, self::PREFIJO_CIFRADO) !== 0) {
+            return false;
+        }
+
+        return $this->intentar_descifrar($crudo) === null;
+    }
+
+    /**
      * Serialización a array/JSON: el valor de una variable sensible NUNCA sale.
      *
-     * Para una sensible se saca `value` y se suman `value_sensitive` (true), `value_set` (si hay algo
+     * Para una sensible se saca `value` y se suman `value_sensitive` (true), `value_ilegible` (hay un
+     * cifrado que no se puede descifrar; en ese caso `value_set` es false), `value_set` (si hay algo
      * cargado) y `value_tail` (últimos caracteres para reconocer cuál está cargada, sólo si el valor
-     * tiene el largo mínimo; si no, null). Para una no sensible queda igual que siempre más
-     * `value_sensitive: false`.
+     * tiene el largo mínimo y la variable no es una contraseña; si no, null). Para una no sensible
+     * queda igual que siempre más `value_sensitive: false`.
      *
      * @return array<string, mixed>
      */
@@ -192,14 +242,26 @@ class EnvTemplate extends Model
             return $array;
         }
 
+        $ilegible = $this->esta_ilegible();
+
         /* Descifrado sólo para calcular los indicadores: el valor no se agrega al array. */
-        $valor = array_key_exists('value', $this->attributes) ? $this->getValueAttribute($this->attributes['value']) : null;
+        $valor = isset($this->attributes['value']) ? (string) $this->attributes['value'] : null;
+
+        if ($valor !== null && strpos($valor, self::PREFIJO_CIFRADO) === 0) {
+            $valor = $this->intentar_descifrar($valor);
+        }
 
         unset($array['value']);
 
         $array['value_sensitive'] = true;
-        $array['value_set']       = $valor !== null && $valor !== '';
-        $array['value_tail']      = self::cola_de($valor);
+        $array['value_ilegible']  = $ilegible;
+        $array['value_set']       = ! $ilegible && $valor !== null && $valor !== '';
+
+        /*
+         * Sin cola para las contraseñas (PASSWORD, PASS...): los últimos caracteres de una contraseña
+         * dicen demasiado; la pantalla sólo muestra "Cargada".
+         */
+        $array['value_tail'] = strpos(strtoupper($clave), 'PASS') !== false ? null : self::cola_de($valor);
 
         return $array;
     }

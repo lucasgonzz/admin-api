@@ -18,6 +18,14 @@ class MigracionCifradoPlantillaEnvTest extends TestCase
 {
     use DatabaseTransactions;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        /* Hermético: sin depender de filas ajenas de env_templates (se revierte con la transacción). */
+        EnvTemplate::query()->delete();
+    }
+
     public function test_up_cifra_la_sensible_en_claro_y_no_toca_la_no_sensible(): void
     {
         $sensible    = $this->insertar_en_claro('ANTHROPIC_API_KEY', 'sk-ant-test-migracion-0001');

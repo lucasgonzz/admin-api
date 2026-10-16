@@ -2,10 +2,16 @@
 
 namespace Tests\Feature;
 
+use App\Models\ClientSshCredential;
+use App\Models\Demo;
+use App\Models\DemoInstallation;
 use App\Models\EnvTemplate;
+use App\Models\Version;
+use App\Services\DemoInstallationService;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use Tests\TestCase;
 
 /**
@@ -18,6 +24,14 @@ use Tests\TestCase;
 class PlantillaEnvCifradaTest extends TestCase
 {
     use DatabaseTransactions;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        /* Hermético: sin depender de filas ajenas de env_templates (se revierte con la transacción). */
+        EnvTemplate::query()->delete();
+    }
 
     /**
      * Valor falso de 28 caracteres (supera el mínimo para mostrar la cola).
@@ -194,6 +208,101 @@ class PlantillaEnvCifradaTest extends TestCase
         /* Es como leen DeploymentService / InstallationService: por el modelo, con el cast a string. */
         $leida = EnvTemplate::where('scope', 'tienda')->where('key', 'ANTHROPIC_API_KEY')->first();
         $this->assertSame(self::CLAVE_DE_PRUEBA, (string) ($leida->value ?? ''));
+    }
+
+    public function test_una_sensible_se_guarda_sin_espacios_ni_tabs_al_borde(): void
+    {
+        $con_espacio = $this->crear('ANTHROPIC_API_KEY', 'sk-ant-test-xxx ');
+        $con_tab     = $this->crear('OPENAI_API_KEY', "\tsk-openai-test-yyy\t");
+
+        $this->assertSame('sk-ant-test-xxx', EnvTemplate::find($con_espacio->id)->value);
+        $this->assertSame('sk-openai-test-yyy', EnvTemplate::find($con_tab->id)->value);
+
+        /* Re-guardar con espacios también recorta. */
+        $recargada        = EnvTemplate::find($con_espacio->id);
+        $recargada->value = '  sk-ant-test-otra  ';
+        $recargada->save();
+        $this->assertSame('sk-ant-test-otra', EnvTemplate::find($con_espacio->id)->value);
+
+        /* Una no sensible no se toca: el recorte es sólo de los secretos. */
+        $no_sensible = $this->crear('MAIL_FROM_NAME', 'Comercio City ');
+        $this->assertSame('Comercio City ', EnvTemplate::find($no_sensible->id)->value);
+    }
+
+    public function test_esta_ilegible_distingue_un_cifrado_roto_de_un_vacio_o_un_legado_en_claro(): void
+    {
+        $rota   = $this->crear('ANTHROPIC_API_KEY', self::CLAVE_DE_PRUEBA);
+        $sana   = $this->crear('OPENAI_API_KEY', self::CLAVE_DE_PRUEBA);
+        $vacia  = $this->crear('DEEPSEEK_API_KEY', null);
+        $legado = $this->crear('SERPER_API_KEY', 'se-reemplaza-por-legado-0000');
+        $no_sen = $this->crear('MAIL_HOST', 'smtp.ejemplo.test');
+
+        DB::table('env_templates')->where('id', $rota->id)->update(['value' => 'enc:v1:payload-roto']);
+        DB::table('env_templates')->where('id', $legado->id)->update(['value' => 'sk-legado-en-claro-123456']);
+        /* Una no sensible con el prefijo no cuenta: la guarda es sólo de secretos. */
+        DB::table('env_templates')->where('id', $no_sen->id)->update(['value' => 'enc:v1:payload-roto']);
+
+        $this->assertTrue(EnvTemplate::find($rota->id)->esta_ilegible());
+        $this->assertFalse(EnvTemplate::find($sana->id)->esta_ilegible());
+        $this->assertFalse(EnvTemplate::find($vacia->id)->esta_ilegible());
+        $this->assertFalse(EnvTemplate::find($legado->id)->esta_ilegible());
+        $this->assertFalse(EnvTemplate::find($no_sen->id)->esta_ilegible());
+
+        /* La serialización lo informa y no la presenta como cargada. */
+        $array = EnvTemplate::find($rota->id)->toArray();
+        $this->assertTrue($array['value_ilegible']);
+        $this->assertFalse($array['value_set']);
+        $this->assertNull($array['value_tail']);
+        $this->assertFalse(EnvTemplate::find($sana->id)->toArray()['value_ilegible']);
+    }
+
+    public function test_las_contrasenas_no_muestran_cola_y_el_resto_de_las_sensibles_si(): void
+    {
+        $contrasena = EnvTemplate::find($this->crear('MAIL_PASSWORD', 'contrasena-larga-de-prueba-1234')->id)->toArray();
+        $pass_corta = EnvTemplate::find($this->crear('DB_PASS', 'contrasena-larga-de-prueba-5678')->id)->toArray();
+        $secreto    = EnvTemplate::find($this->crear('PUSHER_APP_SECRET', 'secreto-largo-de-prueba-9999')->id)->toArray();
+
+        $this->assertTrue($contrasena['value_set']);
+        $this->assertNull($contrasena['value_tail']);
+        $this->assertNull($pass_corta['value_tail']);
+
+        $this->assertSame('9999', $secreto['value_tail']);
+    }
+
+    public function test_un_sensible_cifrado_sale_descifrado_por_el_armado_del_env_de_una_demo(): void
+    {
+        /* El constructor del servicio exige una credencial SSH del tipo de hosting; no se usa. */
+        if (! ClientSshCredential::where('type', 'shared_hosting')->exists()) {
+            ClientSshCredential::create([
+                'type' => 'shared_hosting', 'host' => 'hosting.invalido.local', 'port' => 65002,
+                'username' => 'usuario-de-prueba', 'password' => 'no-se-usa-' . Str::random(8),
+            ]);
+        }
+
+        $this->crear('ANTHROPIC_API_KEY', self::CLAVE_DE_PRUEBA);
+        $this->crear('MAIL_HOST', 'smtp.ejemplo.test');
+
+        $demo = Demo::create([
+            'user_id'           => 4242,
+            'erp_spa_url'       => 'https://demo-cifrado.comerciocity.com',
+            'erp_api_url'       => 'https://api-demo-cifrado.comerciocity.com',
+            'ecommerce_spa_url' => 'https://tienda-demo-cifrado.comerciocity.com',
+            'ecommerce_api_url' => 'https://api-tienda-demo-cifrado.comerciocity.com',
+        ]);
+        /* El servicio exige una versión asociada para construirse. */
+        $version = Version::create([
+            'version' => '9.9.' . random_int(1000, 999999), 'title' => 'Versión de prueba', 'status' => 'published',
+        ]);
+        $instalacion = DemoInstallation::create([
+            'demo_id' => $demo->id, 'version_id' => $version->id, 'status' => DemoInstallation::STATUS_PENDIENTE,
+        ]);
+
+        $vars = (new DemoInstallationService($instalacion))->build_env_vars_to_write();
+
+        /* Al .env de la demo llega la clave real, no el texto cifrado de la base. */
+        $this->assertSame(self::CLAVE_DE_PRUEBA, $vars['ANTHROPIC_API_KEY']);
+        $this->assertSame('smtp.ejemplo.test', $vars['MAIL_HOST']);
+        $this->assertStringNotContainsString('enc:v1:', implode("\n", $vars));
     }
 
     /**
