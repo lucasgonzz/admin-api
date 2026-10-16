@@ -22,6 +22,9 @@ use Illuminate\Validation\Rule;
  * 🔴 Las variables SENSIBLES (EnvSensitiveKeys) se guardan cifradas (ver EnvTemplate) y este controller
  * nunca devuelve su valor: ni en el listado, ni en los diffs contra los clientes. Para cambiarlas desde
  * la pantalla, un valor vacío significa "no tocar" y vaciarlas es una acción explícita (`clear_value`).
+ *
+ * El servicio SSH se resuelve por el container (app(EnvSshService::class)) y no con `new`, para poder
+ * reemplazarlo por un fake en los tests; en producción el container devuelve una instancia común.
  */
 class EnvTemplateController extends Controller
 {
@@ -257,7 +260,7 @@ class EnvTemplateController extends Controller
             ]);
         }
 
-        $env_ssh_service = new EnvSshService();
+        $env_ssh_service = app(EnvSshService::class);
 
         /*
          * Lee el .env del cliente vía SSH. En caso de error, devuelve warning no bloqueante.
@@ -321,7 +324,7 @@ class EnvTemplateController extends Controller
         $client_apis = $client->client_apis;
 
         /* Instancia el servicio SSH compartido para todas las conexiones. */
-        $env_ssh_service = new EnvSshService();
+        $env_ssh_service = app(EnvSshService::class);
 
         /* Acumula los resultados por API para devolver al frontend. */
         $results = [];
@@ -406,7 +409,7 @@ class EnvTemplateController extends Controller
 
         /* Escribe las variables en el .env de cada API del cliente. */
         $client_apis     = $client->client_apis;
-        $env_ssh_service = new EnvSshService();
+        $env_ssh_service = app(EnvSshService::class);
 
         /* Contador de APIs actualizadas correctamente. */
         $updated_apis = 0;
@@ -478,7 +481,7 @@ class EnvTemplateController extends Controller
         }
 
         /* Escribe las variables en el .env del cliente vía SSH, según el hosting_type de esta API. */
-        $env_ssh_service = new EnvSshService();
+        $env_ssh_service = app(EnvSshService::class);
 
         $env_ssh_service->write_env_vars_for($client_api, $vars_to_write);
         $env_ssh_service->disconnect();
