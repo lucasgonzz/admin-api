@@ -4,6 +4,8 @@ namespace App\Mail\Helpers;
 
 use App\Mail\LeadDemoAccesoMail;
 use App\Models\Lead;
+use App\Services\AsistenteDemoLeadService;
+use App\Services\DemoTurnoTexto;
 use App\Services\DemoUrlNormalizer;
 
 /**
@@ -23,6 +25,11 @@ use App\Services\DemoUrlNormalizer;
  *   el lead no tiene demo o la instancia no tiene tienda; el blade oculta la llave.
  * - WhatsApp, firmante y logo: las mismas claves de `config('commerciocity.*')` que ya lee
  *   `LeadDemoMailHelper`, para que los dos mails firmen igual.
+ * - Turno (misión mail-demo-turno-y-asistente, 16/10/2026): día y horas de la demo asignada, de
+ *   `DemoTurnoTexto::de_lead()`. Null si el lead no tiene un turno completo o ya terminó.
+ * - Asistente personal: número y enlace de `AsistenteDemoLeadService`, que solo los da cuando el
+ *   número del asistente está LISTO. Mientras no lo esté, el mail sale sin ese bloque y no le
+ *   promete al lead algo que no funciona.
  */
 class LeadDemoAccesoMailHelper
 {
@@ -57,6 +64,9 @@ class LeadDemoAccesoMailHelper
         $presenter_role = (string) config('commerciocity.demo_mail.presenter_role', 'Fundador');
         $logo_url       = (string) config('commerciocity.logo_url', '');
 
+        // Turno de la demo y asistente: los dos pueden faltar, y el mail se arma igual sin ellos.
+        $turno = DemoTurnoTexto::de_lead($lead);
+
         return new LeadDemoAccesoMail(
             $nombre,
             $url_experiencia,
@@ -64,7 +74,10 @@ class LeadDemoAccesoMailHelper
             $url_whatsapp,
             $logo_url,
             $presenter_name,
-            $presenter_role
+            $presenter_role,
+            $turno,
+            AsistenteDemoLeadService::numero_visible(),
+            AsistenteDemoLeadService::url_whatsapp()
         );
     }
 
