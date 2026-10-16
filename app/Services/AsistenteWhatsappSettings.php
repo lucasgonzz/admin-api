@@ -7,7 +7,7 @@ use App\Models\AdminSetting;
 /**
  * Los interruptores globales del canal del asistente por WhatsApp.
  *
- * Son cinco y cada uno tapa un agujero distinto:
+ * Son seis y cada uno tapa un agujero distinto:
  *
  *   1. **Los tickets de soporte, desconectados.** Lucas lo dictó el 16/9/2026: *"actualmente los
  *      clientes se comunican a otro número por soporte, así que simplemente dejá desconectada la
@@ -31,10 +31,17 @@ use App\Models\AdminSetting;
  *   5. **Qué se le contesta a quien escribe al número del ASISTENTE sin ser dueño** (misión
  *      whatsapp-dos-numeros, 13/10/2026). Ese número no abre tickets, no crea leads y no entra a
  *      implementación: el único camino que le queda a un remitente ajeno es este texto, y por eso
- *      es el único de los cinco con un default que NO es el silencio (ver
+ *      es el único de los seis con un default que NO es el silencio (ver
  *      `texto_para_remitente_ajeno()`).
+ *   6. **Con qué plantilla salen los recordatorios de la Agenda** (misión recordatorios-whatsapp,
+ *      16/10/2026): «recordame el viernes a las 10 que…». Mismo problema que los puntos 3 y 4, y
+ *      peor: el recordatorio sale justamente cuando el dueño NO está hablando con el asistente, así
+ *      que la ventana de 24 hs está cerrada casi siempre. 🔴 Mientras esta fila no exista (y su fila
+ *      activa en `client_templates`), fuera de ventana el recordatorio NO SALE, y además el admin se
+ *      lo anuncia así al `empresa-api` (`plantilla=0`) para que el asistente no le prometa al dueño
+ *      un aviso que no va a llegar.
  *
- * Ninguna de las cinco tiene migración ni seeder, por el mismo motivo que `SupportAiSettings`: la
+ * Ninguna de las seis tiene migración ni seeder, por el mismo motivo que `SupportAiSettings`: la
  * fila se materializa cuando alguien la escribe, y hasta entonces manda el default de acá.
  * Sembrarlas sería un segundo lugar donde vive el default, y los dos se desincronizan sin aviso.
  */
@@ -101,6 +108,15 @@ Este número queda para hablar con el equipo de ComercioCity.";
 
     /** Idioma por defecto de la plantilla del aviso de actualización. */
     private const DEFAULT_ACTUALIZACION_TEMPLATE_LANGUAGE = 'es_AR';
+
+    /** Clave: nombre de la plantilla de Meta con la que salen los recordatorios de la Agenda. */
+    public const KEY_RECORDATORIO_TEMPLATE_NAME = 'asistente_recordatorio_template_name';
+
+    /** Clave: idioma con el que esa plantilla quedó aprobada en Meta. */
+    public const KEY_RECORDATORIO_TEMPLATE_LANGUAGE = 'asistente_recordatorio_template_language';
+
+    /** Idioma por defecto de la plantilla de los recordatorios. */
+    private const DEFAULT_RECORDATORIO_TEMPLATE_LANGUAGE = 'es_AR';
 
     /**
      * Indica si un mensaje de cliente por WhatsApp todavía abre un ticket de soporte.
@@ -218,5 +234,32 @@ Este número queda para hablar con el equipo de ComercioCity.";
         $idioma = trim((string) AdminSetting::get(self::KEY_ACTUALIZACION_TEMPLATE_LANGUAGE, ''));
 
         return $idioma !== '' ? $idioma : self::DEFAULT_ACTUALIZACION_TEMPLATE_LANGUAGE;
+    }
+
+    /**
+     * Nombre de la plantilla de Meta con la que salen los recordatorios de la Agenda fuera de ventana.
+     *
+     * 🔴 Cadena vacía significa NO MANDAR NADA fuera de ventana, no "mandá algo genérico". La
+     * plantilla (`cc_recordatorio_asistente`, UTILITY, una sola variable) se crea en Meta y se carga
+     * acá a mano cuando queda aprobada; hasta entonces el recordatorio sale solo con la ventana
+     * abierta.
+     *
+     * @return string Cadena vacía si no hay ninguna configurada.
+     */
+    public static function plantilla_de_recordatorios(): string
+    {
+        return trim((string) AdminSetting::get(self::KEY_RECORDATORIO_TEMPLATE_NAME, ''));
+    }
+
+    /**
+     * Idioma con el que esa plantilla quedó aprobada en Meta.
+     *
+     * @return string
+     */
+    public static function idioma_de_la_plantilla_de_recordatorios(): string
+    {
+        $idioma = trim((string) AdminSetting::get(self::KEY_RECORDATORIO_TEMPLATE_LANGUAGE, ''));
+
+        return $idioma !== '' ? $idioma : self::DEFAULT_RECORDATORIO_TEMPLATE_LANGUAGE;
     }
 }
