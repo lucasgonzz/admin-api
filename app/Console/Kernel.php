@@ -36,6 +36,28 @@ class Kernel extends ConsoleKernel
             ->dailyAt('08:30')
             ->withoutOverlapping();
 
+        /* Los avisos del asistente por WhatsApp: "terminé de leer tu factura, revisala acá" (misión
+         * asistente-aviso-escaneo-factura, 16/10/2026).
+         *
+         * Cada minuto porque el escaneo tarda segundos y el aviso sirve mientras el dueño sigue con el
+         * teléfono en la mano. Es barato: solo consulta a los clientes cuyo dueño le escribió al
+         * asistente en las últimas 24 hs, y deja en pausa a los que no tienen la ruta.
+         *
+         * 🔴 En segundo plano y sin heredar el candado del cron (`artisan_sin_el_lock_del_cron()`),
+         * igual que el demo setup y el worker: el barrido le pega en serie al `empresa-api` de cada
+         * cliente con un timeout de 15 s, y en primer plano un par de clientes lentos clavarían
+         * `schedule:run` y dejarían sin correr al resto de los comandos de cada minuto.
+         *
+         * 🔴 Y `withoutOverlapping(10)` con el número puesto a mano: dos barridos a la vez se
+         * pelearían los mismos avisos (el reclamo de la cache igual impide el doble envío, pero recién
+         * en el aviso, no en la consulta), y el default del candado son 24 HORAS — una corrida que
+         * muera sin soltarlo dejaría sin avisos todo un día. Diez minutos sobran para una corrida que
+         * normalmente dura segundos. */
+        $schedule->exec(self::artisan_sin_el_lock_del_cron('asistente:enviar-avisos'))
+            ->everyMinute()
+            ->withoutOverlapping(10)
+            ->runInBackground();
+
         /* Recolección del consumo de tokens de IA de cada cliente (misión tokens-por-cliente,
          * 17/9/2026).
          *
