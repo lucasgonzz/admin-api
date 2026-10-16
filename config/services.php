@@ -172,6 +172,33 @@ return [
             'VUE_APP_GOOGLE_MAPS_API_KEY' => env('DEPLOY_TIENDA_GOOGLE_MAPS_API_KEY', ''),
             'VUE_APP_FIREBASE_API_KEY' => env('DEPLOY_TIENDA_FIREBASE_API_KEY', ''),
         ],
+        /*
+         * Tablas cuyos DATOS no van en el respaldo previo al upgrade (backup_in_place), por cliente:
+         * `client_id => [nombre_de_tabla, ...]`. La ESTRUCTURA de la tabla sí se respalda (queda creada
+         * y vacía al restaurar); solo se saltea el volcado de sus filas.
+         *
+         * 🔴 Por qué existe (16/10/2026): el MySQL del VPS corta con `max_execution_time = 120000`
+         * (global, persistente desde el 21/9, contra las consultas apiladas) todo SELECT que pase de
+         * 120 s, y el SELECT del `mysqldump` de una tabla de varios GB entra en ese corte. Servian
+         * (cliente 17) tiene `article_import_result_observations` con 3,1 GB y ~2,4 M filas (log de
+         * observaciones de las importaciones de artículos): su respaldo moría con el Error 3024 y el
+         * upgrade a la 4.3.12 quedaba `failed` sin tocar nada. Lucas decidió (16/10/2026) dejar afuera
+         * los datos de esa tabla antes que subir el tope global del MySQL de producción.
+         *
+         * ⚠️ Es una excepción POR CLIENTE, no una regla general: cualquier otro cliente cuya tabla más
+         * grande pase de ~120 s de dump va a chocar con lo mismo, y ahí se suma su entrada acá (o se
+         * pasa a un tope de sesión propio del dump: en el VPS, `init-command="SET SESSION
+         * max_execution_time=0"` en el archivo de opciones de mysqldump, probado el 16/10/2026).
+         * Medido ese día: la tabla más grande de La Martina (`sales`, 906 MB) tarda 67 s en volcarse,
+         * la de Ferretotal (`articles`) 23 s; La Martina es la próxima en la fila.
+         * Los nombres se validan al armar el comando. Si una migración elimina la tabla, el respaldo
+         * de ese cliente frena (`--no-data` falla con "Couldn't find table"): hay que sacar la entrada.
+         * Un cliente en base compartida (`shared_database_group_id`) dejaría sin datos esa tabla de
+         * los comercios hermanos también.
+         */
+        'respaldo_tablas_sin_datos' => [
+            17 => ['article_import_result_observations'],
+        ],
     ],
 
     // GitHub API: token para acceder al repositorio de documentación de ComercioCity y a los
