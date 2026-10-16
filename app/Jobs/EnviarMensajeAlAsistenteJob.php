@@ -360,6 +360,25 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
                 return;
             }
 
+            /* 🔴 Un mensaje que el asistente no puede leer (un PDF, un video, un sticker… sin nada
+             * escrito) no viaja: el contrato no tiene con qué llevarlo y del otro lado es un 422, que
+             * terminaba en la disculpa y en un aviso al equipo por algo que no es ninguna falla. Se le
+             * contesta acá, con el texto fijo, sin tocar el sistema del cliente. La regla es la misma
+             * con la que `recibir()` decidió no reclamar las fotos en espera: ver
+             * `AsistenteWhatsappService::no_se_puede_leer()`. Va ANTES de la ida y solo mientras no
+             * hubo ida (`ai_message_id` null): una fila que ya está en polling es un mensaje que el
+             * `empresa-api` aceptó. */
+            if ($fila->ai_message_id === null
+                && $asistente->no_se_puede_leer(
+                    $fila->texto !== null ? (string) $fila->texto : null,
+                    (string) $fila->tipo,
+                    is_array($this->imagenes) ? $this->imagenes : []
+                )) {
+                $this->contestar_que_no_se_puede_leer($asistente, $fila, $client, $sender);
+
+                return;
+            }
+
             if ($fila->ai_message_id === null) {
                 $this->enviar($asistente, $urls, $sender, $imagenes, $fila, $client);
 
@@ -1563,6 +1582,63 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
     }
 
     /**
+     * Le contesta al dueño que ese tipo de mensaje no se puede leer, sin pasar por su sistema.
+     *
+     * Cierra la fila como `respondido` y no como `error`, y no avisa al equipo, a propósito: no falló
+     * nada. El dueño mandó algo que el asistente no sabe leer y recibió, por el mismo número por el
+     * que escribió, qué puede mandar en su lugar. El `error` queda vacío salvo que Meta rechace ese
+     * envío, que es lo único que sí habría que poder ver. Leyendo la tabla, este caso es la fila
+     * `respondido` sin `ai_message_id` (nunca viajó) con su `tipo` (`document`, `sticker`…), y la
+     * saliente con `TEXTO_NO_SE_PUEDE_LEER`.
+     *
+     * La fila saliente se deja igual que con cualquier respuesta: es la constancia de lo que se le
+     * dijo, y lleva la conversación de la cita si el dueño citó algo, así que citar este texto después
+     * lo devuelve a donde estaba.
+     *
+     * @param AsistenteWhatsappService $asistente
+     * @param ClientAssistantMessage   $fila      Mensaje del dueño que no se puede leer.
+     * @param Client                   $client
+     * @param WhatsappSendService      $sender
+     *
+     * @return void
+     */
+    private function contestar_que_no_se_puede_leer(
+        AsistenteWhatsappService $asistente,
+        ClientAssistantMessage $fila,
+        Client $client,
+        WhatsappSendService $sender
+    ): void {
+        // Por el número por el que entró, igual que la respuesta: ver el comentario de `consultar()`.
+        $whatsapp_message_id = $sender->paraProposito($this->proposito_de_salida($fila))->send_text(
+            (string) $fila->telefono,
+            AsistenteWhatsappService::TEXTO_NO_SE_PUEDE_LEER,
+            'Asistente por WhatsApp, mensaje que no se puede leer - cliente #' . $client->id
+        );
+
+        $fila->estado = ClientAssistantMessage::ESTADO_RESPONDIDO;
+        $fila->error  = $whatsapp_message_id === null ? (string) $sender->last_send_error : null;
+        $fila->save();
+
+        $asistente->registrar_saliente(
+            $fila,
+            AsistenteWhatsappService::TEXTO_NO_SE_PUEDE_LEER,
+            $whatsapp_message_id,
+            $whatsapp_message_id !== null
+                ? ClientAssistantMessage::ESTADO_RESPONDIDO
+                : ClientAssistantMessage::ESTADO_ERROR,
+            $whatsapp_message_id === null ? (string) $sender->last_send_error : null,
+            $sender->phone_number_id_de_destino()
+        );
+
+        Log::channel('daily')->info('AsistenteWhatsapp: el dueño mandó un mensaje que el asistente no puede leer.', [
+            'assistant_message_id' => $fila->id,
+            'client_id'            => $client->id,
+            'tipo'                 => $fila->tipo,
+            'entregada'            => $whatsapp_message_id !== null,
+        ]);
+    }
+
+    /**
      * Cierra el mensaje del dueño con el texto de disculpa y avisa a los admins.
      *
      * @param AsistenteWhatsappService $asistente
@@ -1686,7 +1762,9 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
      *
      * El webhook maneja más tipos de los que el contrato conoce (`video`, `document`, `sticker`…).
      * Todo lo que no es audio ni imagen viaja como `texto`, que es lo único que el asistente puede
-     * hacer con eso: leer el caption o la transcripción que igual llegó en `texto`.
+     * hacer con eso: leer el caption o la transcripción que igual llegó en `texto`. Si no trae nada
+     * escrito ni fotos, ni siquiera llega acá: lo contesta `contestar_que_no_se_puede_leer()`. El
+     * documento de audio sí llega, y como `audio`: `recibir()` ya lo guardó con ese tipo.
      *
      * @param string $tipo Tipo normalizado del webhook.
      *

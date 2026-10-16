@@ -56,6 +56,18 @@ class AsistenteWhatsappService
         . 'ComercioCity. Probá de nuevo en un rato, o escribime desde el chat del sistema.';
 
     /**
+     * Texto que recibe el dueño cuando manda algo que el asistente no puede leer: un PDF, un video,
+     * un sticker… sin nada escrito (misión asistente-envios-a-clientes, 16/10/2026).
+     *
+     * 🔴 No es una disculpa ni un error, y por eso no es `TEXTO_DE_DISCULPA`: no falló nada y no hay
+     * nadie a quien avisar. Le dice qué SÍ puede mandar, que es lo único que le sirve. Lo manda el
+     * admin, sin pasar por el sistema del cliente: el contrato no tiene cómo llevar ese mensaje. Ver
+     * `no_se_puede_leer()`.
+     */
+    const TEXTO_NO_SE_PUEDE_LEER = 'Ese tipo de mensaje todavía no lo puedo leer: escribime, '
+        . 'mandame una nota de voz o una foto.';
+
+    /**
      * Prefijo de la clave de caché que limita el aviso del 404 a uno por cliente y por día.
      */
     const CACHE_AVISO_404 = 'asistente_whatsapp_aviso_404';
@@ -178,6 +190,28 @@ class AsistenteWhatsappService
      * `api_admin_queue` desde el 21/9: no existía. La migración del admin al VPS dejó en supervisor
      * solo el scheduler, `api_admin_schedule`, y el worker de cola lo siguió lanzando el Kernel.)
      *
+     * **El mensaje que el asistente no puede leer** (misión asistente-envios-a-clientes, 16/10/2026):
+     * un documento, un video, un sticker, una ubicación… que llega SIN texto y sin fotos. El contrato
+     * con el `empresa-api` no tiene con qué representarlo —un `texto` vacío sin `imagenes[]` es un
+     * 422, y el 422 terminaba en el «Uf, no pude contestarte» y en un aviso al equipo por algo que no
+     * es ninguna falla—. Ver `no_se_puede_leer()`. Se decide ACÁ, y no recién en el job, por dos
+     * cosas que solo este punto ve:
+     *
+     *   - **El archivo de audio.** WhatsApp Web manda un audio adjuntado como `document` con mime
+     *     `audio/*`, y el mime solo viene en el `inbound_media` del webhook, que no llega al job (el
+     *     job lleva fotos, nada más). Ese documento se guarda como `tipo = audio` sin texto, y así
+     *     viaja: del otro lado es exactamente un audio que Kapso no transcribió, y el `empresa-api`
+     *     ya tiene su respuesta fija para eso. Con epígrafe no cambia nada: el epígrafe es lo que hay
+     *     para contestar y viaja como siempre.
+     *   - **La espera de las fotos.** Un mensaje que no se puede leer NO reclama las fotos que el
+     *     dueño tenía esperando: no trae ninguna instrucción, y llevárselas haría que salieran sin la
+     *     que el dueño todavía está por mandar. Siguen esperando su audio, o su temporizador.
+     *
+     * El texto fijo lo manda el job (acá no se sale a la red), por la cola `asistente`: con el worker
+     * permanente sale en un segundo. La cita no cambia: la fila resuelve su conversación por cita como
+     * cualquier otra, y la respuesta fija queda como saliente de esa misma conversación (o de ninguna,
+     * si el dueño no citó), así que citarla después lleva a donde el dueño estaba.
+     *
      * @param array<string, mixed> $parsed Resultado de `WhatsappWebhookController::parse_inbound_message()`.
      * @param Client               $client Cliente cuyo dueño escribió.
      *
@@ -187,9 +221,19 @@ class AsistenteWhatsappService
     {
         $reply_to = isset($parsed['reply_to_message_id']) ? trim((string) $parsed['reply_to_message_id']) : '';
 
-        $imagenes = $this->imagenes_del_mensaje($parsed);
-        $segundos = $this->segundos_de_espera_de_foto();
-        $espera   = $segundos > 0 && $this->es_foto_sin_epigrafe($parsed, $imagenes);
+        $imagenes           = $this->imagenes_del_mensaje($parsed);
+        $segundos           = $this->segundos_de_espera_de_foto();
+        $espera             = $segundos > 0 && $this->es_foto_sin_epigrafe($parsed, $imagenes);
+        $documento_de_audio = $this->es_documento_de_audio_sin_epigrafe($parsed);
+
+        /* El documento de audio se guarda como lo que es para el asistente: un audio sin transcribir.
+         * Va ANTES de mirar si se puede leer, porque un audio sí se puede (del otro lado tiene su
+         * respuesta fija). */
+        $tipo = $documento_de_audio ? 'audio' : substr((string) ($parsed['type'] ?? 'text'), 0, 20);
+
+        /* `$espera` y esto se excluyen solos: la foto que espera trae una foto, y un mensaje con fotos
+         * siempre se puede leer. */
+        $no_se_puede_leer = $this->no_se_puede_leer($parsed['body'] ?? null, $tipo, $imagenes);
 
         $fila                               = new ClientAssistantMessage();
         $fila->client_id                    = (int) $client->id;
@@ -198,7 +242,7 @@ class AsistenteWhatsappService
         $fila->direccion                    = ClientAssistantMessage::DIRECCION_ENTRANTE;
         $fila->whatsapp_message_id          = (string) $parsed['message_id'];
         $fila->reply_to_whatsapp_message_id = $reply_to !== '' ? $reply_to : null;
-        $fila->tipo                         = substr((string) ($parsed['type'] ?? 'text'), 0, 20);
+        $fila->tipo                         = $tipo;
         $fila->texto                        = $parsed['body'];
         $fila->estado                       = $espera
             ? ClientAssistantMessage::ESTADO_ESPERANDO
@@ -231,7 +275,20 @@ class AsistenteWhatsappService
             'cito'                => $fila->reply_to_whatsapp_message_id !== null,
             'ai_conversation_id'  => $fila->ai_conversation_id,
             'espera_instruccion'  => $espera,
+            'documento_de_audio'  => $documento_de_audio,
+            'no_se_puede_leer'    => $no_se_puede_leer,
         ]);
+
+        if ($no_se_puede_leer) {
+            /* Sin pasar por el reclamo de las fotos en espera: ver el comentario del método. El job
+             * vuelve a mirar `no_se_puede_leer()` con lo que quedó en la fila y contesta el texto fijo
+             * sin hablar con el sistema del cliente. */
+            EnviarMensajeAlAsistenteJob::dispatch((int) $fila->id)
+                ->onConnection(self::CONEXION_DE_COLA)
+                ->onQueue(self::COLA_DEL_ASISTENTE);
+
+            return $fila;
+        }
 
         if ($espera) {
             /* El tercer parámetro es la espera, y no es decorativo: `retryUntil()` la suma a su
@@ -678,6 +735,90 @@ class AsistenteWhatsappService
         }
 
         return trim((string) ($parsed['body'] ?? '')) === '';
+    }
+
+    /**
+     * Si el mensaje es un archivo de audio que llegó como DOCUMENTO, sin nada escrito.
+     *
+     * Es el caso S19 de la prueba del agente personal (16/10/2026): un audio adjuntado desde WhatsApp
+     * Web (Adjuntar → Audio) no sale como nota de voz sino como `document` con mime `audio/ogg`, y
+     * Kapso no lo transcribe. El webhook lo deja como `document` sin `body`, y hasta el 16/10 viajaba
+     * como un `texto` vacío: 422 del `empresa-api` y «Uf, no pude contestarte».
+     *
+     * El mime se lee de `inbound_media`, que es donde lo deja el webhook (`mime_type` del nodo del
+     * documento, o el que trae `kapso.content`). Se compara solo el principio —`audio/`— porque Meta
+     * puede mandarlo con parámetros (`audio/ogg; codecs=opus`).
+     *
+     * Con epígrafe devuelve false a propósito: el epígrafe es lo que el dueño escribió y el asistente
+     * lo contesta como siempre; marcarlo como audio haría que el `empresa-api` tomara el epígrafe por
+     * la transcripción de un audio que nadie transcribió.
+     *
+     * @param array<string, mixed> $parsed Resultado de `parse_inbound_message()`.
+     *
+     * @return bool
+     */
+    private function es_documento_de_audio_sin_epigrafe(array $parsed): bool
+    {
+        if (strtolower(trim((string) ($parsed['type'] ?? ''))) !== 'document') {
+            return false;
+        }
+
+        if (trim((string) ($parsed['body'] ?? '')) !== '') {
+            return false;
+        }
+
+        if (empty($parsed['inbound_media']) || ! is_array($parsed['inbound_media'])) {
+            return false;
+        }
+
+        $mime = strtolower(trim((string) ($parsed['inbound_media']['mime'] ?? '')));
+
+        return strpos($mime, 'audio/') === 0;
+    }
+
+    /**
+     * Si un mensaje del dueño es de los que el asistente no puede leer: sin texto, sin fotos y sin audio.
+     *
+     * 🔴 **Una sola regla para las dos puntas.** La usa `recibir()` para no reclamar fotos en espera y
+     * despachar el job sin ellas, y la vuelve a usar `EnviarMensajeAlAsistenteJob` antes de la ida,
+     * con lo que quedó en la fila, para contestar el texto fijo en vez de mandarle al `empresa-api`
+     * un mensaje vacío que contesta 422. Dos copias de esta regla serían dos reglas el día que alguien
+     * toque una sola.
+     *
+     * Lo que SÍ se puede leer, y por qué cada cosa:
+     *
+     *   - **Algo escrito** (texto, epígrafe, la transcripción de Kapso, el contenido que deja Kapso de
+     *     una ubicación o un botón): es lo que el asistente contesta.
+     *   - **Fotos** (las propias o las que el mensaje se llevó de la espera): el contrato acepta
+     *     `imagenes[]` sin texto, es el caso normal de la factura.
+     *   - **Audio** (`audio`, `ptt`, `voice`): aunque no venga transcripto, el `empresa-api` tiene su
+     *     respuesta fija («No me llegó lo que dijiste en el audio…»). Incluye el documento de audio,
+     *     que `recibir()` ya guardó como `audio`.
+     *   - **Una foto (`image`) sin metadata**: no entra en esta regla a propósito. Es una falla —Kapso
+     *     no mandó ni URL ni id, o la metadata de la espera no se pudo descifrar— y no un tipo de
+     *     mensaje que no se sepa leer: decirle al dueño que «ese tipo de mensaje» no se lee sería
+     *     mentirle sobre una foto. Sigue su camino de siempre y, si falla, avisa al equipo.
+     *
+     * Todo lo demás —un PDF, un video, un sticker, un contacto, un documento cualquiera— sin nada
+     * escrito no tiene con qué viajar.
+     *
+     * @param string|null                      $texto    Lo que escribió el dueño (`body` o `texto` de la fila).
+     * @param string                           $tipo     Tipo normalizado (el de la fila).
+     * @param array<int, array<string, mixed>> $imagenes Fotos que viajarían con el mensaje.
+     *
+     * @return bool
+     */
+    public function no_se_puede_leer(?string $texto, string $tipo, array $imagenes): bool
+    {
+        if (trim((string) $texto) !== '') {
+            return false;
+        }
+
+        if ($imagenes !== []) {
+            return false;
+        }
+
+        return ! in_array(strtolower(trim($tipo)), ['audio', 'ptt', 'voice', 'image'], true);
     }
 
     /**
