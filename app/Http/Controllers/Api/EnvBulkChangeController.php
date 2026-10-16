@@ -188,6 +188,14 @@ class EnvBulkChangeController extends Controller
                 return ['error' => "La variable '{$key}' no existe en la plantilla .env."];
             }
 
+            /*
+             * Ilegible (APP_KEY cambiada, payload dañado) no es lo mismo que vacío: el accessor devuelve null
+             * en los dos casos, y aplicarla escribiría la variable vacía en el .env de los clientes.
+             */
+            if ($plantilla->esta_ilegible()) {
+                return ['error' => "El valor guardado de '{$key}' no se puede leer; volvé a cargarlo en la plantilla. No se creó ningún lote."];
+            }
+
             /* El accessor del modelo devuelve el valor descifrado. */
             $valor = $plantilla->value;
 

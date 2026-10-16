@@ -53,6 +53,9 @@ class EnvBulkDesdePlantillaTest extends TestCase
     {
         parent::setUp();
 
+        /* Hermético: sin depender de filas ajenas de env_templates (se revierte con la transacción). */
+        EnvTemplate::query()->delete();
+
         $this->ssh_fake = new EnvSshServiceFake();
         $this->app->instance(EnvSshService::class, $this->ssh_fake);
 
@@ -315,6 +318,26 @@ class EnvBulkDesdePlantillaTest extends TestCase
 
         $this->aplicar($admin, $preview->json('token'))->assertStatus(200);
         $this->assertSame('sk-ds-test-0123456789ABCDEF', $this->ssh_fake->escrituras[$client->active_client_api->id]['DEEPSEEK_API_KEY']);
+    }
+
+    public function test_una_clave_ilegible_da_422_nombrandola_y_no_crea_ningun_lote(): void
+    {
+        $admin  = $this->crear_admin('bulk-plantilla-ilegible@test.local');
+        $client = $this->crear_cliente("ANTHROPIC_API_KEY=sk-ant-test-VIEJA-clave-0000\n");
+        $plantilla = $this->crear_plantilla('ANTHROPIC_API_KEY', self::CLAVE);
+
+        /* APP_KEY cambiada o payload dañado: el accessor devolvería null, y aplicarla escribiría vacío. */
+        DB::table('env_templates')->where('id', $plantilla->id)->update(['value' => 'enc:v1:payload-roto']);
+
+        $lotes_antes = EnvChangeBatch::count();
+
+        $response = $this->previsualizar($admin, [$client->id], ['plantilla' => ['keys' => ['ANTHROPIC_API_KEY']]]);
+
+        $response->assertStatus(422);
+        $this->assertStringContainsString('ANTHROPIC_API_KEY', $response->json('message'));
+        $this->assertSame($lotes_antes, EnvChangeBatch::count());
+        $this->assertSame([], $this->ssh_fake->escrituras);
+        Http::assertNothingSent();
     }
 
     /**
