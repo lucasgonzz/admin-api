@@ -78,18 +78,27 @@ class CobranzasController extends Controller
             ? Carbon::parse($inicio_minimo)->format('Y-m')
             : $ahora->copy()->subMonthsNoOverflow(CobranzasMensualidadService::MESES_ATRAS_DEFAULT)->format('Y-m');
 
+        /** Último mes que la tira ofrece: el corriente más 3. */
+        $hasta = $ahora->copy()->addMonthsNoOverflow(CobranzasMensualidadService::MESES_ADELANTE_DEFAULT)->format('Y-m');
+
+        /** Mes de referencia = el más reciente de los pedidos (`$meses` ya viene ordenado). */
+        $referencia = end($meses);
+
         return response()->json([
             'meses'         => $meses,
             'mes_corriente' => $service->mes_corriente(),
             'clientes'      => $service->tabla_mensualidades($meses),
             'rango'         => [
                 'desde' => $desde,
-                'hasta' => $ahora->copy()->addMonthsNoOverflow(CobranzasMensualidadService::MESES_ADELANTE_DEFAULT)->format('Y-m'),
+                'hasta' => $hasta,
             ],
             // Las dos tarjetas de plata (cobrado y falta cobrar) relativas al mes más reciente de los
             // pedidos, que es el que el front toma como mes de referencia. Clave NUEVA y opcional para
             // el front: un SPA viejo la ignora (misión cobranzas-cobrado-y-falta-cobrar, 16/10/2026).
-            'resumen'       => $service->resumen_cobranza(end($meses)),
+            // Si el mes de referencia pasa del último que ofrece la tira (solo se llega por la API a
+            // mano) va null: el recorrido de «falta cobrar» crece con los meses hasta ese mes, y un
+            // 9999-12 era cuestión de minutos y un error 500. El SPA ya tolera `resumen: null`.
+            'resumen'       => $referencia <= $hasta ? $service->resumen_cobranza($referencia) : null,
         ]);
     }
 

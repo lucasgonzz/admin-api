@@ -251,12 +251,9 @@ class CobranzasMensualidadService
     protected function deducir_estado(Client $client, string $periodo, ?MensualidadPeriodo $fila, ?MensualidadInvoice $factura): string
     {
         // 1 a 3: lo afirmado gana a todo lo demás.
-        if ($fila !== null && in_array($fila->estado, [
-            MensualidadPeriodo::ESTADO_SIN_CARGO,
-            MensualidadPeriodo::ESTADO_PAGADO,
-            MensualidadPeriodo::ESTADO_PARCIAL,
-        ], true)) {
-            return $fila->estado;
+        $afirmado = $this->estado_afirmado($fila);
+        if ($afirmado !== null) {
+            return $afirmado;
         }
 
         // 4: hay Factura C autorizada por AFIP y nadie registró el pago.
@@ -277,6 +274,31 @@ class CobranzasMensualidadService
 
         // 7: le tocaba y no hay nada. El rojo.
         return MensualidadPeriodo::ESTADO_PENDIENTE;
+    }
+
+    /**
+     * Las reglas 1 a 3 del orden de `deducir_estado()`: si alguien AFIRMÓ algo de ese mes (sin
+     * cargo, pagado o parcial), eso es el estado, gane lo que gane el resto (factura, calendario,
+     * inicio). Es la única definición de «lo afirmado gana a todo»: la usan `deducir_estado()` y el
+     * atajo de `resumen_falta_cobrar()`, para que si el día de mañana cambia la regla no haya dos
+     * copias que se desfasen.
+     *
+     * @param MensualidadPeriodo|null $fila Lo afirmado de ese mes, si hay fila.
+     *
+     * @return string|null El estado afirmado, o null si nadie afirmó nada de ese mes (pendiente de
+     *                     deducirse por las reglas 4 a 7).
+     */
+    protected function estado_afirmado(?MensualidadPeriodo $fila): ?string
+    {
+        if ($fila !== null && in_array($fila->estado, [
+            MensualidadPeriodo::ESTADO_SIN_CARGO,
+            MensualidadPeriodo::ESTADO_PAGADO,
+            MensualidadPeriodo::ESTADO_PARCIAL,
+        ], true)) {
+            return $fila->estado;
+        }
+
+        return null;
     }
 
     /**
@@ -857,9 +879,15 @@ class CobranzasMensualidadService
      * cobranzas-cobrado-y-falta-cobrar, 16/10/2026): lo que se COBRÓ y lo que FALTA COBRAR, los dos
      * relativos a un mes de referencia R (el más reciente de los meses elegidos en la tira).
      *
-     * 🔴 «Cobrado en total» es la CAJA del mes R —lo que entró durante R, incluidas deudas de meses
-     * anteriores—, no un acumulado histórico (decisión de Lucas, 16/10/2026): los meses que la
-     * planilla importó como PAGADO no tienen monto ni fecha, así que un histórico saldría muy bajo.
+     * 🔴 El «cobrado en total» NO es un acumulado histórico (decisión de Lucas, 16/10/2026: los
+     * meses que la planilla importó como PAGADO no tienen monto ni fecha, así que un histórico
+     * saldría muy bajo): es lo cobrado POR el mes R más lo cobrado DURANTE R por deudas de meses
+     * anteriores. OJO que no es caja estricta por fecha de cobro: lo del mes R se cuenta por el
+     * período al que se imputó (sea cual sea su fecha, igual que la tarjeta de siempre), y solo lo de
+     * meses anteriores se ubica por fecha. En el caso normal —el modal pone la fecha de hoy y se paga
+     * el mes en curso— las dos miradas coinciden; se separan con un adelanto (octubre pagado en
+     * septiembre) o un atraso (septiembre pagado en octubre), y así las dos mitades siempre suman el
+     * total sin pagos contados dos veces.
      *
      * - **cobrado.del_mes**: pagos con monto imputados al período R, sea cual sea su fecha de cobro
      *   (es exactamente lo que la tarjeta ya sumaba, el número de hoy no cambia).
@@ -1038,11 +1066,28 @@ class CobranzasMensualidadService
                         continue;
                     }
 
+                    /** Lo que se afirmó de ese mes, si algo (la fila de `mensualidad_periodos`). */
+                    $fila = $cargado['filas'][$client->id][$periodo] ?? null;
+
+                    /*
+                     * Atajo de rendimiento: un mes afirmado `pagado` o `sin_cargo` no debe nada, pase lo
+                     * que pase con factura, calendario o pagos (regla «lo afirmado gana a todo»,
+                     * `estado_afirmado()`), así que no hace falta armar su celda completa. Es la gran
+                     * mayoría de las celdas —todo el historial importado de la planilla—, y armarlas
+                     * una por una multiplicaba por ocho lo que tarda la tabla. Solo se saltean los dos
+                     * estados que valen 0 en `monto_adeudado()`: `parcial` sí pasa por `estado_de()`
+                     * porque necesita su saldo.
+                     */
+                    $afirmado = $this->estado_afirmado($fila);
+                    if ($afirmado === MensualidadPeriodo::ESTADO_PAGADO || $afirmado === MensualidadPeriodo::ESTADO_SIN_CARGO) {
+                        continue;
+                    }
+
                     /** La celda del mes, con la misma regla de estados que la tabla. */
                     $celda = $this->estado_de(
                         $client,
                         $periodo,
-                        $cargado['filas'][$client->id][$periodo] ?? null,
+                        $fila,
                         $cargado['facturas'][$client->id][$periodo] ?? null,
                         $cargado['pagos'][$client->id][$periodo] ?? []
                     );

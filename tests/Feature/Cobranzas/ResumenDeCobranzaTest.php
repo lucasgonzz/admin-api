@@ -647,4 +647,69 @@ class ResumenDeCobranzaTest extends BaseDeCobranzas
         $this->assertEqualsWithDelta(10 * (12000 + 8000), $resumen['falta_cobrar']['de_anteriores'], 0.001, 'Julio facturado 12.000 + saldo de agosto 8.000, por 10.');
         $this->assertEqualsWithDelta(40000.0, $resumen['cobrado']['de_anteriores'], 0.001, '10 pagos de 4.000 de agosto cobrados en septiembre.');
     }
+
+    /**
+     * 9. Un mes de referencia más allá de lo que ofrece la tira (el corriente + 3) no calcula el
+     * resumen: el recorrido de «falta cobrar» crece con los meses hasta ese mes, y un `9999-12` por
+     * la API a mano tardaba minutos y terminaba en un 500. El resto de la respuesta sigue intacto.
+     * El borde es exacto: con el reloj en septiembre, la tira llega hasta diciembre.
+     *
+     * @return void
+     */
+    public function test_un_mes_de_referencia_mas_alla_de_la_tira_no_calcula_el_resumen(): void
+    {
+        $this->admin_logueado();
+
+        $this->crear_cliente();
+
+        // Diciembre es el último mes de la tira (septiembre + 3): todavía hay resumen.
+        $this->assertIsArray($this->resumen(['2026-12']), 'Diciembre está dentro de la tira.');
+
+        // Enero ya no: resumen null, y la tabla de siempre sale completa.
+        $respuesta = $this->pedir(['2027-01']);
+        $this->assertNull($respuesta->json('resumen'), 'Enero de 2027 pasa del corriente + 3.');
+        $this->assertSame('2026-09', $respuesta->json('mes_corriente'));
+        $this->assertNotEmpty($respuesta->json('clientes'), 'La tabla sigue viniendo.');
+
+        // El caso que lo motivó: un mes absurdo responde enseguida y sin error.
+        $this->assertNull($this->pedir(['9999-12'])->json('resumen'));
+    }
+
+    /**
+     * 10. Los meses `pagado` y `sin_cargo` no deben nada y NO se cuentan como «sin monto», aunque
+     * el cliente no tenga precios cargados: «sin monto» es solo para un mes que SÍ debe y no se sabe
+     * cuánto. Fija que el atajo de rendimiento de `resumen_falta_cobrar()` (saltear esos dos
+     * estados sin armar la celda) da lo mismo que armarla.
+     *
+     * @return void
+     */
+    public function test_los_meses_pagados_o_sin_cargo_de_un_cliente_sin_precio_no_cuentan_como_sin_monto(): void
+    {
+        $this->admin_logueado();
+
+        // Sin precios cargados: ningún mes tiene monto esperado salvo que la fila lo diga.
+        $cliente = $this->crear_cliente(['total_mensualidad' => null, 'mensualidad_inicio' => '2026-06-01']);
+
+        $this->sembrar_periodo($cliente, '2026-06', MensualidadPeriodo::ESTADO_PAGADO, null, true);
+        $this->sembrar_periodo($cliente, '2026-07', MensualidadPeriodo::ESTADO_SIN_CARGO);
+        // Agosto pagado y con factura encima: lo afirmado gana, no debe nada.
+        $this->sembrar_periodo($cliente, '2026-08', MensualidadPeriodo::ESTADO_PAGADO);
+        $this->sembrar_factura($cliente, '2026-08');
+        // Septiembre (R): pagado.
+        $this->sembrar_periodo($cliente, '2026-09', MensualidadPeriodo::ESTADO_PAGADO);
+
+        $falta = $this->resumen()['falta_cobrar'];
+
+        $this->assertSame(0, $falta['sin_monto'], 'Ningún mes de este cliente debe algo: no hay nada que no se sepa cuánto es.');
+        $this->assertEqualsWithDelta(0.0, $falta['total'], 0.001);
+        $this->assertSame(0, $falta['meses_de_anteriores']);
+        $this->assertSame(0, $falta['clientes_del_mes']);
+
+        // En cambio, un mes que SÍ debe y no tiene monto, sí cuenta como sin monto: se reabre
+        // septiembre (la fila es única por cliente y mes, así que se actualiza, no se agrega otra).
+        MensualidadPeriodo::where('client_id', $cliente->id)->where('periodo', '2026-09')
+            ->update(['estado' => MensualidadPeriodo::ESTADO_PENDIENTE]);
+
+        $this->assertSame(1, $this->resumen()['falta_cobrar']['sin_monto'], 'Septiembre pendiente sin precio: debe y no se sabe cuánto.');
+    }
 }
