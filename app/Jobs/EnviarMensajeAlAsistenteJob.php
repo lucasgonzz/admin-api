@@ -35,11 +35,17 @@ use Illuminate\Support\Facades\Log;
  *
  * 🔴 **La espera se hace con `release()`, no durmiendo.** El asistente tiene un presupuesto de 150
  * segundos y un job con `timeout` 240 del lado del cliente: tres minutos de `sleep()` acá serían
- * tres minutos con un worker del admin tomado, y este admin tiene UN worker que además corre
- * deployments e instalaciones. `release($delay)` devuelve el job a la cola con fecha y libera el
- * worker; cuando le toca, vuelve a entrar por `handle()` y sigue donde estaba. (Lo único que se
- * hace durmiendo son las pausas de segundos entre el texto y cada foto de la respuesta, que existen
- * por el 409 de Kapso: ver `mandar_fotos_de_la_respuesta()`.)
+ * tres minutos con un worker del admin tomado, y la cola del canal la atiende UN worker permanente
+ * que tiene que seguir levantando los mensajes de los demás dueños. `release($delay)` devuelve el
+ * job a la cola con fecha y libera el worker; cuando le toca, vuelve a entrar por `handle()` y sigue
+ * donde estaba. (Lo único que se hace durmiendo son las pausas de segundos entre el texto y cada foto
+ * de la respuesta, que existen por el 409 de Kapso: ver `mandar_fotos_de_la_respuesta()`.)
+ *
+ * 🔴 **Sale por su propia cola, `asistente`** (misión asistente-envios-a-clientes, 16/10/2026), y no
+ * por `default`: ver `AsistenteWhatsappService::COLA_DEL_ASISTENTE`. Los tres despachos la piden
+ * explícita, y el `release()` del polling la conserva solo (`DatabaseJob::release()` reencola con la
+ * cola de la fila de `jobs` de la que salió). La atienden el programa de supervisor
+ * `api_admin_queue_asistente` del VPS y, como red, el evento de cada minuto del Kernel.
  *
  * 🔴 **Y la degradación es la parte que más importa.** Las cuatro rutas `api/admin-sync/asistente/*`
  * son nuevas y los 40+ clientes corren versiones distintas de `master`: durante semanas, la
@@ -1030,8 +1036,9 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
      * ⚠️ Las pausas de acá (`pausar()`) son lo ÚNICO que este job hace durmiendo, y son de
      * segundos, no de minutos: a lo sumo ~1,2 s por foto más 1,5 s por reintento transitorio. La
      * regla de "esperar con `release()`" es para los tres minutos del polling; un `release()` por
-     * foto haría que cada una llegara hasta un minuto después de la anterior, que es lo que tarda
-     * el cron en volver a levantar el worker.
+     * foto haría que cada una llegara hasta un minuto después de la anterior si la cola la atiende
+     * solo la red del Kernel (un worker por minuto), y aun con el worker permanente sumaría un
+     * segundo de sondeo y una vuelta por la base por foto.
      *
      * @param WhatsappSendService          $sender   Envío a Kapso/Meta.
      * @param AsistenteFotoSalienteService $fotos    Decide el camino de cada foto y convierte.

@@ -263,6 +263,39 @@ class Kernel extends ConsoleKernel
         $schedule->exec(self::artisan_sin_el_lock_del_cron('queue:work database --stop-when-empty'))
             ->everyMinute()
             ->runInBackground();
+
+        /*
+         * La RED de la cola del asistente por WhatsApp (misión asistente-envios-a-clientes,
+         * 16/10/2026).
+         *
+         * `EnviarMensajeAlAsistenteJob` sale por su propia cola, `asistente`
+         * (`AsistenteWhatsappService::COLA_DEL_ASISTENTE`), y el worker de arriba NO la mira: sin
+         * `--queue` consume solo `default`. Lo normal es que la atienda el worker permanente de
+         * supervisor `api_admin_queue_asistente` del VPS, que levanta cada ingreso en un segundo; este
+         * evento existe para el día que ese programa no esté —un admin recién desplegado sin el
+         * programa instalado, o el programa caído—. Con él el canal anda igual, con la demora vieja de
+         * un worker por minuto; sin él, la fila del dueño quedaría en `recibido` para siempre sin que
+         * nada lo denuncie.
+         *
+         * Las mismas tres cosas que el worker de arriba, por los mismos motivos: `database`
+         * explícito (la default es `sync`), `runInBackground()` (el polling del asistente son tres
+         * minutos de `release()` y un worker en primer plano clavaría el scheduler) y
+         * `artisan_sin_el_lock_del_cron()` (que no herede el candado del cron). Y tampoco
+         * `withoutOverlapping()`: si el worker del minuto anterior sigue vivo, que haya dos no hace
+         * daño —la conexión `database` reserva cada job con `lockForUpdate`— y frenarlo sería dejar la
+         * cola sin atender detrás de un turno largo.
+         *
+         * 🔴 `--queue=asistente` va en el MEDIO del comando a propósito: así el texto
+         * `queue:work database --stop-when-empty` sigue identificando a UN solo evento, el worker de
+         * `default`, que es lo que fija `SchedulerSinElLockDelCronTest`. El nombre de la cola sale de
+         * la constante del canal y no se escribe acá: una cola renombrada de un solo lado deja al
+         * canal sin consumidor.
+         */
+        $schedule->exec(self::artisan_sin_el_lock_del_cron(
+            'queue:work database --queue=' . \App\Services\AsistenteWhatsappService::COLA_DEL_ASISTENTE . ' --stop-when-empty'
+        ))
+            ->everyMinute()
+            ->runInBackground();
     }
 
     /**

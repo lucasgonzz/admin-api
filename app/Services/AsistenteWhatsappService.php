@@ -71,12 +71,40 @@ class AsistenteWhatsappService
      * repo ya dejó tres demos mudas con `RunDemoSetupJob`, y está escrita con todas las letras en
      * `ClaudeDemoOpsController`.
      *
-     * ⚠️ Precondición de infraestructura: al job lo corre el worker
-     * `queue:work database --stop-when-empty` que el scheduler dispara cada minuto. Si ese cron no
-     * corre, este canal no hace NADA visible: la fila queda en `recibido` y el job dormido en
-     * `jobs`. Esa fila en `recibido` es justamente la señal para mirar.
+     * ⚠️ Precondición de infraestructura: al job lo corre un worker de la cola `asistente` (ver
+     * `COLA_DEL_ASISTENTE`, justo abajo). Si no corre ninguno, este canal no hace NADA visible: la
+     * fila queda en `recibido` y el job dormido en `jobs`. Esa fila en `recibido` es justamente la
+     * señal para mirar.
      */
     const CONEXION_DE_COLA = 'database';
+
+    /**
+     * Cola propia del canal, adentro de la conexión `database` (misión asistente-envios-a-clientes,
+     * 16/10/2026).
+     *
+     * 🔴 **Por qué una cola propia y no `default`.** Hasta el 16/10/2026 el job salía por `default`,
+     * que la consumía un solo worker: el `queue:work database --stop-when-empty` que el scheduler
+     * lanza una vez por minuto. Cada ingreso del job —la ida y cada `release()` del polling— esperaba
+     * al tick siguiente, y ese mismo worker además corre deployments (30 min), actualizaciones de
+     * demo y demo setups: medido en la prueba del agente personal del 16/10, cada respuesta llegaba
+     * 60 a 150 segundos después de que el sistema del cliente ya la tenía lista. En su propia cola el
+     * canal no compite con nadie y lo atienden dos cosas:
+     *
+     *   1. **El worker permanente**: el programa de supervisor `api_admin_queue_asistente` del VPS
+     *      del admin (`queue:work database --queue=asistente --sleep=1 ...`). Levanta cada ingreso en
+     *      un segundo. Se instala al desplegar, con el ok de Lucas; NO lo instala el código.
+     *   2. **La red**: un `queue:work database --queue=asistente --stop-when-empty` que el scheduler
+     *      lanza cada minuto (`App\Console\Kernel`). Si el programa de supervisor no está —un admin
+     *      recién desplegado sin el programa, o el programa caído—, el canal sigue andando con la
+     *      demora de antes, no se queda mudo.
+     *
+     * El worker de `default` NO mira esta cola: si alguien la cambia acá sin la red del Kernel y sin
+     * el programa de supervisor, el canal se queda sin consumidor y nada lo avisa.
+     *
+     * `release()` conserva la cola: `DatabaseJob::release()` reencola con la cola de la fila de
+     * `jobs` de la que salió, así que el polling entero vive en `asistente` sin volver a pedirlo.
+     */
+    const COLA_DEL_ASISTENTE = 'asistente';
 
     /**
      * Segundos que espera una foto sin epígrafe si la configuración no dice otra cosa.
@@ -141,9 +169,14 @@ class AsistenteWhatsappService
      *     propias. Un solo POST con la instrucción y las fotos, que el contrato con el `empresa-api`
      *     ya soporta (`imagenes[]` no mira el `tipo`).
      *
-     * ⚠️ El `delay` depende del worker permanente de supervisor (`api_admin_queue`, desde el
-     * 21/9/2026): con él la foto sale a los ~30 s. Con el worker viejo del cron sale al primer tick
-     * después de los 30 s, que es lento pero igual correcto.
+     * ⚠️ El `delay` depende de quién atienda la cola `asistente` (ver `COLA_DEL_ASISTENTE`). Con el
+     * worker permanente de supervisor (`api_admin_queue_asistente`, que se instala en el VPS del admin
+     * al desplegar la misión asistente-envios-a-clientes) la foto sale a los ~30 s. Sin él la atiende
+     * solo la red del Kernel —el `queue:work database --queue=asistente --stop-when-empty` de cada
+     * minuto— y la foto sale al primer tick después de los 30 s, que es lento pero igual correcto.
+     * (Hasta el 16/10/2026 este comentario decía que ya existía un worker de supervisor
+     * `api_admin_queue` desde el 21/9: no existía. La migración del admin al VPS dejó en supervisor
+     * solo el scheduler, `api_admin_schedule`, y el worker de cola lo siguió lanzando el Kernel.)
      *
      * @param array<string, mixed> $parsed Resultado de `WhatsappWebhookController::parse_inbound_message()`.
      * @param Client               $client Cliente cuyo dueño escribió.
@@ -205,6 +238,7 @@ class AsistenteWhatsappService
              * ventana, que Laravel calcula al DESPACHAR y no cuando el job por fin corre. */
             EnviarMensajeAlAsistenteJob::dispatch((int) $fila->id, [], $segundos)
                 ->onConnection(self::CONEXION_DE_COLA)
+                ->onQueue(self::COLA_DEL_ASISTENTE)
                 ->delay(now()->addSeconds($segundos));
 
             return $fila;
@@ -298,7 +332,8 @@ class AsistenteWhatsappService
     {
         $despachar = function (array $reclamadas) use ($fila, $imagenes_propias) {
             EnviarMensajeAlAsistenteJob::dispatch((int) $fila->id, $this->fotos_que_viajan($reclamadas, $imagenes_propias))
-                ->onConnection(self::CONEXION_DE_COLA);
+                ->onConnection(self::CONEXION_DE_COLA)
+                ->onQueue(self::COLA_DEL_ASISTENTE);
         };
 
         $desde = ($fila->created_at !== null ? $fila->created_at->copy() : now())
@@ -475,7 +510,8 @@ class AsistenteWhatsappService
              * job por intento. Va con las fotos en el payload porque `release()` reencola el payload
              * ORIGINAL: ver `EnviarMensajeAlAsistenteJob::cerrar_la_espera()`. */
             EnviarMensajeAlAsistenteJob::dispatch($id_propio, $imagenes)
-                ->onConnection(self::CONEXION_DE_COLA);
+                ->onConnection(self::CONEXION_DE_COLA)
+                ->onQueue(self::COLA_DEL_ASISTENTE);
 
             return [
                 'imagenes'  => $imagenes,
