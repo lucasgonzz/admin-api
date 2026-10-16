@@ -123,6 +123,18 @@ class Kernel extends ConsoleKernel
             ->dailyAt('03:45')
             ->withoutOverlapping(30);
 
+        /* Purga de las búsquedas del centro de recursos más viejas que la retención de 90 días (misión
+         * busquedas-centro-recursos, 16/10/2026).
+         *
+         * 03:30, en el hueco entre `tokens:recolectar` (03:15) y `ai-planes:sincronizar` (03:45): es solo
+         * un DELETE contra la base del admin, no le pega a ningún cliente, así que no compite con ellos.
+         * Borra en tandas de mil. `withoutOverlapping(30)` con el número puesto a mano por lo mismo que los
+         * otros diarios: el default del candado son 24 horas y un proceso que muera sin soltarlo dejaría
+         * sin purga el día siguiente. */
+        $schedule->command('recursos:purgar-busquedas')
+            ->dailyAt('03:30')
+            ->withoutOverlapping(30);
+
         $schedule->command('leads:check-followups')->everyTwoHours();
 
         /* Estado de las plantillas de WhatsApp en Meta (misión plantillas-meta-y-leads-humano,
