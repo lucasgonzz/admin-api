@@ -108,6 +108,31 @@ class AsistenteAvisosService
     ];
 
     /**
+     * Cuántas veces seguidas puede rechazar Meta un mismo aviso antes de darlo por perdido.
+     *
+     * 🔴 Sin tope, un rechazo persistente (un número que ya no existe, un destino bloqueado) se
+     * reintentaba cada minuto durante las 24 hs que el `empresa-api` ofrece el aviso: ~1.440 intentos
+     * y, con la notificación de fallo de `send_text()`, ~144 WhatsApps de error a los admins (el
+     * throttle global es de 10 min). Tres intentos cubren un rechazo pasajero; el cuarto no cambia nada.
+     */
+    const INTENTOS_MAXIMOS = 3;
+
+    /**
+     * Horas que un aviso `fallido` queda sin reintentarse: las mismas 24 hs en que el `empresa-api`
+     * lo ofrece, así que no vuelve a intentarse nunca.
+     */
+    const HORAS_DEL_FALLIDO = 24;
+
+    /**
+     * Prefijo del contador de intentos fallidos de un aviso: `asistente_aviso_intentos:{client_id}:{id}`.
+     *
+     * Vive en una clave hermana del reclamo y no adentro de él a propósito: entre un intento y el
+     * siguiente el reclamo se SUELTA (para que `Cache::add()` siga siendo el reclamo atómico), y el
+     * contador tiene que sobrevivir a eso.
+     */
+    const CACHE_INTENTOS = 'asistente_aviso_intentos';
+
+    /**
      * Prefijo de la clave de pausa por cliente: `asistente_avisos:pausa:{client_id}`.
      */
     const CACHE_PAUSA = 'asistente_avisos:pausa';
@@ -123,10 +148,12 @@ class AsistenteAvisosService
      * - `reclamado`: alguien lo está mandando ahora mismo (o murió en el medio: el reclamo vence solo).
      * - `enviado`: el WhatsApp salió y falta que el `empresa-api` lo marque.
      * - `marcado`: salió y quedó marcado (o el `empresa-api` ya no lo reconoce): no hay nada más que hacer.
+     * - `fallido`: Meta lo rechazó INTENTOS_MAXIMOS veces: no se reintenta más (vence a las 24 hs).
      */
     const RECLAMO_RECLAMADO = 'reclamado';
     const RECLAMO_ENVIADO   = 'enviado';
     const RECLAMO_MARCADO   = 'marcado';
+    const RECLAMO_FALLIDO   = 'fallido';
 
     /**
      * Resolución de la URL del `empresa-api` y del SPA de cada cliente.
@@ -325,7 +352,7 @@ class AsistenteAvisosService
      * @param WhatsappSessionWindowService $ventana            Ventana de 24 hs de Meta.
      * @param string                       $spa_url            SPA del cliente, para armar el link.
      *
-     * @return string enviado | remarcado | ya_avisado | en_curso | turno_en_curso | ventana_cerrada | error
+     * @return string enviado | remarcado | ya_avisado | en_curso | turno_en_curso | ventana_cerrada | error | fallido
      */
     private function avisar(
         Client $client,
@@ -378,31 +405,29 @@ class AsistenteAvisosService
         $link    = $this->link_del_aviso($aviso, $spa_url);
         $mensaje = (string) $aviso['texto'] . ($link !== '' ? "\n\n" . $link : '');
 
+        /* 🔴 `skip_failure_notification = true`: un aviso rechazado NO le manda un WhatsApp de error
+         * a los admins por cada intento. Ese parámetro se documentó para la notificación de fallo misma
+         * (evitar la recursión), pero hace exactamente lo que acá hace falta, y lo usan también los
+         * envíos de fotos del asistente. El fallo queda igual en `last_send_error`, en el log de cada
+         * intento y, al agotar los intentos, en un log de error único (`registrar_fallo()`). */
         try {
             $whatsapp_message_id = $this->sender
                 ->paraProposito($proposito)
                 ->send_text(
                     $telefono,
                     $mensaje,
-                    'Aviso del asistente - cliente #' . $client->id
+                    'Aviso del asistente - cliente #' . $client->id,
+                    true
                 );
         } catch (\Throwable $exception) {
-            /* Se suelta el reclamo: el aviso no salió y la vuelta siguiente tiene que poder mandarlo. */
-            Cache::forget($clave);
+            /* El aviso no salió: cuenta como intento y, si quedan, se suelta para la vuelta siguiente. */
+            $this->registrar_fallo($client, (string) $aviso['id'], $clave, $exception->getMessage());
 
             throw $exception;
         }
 
         if ($whatsapp_message_id === null) {
-            Cache::forget($clave);
-
-            Log::channel('daily')->warning('AsistenteAvisos: Meta rechazó el aviso, queda pendiente.', [
-                'client_id' => $client->id,
-                'aviso_id'  => $aviso['id'],
-                'error'     => (string) $this->sender->last_send_error,
-            ]);
-
-            return 'error';
+            return $this->registrar_fallo($client, (string) $aviso['id'], $clave, (string) $this->sender->last_send_error);
         }
 
         /* Desde acá el aviso YA salió: el reclamo pasa a guardar con qué salió, para que una marca
@@ -447,6 +472,55 @@ class AsistenteAvisosService
     }
 
     /**
+     * Anota un intento fallido del aviso: suelta el reclamo para reintentar, o lo da por `fallido`.
+     *
+     * @param Client $client   Cliente.
+     * @param string $aviso_id Id del aviso.
+     * @param string $clave    Clave del reclamo.
+     * @param string $detalle  Por qué falló.
+     *
+     * @return string error (se reintenta la vuelta siguiente) | fallido (no se reintenta más)
+     */
+    private function registrar_fallo(Client $client, string $aviso_id, string $clave, string $detalle): string
+    {
+        $clave_de_intentos = self::CACHE_INTENTOS . ':' . (int) $client->id . ':' . $aviso_id;
+
+        /* `add()` primero para que el contador nazca con vencimiento; `increment()` sobre una clave
+         * inexistente la crearía sin él en algunos drivers. */
+        Cache::add($clave_de_intentos, 0, now()->addHours(self::HORAS_DEL_FALLIDO));
+        $intentos = (int) Cache::increment($clave_de_intentos);
+
+        if ($intentos < self::INTENTOS_MAXIMOS) {
+            Cache::forget($clave);
+
+            Log::channel('daily')->warning('AsistenteAvisos: Meta rechazó el aviso, se reintenta la vuelta siguiente.', [
+                'client_id' => $client->id,
+                'aviso_id'  => $aviso_id,
+                'intento'   => $intentos,
+                'error'     => $detalle,
+            ]);
+
+            return 'error';
+        }
+
+        /* El reclamo queda tomado como `fallido` y ya no se suelta: esta es la única vez que se llega
+         * acá por este aviso, así que el log de error sale una sola vez. */
+        Cache::put(
+            $clave,
+            ['estado' => self::RECLAMO_FALLIDO, 'intentos' => $intentos],
+            now()->addHours(self::HORAS_DEL_FALLIDO)
+        );
+
+        Log::channel('daily')->error('AsistenteAvisos: Meta rechazó el aviso ' . $intentos . ' veces; no se reintenta más.', [
+            'client_id' => $client->id,
+            'aviso_id'  => $aviso_id,
+            'error'     => $detalle,
+        ]);
+
+        return 'fallido';
+    }
+
+    /**
      * Qué hacer con un aviso que ya tiene reclamo.
      *
      * @param Client               $client Cliente.
@@ -454,7 +528,7 @@ class AsistenteAvisosService
      * @param string               $clave  Clave del reclamo.
      * @param mixed                $previo Lo guardado en el reclamo.
      *
-     * @return string remarcado | ya_avisado | en_curso
+     * @return string remarcado | ya_avisado | fallido | en_curso
      */
     private function resolver_reclamo_previo(Client $client, array $aviso, string $clave, $previo): string
     {
@@ -474,6 +548,10 @@ class AsistenteAvisosService
 
         if ($estado === self::RECLAMO_MARCADO) {
             return 'ya_avisado';
+        }
+
+        if ($estado === self::RECLAMO_FALLIDO) {
+            return 'fallido';
         }
 
         return 'en_curso';

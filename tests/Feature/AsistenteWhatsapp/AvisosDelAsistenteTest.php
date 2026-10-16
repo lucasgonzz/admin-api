@@ -672,6 +672,59 @@ class AvisosDelAsistenteTest extends BaseDelCanal
     }
 
     /**
+     * 🔴 Un rechazo persistente de Meta se intenta tres veces y no más: el aviso queda `fallido` 24 hs,
+     * sin reintentarse cada minuto. Y ningún intento le manda un WhatsApp de error a los admins
+     * (`skip_failure_notification = true`): con un rechazo por minuto eran ~144 avisos de error.
+     *
+     * @return void
+     */
+    public function test_tres_rechazos_de_meta_dejan_el_aviso_fallido_sin_avisar_a_los_admins(): void
+    {
+        /* Espía propio: el del canal no guarda el cuarto parámetro, y es lo que hay que mirar. */
+        $espia = new class extends \App\Services\WhatsappSendService {
+            /** @var array<int, bool> `skip_failure_notification` de cada envío, en orden. */
+            public $sin_notificar = [];
+
+            public function send_text(string $to, string $body, ?string $context = null, bool $skip_failure_notification = false): ?string
+            {
+                $this->sin_notificar[] = $skip_failure_notification;
+                $this->last_send_error = 'Meta rechazó el envío (simulado en la prueba).';
+
+                return null;
+            }
+        };
+        $this->app->instance(\App\Services\WhatsappSendService::class, $espia);
+
+        $this->crear_config_whatsapp();
+        $client = $this->crear_cliente();
+        $this->fila_entrante($client);
+
+        $this->fakear_http([
+            '*/asistente/avisos-pendientes*' => Http::response($this->pendientes(), 200),
+            '*/asistente/avisos/avisado'     => Http::response(['ok' => true], 200),
+        ]);
+
+        $servicio = app(AsistenteAvisosService::class);
+
+        $this->assertStringContainsString(self::ID . '=error', $servicio->enviar_a($client)['detalle']);
+        $this->assertStringContainsString(self::ID . '=error', $servicio->enviar_a($client)['detalle']);
+        $this->assertStringContainsString(self::ID . '=fallido', $servicio->enviar_a($client)['detalle'], 'Al tercer rechazo el aviso queda fallido.');
+
+        /* Las vueltas siguientes ya no lo intentan. */
+        $this->assertStringContainsString(self::ID . '=fallido', $servicio->enviar_a($client)['detalle']);
+        $this->assertStringContainsString(self::ID . '=fallido', $servicio->enviar_a($client)['detalle']);
+
+        $this->assertSame([true, true, true], $espia->sin_notificar, 'Tres intentos, ninguno notifica a los admins.');
+        $this->assertCount(0, $this->pedidos_a('/asistente/avisos/avisado', 'POST'), 'Un aviso que no salió no se marca.');
+
+        /* `fallido` dura 24 hs: pasadas, deja de estar reclamado. */
+        $reclamo = Cache::get($servicio->clave_de_reclamo($client, self::ID));
+        $this->assertSame(AsistenteAvisosService::RECLAMO_FALLIDO, $reclamo['estado']);
+        $this->travel(25)->hours();
+        $this->assertFalse(Cache::has($servicio->clave_de_reclamo($client, self::ID)));
+    }
+
+    /**
      * Un aviso que alguien ya reclamó (otra corrida en vuelo) no se manda.
      *
      * @return void
