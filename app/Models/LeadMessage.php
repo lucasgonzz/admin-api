@@ -345,6 +345,30 @@ class LeadMessage extends Model
             /* Demo directa (misión demo-agendado-directo): no hay día ni hora en el paquete, la
              * instancia se asigna al aplicar y arranca diez minutos después. */
             $acciones[] = 'Agendar demo: ahora (la instancia libre se asigna al aprobar)';
+        } elseif (! empty($parsed['agendar_demo']) && is_array($parsed['agendar_demo'])
+            && (isset($parsed['agendar_demo']['inicio_resuelto']) || isset($parsed['agendar_demo']['dia']) || isset($parsed['agendar_demo']['hora']))) {
+            /* Demo directa PARA UN MOMENTO concreto (misión flujo-lead-landing-closer, 17/10/2026):
+             * el agente devuelve `{dia, hora}` y el servidor resuelve el instante en `inicio_resuelto`
+             * (`Y-m-d H:i`, zona de la demo; ver LeadAiService::normalizar_agendar_demo_directa()).
+             * Antes de esta rama el paquete caía en la de abajo, que no conoce esas claves, y la
+             * burbuja decía «Agendar demo» a secas, como si fuera para ahora. Si el instante no se
+             * pudo resolver (`inicio_ilegible`), se muestra lo que dijo el agente tal cual. */
+            $agendar_demo    = $parsed['agendar_demo'];
+            $inicio_resuelto = isset($agendar_demo['inicio_resuelto']) ? trim((string) $agendar_demo['inicio_resuelto']) : '';
+            $momento_legible = '';
+            if ($inicio_resuelto !== '') {
+                try {
+                    $inicio          = \Carbon\Carbon::createFromFormat('Y-m-d H:i', $inicio_resuelto);
+                    $momento_legible = 'el ' . $inicio->format('d/m') . ' a las ' . $inicio->format('H:i');
+                } catch (\Throwable $e) {
+                    $momento_legible = $inicio_resuelto;
+                }
+            } else {
+                $dia  = isset($agendar_demo['dia']) ? trim((string) $agendar_demo['dia']) : '';
+                $hora = isset($agendar_demo['hora']) ? trim((string) $agendar_demo['hora']) : '';
+                $momento_legible = trim($dia . ($hora !== '' ? ' ' . $hora : ''));
+            }
+            $acciones[] = $momento_legible !== '' ? "Agendar demo: para {$momento_legible}" : 'Agendar demo: para un momento a confirmar';
         } elseif (! empty($parsed['agendar_demo']) && is_array($parsed['agendar_demo'])) {
             $agendar_demo = $parsed['agendar_demo'];
             $demo_date    = isset($agendar_demo['demo_date']) ? trim((string) $agendar_demo['demo_date']) : '';
@@ -376,6 +400,44 @@ class LeadMessage extends Model
         $guardar_nombre = isset($parsed['guardar_nombre']) ? trim((string) $parsed['guardar_nombre']) : '';
         if ($guardar_nombre !== '') {
             $acciones[] = "Guardar nombre del lead: {$guardar_nombre}";
+        }
+
+        /* guardar_calificacion (misión flujo-lead-landing-closer, 17/10/2026): la calificación mínima
+         * que el agente va juntando — a qué se dedica, cuántas personas trabajan con él y si hoy usa
+         * algún sistema. Las tres claves son opcionales y se muestran solo las que vinieron; un objeto
+         * sin ninguna no agrega línea. Los valores se muestran tal cual los devolvió el agente (el
+         * servidor los normaliza al aplicar, ver LeadAiService::aplicar_guardar_calificacion()). */
+        if (! empty($parsed['guardar_calificacion']) && is_array($parsed['guardar_calificacion'])) {
+            $calificacion = $parsed['guardar_calificacion'];
+            $partes       = [];
+
+            $rubro = isset($calificacion['rubro']) && is_scalar($calificacion['rubro']) ? trim((string) $calificacion['rubro']) : '';
+            if ($rubro !== '') {
+                $partes[] = "rubro {$rubro}";
+            }
+
+            $empleados = isset($calificacion['empleados']) && is_scalar($calificacion['empleados']) ? trim((string) $calificacion['empleados']) : '';
+            if ($empleados !== '') {
+                $partes[] = $empleados === '1' ? '1 empleado' : "{$empleados} empleados";
+            }
+
+            $sistema = isset($calificacion['sistema_actual']) && is_scalar($calificacion['sistema_actual']) ? trim((string) $calificacion['sistema_actual']) : '';
+            if ($sistema !== '') {
+                $partes[] = "sistema actual {$sistema}";
+            }
+
+            if (! empty($partes)) {
+                $acciones[] = 'Guardar calificación: ' . implode(', ', $partes);
+            }
+        }
+
+        /* confirmar_interes_closer (misión flujo-lead-landing-closer, 17/10/2026): el lead terminó la
+         * demo y quiere la videollamada con el asesor comercial. El nombre sale de la constante de
+         * LeadAiService (decisión D4: «Thomás», con TH, en un solo lugar); el `defined()` es para que
+         * este archivo no reviente si esa constante se renombra antes de que el modelo se entere. */
+        if (! empty($parsed['confirmar_interes_closer'])) {
+            $closer     = defined('\App\Services\LeadAiService::NOMBRE_DEL_CLOSER') ? \App\Services\LeadAiService::NOMBRE_DEL_CLOSER : 'Thomás';
+            $acciones[] = "Confirmar interés en la llamada con {$closer}";
         }
 
         /* estado_sugerido: solo si implica un cambio real respecto al estado actual del lead. */
