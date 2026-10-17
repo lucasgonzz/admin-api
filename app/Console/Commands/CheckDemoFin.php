@@ -8,6 +8,7 @@ use App\Services\LeadBroadcastService;
 use App\Services\LeadDemoSettings;
 use App\Helpers\AppTime;
 use App\Services\WhatsappSendService;
+use App\Services\WhatsappSessionWindowService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
@@ -30,6 +31,10 @@ use Illuminate\Support\Facades\Log;
  * esté seteada reemplaza a `demo_datetime + duración` como objetivo temporal. Sin esa
  * reprogramación, un check automático puede interrumpir al lead en medio de una
  * conversación en curso (con el agente o con Lucas contestando a mano).
+ *
+ * 17/10/2026 (misión flujo-lead-landing-closer, D10): corre también para la DEMO DIRECTA (antes
+ * la excluía) y, con la ventana de 24 hs abierta, pregunta en texto libre "¿cómo venís con la
+ * demo?"; con la ventana cerrada, la plantilla de siempre.
  */
 class CheckDemoFin extends Command
 {
@@ -62,12 +67,21 @@ class CheckDemoFin extends Command
     private $whatsapp_send_service;
 
     /**
-     * @param WhatsappSendService|null $whatsapp_send_service Inyección opcional (tests).
+     * Resolutor de la ventana de 24 hs de Meta (D10, 17/10/2026): decide texto libre o plantilla.
+     *
+     * @var WhatsappSessionWindowService
      */
-    public function __construct(?WhatsappSendService $whatsapp_send_service = null)
+    private $ventana;
+
+    /**
+     * @param WhatsappSendService|null          $whatsapp_send_service Inyección opcional (tests).
+     * @param WhatsappSessionWindowService|null $ventana               Inyección opcional (tests).
+     */
+    public function __construct(?WhatsappSendService $whatsapp_send_service = null, ?WhatsappSessionWindowService $ventana = null)
     {
         parent::__construct();
         $this->whatsapp_send_service = $whatsapp_send_service ?? new WhatsappSendService();
+        $this->ventana               = $ventana ?? new WhatsappSessionWindowService();
     }
 
     /**
@@ -112,19 +126,15 @@ class CheckDemoFin extends Command
             ->where('automatizaciones_demo_activas', true)
             ->where('auto_check_fin_demo', true)
             ->where('demo_fin_check_enviado', false)
-            /* Ventana extendida afuera (misión 47): el check de fin se dispara al cumplirse la
-             * duración desde demo_start_time, así que a un flexible que entró a las 23:00 le
-             * preguntaría a las 21:00 si terminó — dos horas antes de que empezara.
-             *
-             * Las dos condiciones, por el mismo motivo que en CheckDemoIngress: `demo_flexible` es
-             * una columna preexistente que también se marca a mano en la dinámica actual. */
-            ->where(function ($query) {
-                $query->where('demo_flexible', false)
-                    ->orWhere(function ($otra_dinamica) {
-                        $otra_dinamica->where('demo_experiencia', '!=', Lead::EXPERIENCIA_NUEVA)
-                            ->orWhereNull('demo_experiencia');
-                    });
-            })
+            /* Hasta el 17/10/2026 acá se excluía a la demo directa (`demo_flexible` + dinámica nueva),
+             * con el argumento de la misión 47: en la ventana extendida de seis horas el lead podía
+             * entrar a las 23:00 y el check saltaba a las 21:00, antes de que empezara. Ese motivo ya no
+             * existe: desde el 13/10 la ventana es de dos horas y, sobre todo, un lead en `demo_en_curso`
+             * ENTRÓ (lo puso ahí el evento demo.ingreso), así que "inicio + duración" es un momento
+             * real de su recorrido. Lucas pidió que a la demo directa también se le pregunte cómo viene
+             * (misión flujo-lead-landing-closer, D10): se saca la exclusión y el filtro vuelve a ser el
+             * de cualquier demo. Los checks de la demo directa se prenden solos al agendar
+             * (`auto_check_fin_demo = true` en el UPDATE de LeadAiService). */
             ->whereNotNull('demo_date')
             ->whereNotNull('demo_start_time')
             ->where(function ($query) use ($now) {
@@ -222,24 +232,47 @@ class CheckDemoFin extends Command
                     continue;
                 }
 
-                /* Sin conversación viva: enviar el check de fin por WhatsApp como siempre
-                 * (prompt 353: plantilla Meta aprobada, no depende de ventana 24hs). */
+                /* Sin conversación viva: enviar el check de fin por WhatsApp.
+                 *
+                 * D10 (misión flujo-lead-landing-closer, 17/10/2026): con la ventana de 24 hs de Meta
+                 * ABIERTA sale como texto libre, "¿cómo venís con la demo?", que es lo que Lucas quiere
+                 * que lea un lead que está adentro recorriéndola (en una demo directa la ventana está
+                 * siempre abierta: el lead acaba de escribir para pedirla). Con la ventana cerrada sigue
+                 * saliendo la plantilla aprobada `cc_check_fin_demo` (prompt 353), que es lo único que
+                 * Meta deja mandar en ese caso. El resolutor de la ventana es el mismo de los
+                 * recordatorios (WhatsappSessionWindowService). */
                 // Primer nombre, no el completo (decisión de Lucas, 8/9/2026): el lead ve
                 // "Hola Guillermo", no "Hola Guillermo González".
                 $contact_name = $lead->contact_first_name ?? 'cliente';
-                $content      = "¡Hola {$contact_name}! ¿Pudiste recorrer la demo completa? 😊";
 
                 $whatsapp_message_id = null;
-                $phone = trim((string) $lead->phone);
+                $via                 = null;
+                $phone               = trim((string) $lead->phone);
                 if ($phone !== '') {
-                    $whatsapp_message_id = $this->whatsapp_send_service->send_template(
-                        $phone,
-                        self::TEMPLATE_NAME,
-                        [$contact_name],
-                        'es_AR',
-                        "Check de fin de demo - Lead #{$lead->id} ({$lead->contact_name})"
-                    );
+                    $ventana_abierta = $this->ventana->is_open($phone);
+                    if ($ventana_abierta) {
+                        $via     = 'texto_libre';
+                        $content = "¡Hola {$contact_name}! ¿Cómo venís con la demo? ¿Pudiste recorrerla completa? 😊";
+
+                        $whatsapp_message_id = $this->whatsapp_send_service->send_text(
+                            $phone,
+                            $content,
+                            "Check de fin de demo - Lead #{$lead->id} ({$lead->contact_name})"
+                        );
+                    } else {
+                        $via     = 'plantilla';
+                        $content = "¡Hola {$contact_name}! ¿Pudiste recorrer la demo completa? 😊";
+
+                        $whatsapp_message_id = $this->whatsapp_send_service->send_template(
+                            $phone,
+                            self::TEMPLATE_NAME,
+                            [$contact_name],
+                            'es_AR',
+                            "Check de fin de demo - Lead #{$lead->id} ({$lead->contact_name})"
+                        );
+                    }
                 } else {
+                    $content = "¡Hola {$contact_name}! ¿Pudiste recorrer la demo completa? 😊";
                     Log::warning('CheckDemoFin: lead sin teléfono', [
                         'lead_id' => $lead->id,
                     ]);
@@ -263,6 +296,7 @@ class CheckDemoFin extends Command
                 Log::info('CheckDemoFin: check de fin enviado', [
                     'lead_id'         => $lead->id,
                     'contact_name'    => $lead->contact_name,
+                    'via'             => $via,
                     'target_datetime' => $target_datetime->toDateTimeString(),
                 ]);
 
