@@ -361,12 +361,16 @@ class LeadChatsController extends Controller
                     ->where('lead_messages.requiere_verificacion', true)
                     ->where('lead_messages.status', 'sugerido');
             })
-            // Amarillo: mensaje del lead sin responder (con la marca «no necesita respuesta» adentro).
-            ->orWhereExists(function ($sin_responder) {
-                $sin_responder->selectRaw('1')
-                    ->from('lead_messages')
-                    ->whereColumn('lead_messages.lead_id', 'leads.id');
-                Lead::apply_condicion_mensaje_sin_responder($sin_responder);
+            // Amarillo: mensaje del lead sin responder (con la marca «no necesita respuesta» adentro),
+            // solo si el lead todavía recibe mensajes (ver el porqué en atencion()).
+            ->orWhere(function ($sin_responder_alcanzable) {
+                $sin_responder_alcanzable->whereNull('leads.no_recibe_mensajes_at')
+                    ->whereExists(function ($sin_responder) {
+                        $sin_responder->selectRaw('1')
+                            ->from('lead_messages')
+                            ->whereColumn('lead_messages.lead_id', 'leads.id');
+                        Lead::apply_condicion_mensaje_sin_responder($sin_responder);
+                    });
             });
         });
     }
@@ -393,11 +397,12 @@ class LeadChatsController extends Controller
         $query->orderByRaw('CASE WHEN leads.pinned_at IS NOT NULL THEN 0 ELSE 1 END ASC');
         $query->orderByRaw('leads.pinned_at DESC');
 
-        // Después el color de la fila: rojo (0), amarillo (1), nada (2).
+        // Después el color de la fila: rojo (0), amarillo (1), nada (2). El amarillo también descuenta a
+        // los «ya no recibe mensajes» (ver atencion()), igual que el filtro y el color.
         $query->orderByRaw('
             CASE
                 WHEN (failed_send_count > 0 AND leads.no_recibe_mensajes_at IS NULL) OR pending_verification_count > 0 THEN 0
-                WHEN sin_responder_count > 0 THEN 1
+                WHEN sin_responder_count > 0 AND leads.no_recibe_mensajes_at IS NULL THEN 1
                 ELSE 2
             END ASC
         ');
@@ -499,12 +504,22 @@ class LeadChatsController extends Controller
      *     atención por eso: no hay nada que reintentar.
      *   - rojo / esperando_confirmacion: `pending_verification_count > 0`.
      *   - amarillo / sin_responder: `sin_responder_count > 0`, o sea LA definición de «sin responder»
-     *     con la marca «no necesita respuesta» adentro.
+     *     con la marca «no necesita respuesta» adentro, **y el lead todavía recibe mensajes**.
      *   - null: nada de lo anterior.
      *
-     * Son los mismos tres predicados del ORDER BY ({@see self::aplicar_orden()}) y del filtro
-     * ({@see self::aplicar_solo_atencion()}), así que el orden, el filtro y el color no pueden
-     * contradecirse.
+     * 🔴 Por qué el amarillo también descuenta `no_recibe_mensajes_at` (chequeo independiente de la
+     * misión, 17/10/2026): `Lead::scopeRequiereRevision()` —que alimenta el `sin_responder` de las
+     * tarjetas y `?sin_responder=1`— saca a esos leads de TODO el conteo, no solo del error de envío
+     * («no hay nada que hacer con un lead al que no le llega nada»). Si acá el amarillo los contara,
+     * un lead inalcanzable con un mensaje suyo sin contestar saldría amarillo en la lista y entraría
+     * en `solo_atencion=1` mientras la tarjeta dice 0: la lista y las tarjetas diciendo cosas
+     * distintas, que es justo el defecto del 2/9/2026 que este controlador promete no repetir. El
+     * `row_warning` de la grilla vieja sí lo pintaba; se decide como el scope, no como la grilla,
+     * porque la grilla se va y la tarjeta se queda. Esta regla va en los TRES lugares donde vive el
+     * predicado (acá, el CASE de {@see self::aplicar_orden()} y {@see self::aplicar_solo_atencion()}).
+     *
+     * Son los mismos tres predicados del ORDER BY y del filtro, así que el orden, el filtro y el color
+     * no pueden contradecirse.
      *
      * @param Lead $lead
      *
@@ -512,7 +527,9 @@ class LeadChatsController extends Controller
      */
     private function atencion(Lead $lead): array
     {
-        if ((int) $lead->failed_send_count > 0 && $lead->no_recibe_mensajes_at === null) {
+        $alcanzable = $lead->no_recibe_mensajes_at === null;
+
+        if ((int) $lead->failed_send_count > 0 && $alcanzable) {
             return ['atencion' => 'rojo', 'motivo' => 'error_envio'];
         }
 
@@ -520,7 +537,7 @@ class LeadChatsController extends Controller
             return ['atencion' => 'rojo', 'motivo' => 'esperando_confirmacion'];
         }
 
-        if ((int) $lead->sin_responder_count > 0) {
+        if ((int) $lead->sin_responder_count > 0 && $alcanzable) {
             return ['atencion' => 'amarillo', 'motivo' => 'sin_responder'];
         }
 

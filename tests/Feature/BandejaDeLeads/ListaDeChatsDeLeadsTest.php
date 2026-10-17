@@ -477,6 +477,48 @@ class ListaDeChatsDeLeadsTest extends TestCase
     }
 
     /**
+     * 🔴 Un lead marcado como «ya no recibe mensajes» con un mensaje suyo sin responder tampoco es
+     * amarillo, ni entra en `solo_atencion=1`: `Lead::scopeRequiereRevision()` lo saca de todo el
+     * conteo de la tarjeta, y la lista tiene que decir lo mismo que la tarjeta (chequeo independiente
+     * de la misión, 17/10/2026). El contador `sin_responder_count` no viaja en la fila; lo que viaja
+     * es el veredicto.
+     *
+     * @return void
+     */
+    public function test_el_que_ya_no_recibe_mensajes_tampoco_es_amarillo_ni_entra_en_solo_atencion(): void
+    {
+        // El inalcanzable tiene el mensaje MÁS NUEVO: si el color no mandara, saldría primero.
+        $inalcanzable = $this->crear_lead('Inalcanzable con mensaje', 'calificado', ['no_recibe_mensajes_at' => now()]);
+        $this->crear_mensaje($inalcanzable, ['content' => '¿Cuánto sale?', 'sent_at' => now()->addMinutes(5)]);
+
+        $alcanzable = $this->crear_lead('Alcanzable con mensaje');
+        $this->crear_mensaje($alcanzable, ['content' => '¿Cuánto sale?', 'sent_at' => now()->subMinutes(5)]);
+
+        $filas = $this->filas();
+        $this->assertNull($filas[(int) $inalcanzable->id]['atencion'], 'Inalcanzable: la lista no lo pinta, como la tarjeta no lo cuenta.');
+        $this->assertNull($filas[(int) $inalcanzable->id]['atencion_motivo']);
+        $this->assertSame('amarillo', $filas[(int) $alcanzable->id]['atencion'], 'El mismo hilo, alcanzable, sí es amarillo.');
+
+        $this->assertSame([(int) $alcanzable->id], array_keys($this->filas('solo_atencion=1')), 'solo_atencion deja afuera al inalcanzable.');
+
+        // Y la tarjeta dice lo mismo que la lista: cuenta uno, no dos.
+        $response = $this->actingAs($this->admin, 'sanctum')->getJson('/api/admin/lead/status-cards');
+        $response->assertStatus(200);
+        foreach ($response->json('cards') as $card) {
+            if ($card['value'] === 'calificado') {
+                $this->assertSame(1, (int) $card['sin_responder'], 'La tarjeta y la lista cuentan al mismo lead.');
+            }
+        }
+
+        // Y en el orden va con los «sin color», no con los amarillos: con un último mensaje más nuevo
+        // que el del alcanzable, igual queda debajo de él.
+        $ids = array_map(function ($fila) {
+            return (int) $fila['id'];
+        }, $this->chats()['data']);
+        $this->assertSame([(int) $alcanzable->id, (int) $inalcanzable->id], $ids, 'El amarillo real va arriba del inalcanzable.');
+    }
+
+    /**
      * Orden fijo: fijados (el más reciente arriba) → rojo → amarillo → último mensaje.
      *
      * Los `sent_at` están elegidos para que el orden por último mensaje sea el CONTRARIO al que
