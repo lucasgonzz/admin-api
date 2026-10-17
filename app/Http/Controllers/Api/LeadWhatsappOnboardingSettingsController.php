@@ -45,6 +45,15 @@ class LeadWhatsappOnboardingSettingsController extends Controller
             'verificacion_agendamiento_auto_send_delay_minutes' => 'required|integer|min:'
                 . LeadWhatsappOnboardingSettings::VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MIN_MINUTES,
             'auto_activar_verificacion_al_solicitar_disponibilidad' => 'required|boolean',
+            /* El lead de un botón (landing, landing vieja, Instagram; misión flujo-lead-landing-closer,
+             * 17/10/2026): su auto inmediato y la demora hasta la presentación de Martín. OPCIONALES a
+             * propósito: el SPA que ya está en producción no las manda, y un `required` acá le daría
+             * 422 a cada guardado de la pantalla de Cuenta hasta que se despliegue el SPA nuevo.
+             * `persist_from_request()` las escribe solo si vinieron. Sin placeholder `{nombre}`: el
+             * lead de la landing casi nunca llega con nombre. Mismo rango que la demora genérica. */
+            'auto_message_landing'          => 'sometimes|nullable|string|max:4000',
+            'welcome_delay_seconds_landing' => 'sometimes|nullable|integer|min:' . LeadWhatsappOnboardingSettings::DELAY_MIN_SECONDS
+                . '|max:' . LeadWhatsappOnboardingSettings::DELAY_MAX_SECONDS,
         ]);
 
         // La variante con nombre debe incluir el placeholder para personalizar saludos.
