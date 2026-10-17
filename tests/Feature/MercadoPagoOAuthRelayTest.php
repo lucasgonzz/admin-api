@@ -347,6 +347,27 @@ class MercadoPagoOAuthRelayTest extends TestCase
     }
 
     /**
+     * Una URL registrada con barra invertida, arroba o caracteres de control no se usa de destino: `parse_url`
+     * dice que el host es el último, pero un navegador toma `\` como `/` y terminaría en el primero.
+     *
+     * @return void
+     */
+    public function test_una_url_registrada_con_barra_invertida_o_arroba_no_se_usa_de_destino(): void
+    {
+        $host_1 = $this->host_unico();
+        $this->crear_api($host_1, 'vps', 'https://evil.example\\@' . $host_1);
+        $this->assert_rechazo($this->pegar(['code' => 'c', 'state' => $this->aleatorio() . '_' . $host_1]));
+
+        $host_2 = $this->host_unico();
+        $this->crear_api($host_2, 'vps', 'https://usuario@' . $host_2);
+        $this->assert_rechazo($this->pegar(['code' => 'c', 'state' => $this->aleatorio() . '_' . $host_2]));
+
+        $host_3 = $this->host_unico();
+        $this->crear_demo('https://evil.example\\@' . $host_3);
+        $this->assert_rechazo($this->pegar(['code' => 'c', 'state' => $this->aleatorio() . '_' . $host_3]));
+    }
+
+    /**
      * El state sin sufijo (como el de un ERP viejo), cortos, largos o con basura: 422.
      *
      * @return void

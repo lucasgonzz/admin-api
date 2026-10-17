@@ -217,6 +217,14 @@ class MercadoPagoOAuthRelayService
             return '';
         }
 
+        // Defensa en profundidad: `parse_url` es más laxo que el parser de un navegador. Con una URL guardada
+        // como `https://evil.com\@api-x.comerciocity.com` dice que el host es el segundo, pero el navegador
+        // toma la barra invertida como `/` y va al primero. Una URL registrada con `\`, `@` o caracteres de
+        // control/espacios no se usa nunca como destino de un reenvío.
+        if (preg_match('/[\\\\@\x00-\x20\x7f]/', $url)) {
+            return '';
+        }
+
         $host = parse_url($url, PHP_URL_HOST);
 
         return is_string($host) ? strtolower($host) : '';
