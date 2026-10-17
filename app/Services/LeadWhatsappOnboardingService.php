@@ -24,6 +24,16 @@ class LeadWhatsappOnboardingService
     /** Valor en `system_message_kind` para el mensaje de bienvenida diferido. */
     public const KIND_WELCOME = 'whatsapp_welcome';
 
+    /** `message_type` de las variantes A/B de la presentación genérica (lead que escribe lo suyo). */
+    public const VARIANT_TYPE_WELCOME = 'welcome';
+
+    /**
+     * `message_type` de las variantes A/B de la presentación para el lead que llega con la FRASE DE
+     * UN BOTÓN (misión flujo-lead-landing-closer, 17/10/2026). Las tres de arranque las siembra
+     * `MessageVariantLandingSeeder`; si ninguna está activa se cae a las de `welcome`.
+     */
+    public const VARIANT_TYPE_WELCOME_LANDING = 'welcome_landing';
+
     /**
      * @var WhatsappSendService Envío saliente vía Kapso.
      */
@@ -162,25 +172,80 @@ class LeadWhatsappOnboardingService
     }
 
     /**
+     * ¿El texto ES la frase de uno de nuestros botones (la web, la landing vieja o Instagram)?
+     *
+     * Mismo criterio que `LeadOrigenService::es_frase_exacta()`: normalizado, como mucho UN saludo
+     * adelante («Buenas! Hola, quiero hacer la demo...») y NADA atrás. «Es», no «contiene»: el lead
+     * que escribe «Hola, quiero hacer la demo de ComercioCity, pero recién la semana que viene» ya
+     * dijo algo propio y recibe el onboarding genérico, con sus 60 segundos.
+     *
+     * Se compara contra las TRES constantes de `LeadOrigenService::FRASES_POR_ORIGEN` y no contra
+     * `frases_de_cta()` (las editables de la configuración de demos) a propósito: el botón de la
+     * página de experiencia manda la misma frase que la landing vieja, pero ese botón solo lo ve un
+     * lead que ya existe, así que nunca es un primer mensaje; y una frase cargada a mano en la
+     * configuración no es un botón nuestro. Tampoco se mira `origen`: lo escribe un observer
+     * DESPUÉS de este punto, y acá hace falta decidir con el inbound en la mano (D8 del plan).
+     *
+     * @param string|null $texto El contenido del primer mensaje del lead.
+     *
+     * @return bool
+     */
+    public static function primer_mensaje_es_frase_de_boton(?string $texto): bool
+    {
+        if ($texto === null || trim($texto) === '') {
+            return false;
+        }
+
+        foreach (LeadOrigenService::FRASES_POR_ORIGEN as $par) {
+            if (LeadOrigenService::es_frase_exacta($texto, $par[0])) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Envía mensaje automático inmediato, persiste en lead_messages y encola bienvenida diferida.
      *
+     * Dos caminos (misión flujo-lead-landing-closer, 17/10/2026, D8 del plan):
+     *
+     *  - El PRIMER mensaje es la frase de un botón ({@see primer_mensaje_es_frase_de_boton()}): sale
+     *    el auto landing («Enseguida Martín se suma...»), la presentación se elige entre las
+     *    variantes `welcome_landing` (con fallback a `welcome` si no hay ninguna activa) y la demora
+     *    es la de la variante o, si no tiene, la landing (10 s por default).
+     *  - Cualquier otro primer mensaje: exactamente como hasta hoy (auto genérico con o sin nombre,
+     *    variantes `welcome`, demora de la variante o la global de 60 s).
+     *
      * @param Lead        $lead
-     * @param string|null $display_name Nombre para personalizar saludos.
+     * @param string|null $display_name   Nombre para personalizar saludos.
+     * @param string|null $primer_mensaje Texto del inbound que disparó el onboarding. Null (llamadores
+     *                                    viejos) = camino genérico.
      *
      * @return void
      */
-    public function send_welcome_and_schedule_presentation(Lead $lead, ?string $display_name): void
+    public function send_welcome_and_schedule_presentation(Lead $lead, ?string $display_name, ?string $primer_mensaje = null): void
     {
         if ($this->has_auto_message_been_sent($lead)) {
             return;
         }
 
-        $auto_body = $this->build_auto_message_body($display_name);
+        $es_lead_de_un_boton = self::primer_mensaje_es_frase_de_boton($primer_mensaje);
+
+        $auto_body = $es_lead_de_un_boton
+            ? LeadWhatsappOnboardingSettings::get_auto_message_landing()
+            : $this->build_auto_message_body($display_name);
         $this->persist_and_send_system_message($lead, $auto_body, self::KIND_AUTO);
 
+        if ($es_lead_de_un_boton) {
+            Log::channel('daily')->info('LeadWhatsappOnboarding: primer mensaje con la frase de un botón; onboarding landing.', [
+                'lead_id' => $lead->id,
+            ]);
+        }
+
         if (! $this->has_welcome_been_sent($lead)) {
-            /* Demora: variante asignada (pre-pick universal) → global → sync si es 0. */
-            $delay_seconds = $this->resolve_welcome_delay_seconds($lead);
+            /* Demora: variante asignada (pre-pick universal) → global (landing o genérica) → sync si es 0. */
+            $delay_seconds = $this->resolve_welcome_delay_seconds($lead, $es_lead_de_un_boton);
             $pending_dispatch = SendLeadPresentationMessageJob::dispatch((int) $lead->id, $display_name);
 
             // Con demora 0 no depender de queue:work (mismo criterio que sugerencia IA).
@@ -283,21 +348,25 @@ class LeadWhatsappOnboardingService
      *
      * Siempre consulta la variante asignada al lead, sin requerir nombre de contacto.
      * Si la variante tiene delay_seconds configurado, lo usa; de lo contrario usa el
-     * valor global de admin_settings.
+     * valor global de admin_settings: el landing (10 s) para el lead de un botón, el genérico
+     * (60 s) para el resto.
      *
      * @param Lead $lead
+     * @param bool $lead_de_un_boton true si el primer mensaje fue la frase de un botón (17/10/2026).
      *
      * @return int Segundos de demora para encolar el job.
      */
-    private function resolve_welcome_delay_seconds(Lead $lead): int
+    private function resolve_welcome_delay_seconds(Lead $lead, bool $lead_de_un_boton = false): int
     {
-        $variant = $this->resolve_or_assign_welcome_variant($lead);
+        $variant = $this->resolve_or_assign_welcome_variant($lead, $lead_de_un_boton);
 
         if ($variant !== null && $variant->delay_seconds !== null) {
             return (int) $variant->delay_seconds;
         }
 
-        return LeadWhatsappOnboardingSettings::get_welcome_delay_seconds();
+        return $lead_de_un_boton
+            ? LeadWhatsappOnboardingSettings::get_welcome_delay_seconds_landing()
+            : LeadWhatsappOnboardingSettings::get_welcome_delay_seconds();
     }
 
     /**
@@ -305,22 +374,38 @@ class LeadWhatsappOnboardingService
      *
      * Funciona siempre, independientemente de si el lead tiene nombre de contacto.
      * Si el lead ya tiene welcome_variant_id asignado, devuelve esa misma variante
-     * (garantiza consistencia entre el delay calculado al encolar y el body enviado).
-     * Si no tiene variante, elige una aleatoria del tipo 'welcome' y la persiste.
+     * (garantiza consistencia entre el delay calculado al encolar y el body enviado): por eso el
+     * job diferido no necesita saber de qué tipo era el lead, lee la variante ya persistida.
+     * Si no tiene variante: para el lead de un botón elige una activa de `welcome_landing` y, si
+     * no hay ninguna, cae a `welcome` (D2 del plan: nunca se queda sin presentación por tener las
+     * tres landing apagadas); para el resto, una de `welcome`, como siempre. Y la persiste.
      *
      * @param Lead $lead
+     * @param bool $lead_de_un_boton true si el primer mensaje fue la frase de un botón (17/10/2026).
      *
-     * @return MessageVariant|null null si no hay variantes activas del tipo 'welcome'.
+     * @return MessageVariant|null null si no hay variantes activas de ningún tipo aplicable.
      */
-    private function resolve_or_assign_welcome_variant(Lead $lead): ?MessageVariant
+    private function resolve_or_assign_welcome_variant(Lead $lead, bool $lead_de_un_boton = false): ?MessageVariant
     {
         /* Reutilizar variante ya asignada para mantener coherencia entre delay y body. */
         if ($lead->welcome_variant_id) {
             return MessageVariant::find($lead->welcome_variant_id);
         }
 
+        $variant = null;
+        if ($lead_de_un_boton) {
+            $variant = MessageVariant::pick_active_variant(self::VARIANT_TYPE_WELCOME_LANDING);
+            if ($variant === null) {
+                Log::channel('daily')->info('LeadWhatsappOnboarding: sin variantes welcome_landing activas; se cae a welcome.', [
+                    'lead_id' => $lead->id,
+                ]);
+            }
+        }
+
         /* A/B testing: elegir variante activa del tipo universal 'welcome'. */
-        $variant = MessageVariant::pick_active_variant('welcome');
+        if ($variant === null) {
+            $variant = MessageVariant::pick_active_variant(self::VARIANT_TYPE_WELCOME);
+        }
         if ($variant === null) {
             return null;
         }

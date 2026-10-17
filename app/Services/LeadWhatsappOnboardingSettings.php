@@ -27,6 +27,25 @@ class LeadWhatsappOnboardingSettings
     /** Clave: segundos de espera antes del mensaje de bienvenida. */
     public const KEY_WELCOME_DELAY_SECONDS = 'lead_whatsapp_welcome_delay_seconds';
 
+    /**
+     * Clave: mensaje automático inmediato para el lead que llega con la FRASE DE UN BOTÓN (la
+     * landing, la landing vieja o Instagram; misión flujo-lead-landing-closer, 17/10/2026).
+     *
+     * Ese lead no escribió nada propio: tocó un botón que decía "quiero hacer la demo". El auto
+     * genérico ("un asesor se pondrá en contacto a la brevedad") le suena a cola de espera; acá se
+     * le anuncia que Martín se suma enseguida, y la presentación sale a los pocos segundos (ver
+     * KEY_WELCOME_DELAY_SECONDS_LANDING). No lleva `{nombre}`: el lead de la landing casi nunca
+     * llega con nombre de perfil y el saludo con nombre se pide después, como siempre.
+     */
+    public const KEY_AUTO_LANDING = 'lead_whatsapp_auto_message_landing';
+
+    /**
+     * Clave: segundos entre el auto landing y la presentación de Martín para el lead de un botón.
+     * Default 10 (contra los 60 del lead genérico): el que tocó un botón está esperando que alguien
+     * le hable ya, no en un minuto. Mismo rango 0-3600 que la demora genérica.
+     */
+    public const KEY_WELCOME_DELAY_SECONDS_LANDING = 'lead_whatsapp_welcome_delay_seconds_landing';
+
     /** Clave: segundos de inactividad del lead antes de pedir sugerencia a Claude (debounce). */
     public const KEY_AI_SUGGESTION_DELAY_SECONDS = 'lead_whatsapp_ai_suggestion_delay_seconds';
 
@@ -94,6 +113,15 @@ class LeadWhatsappOnboardingSettings
     /** Demora por defecto antes del mensaje de bienvenida (segundos). */
     private const DEFAULT_WELCOME_DELAY_SECONDS = 60;
 
+    /**
+     * Mensaje automático por defecto para el lead que llega con la frase de un botón (17/10/2026,
+     * texto dictado por Lucas). Sin `{nombre}` a propósito: ver KEY_AUTO_LANDING.
+     */
+    private const DEFAULT_AUTO_LANDING = '¡Hola! 👋 Enseguida Martín se suma a la conversación.';
+
+    /** Demora por defecto entre el auto landing y la presentación (segundos). Ver KEY_WELCOME_DELAY_SECONDS_LANDING. */
+    private const DEFAULT_WELCOME_DELAY_SECONDS_LANDING = 10;
+
     /** Demora por defecto antes de pedir sugerencia IA tras mensajes del lead (segundos). */
     private const DEFAULT_AI_SUGGESTION_DELAY_SECONDS = 60;
 
@@ -135,6 +163,10 @@ class LeadWhatsappOnboardingSettings
             'welcome_message_with_name' => self::get_welcome_message_with_name(),
             'welcome_message_without_name' => self::get_welcome_message_without_name(),
             'welcome_delay_seconds'        => self::get_welcome_delay_seconds(),
+            /* Onboarding del lead que llega con la frase de un botón (17/10/2026). Se exponen para que
+             * el panel pueda editarlos; el SPA de hoy los ignora y el PUT los acepta como opcionales. */
+            'auto_message_landing'         => self::get_auto_message_landing(),
+            'welcome_delay_seconds_landing' => self::get_welcome_delay_seconds_landing(),
             'ai_suggestion_delay_seconds'         => self::get_ai_suggestion_delay_seconds(),
             'verificacion_agendamiento_auto_send_delay_minutes' => self::get_verificacion_agendamiento_auto_send_delay_minutes(),
             'auto_activar_verificacion_al_solicitar_disponibilidad' => self::get_auto_activar_verificacion_al_solicitar_disponibilidad(),
@@ -156,6 +188,18 @@ class LeadWhatsappOnboardingSettings
         AdminSetting::set(self::KEY_WELCOME_WITH_NAME, trim((string) $data['welcome_message_with_name']));
         AdminSetting::set(self::KEY_WELCOME_WITHOUT_NAME, trim((string) $data['welcome_message_without_name']));
         AdminSetting::set(self::KEY_WELCOME_DELAY_SECONDS, (string) (int) $data['welcome_delay_seconds']);
+        /* Las dos claves del lead de un botón son OPCIONALES en el PUT (17/10/2026): el controller y el
+         * SPA de hoy no las mandan, y un `$data['...']` a secas tiraría "Undefined index" en cada
+         * guardado de la pantalla de Cuenta. Se escriben solo si vinieron. */
+        if (array_key_exists('auto_message_landing', $data) && trim((string) $data['auto_message_landing']) !== '') {
+            AdminSetting::set(self::KEY_AUTO_LANDING, trim((string) $data['auto_message_landing']));
+        }
+        if (array_key_exists('welcome_delay_seconds_landing', $data) && $data['welcome_delay_seconds_landing'] !== null && $data['welcome_delay_seconds_landing'] !== '') {
+            AdminSetting::set(
+                self::KEY_WELCOME_DELAY_SECONDS_LANDING,
+                (string) self::clamp_welcome_delay((int) $data['welcome_delay_seconds_landing'])
+            );
+        }
         AdminSetting::set(self::KEY_AI_SUGGESTION_DELAY_SECONDS, (string) (int) $data['ai_suggestion_delay_seconds']);
         AdminSetting::set(
             self::KEY_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MINUTES,
@@ -188,6 +232,12 @@ class LeadWhatsappOnboardingSettings
         }
         if (AdminSetting::get(self::KEY_WELCOME_DELAY_SECONDS) === null) {
             AdminSetting::set(self::KEY_WELCOME_DELAY_SECONDS, (string) self::DEFAULT_WELCOME_DELAY_SECONDS);
+        }
+        if (AdminSetting::get(self::KEY_AUTO_LANDING) === null) {
+            AdminSetting::set(self::KEY_AUTO_LANDING, self::DEFAULT_AUTO_LANDING);
+        }
+        if (AdminSetting::get(self::KEY_WELCOME_DELAY_SECONDS_LANDING) === null) {
+            AdminSetting::set(self::KEY_WELCOME_DELAY_SECONDS_LANDING, (string) self::DEFAULT_WELCOME_DELAY_SECONDS_LANDING);
         }
         if (AdminSetting::get(self::KEY_AI_SUGGESTION_DELAY_SECONDS) === null) {
             AdminSetting::set(self::KEY_AI_SUGGESTION_DELAY_SECONDS, (string) self::DEFAULT_AI_SUGGESTION_DELAY_SECONDS);
@@ -249,6 +299,33 @@ class LeadWhatsappOnboardingSettings
         $seconds = (int) $raw;
 
         return self::clamp_welcome_delay($seconds);
+    }
+
+    /**
+     * Mensaje automático inmediato para el lead cuyo PRIMER mensaje es la frase de un botón
+     * (misión flujo-lead-landing-closer, 17/10/2026). Sin placeholder de nombre.
+     *
+     * @return string
+     */
+    public static function get_auto_message_landing(): string
+    {
+        $texto = trim((string) AdminSetting::get(self::KEY_AUTO_LANDING, self::DEFAULT_AUTO_LANDING));
+
+        /* Una fila vacía (borrada a mano) no puede dejar al lead sin auto: cae al default. */
+        return $texto !== '' ? $texto : self::DEFAULT_AUTO_LANDING;
+    }
+
+    /**
+     * Segundos entre el auto landing y la presentación de Martín para el lead de un botón.
+     * Mismo rango que la demora genérica (0 = sync).
+     *
+     * @return int
+     */
+    public static function get_welcome_delay_seconds_landing(): int
+    {
+        $raw = AdminSetting::get(self::KEY_WELCOME_DELAY_SECONDS_LANDING, (string) self::DEFAULT_WELCOME_DELAY_SECONDS_LANDING);
+
+        return self::clamp_welcome_delay((int) $raw);
     }
 
     /**

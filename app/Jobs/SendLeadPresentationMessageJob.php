@@ -12,7 +12,11 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Envía el mensaje de presentación de ComercioCity ~60 s después del primer contacto WhatsApp.
+ * Envía el mensaje de presentación de ComercioCity después del primer contacto WhatsApp: a los
+ * ~60 s para el lead que escribió lo suyo, a los ~10 s para el que llegó con la frase de un botón
+ * (misión flujo-lead-landing-closer, 17/10/2026). La demora y la variante se deciden al encolar
+ * (LeadWhatsappOnboardingService); este job solo lee la variante ya asignada al lead, así que no
+ * necesita saber de qué tipo era.
  */
 class SendLeadPresentationMessageJob implements ShouldQueue
 {

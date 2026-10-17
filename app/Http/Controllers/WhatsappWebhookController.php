@@ -16,6 +16,7 @@ use App\Models\Implementation;
 use App\Models\ImplementationMessage;
 use App\Models\Lead;
 use App\Models\LeadMessage;
+use App\Models\LeadPipelineStatus;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
 use App\Models\WhatsappConfig;
@@ -1961,8 +1962,18 @@ class WhatsappWebhookController extends Controller
         (new \App\Services\LeadMessagePushNotificationService())->notify($lead, $content);
 
         // 2) Bienvenida inmediata + job de presentación (segundo en el hilo; cada envío emite su propio broadcast).
+        //    Se le pasa el texto del inbound: si ES la frase de un botón (landing / Instagram), el
+        //    onboarding es el landing (auto propio y presentación a los 10 s; 17/10/2026).
         if ($run_onboarding) {
-            $onboarding_service->send_welcome_and_schedule_presentation($lead, $display_name);
+            $onboarding_service->send_welcome_and_schedule_presentation($lead, $display_name, (string) $content);
+        }
+
+        // 2b) `contactado` determinístico (misión flujo-lead-landing-closer, 17/10/2026): el lead en
+        //     `nuevo` que ya recibió la presentación de Martín y vuelve a escribir, respondió. Antes
+        //     este estado solo lo escribía el agente por `estado_sugerido`, y como el agente no
+        //     contesta el primer mensaje, el lead podía quedarse en `nuevo` varias vueltas.
+        if (! $run_onboarding) {
+            $this->marcar_contactado_si_respondio_a_la_presentacion($lead, $onboarding_service);
         }
 
         // Detectar confirmaciones de la demo (ingreso / fin) ANTES de pedir sugerencia IA.
@@ -1971,6 +1982,62 @@ class WhatsappWebhookController extends Controller
 
         // Sugerencia IA con debounce: espera configurable tras el último inbound (2º mensaje o más).
         (new LeadAiSuggestionScheduler())->schedule_after_lead_inbound((int) $lead->id);
+    }
+
+    /**
+     * Pasa a `contactado` al lead en `nuevo` que escribe DESPUÉS de haber recibido la presentación de
+     * Martín (misión flujo-lead-landing-closer, 17/10/2026).
+     *
+     * El pipeline que dictó Lucas dice `nuevo → contactado` cuando el lead responde al primer mensaje.
+     * Hasta hoy nada del sistema escribía `contactado`: lo sugería el agente en su primera respuesta,
+     * y recién se aplicaba al enviarse ese mensaje. Acá es determinístico y previo al agente: se
+     * decide con el hilo, no con el modelo. Y va ANTES del scheduler de IA, para que la sugerencia que
+     * se genere ya mire al lead en `contactado` (el gate y los recursos razonan sobre el estado real).
+     *
+     * Condiciones, todas:
+     *  - el lead está en `nuevo` (cualquier otro estado ya pasó por acá o por el agente);
+     *  - la presentación ya salió (`has_welcome_been_sent`). Si el lead escribe dos veces seguidas
+     *    antes de los 10/60 segundos de la presentación, sigue en `nuevo`: el job de la presentación
+     *    solo manda si el lead sigue en `nuevo`, y moverlo acá lo dejaría sin presentación.
+     *
+     * Deja el evento de estado en el hilo igual que los demás cambios automáticos del sistema
+     * (`is_status_event`: no toca last_message_at ni cuenta como mensaje sin leer).
+     *
+     * @param Lead                          $lead
+     * @param LeadWhatsappOnboardingService $onboarding_service
+     *
+     * @return void
+     */
+    private function marcar_contactado_si_respondio_a_la_presentacion(Lead $lead, LeadWhatsappOnboardingService $onboarding_service): void
+    {
+        if ((string) $lead->status !== 'nuevo') {
+            return;
+        }
+
+        if (! $onboarding_service->has_welcome_been_sent($lead)) {
+            return;
+        }
+
+        $anterior     = (string) $lead->status;
+        $lead->status = 'contactado';
+        $lead->save();
+
+        LeadMessage::create([
+            'lead_id'               => $lead->id,
+            'sender'                => 'sistema',
+            'content'               => 'Estado cambiado de "' . LeadPipelineStatus::label_for($anterior)
+                . '" a "' . LeadPipelineStatus::label_for('contactado') . '": el lead respondió a la presentación.',
+            'status'                => 'enviado',
+            'is_followup'           => false,
+            'is_status_event'       => true,
+            'requiere_verificacion' => false,
+        ]);
+
+        LeadBroadcastService::emit_conversation_updated((int) $lead->id);
+
+        Log::channel('daily')->info('WhatsApp webhook: lead pasado a contactado por responder a la presentación.', [
+            'lead_id' => $lead->id,
+        ]);
     }
 
     /**

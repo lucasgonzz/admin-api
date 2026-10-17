@@ -46,6 +46,9 @@ class DatabaseSeeder extends Seeder
             AdminSettingSeeder::class,
             // Variantes iniciales de welcome para A/B testing del onboarding WhatsApp.
             MessageVariantSeeder::class,
+            // Las tres variantes de la presentación para el lead que llega con la frase de un botón
+            // (landing / Instagram), tipo welcome_landing (misión flujo-lead-landing-closer, 17/10/2026).
+            MessageVariantLandingSeeder::class,
             // Admin por defecto asignado a nuevas implementaciones (requiere AdminUserSeeder).
             ImplementationDefaultAdminSeeder::class,
             // Tiempo de espera antes de procesar archivos recibidos en la Etapa 4.
