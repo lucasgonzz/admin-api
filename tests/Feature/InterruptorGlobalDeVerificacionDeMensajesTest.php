@@ -291,7 +291,15 @@ class InterruptorGlobalDeVerificacionDeMensajesTest extends TestCase
     }
 
     /**
-     * Las 6 condiciones de requires_agendamiento_verification_gate(), reusadas por (f) y (g).
+     * Las 5 condiciones de requires_agendamiento_verification_gate(), reusadas por (f) y (g).
+     *
+     * Eran 6 hasta el 17/10/2026: la sexta era «el estado_sugerido entra al tramo» (lead en
+     * `calificado` con `estado_sugerido: demo_agendada`). La misión flujo-lead-landing-closer la
+     * sacó del gate a propósito (D3 del plan, decisión de Lucas: hasta `solicita_disponibilidad` la
+     * respuesta es automática, nunca más un lead en `calificado` esperando el ok), así que ese
+     * escenario ya no retiene con el interruptor prendido; lo cubre
+     * `tests/Feature/FlujoLead/GateDeAprobacionTest`. Las cinco que quedan retienen igual que
+     * siempre.
      *
      * @return array<string, array{0: string, 1: array<string, mixed>}> status del lead => [status, parsed]
      */
@@ -299,7 +307,6 @@ class InterruptorGlobalDeVerificacionDeMensajesTest extends TestCase
     {
         return [
             'lead ya en el tramo'          => ['solicita_disponibilidad', []],
-            'estado_sugerido entra al tramo' => ['calificado', ['estado_sugerido' => 'demo_agendada']],
             'agendar_demo'                  => ['calificado', ['agendar_demo' => true]],
             'cancelar_demo'                 => ['calificado', ['cancelar_demo' => true]],
             // Ambas acciones ahora solo valen desde demo_agendada -- ingresando_demo se sacó del
@@ -310,10 +317,10 @@ class InterruptorGlobalDeVerificacionDeMensajesTest extends TestCase
     }
 
     /**
-     * (f) Interruptor en true (default): las 6 condiciones del gate siguen reteniendo, exactamente
+     * (f) Interruptor en true (default): las 5 condiciones del gate siguen reteniendo, exactamente
      * como antes de esta misión.
      */
-    public function test_global_en_true_las_seis_condiciones_del_gate_retienen(): void
+    public function test_global_en_true_las_cinco_condiciones_del_gate_retienen(): void
     {
         AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '1');
         $service = $this->service();
@@ -325,11 +332,11 @@ class InterruptorGlobalDeVerificacionDeMensajesTest extends TestCase
     }
 
     /**
-     * (g) Interruptor en false: NINGUNA de las 6 condiciones retiene. Es el corazón del pedido de
+     * (g) Interruptor en false: NINGUNA de las 5 condiciones retiene. Es el corazón del pedido de
      * Lucas: con el interruptor apagado, las acciones de agenda (agendar, cancelar, confirmar
      * ingreso, marcar no ingreso) dejan de esperar aprobación.
      */
-    public function test_global_en_false_ninguna_de_las_seis_condiciones_retiene(): void
+    public function test_global_en_false_ninguna_de_las_cinco_condiciones_retiene(): void
     {
         AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '0');
         $service = $this->service();

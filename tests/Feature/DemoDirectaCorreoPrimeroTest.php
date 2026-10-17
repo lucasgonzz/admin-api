@@ -217,7 +217,11 @@ class DemoDirectaCorreoPrimeroTest extends TestCase
 
         $bloque = $this->contexto($this->crear_lead());
         $regla  = substr($bloque, (int) strpos($bloque, 'TODAVIA NO'));
-        $regla  = substr($regla, 0, (int) strpos($regla, 'Para ofrecerla'));
+        /* La regla del sí termina donde arranca la de la oferta. Hasta el 17/10/2026 esa línea decía
+         * «Para ofrecerla: "te la puedo tener lista en diez minutos"»; la misión flujo-lead-landing-closer
+         * la reemplazó por la oferta completa («La oferta, completa y una sola vez»), así que el corte
+         * se mueve a esa frase. Lo que se mide no cambió: el pedido del mail no nombra ninguna hora. */
+        $regla  = substr($regla, 0, (int) strpos($regla, 'La oferta, completa'));
 
         $this->assertStringContainsString('la tenés reservada dos horas, para que la recorras tranquilo', $regla);
         $this->assertStringNotContainsString('hasta las ', $regla, 'La hora de fin real recién existe al asignar.');
@@ -236,7 +240,8 @@ class DemoDirectaCorreoPrimeroTest extends TestCase
 
         $bloque = $this->contexto($this->crear_lead());
         $regla  = substr($bloque, (int) strpos($bloque, 'TODAVIA NO'));
-        $regla  = substr($regla, 0, (int) strpos($regla, 'Para ofrecerla'));
+        /* Mismo corte que el caso anterior (17/10/2026): la regla del sí termina en la de la oferta. */
+        $regla  = substr($regla, 0, (int) strpos($regla, 'La oferta, completa'));
 
         $this->assertStringNotContainsString('reservada dos horas', $regla);
         $this->assertStringContainsString('dura menos de una hora, para que la recorras tranquilo', $regla);

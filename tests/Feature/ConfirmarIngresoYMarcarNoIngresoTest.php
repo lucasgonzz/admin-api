@@ -57,10 +57,16 @@ class ConfirmarIngresoYMarcarNoIngresoTest extends TestCase
     }
 
     /**
-     * confirmar_ingreso sigue siendo válida desde demo_agendada: marca demo_ingreso_confirmado y
-     * sugiere el pase a demo_en_curso.
+     * confirmar_ingreso desde demo_agendada NO mueve el estado ni marca el ingreso (misión
+     * flujo-lead-landing-closer, 17/10/2026, decisión de Lucas): lo que el lead dice se le cree, pero
+     * `demo_en_curso` y `demo_ingreso_confirmado` los escribe únicamente el evento real `demo.ingreso`
+     * de la instancia. Queda el rastro en el hilo como evento de estado.
+     *
+     * Hasta el 17/10 este caso fijaba lo contrario (la inferencia forzaba demo_en_curso): se
+     * reescribió junto con la regla. El camino completo —el dicho no mueve, el evento sí— está en
+     * `tests/Feature/FlujoLead/ConfirmarIngresoSinCambioDeEstadoTest`.
      */
-    public function test_confirmar_ingreso_sigue_valida_desde_demo_agendada(): void
+    public function test_confirmar_ingreso_desde_demo_agendada_no_mueve_el_estado(): void
     {
         $lead = $this->crear_lead();
 
@@ -71,9 +77,17 @@ class ConfirmarIngresoYMarcarNoIngresoTest extends TestCase
         ]);
 
         $lead->refresh();
-        $this->assertTrue((bool) $lead->demo_ingreso_confirmado);
-        $this->assertNotNull($lead->demo_ingreso_confirmado_at);
-        $this->assertSame('demo_en_curso', $msg->suggested_lead_status);
+        $this->assertFalse((bool) $lead->demo_ingreso_confirmado);
+        $this->assertNull($lead->demo_ingreso_confirmado_at);
+        $this->assertSame('demo_agendada', (string) $lead->status);
+        $this->assertNull($msg->suggested_lead_status);
+
+        $this->assertDatabaseHas('lead_messages', [
+            'lead_id'         => $lead->id,
+            'sender'          => 'sistema',
+            'is_status_event' => true,
+            'content'         => 'El lead dice que entró a la demo; el ingreso real lo confirma la instancia.',
+        ]);
     }
 
     /**

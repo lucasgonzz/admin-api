@@ -84,8 +84,28 @@ class DemoDirectaService
      */
     public function ventana_desde(?Carbon $ahora = null): array
     {
-        $ahora  = $ahora !== null ? $ahora->copy()->setTimezone(self::TZ) : AppTime::now(self::TZ);
-        $inicio = $ahora->copy()->addMinutes(self::MINUTOS_HASTA_EL_INICIO)->second(0);
+        $ahora = $ahora !== null ? $ahora->copy()->setTimezone(self::TZ) : AppTime::now(self::TZ);
+
+        return $this->ventana_para($ahora->copy()->addMinutes(self::MINUTOS_HASTA_EL_INICIO));
+    }
+
+    /**
+     * Ventana de la demo directa que ARRANCA en un instante dado (misión flujo-lead-landing-closer,
+     * 17/10/2026): es `ventana_desde()` sin el +10, para la demo que el lead pide para un momento
+     * concreto ("mañana a las 10", `agendar_demo: {dia, hora}`). Mismos dos clamps: el fin es el tope
+     * de la ventana extendida, cortado a las 23:59 del día del inicio, y `cabe` dice si entre el
+     * inicio y ese fin entra una demo de la duración configurada.
+     *
+     * No valida el inicio contra "ahora" ni contra el horario de la demo del día: eso es de
+     * `LeadAiService::validar_inicio_de_demo_pedida()`, que lo mira antes de llamar acá.
+     *
+     * @param Carbon $inicio Inicio pedido (se copia; segundos en cero).
+     *
+     * @return array{inicio: Carbon, fin: Carbon, cabe: bool}
+     */
+    public function ventana_para(Carbon $inicio): array
+    {
+        $inicio = $inicio->copy()->setTimezone(self::TZ)->second(0);
 
         $fin  = $inicio->copy()->addHours(LeadDemoSettings::get_ventana_extendida_max_horas());
         $tope = $inicio->copy()->setTime(23, 59, 0);
@@ -167,7 +187,36 @@ class DemoDirectaService
      */
     public function proxima_liberacion(Lead $lead, ?Carbon $ahora = null): ?Carbon
     {
-        $ventana  = $this->ventana_desde($ahora);
+        return $this->proxima_liberacion_para_ventana($lead, $this->ventana_desde($ahora));
+    }
+
+    /**
+     * Igual que `proxima_liberacion()`, pero para una demo que arrancaría en `$inicio` (la que el lead
+     * pide para un momento concreto, misión flujo-lead-landing-closer, 17/10/2026): si a esa hora no
+     * hay instancia libre, desde qué hora de ese día sí la habría. Null si hay alguna libre o no hay
+     * demos cargadas.
+     *
+     * @param Lead   $lead   Lead para el que se consulta (se excluye a sí mismo).
+     * @param Carbon $inicio Inicio pedido.
+     *
+     * @return Carbon|null
+     */
+    public function proxima_liberacion_desde(Lead $lead, Carbon $inicio): ?Carbon
+    {
+        return $this->proxima_liberacion_para_ventana($lead, $this->ventana_para($inicio));
+    }
+
+    /**
+     * El cálculo compartido por `proxima_liberacion()` y `proxima_liberacion_desde()`: cuándo se libera
+     * la primera instancia para una ventana ya armada.
+     *
+     * @param Lead                                      $lead
+     * @param array{inicio: Carbon, fin: Carbon, cabe: bool} $ventana
+     *
+     * @return Carbon|null
+     */
+    private function proxima_liberacion_para_ventana(Lead $lead, array $ventana): ?Carbon
+    {
         $ocupadas = $this->ocupacion_por_demo($lead, $ventana['inicio'], $ventana['fin']);
 
         $demos = Demo::query()->orderBy('id')->get();
