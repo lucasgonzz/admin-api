@@ -170,6 +170,23 @@ class PostDemoConThomasTest extends TestCase
             'content'         => 'El lead no quiere avanzar con la llamada con Thomás. Motivo: Lo quiere pensar con su socio',
         ]);
 
+        /* «Terminé, pero no me interesa»: llega con el lead todavía en demo_en_curso y el descarte vale
+         * igual (hasta el 17/10 se ignoraba en silencio por exigir demo_realizada). */
+        $en_curso = $this->crear_lead('demo_en_curso', '5493519990023');
+        $msg_en_curso = $this->service()->aplicar($en_curso, [
+            'mensaje_sugerido'          => 'Dale, gracias por probarla.',
+            'estado_sugerido'           => 'demo_realizada',
+            'confirmar_fin_demo'        => true,
+            'descartar_llamada_closer'  => ['motivo' => 'Dice que no le interesa'],
+        ]);
+        $this->assertSame('demo_realizada', $msg_en_curso->suggested_lead_status);
+        $this->assertTrue((bool) $en_curso->refresh()->claude_auto_reply);
+        $this->assertDatabaseHas('lead_messages', [
+            'lead_id'         => $en_curso->id,
+            'is_status_event' => true,
+            'content'         => 'El lead no quiere avanzar con la llamada con Thomás. Motivo: Dice que no le interesa',
+        ]);
+
         /* La forma vieja (true + motivo_descarte_llamada) sigue valiendo. */
         $otro = $this->crear_lead('demo_realizada', '5493519990022');
         $this->service()->aplicar($otro, [

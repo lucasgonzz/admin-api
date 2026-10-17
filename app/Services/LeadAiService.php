@@ -147,7 +147,7 @@ TXT;
      * apply_parsed_response()). Desde el 2/7/2026 también se usa en
      * requires_agendamiento_verification_gate() para decidir, sin correr ninguna acción,
      * si hay que diferir el paquete completo (mensaje + acciones) hasta la aprobación humana.
-     * closer_activo en adelante ya es 100% manual (Tommy), no se incluye acá.
+     * closer_activo en adelante ya es 100% manual (Thomás, el closer), no se incluye acá.
      *
      * Esta lista sigue siendo el tramo de agenda, sin cambios. Lo que cambió el 1/9/2026 es que el
      * EFECTO de retención que se deriva de ella (en apply_parsed_response,
@@ -7972,9 +7972,14 @@ TXT;
          * requiere_intervencion_humana ni apaga el agente: un "no, gracias" después de la demo no es
          * un caso para una persona, es un lead que queda en `demo_realizada` y lo retoman los
          * seguimientos automáticos. Hasta hoy cada descarte abría una tarea y apagaba el agente, y el
-         * lead quedaba mudo. Queda el motivo en el hilo, como evento, para que se vea por qué. */
+         * lead quedaba mudo. Queda el motivo en el hilo, como evento, para que se vea por qué.
+         *
+         * Válida desde los mismos tres estados que confirmar_interes_closer: «terminé, pero no me
+         * interesa» llega con el lead todavía en demo_en_curso (el estado se aplica al enviar), y hasta
+         * el 17/10/2026 ese descarte se ignoraba en silencio por exigir demo_realizada. */
         $descartar_llamada = ! empty($parsed['descartar_llamada_closer']);
-        if ($descartar_llamada && $lead->usa_experiencia_demo_nueva() && (string) $lead->status === 'demo_realizada') {
+        if ($descartar_llamada && $lead->usa_experiencia_demo_nueva()
+            && in_array((string) $lead->status, ['demo_realizada', 'demo_en_curso', 'demo_pendiente_de_terminar'], true)) {
             $motivo_descarte = isset($parsed['motivo_descarte_llamada']) && trim((string) $parsed['motivo_descarte_llamada']) !== ''
                 ? trim((string) $parsed['motivo_descarte_llamada'])
                 : null;
@@ -8062,7 +8067,7 @@ TXT;
          * marcar_no_ingreso, colisión/slot inválido) — es el valor que realmente termina
          * aplicándose al lead como suggested_lead_status al enviarse el mensaje, no el estado
          * crudo que sugirió Claude en un primer momento. closer_activo en adelante ya es 100%
-         * manual (Tommy), no se toca acá.
+         * manual (Thomás, el closer), no se toca acá.
          *
          * Cuando $for_approval es true, este bloque se salta: el paquete ya pasó por
          * requires_agendamiento_verification_gate() y fue aprobado por un humano, así que no
@@ -8279,7 +8284,7 @@ TXT;
                     $resultado_evento_llamada = $google_event_service_llamada->promote_hold_to_call($lead_fresco_llamada);
                 } else {
                     /* No hay reserva vigente para este horario: liberar la vieja si existía (si
-                     * no, le queda un bloqueo fantasma a Tommy comiéndole un hueco) y crear el
+                     * no, le queda un bloqueo fantasma a Thomás comiéndole un hueco) y crear el
                      * evento en el horario que el lead confirmó. */
                     if (! empty($lead_fresco_llamada->closer_hold_event_id)) {
                         $google_event_service_llamada->release_hold_for_lead($lead_fresco_llamada);
@@ -8382,7 +8387,7 @@ TXT;
         }
 
         if ($notificar_llamada_agendada) {
-            /* Notificar a Tommy por los mismos canales que ya se usan para el escalado a
+            /* Notificar a Thomás por los mismos canales que ya se usan para el escalado a
              * humano (grupo 307, prompt 03) -- no hay un canal específico de "llamada agendada",
              * y este es exactamente ese caso: el lead pasa a manos del closer. */
             try {
@@ -10146,8 +10151,8 @@ BLOQUE_DEL_MANUAL;
                 . "    y en un lugar tranquilo, decile que " . $this->frase_de_la_reserva($fin_para_la_frase, $minutos_de_la_reserva, true) . ", y pedile el mail con\n"
                 . "    una sola pregunta: " . $texto_pedido_del_mail . ". NO devuelvas agendar_demo todavia, NO pases ningun link (ni el de\n"
                 . "    su pagina: esto pisa lo que diga la linea de su pagina) y NO digas que ya la estas preparando: la demo se asigna cuando pasa\n"
-                . "    el mail. No digas ninguna hora. Devolve estado_sugerido igual al que ya tenia (\"" . (string) $lead->status . "\"), NO demo_agendada:\n"
-                . "    todavia no hay ninguna demo asignada."
+                . "    el mail. No digas ninguna hora. Devolve estado_sugerido \"solicita_disponibilidad\" (dijo que si y todavia no agendamos),\n"
+                . "    NO demo_agendada: todavia no hay ninguna demo asignada."
                 . (trim((string) $lead->contact_first_name) === '' ? " Si todavia no tenemos su nombre, pedilo en la misma pregunta." : '')
                 . "\n";
 
@@ -10231,7 +10236,11 @@ BLOQUE_DEL_MANUAL;
             . LeadOrigenService::linea_del_si_explicito($lead)
             . "  - La oferta, completa y una sola vez: es una instancia completa de la plataforma (el sistema de gestion, la tienda online\n"
             . "    conectada y el sistema de agentes de IA: el asistente para el y su equipo y el agente que atiende a sus clientes), dura\n"
-            . "    mas o menos una hora y se la reservamos dos horas; que la haga desde una computadora, en un lugar tranquilo y, si quiere,\n"
+            /* La duración sale de DemoTurnoTexto::duracion_en_palabras() («menos de una hora»), la misma
+             * frase que dicta la reserva unas líneas más abajo y que dice el mail de acceso: una sola
+             * fuente para que el agente y el mail no se contradigan. Lucas dictó «aproximadamente una hora»
+             * (16/10/2026); si quiere ese texto, es una línea en duracion_en_palabras(), no acá. */
+            . "    " . DemoTurnoTexto::duracion_en_palabras() . " y se la reservamos dos horas; que la haga desde una computadora, en un lugar tranquilo y, si quiere,\n"
             . "    con la gente que decide con el; nosotros le hacemos soporte por aca mientras la recorre, gratis y sin compromiso; y si le\n"
             . "    gusta, despues coordinamos una videollamada para ver como se implementa en su negocio. Cerra con UNA pregunta: ¿la hace\n"
             . "    ahora o cuando le queda comodo? Sin grilla y sin pedir disponibilidad.\n"

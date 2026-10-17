@@ -323,18 +323,27 @@ class DemoDirectaCorreoPrimeroTest extends TestCase
     // ---------------------------------------------------------------------------------------------
 
     /**
-     * 🔴 El pedido del mail devuelve el estado que el lead ya tenía, NO `demo_agendada`: todavía no hay demo
-     * asignada, y un `demo_agendada` sin `agendar_demo` retiene el mensaje para revisión humana.
+     * 🔴 El pedido del mail devuelve `solicita_disponibilidad` («dijo que sí y todavía no agendamos»), NO
+     * `demo_agendada`: todavía no hay demo asignada, y un `demo_agendada` sin `agendar_demo` retiene el
+     * mensaje para revisión humana.
+     *
+     * Hasta el 17/10/2026 el bloque pedía «el estado que ya tenía» (`calificado`); la misión
+     * flujo-lead-landing-closer lo cambió junto con la regla D3: el sí mueve al lead a
+     * `solicita_disponibilidad` (ese mensaje sale solo), así el `agendar_demo` del turno siguiente llega
+     * con el lead ya adentro del tramo y el escudo prendido por el latch, y no queda nunca un lead en
+     * `calificado` con un mensaje esperando el ok. Se reescribió la aserción con la regla nueva.
      *
      * @return void
      */
-    public function test_el_pedido_del_mail_no_cambia_el_estado_a_demo_agendada(): void
+    public function test_el_pedido_del_mail_deja_al_lead_en_solicita_disponibilidad_no_en_demo_agendada(): void
     {
         $this->crear_demo();
 
         $bloque = $this->contexto($this->crear_lead());
 
-        $this->assertStringContainsString('estado_sugerido igual al que ya tenia ("calificado"), NO demo_agendada', $bloque);
+        $this->assertStringContainsString('Devolve estado_sugerido "solicita_disponibilidad" (dijo que si y todavia no agendamos)', $bloque);
+        $this->assertStringContainsString('NO demo_agendada: todavia no hay ninguna demo asignada', $bloque);
+        $this->assertStringNotContainsString('igual al que ya tenia', $bloque);
     }
 
     /**
