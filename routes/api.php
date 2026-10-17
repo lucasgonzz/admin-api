@@ -105,6 +105,22 @@ Route::post('webhook/recall', [RecallWebhookController::class, 'receive'])
     ->middleware('throttle:api');
 
 /*
+| Callback CENTRAL de OAuth de Mercado Pago (misión mp-redireccion-central-admin, 17/10/2026).
+|
+| 🔴 Es PÚBLICA (fuera de `auth:sanctum`, sin clave) porque quien pega acá es el NAVEGADOR del
+| comerciante, redirigido por Mercado Pago después de autorizar: no hay sesión del admin ni forma de
+| mandar un header. Es la única `redirect_uri` registrada en la app de Mercado Pago:
+| `https://api-admin.comerciocity.com/api/mercadopago/callback`.
+|
+| No autentica a nadie ni canjea nada: reenvía el `code` al empresa-api del cliente que inició la
+| conexión (el host viaja en el `state`). Lo que la hace segura no es el acceso sino que el destino
+| NUNCA sale de la request: se busca el host en `client_apis` / `demos`, y si no está, 422 sin
+| redirección. Ver MercadoPagoOAuthRelayService.
+*/
+Route::get('mercadopago/callback', [\App\Http\Controllers\Api\MercadoPagoOAuthRelayController::class, 'callback'])
+    ->middleware('throttle:60,1');
+
+/*
 | Formulario público de configuración de implementación (acceso por token, sin auth).
 | El cliente accede con un link único que contiene form_token; no requiere Sanctum.
 */
