@@ -714,21 +714,53 @@ class Lead extends Model
             // evento de estado). Si después hubo un reintento exitoso o el lead respondió, el error se considera
             // resuelto y deja de contar. Los registros is_error son is_status_event = true, así que un error
             // más nuevo no "resuelve" a otro error (no cuenta como actividad real).
+            //
+            // El predicado vive en apply_condicion_error_sin_resolver() desde el 17/10/2026, porque la
+            // lista de chats (LeadChatsController, `solo_atencion=1`) necesita el MISMO criterio en un
+            // WHERE y copiarlo a mano es la receta con la que ya divergieron dos veces otros gemelos.
             'failed_send_count' => \App\Models\LeadMessage::selectRaw('COUNT(*)')
                 ->whereColumn('lead_messages.lead_id', 'leads.id')
-                ->where(function ($error_source) {
-                    $error_source->where('is_error', true)
-                        ->orWhere('whatsapp_delivery_status', 'fallido');
-                })
-                ->whereNotExists(function ($posterior) {
-                    // Actividad real posterior: mensaje del MISMO lead, id mayor, que NO sea evento de estado.
-                    $posterior->selectRaw('1')
-                        ->from('lead_messages as lm_post')
-                        ->whereColumn('lm_post.lead_id', 'lead_messages.lead_id')
-                        ->whereColumn('lm_post.id', '>', 'lead_messages.id')
-                        ->where('lm_post.is_status_event', false);
+                ->where(function ($error) {
+                    self::apply_condicion_error_sin_resolver($error);
                 }),
         ]);
+    }
+
+    /**
+     * 🔴 LA definición en SQL de "este saliente falló y el error sigue sin resolver", y la única que hay.
+     *
+     * Es el criterio del badge `failed_send_count` (y del rojo `error_envio` de la lista de chats),
+     * extraído tal cual el 17/10/2026 (misión flujo-lead-landing-closer) para que
+     * `LeadChatsController` pueda usarlo también como filtro (`solo_atencion=1`) sin reescribirlo.
+     * No cambia nada de lo que contaba antes: dos fuentes de error —el registro de sistema
+     * (`is_error`) y la entrega fallida que avisa Kapso (`whatsapp_delivery_status = 'fallido'`)— y
+     * "sin resolver" = sin NINGUNA actividad real posterior del mismo lead (un mensaje con id mayor
+     * que no sea evento de estado). Los registros `is_error` son `is_status_event = true`, así que
+     * un error más nuevo no resuelve a otro error.
+     *
+     * ⚠️ Es más ancho que la razón B de {@see self::scopeRequiereRevision()} (que solo suma la
+     * entrega fallida con `$incluir_entrega_fallida = true`): acá la entrega fallida entra siempre,
+     * como entraba en el badge. No unificarlos sin leer `TarjetasDeEstadoDeLeadsTest`.
+     *
+     * @param \Illuminate\Database\Query\Builder $query Subconsulta ya apuntada a `lead_messages`
+     *                                                  (sin alias), correlacionada con el lead.
+     *
+     * @return void
+     */
+    public static function apply_condicion_error_sin_resolver($query): void
+    {
+        $query->where(function ($error_source) {
+                $error_source->where('lead_messages.is_error', true)
+                    ->orWhere('lead_messages.whatsapp_delivery_status', 'fallido');
+            })
+            ->whereNotExists(function ($posterior) {
+                // Actividad real posterior: mensaje del MISMO lead, id mayor, que NO sea evento de estado.
+                $posterior->selectRaw('1')
+                    ->from('lead_messages as lm_post')
+                    ->whereColumn('lm_post.lead_id', 'lead_messages.lead_id')
+                    ->whereColumn('lm_post.id', '>', 'lead_messages.id')
+                    ->where('lm_post.is_status_event', false);
+            });
     }
 
     /**

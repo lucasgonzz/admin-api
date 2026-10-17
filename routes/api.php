@@ -41,6 +41,7 @@ use App\Http\Controllers\RecallWebhookController;
 use App\Http\Controllers\FollowupRuleController;
 use App\Http\Controllers\FollowupTemplateController;
 use App\Http\Controllers\LeadCallController;
+use App\Http\Controllers\LeadChatsController;
 use App\Http\Controllers\LeadController;
 use App\Http\Controllers\MetaRawWebhookController;
 use App\Http\Controllers\PipelineActivityController;
@@ -856,6 +857,14 @@ Route::prefix('admin')->group(function () {
         // necesitan revisión (mismo criterio que el botón de revisión: sin responder o con error).
         // 🔴 Va ANTES de lead/{id}: si va después, {id} se come "status-cards".
         Route::get('lead/status-cards', [LeadController::class, 'status_cards_json']);
+        /* La bandeja estilo WhatsApp (misión flujo-lead-landing-closer, 17/10/2026): la lista de chats
+           con el último mensaje y el color de atención de cada lead, una fila sola para refrescar desde
+           Pusher, y el botón «no necesita respuesta». Controlador propio (LeadChatsController) para no
+           tocar LeadController; el contrato es el §4.1 del plan de la misión.
+           🔴 `lead/chats` va ANTES de lead/{id} por la misma trampa que status-cards. */
+        Route::get('lead/chats', [LeadChatsController::class, 'index_json']);
+        Route::get('lead/chats/{id}', [LeadChatsController::class, 'show_json'])->where('id', '[0-9]+');
+        Route::post('lead/{id}/marcar-respondido', [LeadChatsController::class, 'marcar_respondido_json'])->where('id', '[0-9]+');
         Route::get('lead/{id}', [LeadController::class, 'show_json']);
         Route::post('lead', [LeadController::class, 'store_json']);
         Route::put('lead/{id}', [LeadController::class, 'update_json']);
