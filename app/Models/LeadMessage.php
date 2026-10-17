@@ -890,6 +890,24 @@ class LeadMessage extends Model
     /**
      * Mensajes que deben viajar en listados de leads (notificaciones / pendientes de acción).
      *
+     * ⚠️ La marca «no necesita respuesta» (`leads.atendido_hasta_message_id`, misión
+     * flujo-lead-landing-closer, 17/10/2026) NO se aplica acá, a propósito, y por dos motivos:
+     *
+     *   1. Este scope selecciona qué mensajes VIAJAN en el listado, no cuáles piden atención. Su
+     *      primera rama trae todo mensaje del lead con `read_at` nulo —y hoy ningún código de `app`
+     *      escribe `lead_messages.read_at` (la lectura real va por `lead_message_reads`)—, así que
+     *      todo mensaje del lead viaja por esa rama igual, con marca o sin ella. Excluirlo de la
+     *      tercera rama no cambiaría una sola fila de la respuesta; sería una exclusión decorativa.
+     *   2. «Leído» no es «respondido», y «atendido sin respuesta» tampoco es «leído»: la marca la
+     *      pone un admin para todos, y la lectura es por admin. Mezclarlas acá volvería a cruzar las
+     *      dos definiciones que este archivo separó a propósito.
+     *
+     * Lo que SÍ pide atención lo deciden `Lead::apply_condicion_mensaje_sin_responder()` (SQL) y
+     * `LeadConversationAiState::has_unanswered_lead_messages()` (PHP), que son los que llevan la marca.
+     * Esta rama se correlaciona por `lead_messages.lead_id` sin tener a `leads` en el `FROM`, así
+     * que si algún día hiciera falta la exclusión acá, habría que traerla con un subselect sobre
+     * `leads` y no copiando la cláusula de allá.
+     *
      * @param \Illuminate\Database\Eloquent\Builder $query
      *
      * @return \Illuminate\Database\Eloquent\Builder

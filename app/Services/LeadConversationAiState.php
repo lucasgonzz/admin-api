@@ -49,6 +49,16 @@ class LeadConversationAiState
      * {@see LeadMessage::tiene_reaccion_admin()} tampoco cuenta como sin responder: decisión de
      * Lucas del 8/9/2026, reaccionarle desde el panel es una forma de respuesta.
      *
+     * 🔴 Y tampoco cuenta un mensaje del lead con `id <= leads.atendido_hasta_message_id`, la
+     * marca «no necesita respuesta» de la bandeja (misión flujo-lead-landing-closer, decisión D6
+     * de Lucas, 17/10/2026). Esta función es el gate del scheduler de la IA
+     * ({@see LeadAiSuggestionScheduler}, {@see \App\Jobs\GenerateLeadAiSuggestionJob}) y del
+     * botón de revisión ({@see LeadPendingReviewService}): si el operador dijo que ese mensaje no
+     * necesita respuesta, la IA no tiene por qué redactarle una. Es el GEMELO PHP de la cláusula
+     * que {@see Lead::apply_condicion_mensaje_sin_responder()} aplica en SQL, y los dos tienen que
+     * decir lo mismo (lo verifica `RevisionDeLeadsEnSqlYEnPhpCoincidenTest`, usando esta función
+     * como oráculo a través de `LeadPendingReviewService`). Si tocás uno, tocá el otro.
+     *
      * @param Lead $lead Lead con relación `messages` cargada (orden por id).
      *
      * @return bool
@@ -59,6 +69,10 @@ class LeadConversationAiState
         if ($messages === null || $messages->isEmpty()) {
             return false;
         }
+
+        /* Hasta qué id del hilo el operador dio por atendido sin contestar. 0 = nada marcado, y
+           como ningún mensaje tiene id 0 la comparación de abajo deja pasar a todos. */
+        $atendido_hasta = (int) ($lead->atendido_hasta_message_id ?? 0);
 
         $last_outbound_index = -1;
         $index = 0;
@@ -79,6 +93,8 @@ class LeadConversationAiState
             $candidate = $messages[$cursor];
             if ((string) $candidate->sender === 'lead'
                 && (string) $candidate->status === 'enviado'
+                /* Gemelo de la cláusula «no necesita respuesta» del SQL (D6, 17/10/2026). */
+                && (int) $candidate->id > $atendido_hasta
                 && (string) ($candidate->kind ?? '') !== 'reaction'
                 && ! LeadWhatsappReactionService::is_legacy_reaction_content((string) $candidate->content)
                 && ! LeadMessage::tiene_reaccion_admin($candidate)) {

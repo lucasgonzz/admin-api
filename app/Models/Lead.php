@@ -343,6 +343,11 @@ class Lead extends Model
         // Flag: el lead confirmó por WhatsApp que pudo entrar a la demo.
         'demo_ingreso_confirmado'      => 'boolean',
 
+        // Marca «no necesita respuesta» de la bandeja (misión flujo-lead-landing-closer, 17/10/2026):
+        // id del último mensaje del lead dado por atendido sin contestarle. Null = nada marcado.
+        // Ver Lead::apply_condicion_mensaje_sin_responder() y LeadChatsController::marcar_respondido_json().
+        'atendido_hasta_message_id'    => 'integer',
+
         // Flag: ya se envió el mensaje preguntando si terminó la demo.
         'demo_fin_check_enviado'       => 'boolean',
 
@@ -790,12 +795,33 @@ class Lead extends Model
      * reaccionado no es el último del hilo, un mensaje posterior del lead sigue sin responder aunque
      * este quede resuelto por la reacción.
      *
-     * La usan las dos cosas que tienen que decir lo mismo: el scope `requiereRevision` (que cuenta
-     * la tarjeta "sin responder") y el flag `row_warning` (que pinta la fila de amarillo). Si
-     * estuvieran escritas por separado, la tarjeta y la grilla volverían a contradecirse — que es
-     * exactamente lo que Lucas reportó el 2/9/2026.
+     * 🔴 Y la marca «no necesita respuesta» (misión flujo-lead-landing-closer, decisión D6 de Lucas,
+     * 17/10/2026): un mensaje del lead con `id <= leads.atendido_hasta_message_id` NO está sin
+     * responder, aunque nadie le haya contestado ni reaccionado. El operador lo dio por atendido
+     * desde la conversación («no necesita respuesta»: un «gracias», un sticker, un «dale» que no
+     * merecen ni un texto ni una reacción) y hasta hoy esa fila quedaba amarilla para siempre. Es un
+     * id y no un booleano a propósito: el mensaje siguiente del lead tiene un id mayor y vuelve a
+     * contar solo, sin que haya que limpiar nada. Entra ACÁ, en la definición única, y no como un
+     * filtro aparte en cada consumidor, porque así la marca vale igual para el amarillo de la fila,
+     * para el `sin_responder` de las tarjetas, para `?sin_responder=1` y para la lista de chats; y
+     * su gemelo PHP ({@see \App\Services\LeadConversationAiState::has_unanswered_lead_messages()})
+     * hace que el scheduler de la IA tampoco genere una sugerencia para ese mensaje.
      *
-     * @param \Illuminate\Database\Query\Builder $query Subconsulta sobre lead_messages, correlacionada.
+     * ⚠️ Esa cláusula referencia `leads.atendido_hasta_message_id`, o sea que la subconsulta tiene
+     * que estar correlacionada con la tabla `leads` SIN alias (es lo que ya hacen los tres
+     * call-sites: `requiereRevision`, `row_warning` y la lista de chats, todos con
+     * `whereColumn('lead_messages.lead_id', 'leads.id')`). Se eligió así en vez de un subselect
+     * por PK sobre `leads` porque este predicado corre sobre cada mensaje de cada lead al contar
+     * las tarjetas, y el subselect sumaba una lectura por mensaje para no ganar nada.
+     *
+     * La usan las cosas que tienen que decir lo mismo: el scope `requiereRevision` (que cuenta la
+     * tarjeta "sin responder"), el flag `row_warning` (que pinta la fila de amarillo) y la
+     * `atencion` amarilla de `GET admin/lead/chats`. Si estuvieran escritas por separado, la
+     * tarjeta y la grilla volverían a contradecirse — que es exactamente lo que Lucas reportó el
+     * 2/9/2026.
+     *
+     * @param \Illuminate\Database\Query\Builder $query Subconsulta sobre lead_messages, correlacionada
+     *                                                  con `leads` (la tabla exterior, sin alias).
      *
      * @return void
      */
@@ -803,6 +829,13 @@ class Lead extends Model
     {
         $query->where('lead_messages.sender', 'lead')
             ->where('lead_messages.status', 'enviado')
+            /* «No necesita respuesta» (D6, 17/10/2026): dado por atendido hasta ese id, inclusive.
+               Con la marca en null no filtra nada, que es el estado de todo lead anterior a la
+               columna. Ver el porqué completo en el docblock. */
+            ->where(function ($atendido) {
+                $atendido->whereNull('leads.atendido_hasta_message_id')
+                    ->orWhereColumn('lead_messages.id', '>', 'leads.atendido_hasta_message_id');
+            })
             ->where(function ($no_reaccion) {
                 $no_reaccion->whereNull('lead_messages.kind')
                     ->orWhere('lead_messages.kind', '<>', 'reaction');
