@@ -842,6 +842,12 @@ return [
                 'first_message_at', 'last_message_at', 'pinned_at',
                 'pendiente_revision_at', 'no_recibe_mensajes_at',
                 'no_recibe_mensajes_motivo',
+                /* La marca «no necesita respuesta» de la bandeja (misión flujo-lead-landing-closer,
+                   17/10/2026): id del último mensaje del lead dado por atendido sin contestarle. Va
+                   en la base, al lado de `no_recibe_mensajes_at`, porque es la otra razón por la que
+                   un lead que habló último NO figura como sin responder; sin esto, `/leads` vería
+                   un hilo que termina en el lead y no sabría por qué nadie lo cuenta. */
+                'atendido_hasta_message_id',
 
                 /* De dónde vino el lead, calculado sobre su primer mensaje (misión
                    origen-del-lead-y-conversiones-meta, 13/10/2026). NULL = todavía no se calculó. */
