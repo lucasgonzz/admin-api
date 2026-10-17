@@ -12,6 +12,7 @@ use App\Models\RecursosSesion as RecursosSesionModelo;
 use App\Models\RecursosUsuario;
 use App\Models\RecursosVideo;
 use App\Models\RecursosVoto;
+use App\Services\RecursosBusquedasService;
 use App\Services\RecursosCatalogoService;
 use App\Services\RecursosProgresoService;
 use Illuminate\Database\QueryException;
@@ -43,6 +44,17 @@ class RecursosPaginaController extends Controller
      * Largo máximo del "qué mejorarías" de la encuesta.
      */
     const MAX_MEJORA = 2000;
+
+    /**
+     * Largo máximo de la consulta tal como la tipeó el usuario, en caracteres (contrato C-BUSQ-1). La que
+     * se guarda es la normalizada y más corta (`recursos.busquedas.max_consulta`).
+     */
+    const MAX_CONSULTA_ORIGINAL = 500;
+
+    /**
+     * Tope de `resultados` y de `posicion` en el registro de búsquedas.
+     */
+    const MAX_RESULTADOS = 100000;
 
     /**
      * GET recursos/catalogo — carpetas y videos activos, sin transcripción. Cacheado.
@@ -423,6 +435,150 @@ class RecursosPaginaController extends Controller
         }
 
         return response()->json(['codigo' => $video->codigo] + $valores);
+    }
+
+    /**
+     * POST recursos/busquedas — registra una búsqueda del buscador (contrato C-BUSQ-1 de la misión
+     * busquedas-centro-recursos, 16/10/2026). Público, con sesión opcional (el invitado también registra).
+     *
+     * Body: `{evento, consulta, resultados, primero?, completo, abrio?, posicion?}`. El `evento` identifica
+     * la búsqueda: la primera vez la crea y, si llega otra vez con el mismo `evento` y un `abrio`, completa
+     * el resultado abierto (el primer clic gana). → `{registrado: true}`; o `{registrado: false, motivo}` con
+     * motivo `descartada` (la consulta parece un dato personal o es demasiado corta) o `soporte` (sesión de
+     * solo lectura: soporte mirando no cuenta). 422 `datos_invalidos` si el body no cumple.
+     *
+     * @param Request                  $request
+     * @param RecursosBusquedasService $busquedas
+     *
+     * @return JsonResponse
+     */
+    public function busquedas_json(Request $request, RecursosBusquedasService $busquedas): JsonResponse
+    {
+        $sesion = $request->attributes->get(RecursosSesion::ATRIBUTO_SESION);
+
+        if ($sesion instanceof RecursosSesionModelo && $sesion->solo_lectura) {
+            return response()->json(['registrado' => false, 'motivo' => 'soporte']);
+        }
+
+        $datos = self::datos_de_la_busqueda($request);
+
+        if (is_string($datos)) {
+            return response()->json(['error' => 'datos_invalidos', 'detalle' => $datos], 422);
+        }
+
+        $usuario = $this->usuario($request);
+
+        return response()->json($busquedas->registrar($datos, $usuario instanceof RecursosUsuario ? (int) $usuario->id : null));
+    }
+
+    /**
+     * Valida el body de `recursos/busquedas` y lo deja con los tipos ya convertidos.
+     *
+     * @param Request $request
+     *
+     * @return array<string, mixed>|string El body limpio, o el motivo legible del rechazo.
+     */
+    protected static function datos_de_la_busqueda(Request $request)
+    {
+        $evento = $request->input('evento');
+
+        if (! is_string($evento) || preg_match('/^[A-Za-z0-9_-]{8,40}$/', $evento) !== 1) {
+            return '`evento` tiene que ser un texto de 8 a 40 caracteres (letras, números, guión y guión bajo).';
+        }
+
+        $consulta = $request->input('consulta');
+
+        if (! is_string($consulta) || trim($consulta) === '' || mb_strlen($consulta, 'UTF-8') > self::MAX_CONSULTA_ORIGINAL) {
+            return '`consulta` tiene que ser un texto de 1 a ' . self::MAX_CONSULTA_ORIGINAL . ' caracteres.';
+        }
+
+        $resultados = self::entero_de($request->input('resultados'));
+
+        if ($resultados === null || $resultados < 0 || $resultados > self::MAX_RESULTADOS) {
+            return '`resultados` tiene que ser un entero de 0 a ' . self::MAX_RESULTADOS . '.';
+        }
+
+        $completo = $request->input('completo');
+
+        if (! in_array($completo, [true, false, 1, 0, '1', '0'], true)) {
+            return '`completo` tiene que ser true o false.';
+        }
+
+        $primero = self::codigo_de($request->input('primero'));
+
+        if ($primero === false) {
+            return '`primero` es un código de hasta 20 caracteres o null.';
+        }
+
+        $abrio = self::codigo_de($request->input('abrio'));
+
+        if ($abrio === false) {
+            return '`abrio` es un código de hasta 20 caracteres o null.';
+        }
+
+        $posicion = null;
+
+        if ($request->input('posicion') !== null) {
+            $posicion = self::entero_de($request->input('posicion'));
+
+            if ($posicion === null || $posicion < 1 || $posicion > self::MAX_RESULTADOS) {
+                return '`posicion` tiene que ser un entero de 1 en adelante.';
+            }
+        }
+
+        return [
+            'evento'     => $evento,
+            'consulta'   => $consulta,
+            'resultados' => $resultados,
+            'primero'    => $primero,
+            'completo'   => in_array($completo, [true, 1, '1'], true),
+            'abrio'      => $abrio,
+            'posicion'   => $posicion,
+        ];
+    }
+
+    /**
+     * Un entero que puede venir como número o como texto de dígitos; null si no lo es (un booleano, un
+     * decimal o un texto cualquiera no valen).
+     *
+     * @param mixed $valor
+     *
+     * @return int|null
+     */
+    protected static function entero_de($valor): ?int
+    {
+        if (is_int($valor)) {
+            return $valor;
+        }
+
+        if (is_string($valor) && preg_match('/^\d{1,9}$/', $valor) === 1) {
+            return (int) $valor;
+        }
+
+        return null;
+    }
+
+    /**
+     * Un código de video opcional: null si no vino (o vino vacío), el texto recortado si es válido, false
+     * si no es texto o pasa los 20 caracteres.
+     *
+     * @param mixed $valor
+     *
+     * @return string|false|null
+     */
+    protected static function codigo_de($valor)
+    {
+        if ($valor === null) {
+            return null;
+        }
+
+        if (! is_string($valor) || strlen(trim($valor)) > 20) {
+            return false;
+        }
+
+        $valor = trim($valor);
+
+        return $valor === '' ? null : $valor;
     }
 
     /**

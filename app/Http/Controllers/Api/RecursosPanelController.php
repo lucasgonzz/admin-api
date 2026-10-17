@@ -9,8 +9,10 @@ use App\Models\RecursosPregunta;
 use App\Models\RecursosUsuario;
 use App\Models\RecursosVideo;
 use App\Services\RecursosBorradorService;
+use App\Services\RecursosBusquedasService;
 use App\Services\RecursosEstadisticasService;
 use App\Services\RecursosLinkService;
+use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
@@ -228,6 +230,43 @@ class RecursosPanelController extends Controller
     }
 
     /**
+     * GET admin/recursos/busquedas?desde=Y-m-d&hasta=Y-m-d&limit=100 (contrato C-BUSQ-2 de la misión
+     * busquedas-centro-recursos, 16/10/2026) → `{desde, hasta, totales, sin_encontrar, sin_clic}`: lo que
+     * buscaron los clientes en el buscador de la página, para afinar los sinónimos.
+     *
+     * `desde` y `hasta` son días INCLUSIVOS en la hora de la app; sin ellos, los últimos 30 días. `limit` es
+     * por lista (1 a 200, 100 por defecto). Fechas mal escritas o `desde` posterior a `hasta` → 422. Sin
+     * datos contesta igual, con las listas vacías y los totales en cero.
+     *
+     * @param Request                  $request
+     * @param RecursosBusquedasService $busquedas
+     *
+     * @return JsonResponse
+     */
+    public function busquedas_json(Request $request, RecursosBusquedasService $busquedas): JsonResponse
+    {
+        $hoy = Carbon::now()->startOfDay();
+
+        $hasta = $this->dia_de_la_consulta($request->query('hasta'), $hoy->copy());
+        $desde = $this->dia_de_la_consulta($request->query('desde'), $hoy->copy()->subDays(29));
+
+        if (! $hasta instanceof Carbon || ! $desde instanceof Carbon) {
+            return response()->json(['error' => 'datos_invalidos', 'detalle' => '`desde` y `hasta` son fechas con formato AAAA-MM-DD.'], 422);
+        }
+
+        if ($desde->gt($hasta)) {
+            return response()->json(['error' => 'datos_invalidos', 'detalle' => '`desde` no puede ser posterior a `hasta`.'], 422);
+        }
+
+        $limit = (int) $request->query('limit', 100);
+        $limit = max(1, min(200, $limit));
+
+        return response()->json(
+            ['desde' => $desde->format('Y-m-d'), 'hasta' => $hasta->format('Y-m-d')] + $busquedas->resumen($desde, $hasta, $limit)
+        );
+    }
+
+    /**
      * GET admin/recursos/clientes → `{clientes: [...]}`.
      *
      * @param RecursosEstadisticasService $estadisticas
@@ -331,6 +370,34 @@ class RecursosPanelController extends Controller
             'borrador'       => $pregunta->borrador,
             'oculta'         => (bool) $pregunta->oculta,
         ];
+    }
+
+    /**
+     * Un día `Y-m-d` de la query string como Carbon a las 00:00, o `$por_defecto` si no vino. null si vino
+     * algo que no es una fecha real (incluye "2026-02-30", que PHP corre a marzo si no se lo chequea).
+     *
+     * @param mixed  $valor
+     * @param Carbon $por_defecto
+     *
+     * @return Carbon|null
+     */
+    protected function dia_de_la_consulta($valor, Carbon $por_defecto): ?Carbon
+    {
+        if ($valor === null || $valor === '') {
+            return $por_defecto;
+        }
+
+        if (! is_string($valor)) {
+            return null;
+        }
+
+        try {
+            $dia = Carbon::createFromFormat('!Y-m-d', $valor);
+        } catch (\Exception $e) {
+            return null;
+        }
+
+        return $dia instanceof Carbon && $dia->format('Y-m-d') === $valor ? $dia : null;
     }
 
     /**

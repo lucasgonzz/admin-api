@@ -211,6 +211,13 @@ Route::prefix('recursos')
             Route::post('sesion/link', [\App\Http\Controllers\Api\RecursosSesionController::class, 'link_json']);
         });
 
+        /* Lo que se busca en el buscador (misión busquedas-centro-recursos, 16/10/2026). Sin `recursos.sesion` ni
+           `recursos.escritura`: el invitado también registra, y la sesión de soporte (solo lectura) se corta
+           adentro del controlador con `registrado: false`. Cubeta propia por IP: la página manda una por
+           búsqueda y otra si se abre un resultado, y no tiene por qué comerse el cupo de lo demás. */
+        Route::post('busquedas', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'busquedas_json'])
+            ->middleware(['recursos.throttle:30,1,busquedas,ip', 'recursos.sesion.opcional']);
+
         Route::middleware(['recursos.throttle:60,1,escritura,token', 'recursos.sesion'])->group(function () {
             Route::get('yo', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'yo_json']);
             Route::post('salir', [\App\Http\Controllers\Api\RecursosSesionController::class, 'salir_json']);
@@ -1390,6 +1397,7 @@ Route::prefix('admin')->group(function () {
         Route::post('recursos/preguntas/{id}/borrador', [\App\Http\Controllers\Api\RecursosPanelController::class, 'borrador_json'])->whereNumber('id');
         Route::get('recursos/videos', [\App\Http\Controllers\Api\RecursosPanelController::class, 'videos_json']);
         Route::get('recursos/videos/{codigo}/mejoras', [\App\Http\Controllers\Api\RecursosPanelController::class, 'mejoras_json']);
+        Route::get('recursos/busquedas', [\App\Http\Controllers\Api\RecursosPanelController::class, 'busquedas_json']);
         Route::get('recursos/clientes', [\App\Http\Controllers\Api\RecursosPanelController::class, 'clientes_json']);
         Route::get('recursos/clientes/{client_id}', [\App\Http\Controllers\Api\RecursosPanelController::class, 'cliente_json'])->whereNumber('client_id');
         Route::post('recursos/clientes/{client_id}/link-dueno', [\App\Http\Controllers\Api\RecursosPanelController::class, 'link_dueno_json'])->whereNumber('client_id');
