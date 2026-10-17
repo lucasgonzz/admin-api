@@ -308,6 +308,95 @@ class AgendarDemoConDiaYHoraTest extends TestCase
     }
 
     /**
+     * (9 bis) 🔴 A las 23:15 ya no entra una demo hoy (23:25-23:59 son 34 minutos, menos que la duración): el
+     *         bloque dice que para AHORA no se asigna nada, pero para un MOMENTO CONCRETO pide el mail igual y
+     *         ofrece agendar_demo con dia y hora. Y el paquete {dia: manana, hora: 10:00} se normaliza con la
+     *         instancia prevista de mañana y se asigna al aprobar. (A las 22:30 todavía entra una demo de
+     *         60 minutos y el bloque va por la rama «mail primero», que trae la misma cláusula.)
+     *
+     * @return void
+     */
+    public function test_cuando_ya_no_entra_hoy_el_momento_concreto_pide_el_mail_y_se_agenda_para_manana(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-09-08 23:15:00', DemoDirectaService::TZ));
+        config(['services.admin_spa.url' => 'https://admin.test']);
+
+        $demo = $this->crear_demo(1);
+
+        /* Sin mail: el bloque niega el "ahora" (no entra hoy) pero NO el pedido del mail para un momento concreto. */
+        $sin_mail        = $this->crear_lead_calificado_con_mail();
+        $sin_mail->email = null;
+        $sin_mail->save();
+        $bloque = $this->contexto($sin_mail->refresh());
+
+        $this->assertStringContainsString('es un SI, pero ahora NO se', $bloque);
+        $this->assertStringContainsString('Si NOMBRO UN MOMENTO CONCRETO (manana a las 10, hoy a las 18) y todavia no tenemos su mail', $bloque);
+        $this->assertStringContainsString('pedile el mail con una sola pregunta y NO devuelvas agendar_demo ni links todavia', $bloque);
+        $this->assertStringContainsString("Vale aunque la\n    linea Demo: diga que AHORA no hay instancia", $bloque);
+        $this->assertStringContainsString('agendar_demo: {"dia": "hoy|manana|lunes...", "hora": "HH:MM"}', $bloque);
+        $this->assertStringContainsString('ya no entra una demo hoy', $bloque);
+
+        /* Con mail: el paquete se normaliza para mañana y, al aprobar, se asigna. */
+        $lead = $this->crear_lead_calificado_con_mail();
+        $this->sembrar_entorno_del_agente($this->respuesta_del_modelo($lead, $demo, 'manana', '10:00', 'Listo, mañana a las 10:00 la tenés lista.'));
+
+        $msg = (new LeadAiService())->generate_suggestion($lead, false);
+
+        $this->assertTrue((bool) $msg->requiere_verificacion);
+        $this->assertSame('2026-09-09 10:00', $msg->pending_actions['agendar_demo']['inicio_resuelto']);
+        $this->assertSame($demo->id, (int) $msg->pending_actions['agendar_demo']['demo_id_previsto'], 'La previsión es para la ventana de mañana, no para ahora.');
+        $this->assertStringNotContainsString('⚠️', (string) $msg->ai_reasoning);
+
+        (new LeadAiService())->apply_pending_actions($msg->fresh(), $this->final_actions_del_panel_sin_dia_ni_hora());
+
+        $lead->refresh();
+        $this->assertSame('demo_agendada', (string) $lead->status);
+        $this->assertSame('2026-09-09', $lead->demo_date->format('Y-m-d'));
+        $this->assertSame('10:00', $lead->demo_start_time);
+    }
+
+    /**
+     * (9 ter) Con la demo asignada para mañana, el contexto de INGRESO no lo apura a entrar: dice desde cuándo se
+     *         habilita el botón. Con el turno ya arrancado, el contexto de siempre.
+     *
+     * @return void
+     */
+    public function test_con_la_demo_de_manana_el_contexto_de_ingreso_dice_desde_cuando(): void
+    {
+        config(['services.admin_spa.url' => 'https://admin.test']);
+        $demo = $this->crear_demo(1);
+
+        $manana                  = $this->crear_lead_calificado_con_mail();
+        $manana->status          = 'demo_agendada';
+        $manana->demo_id         = $demo->id;
+        $manana->demo_date       = '2026-09-09';
+        $manana->demo_start_time = '10:00';
+        $manana->demo_end_time   = '12:00';
+        $manana->demo_flexible   = true;
+        $manana->save();
+
+        $contexto = $this->contexto_del_turno($manana->refresh());
+        $this->assertStringContainsString('turno TODAVÍA NO ARRANCÓ', $contexto);
+        $this->assertStringContainsString('quedó para el 09/09 a las 10:00', $contexto);
+        $this->assertStringContainsString('NO lo apures a entrar', $contexto);
+        $this->assertStringNotContainsString('tu objetivo es que entre', $contexto);
+
+        $hoy                  = $this->crear_lead_calificado_con_mail();
+        $hoy->phone           = '5493511234568';
+        $hoy->status          = 'demo_agendada';
+        $hoy->demo_id         = $demo->id;
+        $hoy->demo_date       = '2026-09-08';
+        $hoy->demo_start_time = '09:30';
+        $hoy->demo_end_time   = '11:30';
+        $hoy->demo_flexible   = true;
+        $hoy->save();
+
+        $contexto_hoy = $this->contexto_del_turno($hoy->refresh());
+        $this->assertStringContainsString('tu objetivo es que entre', $contexto_hoy);
+        $this->assertStringNotContainsString('turno TODAVÍA NO ARRANCÓ', $contexto_hoy);
+    }
+
+    /**
      * (10) resolve_dia_solicitado(): 'hoy' solo cuando el llamador lo habilita; el resto como siempre.
      *
      * @return void
@@ -342,6 +431,40 @@ class AgendarDemoConDiaYHoraTest extends TestCase
     /* ------------------------------------------------------------------ */
     /* Ayudas                                                                */
     /* ------------------------------------------------------------------ */
+
+    /**
+     * El bloque DEMO DIRECTA de un lead (mismo acceso que DemoDirectaCorreoPrimeroTest).
+     *
+     * @param Lead $lead
+     *
+     * @return string
+     */
+    private function contexto(Lead $lead): string
+    {
+        $metodo = new \ReflectionMethod(LeadAiService::class, 'build_demo_directa_context');
+        $metodo->setAccessible(true);
+
+        return (string) $metodo->invoke(new LeadAiService(), $lead);
+    }
+
+    /**
+     * El contexto completo del turno (build_user_content), con la demo directa activa.
+     *
+     * @param Lead $lead
+     *
+     * @return string
+     */
+    private function contexto_del_turno(Lead $lead): string
+    {
+        $service = new class extends LeadAiService {
+            public function contexto(Lead $lead): string
+            {
+                return $this->build_user_content($lead, false, '', null, true);
+            }
+        };
+
+        return $service->contexto($lead);
+    }
 
     /**
      * @param Lead   $lead

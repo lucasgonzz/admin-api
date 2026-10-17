@@ -102,6 +102,34 @@ class LinkDeIngresoEnElBloqueTest extends TestCase
     }
 
     /**
+     * (3 bis) El setup `fallido` no es «se esta preparando»: el bloque dice que el armado falló y manda escalar.
+     *         Y con token vigente pero la instancia sin `erp_spa_url`, dice que falta el link, no que el token venció.
+     *
+     * @return void
+     */
+    public function test_setup_fallido_y_demo_sin_url_tienen_su_propio_motivo(): void
+    {
+        $demo    = $this->crear_demo();
+        $fallido = $this->crear_lead_con_demo($demo, 'fallido', 'token-de-prueba-vigente', now()->addHours(3), null, '5493519990014');
+        $bloque  = $this->contexto($fallido);
+        $this->assertStringContainsString('(todavia no disponible: el armado de la demo fallo; no prometas el link', $bloque);
+        $this->assertStringContainsString('requiere_intervencion_humana: true con el motivo)', $bloque);
+        $this->assertStringNotContainsString('(todavia no disponible: la demo se esta preparando)', $bloque);
+
+        $sin_url                    = new Demo();
+        $sin_url->uuid              = (string) Str::uuid();
+        $sin_url->erp_spa_url       = '';
+        $sin_url->erp_api_url       = 'https://demo-2-api.test';
+        $sin_url->ecommerce_spa_url = 'https://tienda-2.test';
+        $sin_url->ecommerce_api_url = 'https://tienda-2-api.test';
+        $sin_url->save();
+        $lead_sin_url = $this->crear_lead_con_demo($sin_url, 'exitoso', 'token-de-prueba-vigente', now()->addHours(3), null, '5493519990015');
+        $bloque       = $this->contexto($lead_sin_url);
+        $this->assertStringContainsString('(todavia no disponible: la instancia no tiene link de ingreso cargado', $bloque);
+        $this->assertStringNotContainsString('el token vencio', $bloque);
+    }
+
+    /**
      * (4) 🔴 Con demo asignada, setup exitoso y token vigente: el link completo, copiable.
      *
      * @return void

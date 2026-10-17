@@ -76,9 +76,46 @@ class CalificacionMinimaTest extends TestCase
         ]);
 
         $lead->refresh();
+        $this->assertNotNull($lead->cantidad_empleados, 'El cero se escribe: es un dato, no la falta de uno.');
         $this->assertSame(0, (int) $lead->cantidad_empleados);
         $this->assertSame('contactado', (string) $lead->status);
         $this->assertNull($msg->suggested_lead_status, 'contactado == contactado: sin badge de cambio.');
+    }
+
+    /**
+     * (2 bis) «Solo yo», «trabajo solo», «ninguno» son un dato (cero), no la falta de uno: se guarda 0 y el bloque
+     *         deja de decir (sin dato), así el agente no vuelve a preguntar.
+     *
+     * @return void
+     */
+    public function test_solo_yo_y_ninguno_se_guardan_como_cero(): void
+    {
+        foreach (['solo yo', 'Trabajo solo', 'ninguno', 'Nadie', 'yo sola'] as $i => $dicho) {
+            $lead = $this->crear_lead('contactado');
+            $lead->phone = '549351999100' . $i;
+            $lead->save();
+
+            $this->service()->aplicar($lead, [
+                'mensaje_sugerido'     => 'Dale.',
+                'estado_sugerido'      => 'contactado',
+                'guardar_calificacion' => ['empleados' => $dicho],
+            ]);
+
+            $lead->refresh();
+            $this->assertNotNull($lead->cantidad_empleados, "«{$dicho}» tiene que guardarse, no quedar sin dato.");
+            $this->assertSame(0, (int) $lead->cantidad_empleados, "«{$dicho}» es cero.");
+        }
+
+        /* "varios" sigue sin ser un número. */
+        $vago = $this->crear_lead('contactado');
+        $vago->phone = '5493519991009';
+        $vago->save();
+        $this->service()->aplicar($vago, [
+            'mensaje_sugerido'     => 'Dale.',
+            'estado_sugerido'      => 'contactado',
+            'guardar_calificacion' => ['empleados' => 'varios'],
+        ]);
+        $this->assertNull($vago->refresh()->cantidad_empleados);
     }
 
     /**

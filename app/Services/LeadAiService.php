@@ -28,6 +28,7 @@ use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 /**
  * Integración con Anthropic (Claude) para sugerir respuestas de WhatsApp al setter.
@@ -3225,7 +3226,7 @@ TXT;
      */
     protected function validar_inicio_de_demo_pedida(Carbon $inicio, Carbon $ahora): ?string
     {
-        if ($inicio->lt($ahora->copy()->addMinutes(self::MINIMO_MINUTOS_PARA_TURNO_PEDIDO))) {
+        if ($inicio->lt($ahora->copy()->addMinutes(self::minimo_minutos_para_turno_pedido()))) {
             return 'muy_pronto';
         }
 
@@ -3243,6 +3244,42 @@ TXT;
         }
 
         return null;
+    }
+
+    /**
+     * Minutos mínimos entre "ahora" y el inicio de una demo pedida para un momento concreto: el piso de
+     * MINIMO_MINUTOS_PARA_TURNO_PEDIDO o lo que tarde el setup según la setting, lo que sea mayor. Con el
+     * setup configurado en 20 minutos, "hoy a las 18" dicho a las 17:45 tampoco llega.
+     *
+     * @return int
+     */
+    public static function minimo_minutos_para_turno_pedido(): int
+    {
+        return max(self::MINIMO_MINUTOS_PARA_TURNO_PEDIDO, LeadDemoSettings::get_setup_minutos_antes());
+    }
+
+    /**
+     * Inicio del turno asignado al lead como instante en la zona de la demo, o null si no tiene turno
+     * legible (sin fecha, sin hora o con una hora que no parsea).
+     *
+     * @param Lead $lead
+     *
+     * @return Carbon|null
+     */
+    protected function inicio_del_turno_de(Lead $lead): ?Carbon
+    {
+        if ($lead->demo_date === null || trim((string) $lead->demo_start_time) === '') {
+            return null;
+        }
+
+        try {
+            return Carbon::parse(
+                $lead->demo_date->format('Y-m-d') . ' ' . self::time_string_to_hhmm($lead->demo_start_time),
+                DemoDirectaService::TZ
+            );
+        } catch (\Exception $e) {
+            return null;
+        }
     }
 
     /**
@@ -3291,7 +3328,7 @@ TXT;
     {
         switch ($motivo) {
             case 'muy_pronto':
-                return 'faltan menos de ' . self::MINIMO_MINUTOS_PARA_TURNO_PEDIDO . ' minutos y el setup no llega';
+                return 'faltan menos de ' . self::minimo_minutos_para_turno_pedido() . ' minutos y el setup no llega';
             case 'fuera_de_horario':
                 return 'cae fuera del horario de la demo de ese día';
             case 'no_cabe':
@@ -3373,7 +3410,9 @@ TXT;
         }
 
         $empleados = self::leer_cantidad_de_empleados(isset($calificacion['empleados']) ? $calificacion['empleados'] : null);
-        if ($empleados !== null && $empleados !== (int) $lead->cantidad_empleados) {
+        /* `null` (sin dato) y `0` (trabaja solo) son distintos: un cast a int los confundiría y "solo yo"
+         * nunca quedaría escrito sobre una columna vacía. */
+        if ($empleados !== null && ($lead->cantidad_empleados === null || $empleados !== (int) $lead->cantidad_empleados)) {
             $lead->cantidad_empleados = $empleados;
             $cambios['empleados']     = $empleados;
         }
@@ -3414,7 +3453,19 @@ TXT;
         if (is_int($crudo) || is_float($crudo)) {
             return $crudo >= 0 ? (int) $crudo : null;
         }
-        if (! is_string($crudo) || ! preg_match('/\d+/', $crudo, $m)) {
+        if (! is_string($crudo)) {
+            return null;
+        }
+
+        /* "Solo yo", "trabajo solo", "ninguno", "nadie": es un dato (cero), no la falta de uno. Sin esto el
+         * bloque seguía diciendo `empleados=(sin dato)` y el agente volvía a preguntar lo que el lead ya
+         * contestó (17/10/2026). */
+        $texto = trim((string) preg_replace('/\s+/', ' ', mb_strtolower(Str::ascii($crudo), 'UTF-8')));
+        if (preg_match('/^(ninguno|ninguna|nadie|solo|sola|yo solo|yo sola|solo yo|sola yo|trabajo solo|trabajo sola|estoy solo|estoy sola|solo el dueno|solo la duena)\.?$/', $texto)) {
+            return 0;
+        }
+
+        if (! preg_match('/\d+/', $texto, $m)) {
             return null;
         }
 
@@ -10136,13 +10187,34 @@ BLOQUE_DEL_MANUAL;
 
         $frases_de_los_botones = LeadOrigenService::frases_de_cta_para_el_prompt();
 
+        /* Lo que se devuelve cuando el lead nombró un MOMENTO CONCRETO en vez de "ahora" (17/10/2026): la misma
+         * secuencia que el "ahora" (mail primero si no lo tenemos; con el mail, agendar_demo + los dos links),
+         * con `{dia, hora}` en lugar de `{ahora: true}` y la hora escrita en el mensaje. Se arma una vez y se
+         * pega en cada variante, para que ninguna variante le dé al modelo una orden opuesta a la regla del
+         * momento concreto de más abajo. */
+        $agendar_para_un_momento = 'agendar_demo: {"dia": "hoy|manana|lunes...", "hora": "HH:MM"}';
+        $clausula_momento_con_mail = "  - Si en vez de ahora NOMBRO UN MOMENTO CONCRETO (manana a las 10, hoy a las 18) y ya tenemos su mail (o lo pasa en\n"
+            . "    este mensaje): devolve " . $agendar_para_un_momento . " (mas guardar_email si el correo llego ahora) y en el MISMO mensaje los dos\n"
+            . "    links de arriba, escribiendo esa misma hora (HH:MM) y que se la reservamos " . self::horas_en_letras(LeadDemoSettings::get_ventana_extendida_max_horas()) . " desde esa hora. Vale aunque\n"
+            . "    la linea Demo: diga que AHORA no hay instancia: la instancia se busca para ese momento, no para ahora.\n";
+        $clausula_momento_sin_mail = "  - Si NOMBRO UN MOMENTO CONCRETO (manana a las 10, hoy a las 18) y todavia no tenemos su mail: confirmale el momento con\n"
+            . "    palabras, pedile el mail con una sola pregunta y NO devuelvas agendar_demo ni links todavia; estado_sugerido\n"
+            . "    \"solicita_disponibilidad\". Con el mail, " . $agendar_para_un_momento . " y los dos links, escribiendo esa hora (HH:MM). Vale aunque la\n"
+            . "    linea Demo: diga que AHORA no hay instancia. Si solo dijo una parte del dia (\"a la tarde\"), preguntale la hora.\n";
+
         if (! $demo_vigente_asignada && ! $hay_instancia_para_asignar) {
-            /* Es un sí, pero no hay nada que asignar: ni se pide el mail ni se pasan links (el estado `Demo:` dice
-             * qué contestar). */
+            /* Es un sí, pero AHORA no hay nada que asignar: para "ahora" ni se pide el mail ni se pasan links (el estado
+             * `Demo:` dice qué contestar). Para un momento concreto, en cambio, la demo sí se puede dejar fijada
+             * (17/10/2026): la instancia se busca para ESE momento, no para ahora, así que el mail y el agendar_demo
+             * con {dia, hora} van igual. Hasta el 17/10 esta variante le negaba el pedido del mail al lead que a las
+             * 22:30 decía «sí, mañana a las 10». */
             $regla_del_si = "  - Si el lead pide la demo (por ejemplo " . $frases_de_los_botones . ", que es lo que\n"
                 . "    mandan el boton de su pagina, el de la web y el de Instagram, o cualquier frase equivalente), es un SI, pero ahora NO se\n"
-                . "    puede asignar ninguna instancia (ver la linea Demo: de arriba): no pidas el mail, no pases ningun link y no devuelvas\n"
-                . "    agendar_demo. Segui lo que dice esa linea.\n";
+                . "    puede asignar ninguna instancia (ver la linea Demo: de arriba). Si quiere hacerla AHORA: no pidas el mail, no pases ningun link y no devuelvas\n"
+                . "    agendar_demo. Segui lo que dice esa linea (desde que hora se la podes tener lista, o que sea manana). Si NOMBRA UN MOMENTO\n"
+                . "    CONCRETO, es distinto: ver las dos lineas siguientes.\n"
+                . ($email === '' ? $clausula_momento_sin_mail : '')
+                . $clausula_momento_con_mail;
             $regla_de_aceptar = '';
         } elseif ($mail_primero) {
             $regla_del_si = "  - Si el lead pide la demo (por ejemplo " . $frases_de_los_botones . ", que es lo que\n"
@@ -10164,9 +10236,12 @@ BLOQUE_DEL_MANUAL;
                 . "    \"ya la estoy preparando\". El sistema asigna la instancia libre al enviar y la demo arranca diez minutos despues:\n"
                 . "    no inventes hora ni fecha, el mail trae las reales. Si el correo viene con un error evidente (sin arroba, dominio\n"
                 . "    cortado), pedile que lo revise y no devuelvas nada todavia.\n"
+                . $clausula_momento_sin_mail
+                . $clausula_momento_con_mail
                 . "  - Si no quiere pasar el mail (se niega, no tiene, prefiere no): explicale UNA sola vez para que sirve (el dia y la\n"
                 . "    hora de su demo, como aprovecharla y que es su llave para abrirla desde la compu). Si sigue sin querer, no\n"
-                . "    insistas: devolve agendar_demo: {\"ahora\": true} y pasale los dos links igual, sin volver a pedirle el mail.\n";
+                . "    insistas: devolve agendar_demo: {\"ahora\": true} y pasale los dos links igual, sin volver a pedirle el mail\n"
+                . "    (o " . $agendar_para_un_momento . " si habia nombrado un momento concreto, con esa hora escrita en el mensaje).\n";
         } elseif ($email === '' && ! $demo_vigente_asignada) {
             /* Ya se le pidió el correo dos veces o más y no lo dio: se sigue sin él. */
             $regla_del_si = "  - Si el lead pide la demo (por ejemplo " . $frases_de_los_botones . ", que es lo que\n"
@@ -10178,7 +10253,9 @@ BLOQUE_DEL_MANUAL;
 
             $regla_de_aceptar = "  - Cuando acepta hacerla ahora: devolve agendar_demo: {\"ahora\": true} y en el MISMO mensaje pasale los dos\n"
                 . "    links de arriba (la pagina —aunque ya la tenga, se repite: ahi ve el formulario, el video y el boton— y la\n"
-                . "    tienda, copiados textuales), sin pedirle el mail. NO escribas \"en diez minutos\" ni \"en unos minutos\" en ese mensaje.\n";
+                . "    tienda, copiados textuales), sin pedirle el mail. NO escribas \"en diez minutos\" ni \"en unos minutos\" en ese mensaje.\n"
+                . "  - Si en vez de ahora NOMBRO UN MOMENTO CONCRETO (manana a las 10, hoy a las 18): devolve " . $agendar_para_un_momento . " con los dos\n"
+                . "    links, escribiendo esa misma hora (HH:MM) en el mensaje, sin pedirle el mail. Si solo dijo una parte del dia, preguntale la hora.\n";
         } elseif ($email !== '' && ! $demo_vigente_asignada) {
             $regla_del_si = "  - Si el lead pide la demo (por ejemplo " . $frases_de_los_botones . ", que es lo que\n"
                 . "    mandan el boton de su pagina, el de la web y el de Instagram, o cualquier frase equivalente), es un SI. Ya tenemos\n"
@@ -10190,13 +10267,17 @@ BLOQUE_DEL_MANUAL;
                 . "    links de arriba (la pagina —aunque ya la tenga, se repite: ahi ve el formulario, el video y el boton— y la\n"
                 . "    tienda, copiados textuales). No le pidas el mail: ya lo tenemos. NO escribas \"en diez minutos\" ni \"en unos minutos\" en\n"
                 . "    ese mensaje (el sistema lo toma por un horario concreto). El sistema asigna la instancia libre al enviar\n"
-                . "    y la demo arranca diez minutos despues: no inventes hora ni fecha.\n";
+                . "    y la demo arranca diez minutos despues: no inventes hora ni fecha.\n"
+                . $clausula_momento_con_mail;
         } else {
             /* Demo ya asignada: no hay nada que aceptar ni agendar; las reglas de abajo (ahora no puede, mail suelto)
-             * son las que aplican. */
+             * son las que aplican. Si pide cambiarla a otro momento, cancelar_demo + agendar_demo con dia y hora en
+             * el mismo paquete (17/10/2026). */
             $regla_del_si = "  - Si el lead pide la demo (por ejemplo " . $frases_de_los_botones . ", que es lo que\n"
                 . "    mandan el boton de su pagina, el de la web y el de Instagram, o cualquier frase equivalente) y ya la tiene\n"
-                . "    asignada, no la vuelvas a agendar: pasale de nuevo el link de su pagina y decile que " . $frase_de_la_reserva . ".\n";
+                . "    asignada, no la vuelvas a agendar: pasale de nuevo el link de su pagina y decile que " . $frase_de_la_reserva . ".\n"
+                . "    Si pide CAMBIARLA a otro momento concreto: cancelar_demo: true y " . $agendar_para_un_momento . " en el mismo paquete, con esa\n"
+                . "    hora escrita en el mensaje.\n";
             $regla_de_aceptar = '';
         }
 
@@ -10240,7 +10321,9 @@ BLOQUE_DEL_MANUAL;
              * frase que dicta la reserva unas líneas más abajo y que dice el mail de acceso: una sola
              * fuente para que el agente y el mail no se contradigan. Lucas dictó «aproximadamente una hora»
              * (16/10/2026); si quiere ese texto, es una línea en duracion_en_palabras(), no acá. */
-            . "    " . DemoTurnoTexto::duracion_en_palabras() . " y se la reservamos dos horas; que la haga desde una computadora, en un lugar tranquilo y, si quiere,\n"
+            /* Y la reserva sale de la setting, en letras (horas_en_letras), como en frase_de_la_reserva(): con la
+             * ventana en 3 el bloque dice «tres horas» en todas sus líneas, no «dos» en una y «tres» en otra. */
+            . "    " . DemoTurnoTexto::duracion_en_palabras() . " y se la reservamos " . self::horas_en_letras(LeadDemoSettings::get_ventana_extendida_max_horas()) . "; que la haga desde una computadora, en un lugar tranquilo y, si quiere,\n"
             . "    con la gente que decide con el; nosotros le hacemos soporte por aca mientras la recorre, gratis y sin compromiso; y si le\n"
             . "    gusta, despues coordinamos una videollamada para ver como se implementa en su negocio. Cerra con UNA pregunta: ¿la hace\n"
             . "    ahora o cuando le queda comodo? Sin grilla y sin pedir disponibilidad.\n"
@@ -10302,6 +10385,12 @@ BLOQUE_DEL_MANUAL;
             return $encabezado . "(todavia no disponible: no hay demo asignada)\n";
         }
 
+        /* `fallido` no es "se esta preparando": el armado reventó y nadie lo va a terminar solo. El agente no
+         * tiene cómo arreglarlo: que no prometa el link y que lo escale. */
+        if ((string) $lead->demo_setup_status === 'fallido') {
+            return $encabezado . "(todavia no disponible: el armado de la demo fallo; no prometas el link, decile que lo revisa el equipo y devolve requiere_intervencion_humana: true con el motivo)\n";
+        }
+
         if ((string) $lead->demo_setup_status !== 'exitoso') {
             return $encabezado . "(todavia no disponible: la demo se esta preparando)\n";
         }
@@ -10309,10 +10398,16 @@ BLOQUE_DEL_MANUAL;
         $token_vigente = trim((string) $lead->demo_ingreso_token) !== ''
             && $lead->demo_ingreso_token_revocado_at === null
             && ($lead->demo_ingreso_token_expira_at === null || $lead->demo_ingreso_token_expira_at->gt($ahora));
-        $url = $token_vigente ? (string) $lead->demo_ingreso_url : '';
 
-        if (! $token_vigente || $url === '') {
+        if (! $token_vigente) {
             return $encabezado . "(todavia no disponible: el token vencio)\n";
+        }
+
+        /* Token vigente pero sin URL: la instancia no tiene `erp_spa_url` cargada. No es un token vencido, es un
+         * dato que falta en el módulo de Demos. */
+        $url = (string) $lead->demo_ingreso_url;
+        if ($url === '') {
+            return $encabezado . "(todavia no disponible: la instancia no tiene link de ingreso cargado; requiere_intervencion_humana: true si el lead lo necesita)\n";
         }
 
         return $encabezado . $url . "\n";
@@ -10874,6 +10969,19 @@ TXT;
             /* Dinámica nueva: el acceso es la página (link de arriba), no hay credenciales. Hasta
              * el 10/9/2026 este estado recibía el bloque de abajo, que habla de usuario y
              * contraseña, y el `.md` de demo_ciclo tenía que desmentirlo. */
+            /* Con la demo para un momento futuro (agendar_demo {dia, hora}, 17/10/2026) el botón de su página
+             * está en "antes" (cuenta regresiva): apurarlo a entrar sería mandarlo contra un botón apagado. El
+             * objetivo "que entre" vale recién cuando el turno arrancó. */
+            $inicio_del_turno = $this->inicio_del_turno_de($lead);
+            if ($inicio_del_turno !== null && $inicio_del_turno->gt(AppTime::now(DemoDirectaService::TZ))) {
+                $txt .= "\n\nCONTEXTO DE DEMO - INGRESO (dinámica nueva, turno TODAVÍA NO ARRANCÓ):\n"
+                    . "La demo del lead quedó para el " . $inicio_del_turno->format('d/m') . " a las " . $inicio_del_turno->format('H:i') . ". El botón de su\n"
+                    . "página se habilita a esa hora (antes muestra la cuenta regresiva): NO lo apures a entrar ni le digas que\n"
+                    . "ya puede. Si pregunta, decile desde cuándo se habilita y que mientras tanto puede completar el formulario y\n"
+                    . "mirar el video de introducción en su página (link copiado textual del bloque de arriba). Si dice que a esa\n"
+                    . "hora no va a poder, cancelar_demo: true (y agendar_demo con el día y la hora nuevos si nombra otro momento).\n"
+                    . "NO hay usuario, contraseña ni documento de prueba. No devuelvas confirmar_ingreso.";
+            } else {
             $txt .= "\n\nCONTEXTO DE DEMO - INGRESO (dinámica nueva):\n"
                 . "El lead tiene la demo asignada y todavía no entró de verdad. El sistema detecta solo el ingreso\n"
                 . "cuando abre la demo desde su página; si te escribe antes, tu objetivo es que entre.\n"
@@ -10886,6 +10994,7 @@ TXT;
                 . "hubieras verificado: el estado lo mueve el ingreso real que detecta el sistema. Si dice claramente que\n"
                 . "no va a poder o no quiere entrar, devolvé marcar_no_ingreso: true. Si intentaste resolverlo y aun así\n"
                 . "no puede, devolvé requiere_intervencion_humana: true con motivo_intervencion claro.";
+            }
         } elseif ($lead_status_for_context === 'demo_agendada') {
             /* El lead está en el tramo de la demo agendada, todavía sin confirmar el ingreso real
              * (con demo v2 conectada, ese ingreso lo detecta solo DemoEventosController apenas
