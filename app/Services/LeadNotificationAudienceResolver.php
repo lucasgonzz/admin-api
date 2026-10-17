@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Admin;
+use App\Models\AdminPushSubscription;
 use App\Models\Lead;
 
 /**
@@ -120,6 +121,36 @@ class LeadNotificationAudienceResolver
             self::ids_por_rol_con_fallback(self::ROL_SETTER),
             self::ids_campanita($lead)
         ));
+    }
+
+    /**
+     * De una lista de admins, cuáles tienen AL MENOS un dispositivo de push registrado
+     * (`admin_push_subscriptions`). Una sola consulta: esto corre adentro del webhook de Meta, que
+     * es sincrónico y con timeout.
+     *
+     * Es el criterio de «puede recibir push» que decide el canal en los avisos de verificación
+     * ({@see LeadVerificacionWhatsappService}, {@see LeadVerificacionAgendamientoNotificationService}),
+     * puesto acá el 17/10/2026 para que los dos lo pidan al mismo lugar.
+     * {@see LeadMessagePushNotificationService} tiene la misma consulta escrita adentro desde antes
+     * (11/8/2026); el día que se toque ese archivo, que la pida acá.
+     *
+     * @param array<int, int> $admin_ids
+     *
+     * @return array<int, int> Subconjunto de `$admin_ids` con device, sin repetidos.
+     */
+    public static function ids_con_device_de_push(array $admin_ids): array
+    {
+        if (empty($admin_ids)) {
+            return [];
+        }
+
+        return AdminPushSubscription::whereIn('admin_id', $admin_ids)
+            ->distinct()
+            ->pluck('admin_id')
+            ->map(function ($id) {
+                return (int) $id;
+            })
+            ->all();
     }
 
     /**
