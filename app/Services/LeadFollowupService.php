@@ -44,21 +44,47 @@ class LeadFollowupService
     /**
      * Procesa todos los leads que no están cerrados / en pausa final.
      *
-     * @return array{processed:int,suggestions:int,paused:int,errors:int}
+     * 🔴 Solo dentro de la franja horaria de los seguimientos automáticos (09:00 a 21:00, hora de
+     * Argentina, {@see FranjaHorariaDeSeguimientos}; misión asistente-arreglos-segunda-prueba, N11,
+     * 19/10/2026). El cron corre cada dos horas también de noche (`Kernel.php`, `everyTwoHours()`), y
+     * el 18/10 a las 00:00 esta corrida le mandó «Hace un par de días te escribimos…» al dueño de
+     * demo3. Fuera de la franja no se procesa NINGÚN lead —ni plantilla, ni sugerencia, ni pausa—:
+     * la primera corrida de la mañana (10:00) los toma igual, porque `process_lead()` decide por horas
+     * desde el último mensaje y de noche no se escribió nada. La franja va acá y no en
+     * `process_lead()` a propósito: `process_single_lead()` (el comando de prueba local) y el botón
+     * manual no son la cadencia automática.
+     *
+     * @return array{processed:int,suggestions:int,paused:int,errors:int,fuera_de_franja:bool}
+     *   `fuera_de_franja` en true: la corrida no procesó nada porque era de noche.
      */
     public function process_all_active_leads(): array
     {
-        $stats = ['processed' => 0, 'suggestions' => 0, 'paused' => 0, 'errors' => 0];
+        $stats = ['processed' => 0, 'suggestions' => 0, 'paused' => 0, 'errors' => 0, 'fuera_de_franja' => false];
+
+        if (! FranjaHorariaDeSeguimientos::ahora_esta_dentro()) {
+            $stats['fuera_de_franja'] = true;
+            Log::info('LeadFollowupService: corrida fuera de la franja horaria de seguimientos; no se procesa ningún lead.', [
+                'ahora'  => AppTime::now(FranjaHorariaDeSeguimientos::ZONA_HORARIA)->toDateTimeString(),
+                'franja' => FranjaHorariaDeSeguimientos::HORA_DE_INICIO . ':00-' . FranjaHorariaDeSeguimientos::HORA_DE_FIN . ':00',
+            ]);
+
+            return $stats;
+        }
+
         $rules = FollowupRule::query()->where('activa', true)->get()->keyBy('estado');
 
         $leads = Lead::query()
             ->whereNotIn('status', ['cerrado_ganado', 'cerrado_perdido', 'en_pausa'])
             ->get();
 
+        /* Un directorio por corrida: arma el índice de teléfonos de clientes una sola vez (cuatro
+           consultas) y lo reusa para todos los leads. Ver ClientPhoneDirectory::es_lead_de_un_cliente(). */
+        $directorio = new ClientPhoneDirectory();
+
         foreach ($leads as $lead) {
             $stats['processed']++;
             try {
-                $result = $this->process_lead($lead, $rules);
+                $result = $this->process_lead($lead, $rules, $directorio);
                 if ($result === 'suggestion') {
                     $stats['suggestions']++;
                 }
@@ -262,15 +288,44 @@ class LeadFollowupService
     /**
      * @param Lead                                       $lead
      * @param \Illuminate\Support\Collection $rules_by_estado
+     * @param ClientPhoneDirectory|null                  $directorio Directorio de teléfonos de clientes
+     *                                                               de la corrida (con su índice ya
+     *                                                               armado). Null: se crea uno para este
+     *                                                               lead (camino de process_single_lead()).
      *
      * @return string|null suggestion|paused|null
      */
-    protected function process_lead(Lead $lead, $rules_by_estado): ?string
+    protected function process_lead(Lead $lead, $rules_by_estado, ?ClientPhoneDirectory $directorio = null): ?string
     {
         if ($lead->tiene_sugerencia_pendiente) {
             return null;
         }
         if (! $rules_by_estado->has($lead->status)) {
+            return null;
+        }
+
+        /*
+         * 🔴 El número de un cliente no recibe seguimientos de lead (misión
+         * asistente-arreglos-segunda-prueba, N11, 19/10/2026). El 18/10 a las 00:00 este cron le mandó
+         * «Hace un par de días te escribimos…» al dueño de demo3 (cliente 58), porque el lead 644
+         * seguía vivo con su mismo teléfono. Tampoco al lead ya promovido a cliente.
+         *
+         * `return null` y NADA MÁS, a propósito: ni pausa, ni evento en el hilo, ni cambio de estado.
+         * El lead queda exactamente como estaba; si mañana el cliente se da de baja o se corrige el
+         * teléfono, el cron lo vuelve a llevar sin que haya que deshacer nada. Va antes de
+         * lead_respondio() porque es más barato (el índice ya está armado para toda la corrida) y
+         * porque, contestara o no, a un cliente no se le manda la cadencia de un lead.
+         */
+        $directorio = $directorio !== null ? $directorio : new ClientPhoneDirectory();
+        $motivo     = $directorio->motivo_de_lead_de_un_cliente($lead);
+        if ($motivo !== null) {
+            /* El rastro de por qué este lead no recibió nada (una línea por lead y por corrida): sin
+               él, un lead de prueba con el número de un admin queda mudo sin explicación. */
+            Log::info('LeadFollowupService: lead callado por ser de un cliente; no recibe seguimientos automáticos.', [
+                'lead_id' => $lead->id,
+                'motivo'  => $motivo,
+            ]);
+
             return null;
         }
 
@@ -639,7 +694,21 @@ class LeadFollowupService
     }
 
     /**
-     * Timestamp del último mensaje no rechazado, o creación del lead.
+     * Momento del último mensaje no rechazado del hilo, o la creación del lead si no tiene ninguno.
+     *
+     * 🔴 Para los SALIENTES cuenta cuándo salieron (`sent_at`), no cuándo se crearon, con
+     * `COALESCE(sent_at, created_at)`; para los entrantes, `created_at` (cuando llegaron). Revisión
+     * independiente de la misión asistente-arreglos-segunda-prueba (N11, 19/10/2026): con la franja
+     * horaria, un seguimiento retenido creado a las 20:50 sale recién a las 09:01 del día siguiente, y
+     * midiendo por `created_at` el cron de las 10:00 veía 13 horas «desde el último mensaje» y mandaba
+     * el siguiente seguimiento una hora después del anterior. Lo mismo pasaba, con menos horas, con
+     * cualquier seguimiento retenido que un setter aprobaba tarde.
+     *
+     * El `COALESCE` deja todo lo demás como estaba: un saliente sin `sent_at` (el seguimiento directo
+     * por plantilla no lo graba; una sugerencia todavía `sugerido`) cuenta por su `created_at`, igual
+     * que siempre. Y se toma el MÁXIMO de esas fechas en vez de «el último por `id`»: con `sent_at`, el
+     * mensaje que salió más tarde no es necesariamente el de `id` más alto (un seguimiento creado de
+     * noche y aprobado a la mañana tiene un `id` más bajo que lo que se escribió en el medio).
      *
      * @param Lead $lead
      *
@@ -647,13 +716,13 @@ class LeadFollowupService
      */
     protected function last_message_at(Lead $lead): Carbon
     {
-        $m = LeadMessage::query()
+        $fila = LeadMessage::query()
             ->where('lead_id', $lead->id)
             ->where('status', '!=', 'rechazado')
-            ->orderByDesc('id')
+            ->selectRaw("MAX(CASE WHEN sender = 'lead' THEN created_at ELSE COALESCE(sent_at, created_at) END) AS ultimo_at")
             ->first();
-        if ($m && $m->created_at) {
-            return Carbon::parse($m->created_at);
+        if ($fila && ! empty($fila->ultimo_at)) {
+            return Carbon::parse((string) $fila->ultimo_at);
         }
 
         return $lead->created_at ? Carbon::parse($lead->created_at) : AppTime::now();

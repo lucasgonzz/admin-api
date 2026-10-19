@@ -7,12 +7,15 @@ use App\Http\Controllers\DemoExperienciaController;
 use App\Models\DemoEventoRecibido;
 use App\Models\Lead;
 use App\Models\LeadMessage;
+use App\Services\ClientPhoneDirectory;
+use App\Services\FranjaHorariaDeSeguimientos;
 use App\Services\LeadBroadcastService;
 use App\Services\LeadDemoSettings;
 use App\Services\WhatsappSendService;
 use App\Services\WhatsappSessionWindowService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -37,6 +40,9 @@ use Illuminate\Support\Facades\Log;
  *    falla: reintentar cada cinco minutos contra un número que rebota quema el canal.
  *
  * Se ejecuta cada cinco minutos (Kernel). Sólo dinámica nueva: en la actual la página no es landing.
+ * Desde el 19/10/2026 (misión asistente-arreglos-segunda-prueba, N11) manda solo dentro de la franja
+ * horaria de los seguimientos automáticos ({@see FranjaHorariaDeSeguimientos}, 09:00 a 21:00) y nunca
+ * al número de un cliente ({@see ClientPhoneDirectory::es_lead_de_un_cliente()}).
  */
 class CheckPaginaSinDemo extends Command
 {
@@ -51,6 +57,19 @@ class CheckPaginaSinDemo extends Command
      * @var array<int, string>
      */
     private const ESTADOS_CANDIDATOS = ['contactado', 'calificado'];
+
+    /**
+     * Prefijo de la marca en caché que deja UNA línea de log por lead de cliente y por día (se le suma
+     * `{lead_id}:{fecha}`). Este comando corre cada cinco minutos y un lead de cliente sigue siendo
+     * candidato en cada corrida: sin la marca serían hasta 288 líneas por día y por lead.
+     */
+    private const CLAVE_RASTRO_LEAD_CALLADO = 'leads:pagina-sin-demo:callado:';
+
+    /**
+     * Prefijo de la marca en caché que deja UNA línea de «fuera de la franja» por noche (se le suma la
+     * fecha en que empezó la noche). Sin ella serían ~144 por noche.
+     */
+    private const CLAVE_RASTRO_FUERA_DE_FRANJA = 'leads:pagina-sin-demo:fuera-de-franja:';
 
     /**
      * Nombre del comando artisan.
@@ -90,6 +109,36 @@ class CheckPaginaSinDemo extends Command
     public function handle(): int
     {
         $now = AppTime::now(self::TZ);
+
+        /* 🔴 Franja horaria de los seguimientos automáticos (misión asistente-arreglos-segunda-prueba,
+         * N11, 19/10/2026): este mensaje es un seguimiento comercial más y de noche no sale. No se
+         * consulta ni se marca a nadie: la columna `pagina_seguimiento_enviado_at` queda vacía y la
+         * primera corrida de la mañana (09:00, este comando corre cada cinco minutos) vuelve a evaluar a
+         * los mismos candidatos con las mismas reglas. Ninguna de esas reglas se vuelve más exigente con
+         * el paso de las horas (la apertura sigue teniendo más de N minutos, el silencio se alarga) salvo
+         * una: la ventana de 24 hs de Meta. Si se cierra durante la noche, a la mañana no se manda —
+         * igual que hoy con cualquier lead fuera de la ventana: no se marca, y si vuelve a escribir la
+         * ventana se abre—. Es preferible eso a un texto libre a las tres de la mañana. */
+        if (! FranjaHorariaDeSeguimientos::esta_dentro($now)) {
+            $this->info('Fuera de la franja horaria de seguimientos ('
+                . FranjaHorariaDeSeguimientos::HORA_DE_INICIO . ':00 a ' . FranjaHorariaDeSeguimientos::HORA_DE_FIN
+                . ':00): no se manda nada, la corrida de la mañana lo vuelve a evaluar.');
+
+            /* Rastro en el log (no solo en la salida del comando, que en el scheduler no lee nadie):
+               si un lead esperaba este mensaje y no le llegó, el motivo queda escrito. UNA línea por
+               noche y no una por corrida (serían ~144): ver una_vez(). La noche se nombra por la fecha
+               en que empezó, así las 23:00 y las 03:00 son la misma; la marca vive hasta la apertura. */
+            $noche = $now->hour < FranjaHorariaDeSeguimientos::HORA_DE_INICIO
+                ? $now->copy()->subDay()->toDateString()
+                : $now->toDateString();
+            if ($this->una_vez(self::CLAVE_RASTRO_FUERA_DE_FRANJA . $noche, FranjaHorariaDeSeguimientos::proximo_momento_permitido($now))) {
+                Log::info('CheckPaginaSinDemo: fuera de la franja horaria de seguimientos; no se evalúa a nadie hasta la apertura.', [
+                    'ahora' => $now->toDateTimeString(),
+                ]);
+            }
+
+            return 0;
+        }
 
         $espera_minutos   = LeadDemoSettings::get_pagina_seguimiento_minutos();
         $silencio_minutos = LeadDemoSettings::get_check_ingreso_silencio_minutos();
@@ -170,7 +219,31 @@ class CheckPaginaSinDemo extends Command
         $silencio_limite = $now->copy()->subMinutes($silencio_minutos);
         $ventana_service = app(WhatsappSessionWindowService::class);
 
+        /* Un directorio por corrida: el índice de teléfonos de clientes se arma una sola vez, en el
+         * primer candidato que llegue a la guarda. */
+        $directorio = new ClientPhoneDirectory();
+
         foreach ($candidates as $lead) {
+            /* 🔴 Misión asistente-arreglos-segunda-prueba (N11, 19/10/2026): a un cliente (su teléfono
+             * es el de un cliente activo, de su equipo o de un admin, o el lead ya fue promovido) no se
+             * le manda el seguimiento de la página: es la cadencia de un lead, la misma guarda que el
+             * cron de seguimientos. No se marca: la columna dice "enviado", no "descartado", y si el
+             * número deja de ser de un cliente el próximo tick lo vuelve a evaluar. */
+            $motivo_cliente = $directorio->motivo_de_lead_de_un_cliente($lead);
+            if ($motivo_cliente !== null) {
+                /* Una línea por lead y por día, no una cada cinco minutos (hasta 288 por día y por
+                   lead mientras siga siendo candidato): ver una_vez(). */
+                $clave = self::CLAVE_RASTRO_LEAD_CALLADO . $lead->id . ':' . $now->toDateString();
+                if ($this->una_vez($clave, $now->copy()->endOfDay())) {
+                    Log::info('CheckPaginaSinDemo: lead callado por ser de un cliente; no recibe el seguimiento de la página.', [
+                        'lead_id' => $lead->id,
+                        'motivo'  => $motivo_cliente,
+                    ]);
+                }
+
+                continue;
+            }
+
             $apertura = $primeras_aperturas->get($lead->id);
             if ($apertura === null || empty($apertura->primera_apertura)) {
                 /* No debería pasar (el EXISTS de arriba garantiza la apertura), pero un lead sin
@@ -277,5 +350,27 @@ class CheckPaginaSinDemo extends Command
         $this->info("Seguimientos de página enviados: {$sent}");
 
         return 0;
+    }
+
+    /**
+     * ¿Es la primera vez que se pide esta marca antes de que venza? Sirve para que el rastro en el log
+     * salga una vez por período (por día, por noche) y no en cada corrida de cinco minutos.
+     *
+     * `Cache::add()` escribe solo si la clave no existe y devuelve si la escribió: dos corridas que se
+     * pisaran no loguean dos veces. Si la caché falla, se loguea igual —el rastro importa más que un
+     * renglón repetido— y la corrida sigue: un problema de caché no puede frenar los envíos.
+     *
+     * @param string $clave  Clave completa de la marca.
+     * @param Carbon $vence  Hasta cuándo vale la marca (fin del día, apertura de la franja).
+     *
+     * @return bool true si hay que loguear ahora.
+     */
+    private function una_vez(string $clave, Carbon $vence): bool
+    {
+        try {
+            return (bool) Cache::add($clave, 1, $vence);
+        } catch (\Throwable $e) {
+            return true;
+        }
     }
 }
