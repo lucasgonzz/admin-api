@@ -117,7 +117,7 @@ class ArtisanDelDeploymentCorreComoElUsuarioDelSitioTest extends TestCase
      * @param  string|null  $vps_path      Lo que se guarda en client_apis.vps_path (por defecto, la carpeta).
      * @return array<string, mixed>
      */
-    private function escenario(string $hosting_type, ?string $vps_path = null): array
+    private function escenario(string $hosting_type, ?string $vps_path = null, bool $rotacion = false): array
     {
         $this->contador++;
 
@@ -140,6 +140,12 @@ class ArtisanDelDeploymentCorreComoElUsuarioDelSitioTest extends TestCase
         $api     = $this->crear_api($client, $carpeta, $hosting_type, $vps_path ?? $carpeta);
 
         $client->active_client_api_id = $api->id;
+        $otra                         = null;
+        if ($rotacion) {
+            /* Rotación: el destino del upgrade es la carpeta que NO atiende; la otra (`<carpeta>2`) es la activa. */
+            $otra                         = $this->crear_api($client, $carpeta . '2', $hosting_type, ($vps_path ?? $carpeta) . '2');
+            $client->active_client_api_id = $otra->id;
+        }
         $client->save();
 
         $upgrade = ClientVersionUpgrade::create([
@@ -150,7 +156,7 @@ class ArtisanDelDeploymentCorreComoElUsuarioDelSitioTest extends TestCase
             'target_client_api_id' => $api->id,
         ]);
 
-        $this->env->envs[$api->id] = "APP_NAME=Artisan\n"
+        $env = "APP_NAME=Artisan\n"
             . "DB_CONNECTION=mysql\n"
             . "DB_HOST=127.0.0.1\n"
             . "DB_PORT=3306\n"
@@ -158,7 +164,12 @@ class ArtisanDelDeploymentCorreComoElUsuarioDelSitioTest extends TestCase
             . "DB_USERNAME=u767360347_user\n"
             . "DB_PASSWORD='clave-de-la-base'\n";
 
-        return compact('client', 'api', 'upgrade', 'carpeta', 'to');
+        $this->env->envs[$api->id] = $env;
+        if ($otra !== null) {
+            $this->env->envs[$otra->id] = $env;
+        }
+
+        return compact('client', 'api', 'otra', 'upgrade', 'carpeta', 'to');
     }
 
     /**
@@ -709,31 +720,86 @@ class ArtisanDelDeploymentCorreComoElUsuarioDelSitioTest extends TestCase
         $this->correr_el_despliegue_entero($e);
 
         $usuario = 'api-' . $e['carpeta'];
-        $chowns  = $this->comandos_con('chown -R');
 
-        $storage = null;
-        foreach ($chowns as $chown) {
-            if (strpos($chown, 'storage/logs storage/framework bootstrap/cache') !== false) {
-                $storage = $chown;
+        /* Dos veces en el lugar: antes del `down` (el primer artisan del sitio) y en el esqueleto de storage. */
+        $posiciones = [];
+        foreach ($this->ssh->comandos as $posicion => $comando) {
+            if (strpos($comando, 'storage/logs storage/framework bootstrap/cache') === false) {
+                continue;
             }
+
+            $posiciones[] = $posicion;
+
+            $this->assertStringContainsString("chown -R '" . $usuario . ':' . $usuario . "' storage/logs storage/framework bootstrap/cache", $comando);
+            $this->assertStringNotContainsString('storage/app', $comando);
+            $this->assertStringContainsString("cd '/home/api-" . $e['carpeta'] . "/empresa-api'", $comando);
         }
-        $this->assertNotNull($storage, 'No hay chown de storage/logs: ' . implode("\n", $chowns));
+        $this->assertCount(2, $posiciones, 'En el lugar la guarda corre antes del down y en el esqueleto: ' . $this->ssh->todo());
 
-        $this->assertStringContainsString("chown -R '" . $usuario . ':' . $usuario . "' storage/logs storage/framework bootstrap/cache", $storage);
-        $this->assertStringNotContainsString('storage/app', $storage);
-        $this->assertStringContainsString("cd '/home/api-" . $e['carpeta'] . "/empresa-api'", $storage);
+        $down     = $this->ssh->posicion_de('php artisan down');
+        $composer = $this->ssh->posicion_de('composer');
+        $mkdir    = $this->ssh->posicion_de('mkdir -p storage/app/public');
+        $clears   = $this->ssh->posicion_de('config:clear');
+        $migrate  = $this->ssh->posicion_de('php artisan migrate --force');
 
-        $chown  = $this->ssh->posicion_de('storage/logs storage/framework bootstrap/cache');
-        $clears = $this->ssh->posicion_de('config:clear');
-        $migrate = $this->ssh->posicion_de('php artisan migrate --force');
-        $this->assertLessThan($clears, $chown, $this->ssh->todo());
-        $this->assertLessThan($migrate, $chown);
+        /* La primera antes del primer artisan del sitio. */
+        $this->assertLessThan($down, $posiciones[0], 'La guarda va antes del down.');
+
+        /* La segunda DESPUÉS de lo que sigue siendo root (el composer de upload_api y el mkdir del esqueleto) y
+           ANTES del primer artisan de la migración. */
+        $this->assertLessThan($posiciones[1], $composer, 'La guarda va después del composer install (root).');
+        $this->assertLessThan($posiciones[1], $mkdir, 'La guarda va después del mkdir del esqueleto (root).');
+        $this->assertLessThan($clears, $posiciones[1], $this->ssh->todo());
+        $this->assertLessThan($migrate, $posiciones[1]);
 
         $this->assertStringContainsString(
             'con el dueño del sitio (' . $usuario . ')',
             $this->logs($e['upgrade']),
             'Si el servidor confirma el chown, el log lo dice.'
         );
+    }
+
+    /**
+     * 🔴 Rotación: el despliegue va a la carpeta que NO atiende (`<carpeta>`), mientras la activa es otra
+     * (`<carpeta>2`). Los artisan y el chown son del usuario del frente DESTINO (cuyo código se está
+     * desplegando), no del que atiende. En la rotación no hay mantenimiento (`down`/`up`).
+     */
+    public function test_en_la_rotacion_en_el_vps_el_usuario_y_el_chown_son_los_del_frente_destino(): void
+    {
+        $e = $this->escenario('vps', null, true);
+        $this->seeders_y_comandos($e);
+        $this->ssh->responder('CC_STORAGE_DEL_SITIO_OK', 'CC_STORAGE_DEL_SITIO_OK');
+
+        $this->artefactos_en_github($e['to']);
+        $this->respaldo_en_disco($e);
+        $this->spa_ya_bajado($e['upgrade']);
+
+        $error = $this->correr($this->servicio($e['upgrade']), 'upload_spa');
+        $this->assertNull($error, $error === null ? '' : $error->getMessage() . "\n" . $this->logs($e['upgrade']));
+
+        $this->assertSame([], $this->artisan_que_corre_como_root(), $this->ssh->todo());
+        $this->assertSame([], $this->comandos_con('artisan down'), 'La rotación no pone el sistema en mantenimiento.');
+
+        $destino = 'api-' . $e['carpeta'];
+        $otro    = 'api-' . $e['carpeta'] . '2';
+
+        $usuarios = [];
+        foreach ($this->ssh->comandos as $comando) {
+            if (stripos($comando, 'artisan') === false) {
+                continue;
+            }
+
+            $desenvuelto = $this->desenvolver_el_sudo($comando);
+            $this->assertNotNull($desenvuelto, $comando);
+            $usuarios[$desenvuelto[0]] = true;
+        }
+        $this->assertSame([$destino], array_keys($usuarios), 'Todo artisan va con el usuario del frente destino, nunca con el del activo.');
+
+        $chowns = $this->comandos_con('storage/logs storage/framework bootstrap/cache');
+        $this->assertCount(1, $chowns);
+        $this->assertStringContainsString("chown -R '" . $destino . ':' . $destino . "'", $chowns[0]);
+        $this->assertStringContainsString("cd '/home/" . $destino . "/empresa-api'", $chowns[0]);
+        $this->assertStringNotContainsString($otro, $this->ssh->todo(), 'Ni un comando toca al frente que atiende.');
     }
 
     /**

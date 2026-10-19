@@ -4193,10 +4193,20 @@ class DeploymentService
      * de AuditLogRecorder escrito por una migración (la tabla `audit_logs` todavía no existía) creó el
      * log del día de root a las 22:09:37 y el sistema no pudo loguear hasta la medianoche.
      *
-     * 🔴 Es el ÚNICO camino para armar un artisan de este servicio: migraciones, clears, seeders,
+     * 🔴 Es el ÚNICO camino para EJECUTAR un artisan en este servicio: migraciones, clears, seeders,
      * comandos de la versión, `queue:restart`, `down` y `up` pasan todos por acá, y el test
      * `ArtisanDelDeploymentCorreComoElUsuarioDelSitioTest` falla si algún `artisan` sale pelado en un
-     * VPS. Un artisan nuevo que no pase por acá reabre el hueco.
+     * VPS. Un artisan nuevo que no pase por acá reabre el hueco. (comando_para_levantar() también arma
+     * un `sudo`, pero es solo el texto que el log sugiere copiar: no se ejecuta.)
+     *
+     * Alcance: lo que corre adentro es TODO comando de una versión o de un seeder, no solo artisan. Hoy
+     * son todos `php artisan …`; uno que algún día necesite root (`supervisorctl`, `systemctl`) no va por
+     * este despliegue. Y un `$HOME`/`$(…)` adentro se expande como el usuario del sitio, no como root.
+     *
+     * Lo que NO cubre: el `cd` previo de cada etapa (`cd {$api_path} && …`) sigue sin entrecomillar en
+     * varias etapas, deuda anterior a este cambio (el `vps_path` es texto libre y la credencial es root;
+     * ver el informe de la misión); y el `composer install` de upload_api, que sigue siendo root y arranca
+     * Laravel por los scripts de composer: lo cubre la guarda de devolver_storage_al_usuario_del_sitio().
      *
      * `bash -c '<comando>'` y no un prefijo pegado al `php`: lo que llega es TEXTO LIBRE de la versión
      * (`USER_ID=2700 php artisan x`, `a && b`, comillas del `--class='…'`) y un `sudo` delante de la
@@ -4304,6 +4314,9 @@ class DeploymentService
      * chicos (storage/framework y bootstrap/cache; ver nota sobre rendimiento),
      * y no falla si los directorios ya existen (mkdir -p es no-op).
      *
+     * En el VPS termina devolviéndole al usuario del sitio `storage/logs`, `storage/framework` y
+     * `bootstrap/cache` (devolver_storage_al_usuario_del_sitio()): el mkdir de arriba corre como root.
+     *
      * @param  string  $step  Identificador de etapa para logs
      * @return void
      */
@@ -4340,8 +4353,12 @@ class DeploymentService
      * ya corre como el usuario del sitio (como_usuario_del_sitio()), así que root no vuelve a crear
      * nada. Esto cubre lo que sigue siendo de root y corre ANTES: el `composer install` de upload_api
      * (sus scripts arrancan Laravel y escriben `bootstrap/cache/*.php`, y podrían loguear un aviso) y el
-     * `mkdir -p` de arriba, que crea el árbol de root si faltaba. También cura un log o un directorio de
-     * root que haya dejado un despliegue anterior, antes de que el usuario del sitio los necesite.
+     * `mkdir -p` de arriba, que crea de root los directorios de esos tres árboles si faltaban (no los de
+     * `storage/app`, que quedan como estaban). También cura un log o un directorio de root que haya
+     * dejado un despliegue anterior, antes de que el usuario del sitio los necesite.
+     *
+     * Se llama en dos lugares: acá (justo antes del primer artisan de la migración, en TODOS los caminos) y
+     * en poner_en_mantenimiento(), antes del `down`, que en el lugar es el primer artisan del sitio.
      *
      * Solo esos tres árboles, que son chicos (el chmod -R de arriba ya recorre los dos últimos en cada
      * despliegue): `storage/app` puede tener años de adjuntos y un `chown -R` ahí tardaría minutos. Nunca
@@ -5754,6 +5771,11 @@ class DeploymentService
         $this->marcar_sistema_tocado('upload_api');
 
         $this->log('upload_api', 'En el lugar: se pone el sistema del cliente en mantenimiento antes de reemplazar la API.');
+
+        /* El `down` es el primer artisan del usuario del sitio en el camino en el lugar: antes de él, el
+           storage vuelve a su dueño (un log o un directorio de root que dejó un despliegue viejo haría fallar
+           el `down`, que aborta antes de reemplazar nada). En el shared no hace nada. */
+        $this->devolver_storage_al_usuario_del_sitio('upload_api', $api_path);
 
         $this->exec_hosting_ssh(
             'upload_api',
