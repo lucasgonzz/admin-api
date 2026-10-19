@@ -99,9 +99,16 @@ class UserIdUnicoService
         }
 
         throw ValidationException::withMessages([
+            /*
+             * El consejo no es "cargá el ID de la base": en el caso real que originó esto (demo3), el
+             * dueño de la base de la demo ES el 2600 de Ferretotal, así que eso llevaba a cargar justo
+             * el número que se rechaza. Si de verdad son dos sistemas con el mismo id, el arreglo es
+             * cambiar el `USER_ID` de uno de ellos también del lado del ERP.
+             */
             'user_id' => 'El ID de comercio ' . $user_id . ' ya lo tiene ' . $mensaje . '. Dos sistemas '
-                . 'con el mismo ID de dueño se mezclan los avisos en vivo: cargá el ID que tiene el '
-                . 'dueño en la base de este sistema.',
+                . 'con el mismo ID de dueño se mezclaban los avisos en vivo: usá un ID libre, y si el '
+                . 'dueño de este sistema ya tiene ese número en su base, hay que cambiarle el USER_ID '
+                . 'también del lado del ERP.',
         ]);
     }
 
