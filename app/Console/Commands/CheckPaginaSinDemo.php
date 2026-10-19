@@ -15,6 +15,7 @@ use App\Services\WhatsappSendService;
 use App\Services\WhatsappSessionWindowService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -56,6 +57,19 @@ class CheckPaginaSinDemo extends Command
      * @var array<int, string>
      */
     private const ESTADOS_CANDIDATOS = ['contactado', 'calificado'];
+
+    /**
+     * Prefijo de la marca en caché que deja UNA línea de log por lead de cliente y por día (se le suma
+     * `{lead_id}:{fecha}`). Este comando corre cada cinco minutos y un lead de cliente sigue siendo
+     * candidato en cada corrida: sin la marca serían hasta 288 líneas por día y por lead.
+     */
+    private const CLAVE_RASTRO_LEAD_CALLADO = 'leads:pagina-sin-demo:callado:';
+
+    /**
+     * Prefijo de la marca en caché que deja UNA línea de «fuera de la franja» por noche (se le suma la
+     * fecha en que empezó la noche). Sin ella serían ~144 por noche.
+     */
+    private const CLAVE_RASTRO_FUERA_DE_FRANJA = 'leads:pagina-sin-demo:fuera-de-franja:';
 
     /**
      * Nombre del comando artisan.
@@ -111,10 +125,17 @@ class CheckPaginaSinDemo extends Command
                 . ':00): no se manda nada, la corrida de la mañana lo vuelve a evaluar.');
 
             /* Rastro en el log (no solo en la salida del comando, que en el scheduler no lee nadie):
-               si un lead esperaba este mensaje y no le llegó, el motivo queda escrito. */
-            Log::info('CheckPaginaSinDemo: fuera de la franja horaria de seguimientos; no se evalúa a nadie.', [
-                'ahora' => $now->toDateTimeString(),
-            ]);
+               si un lead esperaba este mensaje y no le llegó, el motivo queda escrito. UNA línea por
+               noche y no una por corrida (serían ~144): ver una_vez(). La noche se nombra por la fecha
+               en que empezó, así las 23:00 y las 03:00 son la misma; la marca vive hasta la apertura. */
+            $noche = $now->hour < FranjaHorariaDeSeguimientos::HORA_DE_INICIO
+                ? $now->copy()->subDay()->toDateString()
+                : $now->toDateString();
+            if ($this->una_vez(self::CLAVE_RASTRO_FUERA_DE_FRANJA . $noche, FranjaHorariaDeSeguimientos::proximo_momento_permitido($now))) {
+                Log::info('CheckPaginaSinDemo: fuera de la franja horaria de seguimientos; no se evalúa a nadie hasta la apertura.', [
+                    'ahora' => $now->toDateTimeString(),
+                ]);
+            }
 
             return 0;
         }
@@ -210,10 +231,15 @@ class CheckPaginaSinDemo extends Command
              * número deja de ser de un cliente el próximo tick lo vuelve a evaluar. */
             $motivo_cliente = $directorio->motivo_de_lead_de_un_cliente($lead);
             if ($motivo_cliente !== null) {
-                Log::info('CheckPaginaSinDemo: lead callado por ser de un cliente; no recibe el seguimiento de la página.', [
-                    'lead_id' => $lead->id,
-                    'motivo'  => $motivo_cliente,
-                ]);
+                /* Una línea por lead y por día, no una cada cinco minutos (hasta 288 por día y por
+                   lead mientras siga siendo candidato): ver una_vez(). */
+                $clave = self::CLAVE_RASTRO_LEAD_CALLADO . $lead->id . ':' . $now->toDateString();
+                if ($this->una_vez($clave, $now->copy()->endOfDay())) {
+                    Log::info('CheckPaginaSinDemo: lead callado por ser de un cliente; no recibe el seguimiento de la página.', [
+                        'lead_id' => $lead->id,
+                        'motivo'  => $motivo_cliente,
+                    ]);
+                }
 
                 continue;
             }
@@ -324,5 +350,27 @@ class CheckPaginaSinDemo extends Command
         $this->info("Seguimientos de página enviados: {$sent}");
 
         return 0;
+    }
+
+    /**
+     * ¿Es la primera vez que se pide esta marca antes de que venza? Sirve para que el rastro en el log
+     * salga una vez por período (por día, por noche) y no en cada corrida de cinco minutos.
+     *
+     * `Cache::add()` escribe solo si la clave no existe y devuelve si la escribió: dos corridas que se
+     * pisaran no loguean dos veces. Si la caché falla, se loguea igual —el rastro importa más que un
+     * renglón repetido— y la corrida sigue: un problema de caché no puede frenar los envíos.
+     *
+     * @param string $clave  Clave completa de la marca.
+     * @param Carbon $vence  Hasta cuándo vale la marca (fin del día, apertura de la franja).
+     *
+     * @return bool true si hay que loguear ahora.
+     */
+    private function una_vez(string $clave, Carbon $vence): bool
+    {
+        try {
+            return (bool) Cache::add($clave, 1, $vence);
+        } catch (\Throwable $e) {
+            return true;
+        }
     }
 }

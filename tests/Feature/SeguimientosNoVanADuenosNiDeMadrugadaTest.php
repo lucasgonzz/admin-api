@@ -873,6 +873,52 @@ class SeguimientosNoVanADuenosNiDeMadrugadaTest extends TestCase
     }
 
     /**
+     * `leads:check-pagina-sin-demo` corre cada cinco minutos: el rastro no puede repetirse en cada
+     * corrida. Un lead de cliente que sigue siendo candidato deja UNA línea por día (dos corridas
+     * seguidas → una línea; al día siguiente, otra), y «fuera de la franja» deja UNA por noche (las
+     * 23:00 y las 03:00 son la misma noche; la noche siguiente, otra).
+     *
+     * @return void
+     */
+    public function test_el_rastro_de_la_pagina_sin_demo_no_se_repite_en_cada_corrida(): void
+    {
+        $logs = $this->capturar_logs();
+        $this->preparar_pagina_sin_demo();
+
+        $this->a_las('14:00:00');
+        $this->crear_cliente(self::TELEFONO_DEL_DUENO_LOCAL, true);
+        $dueno = $this->lead_de_pagina(self::TELEFONO_DEL_DUENO_E164);
+        $this->mensaje_de_pagina($dueno, 'lead', $this->momento('11:00:00'));
+        $this->mensaje_de_pagina($dueno, 'sistema', $this->momento('11:10:00'));
+        $this->apertura($dueno, $this->momento('11:30:00'));
+
+        $callado = ['lead_id' => $dueno->id, 'motivo' => 'telefono_de_cliente'];
+
+        $this->artisan('leads:check-pagina-sin-demo')->assertExitCode(0);
+        $this->a_las('14:05:00');
+        $this->artisan('leads:check-pagina-sin-demo')->assertExitCode(0);
+        $this->assertCount(1, $this->logs_con($logs, 'info', $callado), 'Dos corridas seguidas del mismo día: una sola línea por lead.');
+
+        $this->a_las('14:00:00', 1);
+        $this->artisan('leads:check-pagina-sin-demo')->assertExitCode(0);
+        $this->assertCount(2, $this->logs_con($logs, 'info', $callado), 'Al día siguiente, una línea más.');
+
+        $franja = 'CheckPaginaSinDemo: fuera de la franja';
+
+        $this->a_las('23:00:00');
+        $this->artisan('leads:check-pagina-sin-demo')->assertExitCode(0);
+        $this->a_las('23:05:00');
+        $this->artisan('leads:check-pagina-sin-demo')->assertExitCode(0);
+        $this->a_las('03:00:00', 1);
+        $this->artisan('leads:check-pagina-sin-demo')->assertExitCode(0);
+        $this->assertCount(1, $this->logs_que_dicen($logs, 'info', $franja), 'Toda una noche (23:00, 23:05 y 03:00): una sola línea.');
+
+        $this->a_las('23:00:00', 1);
+        $this->artisan('leads:check-pagina-sin-demo')->assertExitCode(0);
+        $this->assertCount(2, $this->logs_que_dicen($logs, 'info', $franja), 'La noche siguiente, una línea más.');
+    }
+
+    /**
      * `leads:check-followups` dice en su salida si la corrida quedó fuera de la franja.
      *
      * @return void
