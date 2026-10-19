@@ -3,7 +3,9 @@
 namespace App\Jobs;
 
 use App\Models\LeadMessage;
+use App\Services\ClientPhoneDirectory;
 use App\Services\LeadAiSuggestionAutoSendScheduler;
+use App\Services\LeadBroadcastService;
 use App\Services\LeadSuggestionSendService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -65,6 +67,29 @@ class AutoSendLeadAiSuggestionJob implements ShouldQueue
 
         if ((string) $message->status !== 'sugerido') {
             return;
+        }
+
+        /*
+         * 🔴 Misión asistente-arreglos-segunda-prueba (N11, 19/10/2026): el respaldo de un SEGUIMIENTO
+         * retenido no le escribe al número de un cliente (ni a un lead ya promovido). El scheduler ya no
+         * lo programa en ese caso; esto es la red para los jobs que quedaron en la cola desde antes, o
+         * para el número que pasó a ser de un cliente entre que se programó y que vence. No se manda,
+         * no se rechaza: la sugerencia queda en la bandeja para una persona y se le saca el contador
+         * (cancel_for_message), para que el panel no prometa un envío que no va a ocurrir.
+         */
+        if ($scheduler->es_seguimiento_retenido($message)) {
+            $lead = $message->lead;
+            if ($lead !== null && (new ClientPhoneDirectory())->es_lead_de_un_cliente($lead)) {
+                $scheduler->cancel_for_message($this->message_id);
+                LeadBroadcastService::emit_conversation_updated((int) $message->lead_id, $this->message_id);
+
+                Log::channel('daily')->info('AutoSendLeadAiSuggestionJob: seguimiento retenido de un lead que es cliente; no se auto-envía.', [
+                    'message_id' => $this->message_id,
+                    'lead_id'    => $message->lead_id,
+                ]);
+
+                return;
+            }
         }
 
         /*

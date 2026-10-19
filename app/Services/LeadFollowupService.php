@@ -55,10 +55,14 @@ class LeadFollowupService
             ->whereNotIn('status', ['cerrado_ganado', 'cerrado_perdido', 'en_pausa'])
             ->get();
 
+        /* Un directorio por corrida: arma el índice de teléfonos de clientes una sola vez (cuatro
+           consultas) y lo reusa para todos los leads. Ver ClientPhoneDirectory::es_lead_de_un_cliente(). */
+        $directorio = new ClientPhoneDirectory();
+
         foreach ($leads as $lead) {
             $stats['processed']++;
             try {
-                $result = $this->process_lead($lead, $rules);
+                $result = $this->process_lead($lead, $rules, $directorio);
                 if ($result === 'suggestion') {
                     $stats['suggestions']++;
                 }
@@ -262,15 +266,36 @@ class LeadFollowupService
     /**
      * @param Lead                                       $lead
      * @param \Illuminate\Support\Collection $rules_by_estado
+     * @param ClientPhoneDirectory|null                  $directorio Directorio de teléfonos de clientes
+     *                                                               de la corrida (con su índice ya
+     *                                                               armado). Null: se crea uno para este
+     *                                                               lead (camino de process_single_lead()).
      *
      * @return string|null suggestion|paused|null
      */
-    protected function process_lead(Lead $lead, $rules_by_estado): ?string
+    protected function process_lead(Lead $lead, $rules_by_estado, ?ClientPhoneDirectory $directorio = null): ?string
     {
         if ($lead->tiene_sugerencia_pendiente) {
             return null;
         }
         if (! $rules_by_estado->has($lead->status)) {
+            return null;
+        }
+
+        /*
+         * 🔴 El número de un cliente no recibe seguimientos de lead (misión
+         * asistente-arreglos-segunda-prueba, N11, 19/10/2026). El 18/10 a las 00:00 este cron le mandó
+         * «Hace un par de días te escribimos…» al dueño de demo3 (cliente 58), porque el lead 644
+         * seguía vivo con su mismo teléfono. Tampoco al lead ya promovido a cliente.
+         *
+         * `return null` y NADA MÁS, a propósito: ni pausa, ni evento en el hilo, ni cambio de estado.
+         * El lead queda exactamente como estaba; si mañana el cliente se da de baja o se corrige el
+         * teléfono, el cron lo vuelve a llevar sin que haya que deshacer nada. Va antes de
+         * lead_respondio() porque es más barato (el índice ya está armado para toda la corrida) y
+         * porque, contestara o no, a un cliente no se le manda la cadencia de un lead.
+         */
+        $directorio = $directorio !== null ? $directorio : new ClientPhoneDirectory();
+        if ($directorio->es_lead_de_un_cliente($lead)) {
             return null;
         }
 

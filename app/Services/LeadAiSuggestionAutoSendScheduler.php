@@ -72,6 +72,24 @@ class LeadAiSuggestionAutoSendScheduler
                 return;
             }
 
+            /*
+             * 🔴 Misión asistente-arreglos-segunda-prueba (N11, 19/10/2026): el respaldo automático de
+             * un SEGUIMIENTO retenido no se programa si el lead es un cliente (su teléfono es el de un
+             * cliente activo, de su equipo o de un admin, o ya fue promovido). Es la misma guarda que
+             * el cron de seguimientos (ClientPhoneDirectory::es_lead_de_un_cliente()): el seguimiento
+             * queda en la bandeja para que lo vea una persona, sin contador, en vez de salir solo al
+             * número de un dueño como salió el del 18/10 al de demo3. Solo los seguimientos: una
+             * respuesta conversacional retenida es otra cosa (el lead escribió, alguien le contesta).
+             */
+            if ($lead && $this->es_seguimiento_retenido($message) && (new ClientPhoneDirectory())->es_lead_de_un_cliente($lead)) {
+                Log::channel('daily')->info('LeadAiSuggestionAutoSendScheduler: seguimiento retenido de un lead que es cliente; no se programa el respaldo.', [
+                    'message_id' => (int) $message->id,
+                    'lead_id'    => $message->lead_id,
+                ]);
+
+                return;
+            }
+
             // La config de origen está en minutos (decisión 13/7/2026); se convierte a segundos acá
             // porque el resto del método sigue trabajando con segundos (addSeconds, log, etc).
             $delay_minutes = LeadWhatsappOnboardingSettings::get_verificacion_agendamiento_auto_send_delay_minutes();
@@ -119,6 +137,28 @@ class LeadAiSuggestionAutoSendScheduler
 
         /* Reemitir el mensaje con ai_auto_send_at para clientes que ya recibieron el alta sin timer. */
         LeadBroadcastService::emit_conversation_updated((int) $message->lead_id, $message_id);
+    }
+
+    /**
+     * ¿Es un SEGUIMIENTO del cron retenido para verificación, de los que tienen respaldo automático?
+     *
+     * Son los que deja `LeadFollowupService::create_pending_followup_for_verification()` (plantilla del
+     * tramo de agenda, o escudo por-lead prendido) y los seguimientos que Claude redacta con
+     * `requiere_verificacion`: `is_followup` + `requiere_verificacion`, del sistema. Las guardas de los
+     * seguimientos automáticos (teléfono de cliente y, desde la misma misión, la franja horaria) se
+     * aplican solo a estos: una respuesta conversacional retenida no es un seguimiento, y un
+     * seguimiento sin retener (`requiere_verificacion = false`) sale en el acto por el camino que lo
+     * generó, que ya tiene sus propias guardas (el cron) o es una persona apretando un botón.
+     *
+     * @param LeadMessage $message
+     *
+     * @return bool
+     */
+    public function es_seguimiento_retenido(LeadMessage $message): bool
+    {
+        return (string) $message->sender === 'sistema'
+            && (bool) $message->is_followup
+            && (bool) $message->requiere_verificacion;
     }
 
     /**

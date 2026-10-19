@@ -7,6 +7,7 @@ use App\Http\Controllers\DemoExperienciaController;
 use App\Models\DemoEventoRecibido;
 use App\Models\Lead;
 use App\Models\LeadMessage;
+use App\Services\ClientPhoneDirectory;
 use App\Services\LeadBroadcastService;
 use App\Services\LeadDemoSettings;
 use App\Services\WhatsappSendService;
@@ -170,7 +171,20 @@ class CheckPaginaSinDemo extends Command
         $silencio_limite = $now->copy()->subMinutes($silencio_minutos);
         $ventana_service = app(WhatsappSessionWindowService::class);
 
+        /* Un directorio por corrida: el índice de teléfonos de clientes se arma una sola vez, en el
+         * primer candidato que llegue a la guarda. */
+        $directorio = new ClientPhoneDirectory();
+
         foreach ($candidates as $lead) {
+            /* 🔴 Misión asistente-arreglos-segunda-prueba (N11, 19/10/2026): a un cliente (su teléfono
+             * es el de un cliente activo, de su equipo o de un admin, o el lead ya fue promovido) no se
+             * le manda el seguimiento de la página: es la cadencia de un lead, la misma guarda que el
+             * cron de seguimientos. No se marca: la columna dice "enviado", no "descartado", y si el
+             * número deja de ser de un cliente el próximo tick lo vuelve a evaluar. */
+            if ($directorio->es_lead_de_un_cliente($lead)) {
+                continue;
+            }
+
             $apertura = $primeras_aperturas->get($lead->id);
             if ($apertura === null || empty($apertura->primera_apertura)) {
                 /* No debería pasar (el EXISTS de arriba garantiza la apertura), pero un lead sin
