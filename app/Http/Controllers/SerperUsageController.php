@@ -118,8 +118,9 @@ class SerperUsageController extends Controller
         if ($effectiveClient) {
             $clientQuery->where('id', $effectiveClient);
         }
-        $clients = $clientQuery->get()->map(function ($client) {
-            $last = ClientSerperUsage::where('client_id', $client->id)->max('created_at');
+        $lastReports = ClientSerperUsage::query()->select('client_id')->selectRaw('MAX(created_at) AS received_at')->groupBy('client_id')->pluck('received_at', 'client_id');
+        $clients = $clientQuery->get()->map(function ($client) use ($lastReports) {
+            $last = $lastReports->get($client->id);
             return ['id' => (int) $client->id, 'name' => $client->company_name ?: $client->name,
                 'has_telemetry' => $last !== null, 'last_received_at' => $last];
         })->all();

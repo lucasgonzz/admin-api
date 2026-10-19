@@ -16,7 +16,8 @@ class FichasCompartidasYConsumoSerperTest extends BaseDelCanal
     protected function setUp(): void
     {
         parent::setUp();
-        $this->assertMatchesRegularExpression('/^admin_testing(?:_s\d+)?$/', config('database.connections.mysql.database'));
+        $this->assertSame('testing', app()->environment());
+        $this->assertMatchesRegularExpression('/(?:^|_)test(?:ing)?(?:_|$)/', config('database.connections.' . config('database.default') . '.database'));
         // Los totales globales deben ser independientes de fixtures QA u otras corridas. La
         // transacción del test recupera exactamente esos datos al terminar cada método.
         ClientSerperUsage::query()->delete();
@@ -109,7 +110,9 @@ class FichasCompartidasYConsumoSerperTest extends BaseDelCanal
             array_merge($this->ficha(), ['sources' => [['url' => 'http://127.0.0.1/secreto']]]),
             array_merge($this->ficha(), ['sources' => [['url' => 'http://servidor.local/secreto']]]),
             array_merge($this->ficha(), ['sources' => [['url' => 'https://user:clave@fabricante.com/producto']]]),
-            array_merge($this->ficha(), ['weight_kg' => -1])] as $bad) {
+            array_merge($this->ficha(), ['weight_kg' => -1]),
+            array_merge($this->ficha(), ['brand' => str_repeat('m', 191)]),
+            array_merge($this->ficha(), ['net_content' => str_repeat('c', 191)])] as $bad) {
             $this->putJson('/api/inbound/product-facts/7791234567898', ['lease_token' => $lease, 'status' => 'found', 'product' => $bad], $this->headers($client))->assertStatus(422);
         }
         $this->assertNull(SharedProductFact::where('gtin', '07791234567898')->first()->product);
@@ -124,6 +127,7 @@ class FichasCompartidasYConsumoSerperTest extends BaseDelCanal
         $this->assertSame(2, ClientSerperUsage::where('event_uuid', $event['event_uuid'])->count());
         $this->assertEquals(1, ClientSerperUsage::where('client_id', $a->id)->value('credits'));
         $this->postJson('/api/inbound/serper-usage', ['events' => [$this->evento(['secret' => 'no'])]], $this->headers($a))->assertStatus(422);
+        $this->postJson('/api/inbound/serper-usage', ['events' => [$this->evento(['auth_user_name' => str_repeat('a', 191)])]], $this->headers($a))->assertStatus(422);
     }
 
     public function test_resumen_respeta_dia_argentino_usuario_proceso_y_creditos_desconocidos()
