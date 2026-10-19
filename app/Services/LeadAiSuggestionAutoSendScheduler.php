@@ -123,22 +123,27 @@ class LeadAiSuggestionAutoSendScheduler
          * (el reloj que mueven los tests y el reloj virtual de local) más la demora, que es una duración.
          *
          * Al moverlo, el token tiene que vivir hasta esa hora: con el TTL fijo de dos horas
-         * (CACHE_TTL_SECONDS) el job de las 09:00 encontraría el token vencido y se descartaría como
+         * (CACHE_TTL_SECONDS) el job de la mañana encontraría el token vencido y se descartaría como
          * obsoleto, o sea que el seguimiento no saldría nunca. Por eso el TTL pasa a ser la demora más
-         * el margen de siempre. Y el job sale marcado como "ya reprogramado por la franja", para que si
-         * igual corriera de noche no se reprograme en cadena (ver AutoSendLeadAiSuggestionJob).
+         * el margen de siempre. Y el job sale contando una reprogramación por la franja, para que si
+         * igual corriera de noche las reprogramaciones tengan tope (ver AutoSendLeadAiSuggestionJob).
+         *
+         * 🔴 La hora es la apertura MÁS UN MINUTO (09:01:00, FranjaHorariaDeSeguimientos::
+         * momento_para_reprogramar()) y la demora se redondea PARA ARRIBA (segundos_hasta()): con
+         * microsegundos en el reloj, `diffInSeconds()` truncaba y dejaba el job para las 08:59:59,x,
+         * fuera de la franja (lo reprodujo la revisión independiente).
          */
-        $ttl_del_token        = self::CACHE_TTL_SECONDS;
-        $movido_por_la_franja = false;
+        $ttl_del_token                = self::CACHE_TTL_SECONDS;
+        $reprogramaciones_por_franja  = 0;
         if ($this->es_seguimiento_retenido($message)) {
             $ahora       = AppTime::now(FranjaHorariaDeSeguimientos::ZONA_HORARIA);
             $vencimiento = $ahora->copy()->addSeconds(max(0, $delay_seconds));
 
             if (! FranjaHorariaDeSeguimientos::esta_dentro($vencimiento)) {
-                $permitido            = FranjaHorariaDeSeguimientos::proximo_momento_permitido($vencimiento);
-                $delay_seconds        = max(1, $ahora->diffInSeconds($permitido, false));
-                $ttl_del_token        = $delay_seconds + self::CACHE_TTL_SECONDS;
-                $movido_por_la_franja = true;
+                $permitido                   = FranjaHorariaDeSeguimientos::momento_para_reprogramar($vencimiento);
+                $delay_seconds               = FranjaHorariaDeSeguimientos::segundos_hasta($ahora, $permitido);
+                $ttl_del_token               = $delay_seconds + self::CACHE_TTL_SECONDS;
+                $reprogramaciones_por_franja = 1;
             }
         }
 
@@ -165,7 +170,7 @@ class LeadAiSuggestionAutoSendScheduler
         $message->ai_auto_send_at = $auto_send_at;
         $message->save();
 
-        AutoSendLeadAiSuggestionJob::dispatch($message_id, $auto_send_token, $movido_por_la_franja)
+        AutoSendLeadAiSuggestionJob::dispatch($message_id, $auto_send_token, $reprogramaciones_por_franja)
             ->delay($auto_send_at);
 
         Log::channel('daily')->debug('LeadAiSuggestionAutoSendScheduler: envío automático programado.', [
@@ -174,7 +179,7 @@ class LeadAiSuggestionAutoSendScheduler
             'delay_seconds'        => $delay_seconds,
             'auto_send_at'         => $auto_send_at->toIso8601String(),
             'auto_send_token'      => $auto_send_token,
-            'movido_por_la_franja' => $movido_por_la_franja,
+            'reprogramaciones'     => $reprogramaciones_por_franja,
         ]);
 
         /* Reemitir el mensaje con ai_auto_send_at para clientes que ya recibieron el alta sin timer. */
@@ -277,38 +282,44 @@ class LeadAiSuggestionAutoSendScheduler
      * Lo llama `AutoSendLeadAiSuggestionJob` cuando le toca correr de noche: un job que se programó
      * de día y el worker tomó tarde, o uno encolado antes de que existiera la franja. En vez de
      * mandar, se invalida el token viejo, se saca uno nuevo que vive hasta la hora nueva (más el
-     * margen de siempre) y se encola un job NUEVO marcado como reprogramado, con la demora hasta las
-     * 09:00. `ai_auto_send_at` pasa a esa hora, así el contador del panel dice la verdad.
+     * margen de siempre) y se encola un job NUEVO que cuenta una reprogramación más, con la demora
+     * hasta la apertura de la franja más un minuto (09:01:00, redondeada para arriba: ver
+     * FranjaHorariaDeSeguimientos::MARGEN_AL_ABRIR_SEGUNDOS). `ai_auto_send_at` pasa a esa hora, así
+     * el contador del panel dice la verdad.
      *
      * 🔴 Un job nuevo y no `release()`: el worker de producción corre sin `--tries` (vale 1) y el job
      * no declara `$tries`, así que un `release()` volvería a la cola con el intento ya gastado y el
      * worker lo daría por fallido al tomarlo de nuevo. Un dispatch nuevo arranca de cero.
      *
-     * @param LeadMessage $message Seguimiento retenido todavía en `sugerido`.
+     * @param LeadMessage $message                 Seguimiento retenido todavía en `sugerido`.
+     * @param int         $reprogramaciones_previas Cuántas veces ya se había reprogramado el job que
+     *                                             llama (el nuevo sale con una más). Default 0.
      *
      * @return Carbon Momento al que quedó reprogramado.
      */
-    public function reprogramar_a_la_franja(LeadMessage $message): Carbon
+    public function reprogramar_a_la_franja(LeadMessage $message, int $reprogramaciones_previas = 0): Carbon
     {
         $ahora     = AppTime::now(FranjaHorariaDeSeguimientos::ZONA_HORARIA);
-        $permitido = FranjaHorariaDeSeguimientos::proximo_momento_permitido($ahora);
-        $demora    = max(1, $ahora->diffInSeconds($permitido, false));
+        $permitido = FranjaHorariaDeSeguimientos::momento_para_reprogramar($ahora);
+        $demora    = FranjaHorariaDeSeguimientos::segundos_hasta($ahora, $permitido);
 
-        $message_id      = (int) $message->id;
-        $auto_send_token = $this->bump_auto_send_token($message_id, $demora + self::CACHE_TTL_SECONDS);
-        $auto_send_at    = now()->addSeconds($demora);
+        $message_id       = (int) $message->id;
+        $auto_send_token  = $this->bump_auto_send_token($message_id, $demora + self::CACHE_TTL_SECONDS);
+        $auto_send_at     = now()->addSeconds($demora);
+        $reprogramaciones = $reprogramaciones_previas + 1;
 
         $message->ai_auto_send_at = $auto_send_at;
         $message->save();
 
-        AutoSendLeadAiSuggestionJob::dispatch($message_id, $auto_send_token, true)
+        AutoSendLeadAiSuggestionJob::dispatch($message_id, $auto_send_token, $reprogramaciones)
             ->delay($auto_send_at);
 
         Log::channel('daily')->info('LeadAiSuggestionAutoSendScheduler: respaldo de seguimiento reprogramado a la franja horaria.', [
-            'message_id'      => $message_id,
-            'lead_id'         => $message->lead_id,
-            'auto_send_at'    => $auto_send_at->toIso8601String(),
-            'auto_send_token' => $auto_send_token,
+            'message_id'       => $message_id,
+            'lead_id'          => $message->lead_id,
+            'auto_send_at'     => $auto_send_at->toIso8601String(),
+            'auto_send_token'  => $auto_send_token,
+            'reprogramaciones' => $reprogramaciones,
         ]);
 
         LeadBroadcastService::emit_conversation_updated((int) $message->lead_id, $message_id);

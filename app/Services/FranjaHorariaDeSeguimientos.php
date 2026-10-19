@@ -49,6 +49,20 @@ class FranjaHorariaDeSeguimientos
     public const HORA_DE_FIN = 21;
 
     /**
+     * Segundos DESPUÉS de la apertura a los que se programa un respaldo corrido por la franja: sale a
+     * las 09:01:00 y no a las 09:00:00 en punto.
+     *
+     * 🔴 Revisión independiente (19/10/2026): en producción `Carbon::now()` trae microsegundos y
+     * `diffInSeconds()` trunca, así que una demora calculada «hasta las 09:00» dejaba el job para las
+     * 08:59:59,x. Si el worker lo tomaba en ese segundo, el job estaba fuera de la franja, ya marcado
+     * como reprogramado, y no salía nunca: el mensaje quedaba `sugerido`, `tiene_sugerencia_pendiente`
+     * en true, y el cron dejaba de llevar a ese lead. Un minuto de margen (más el redondeo para arriba
+     * de {@see segundos_hasta()}) deja el vencimiento siempre adentro, aunque el reloj del worker y el
+     * del que programó difieran en algunos segundos.
+     */
+    public const MARGEN_AL_ABRIR_SEGUNDOS = 60;
+
+    /**
      * ¿Este instante está dentro de la franja? [HORA_DE_INICIO:00, HORA_DE_FIN:00), hora de Argentina.
      *
      * @param Carbon $momento Instante a evaluar, en cualquier zona horaria.
@@ -95,5 +109,39 @@ class FranjaHorariaDeSeguimientos
         }
 
         return $inicio_de_hoy->addDay();
+    }
+
+    /**
+     * A qué hora programar un envío automático que vencería en `$momento`: el mismo `$momento` si cae
+     * dentro de la franja; si no, el próximo inicio de la franja MÁS {@see MARGEN_AL_ABRIR_SEGUNDOS}
+     * (las 09:01:00 exactas). Es la que usa el respaldo de los seguimientos retenidos; para saber si
+     * se puede mandar YA, la regla sigue siendo {@see esta_dentro()}.
+     *
+     * @param Carbon $momento Vencimiento original, en cualquier zona horaria.
+     *
+     * @return Carbon Copia nueva, en hora de Argentina.
+     */
+    public static function momento_para_reprogramar(Carbon $momento): Carbon
+    {
+        if (self::esta_dentro($momento)) {
+            return $momento->copy()->setTimezone(self::ZONA_HORARIA);
+        }
+
+        return self::proximo_momento_permitido($momento)->addSeconds(self::MARGEN_AL_ABRIR_SEGUNDOS);
+    }
+
+    /**
+     * Segundos enteros que hay que esperar desde `$desde` para no llegar ANTES de `$hasta`: la
+     * diferencia redondeada PARA ARRIBA (con microsegundos, `diffInSeconds()` trunca y deja el
+     * vencimiento un segundo antes; ver {@see MARGEN_AL_ABRIR_SEGUNDOS}). Nunca menos de 1.
+     *
+     * @param Carbon $desde
+     * @param Carbon $hasta
+     *
+     * @return int
+     */
+    public static function segundos_hasta(Carbon $desde, Carbon $hasta): int
+    {
+        return max(1, (int) ceil($desde->floatDiffInSeconds($hasta, false)));
     }
 }

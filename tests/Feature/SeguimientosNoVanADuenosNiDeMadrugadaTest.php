@@ -289,6 +289,17 @@ class SeguimientosNoVanADuenosNiDeMadrugadaTest extends TestCase
         $this->assertTrue(FranjaHorariaDeSeguimientos::proximo_momento_permitido($this->momento('21:00:00'))->equalTo($manana_a_las_nueve));
         $this->assertTrue(FranjaHorariaDeSeguimientos::proximo_momento_permitido($this->momento('03:00:00'))->equalTo($hoy_a_las_nueve));
         $this->assertTrue(FranjaHorariaDeSeguimientos::proximo_momento_permitido($this->momento('10:15:00'))->equalTo($this->momento('10:15:00')));
+
+        /* Para reprogramar, la apertura más el minuto de margen; de día, el mismo momento. */
+        $this->assertSame(60, FranjaHorariaDeSeguimientos::MARGEN_AL_ABRIR_SEGUNDOS);
+        $this->assertTrue(FranjaHorariaDeSeguimientos::momento_para_reprogramar($this->momento('23:30:00'))->equalTo($manana_a_las_nueve->copy()->addMinute()));
+        $this->assertTrue(FranjaHorariaDeSeguimientos::momento_para_reprogramar($this->momento('10:15:00'))->equalTo($this->momento('10:15:00')));
+
+        /* La espera se redondea para arriba: 1,5 segundos son 2, nunca 1. */
+        $this->assertSame(2, FranjaHorariaDeSeguimientos::segundos_hasta(
+            Carbon::parse(self::DIA . ' 20:50:00.500000', self::TZ),
+            Carbon::parse(self::DIA . ' 20:50:02', self::TZ)
+        ));
     }
 
     /**
@@ -316,12 +327,13 @@ class SeguimientosNoVanADuenosNiDeMadrugadaTest extends TestCase
 
     /**
      * Un seguimiento retenido para verificación a las 20:50, con 30 minutos de respaldo, vencería a las
-     * 21:20: se reprograma a las 09:00 del día siguiente (el contador del panel ya lo muestra así) y el
-     * job sale con esa demora. A las 09:00 el job encuentra su token vivo y manda.
+     * 21:20: se reprograma a las 09:01:00 del día siguiente —la apertura de la franja más el margen de
+     * un minuto— (el contador del panel ya lo muestra así) y el job sale con esa demora. A esa hora el
+     * job encuentra su token vivo y manda.
      *
      * @return void
      */
-    public function test_el_respaldo_de_un_seguimiento_que_venceria_de_noche_se_reprograma_a_las_nueve(): void
+    public function test_el_respaldo_de_un_seguimiento_que_venceria_de_noche_se_reprograma_a_la_manana(): void
     {
         Queue::fake();
         $espia = $this->espiar_sender();
@@ -332,22 +344,59 @@ class SeguimientosNoVanADuenosNiDeMadrugadaTest extends TestCase
         $mensaje = $this->seguimiento_retenido($lead);
         app(LeadAiSuggestionAutoSendScheduler::class)->schedule_for_suggested_message($mensaje);
 
-        $manana_a_las_nueve = Carbon::parse(self::DIA . ' 09:00:00', self::TZ)->addDay();
+        $manana_nueve_y_uno = Carbon::parse(self::DIA . ' 09:01:00', self::TZ)->addDay();
 
         $this->assertTrue(
-            $mensaje->fresh()->ai_auto_send_at->equalTo($manana_a_las_nueve),
-            'El respaldo que vencía a las 21:20 tiene que quedar para las 09:00 del día siguiente.'
+            $mensaje->fresh()->ai_auto_send_at->equalTo($manana_nueve_y_uno),
+            'El respaldo que vencía a las 21:20 tiene que quedar para las 09:01 del día siguiente.'
         );
 
         $job = $this->unico_job_encolado();
-        $this->assertTrue($job->delay->equalTo($manana_a_las_nueve));
-        $this->assertTrue($this->propiedad($job, 'reprogramado_por_la_franja'), 'Movido por la franja: el job ya es la reprogramación.');
+        $this->assertTrue($job->delay->equalTo($manana_nueve_y_uno));
+        $this->assertSame(1, $this->propiedad($job, 'reprogramaciones_por_la_franja'), 'Movido por la franja: el job ya cuenta como una reprogramación.');
 
-        $this->a_las('09:00:00', 1);
+        $this->a_las('09:01:00', 1);
         $job->handle(app(LeadSuggestionSendService::class), app(LeadAiSuggestionAutoSendScheduler::class));
 
-        $this->assertCount(1, $this->envios_a($espia, '+5493415550009'), 'A las 09:00 el token sigue vivo y el seguimiento sale.');
+        $this->assertCount(1, $this->envios_a($espia, '+5493415550009'), 'A las 09:01 el token sigue vivo y el seguimiento sale.');
         $this->assertSame('enviado', $mensaje->fresh()->status);
+    }
+
+    /**
+     * 🔴 Revisión independiente, sonda 2: con microsegundos en el reloj (como en producción),
+     * `diffInSeconds()` truncaba y el respaldo quedaba para las 08:59:59,x — fuera de la franja, ya
+     * marcado, y no salía nunca. Ahora la demora se redondea para arriba y hay un minuto de margen: el
+     * vencimiento cae siempre adentro de la franja, tanto al programar como al reprogramar desde el job.
+     *
+     * @return void
+     */
+    public function test_con_microsegundos_el_respaldo_nunca_queda_antes_de_la_apertura(): void
+    {
+        Queue::fake();
+        $this->espiar_sender();
+        $this->demora_de_respaldo(30);
+
+        Carbon::setTestNow(Carbon::parse(self::DIA . ' 20:50:00.654321', self::TZ));
+        $mensaje = $this->seguimiento_retenido($this->crear_lead('+5493415550015'));
+        app(LeadAiSuggestionAutoSendScheduler::class)->schedule_for_suggested_message($mensaje);
+
+        $job = $this->unico_job_encolado();
+        $this->assertTrue(FranjaHorariaDeSeguimientos::esta_dentro($job->delay), 'Programado: el job tiene que vencer DENTRO de la franja, no a las 08:59:59.');
+        $this->assertTrue($job->delay->gte(Carbon::parse(self::DIA . ' 09:01:00', self::TZ)->addDay()));
+        $this->assertTrue(FranjaHorariaDeSeguimientos::esta_dentro($mensaje->fresh()->ai_auto_send_at));
+
+        /* Reprogramado desde el job que corrió de noche, también con microsegundos. */
+        $otro = $this->seguimiento_retenido($this->crear_lead('+5493415550016'));
+        Carbon::setTestNow(Carbon::parse(self::DIA . ' 20:00:00.250000', self::TZ));
+        app(LeadAiSuggestionAutoSendScheduler::class)->schedule_for_suggested_message($otro);
+        $de_dia = Queue::pushed(AutoSendLeadAiSuggestionJob::class)->last();
+
+        Carbon::setTestNow(Carbon::parse(self::DIA . ' 21:15:00.999999', self::TZ));
+        $de_dia->handle(app(LeadSuggestionSendService::class), app(LeadAiSuggestionAutoSendScheduler::class));
+
+        $reprogramado = Queue::pushed(AutoSendLeadAiSuggestionJob::class)->last();
+        $this->assertNotSame($de_dia, $reprogramado, 'Tenía que encolarse la reprogramación.');
+        $this->assertTrue(FranjaHorariaDeSeguimientos::esta_dentro($reprogramado->delay), 'Reprogramado: tiene que vencer dentro de la franja.');
     }
 
     /**
@@ -377,19 +426,19 @@ class SeguimientosNoVanADuenosNiDeMadrugadaTest extends TestCase
         $this->assertTrue($conversacion->fresh()->ai_auto_send_at->equalTo($this->momento('21:20:00')));
 
         foreach (Queue::pushed(AutoSendLeadAiSuggestionJob::class) as $job) {
-            $this->assertFalse($this->propiedad($job, 'reprogramado_por_la_franja'));
+            $this->assertSame(0, $this->propiedad($job, 'reprogramaciones_por_la_franja'));
         }
     }
 
     /**
      * El job que se programó de día pero corre de noche (un worker atrasado, o un job encolado antes de
-     * esta guarda) no manda: se reprograma a las 09:00 con un job nuevo. Y ese job nuevo, si por algún
-     * motivo también corriera de noche, no se vuelve a reprogramar: no hay cadena de reprogramaciones
-     * (con la cola `sync` de los tests sería un bucle infinito).
+     * esta guarda) no manda: se reprograma a las 09:01 con un job nuevo, y el viejo queda obsoleto. Si
+     * ese job nuevo TAMBIÉN corre fuera de la franja (por ejemplo, el worker lo toma a las 08:59:59 con
+     * el reloj corrido), no se abandona: se vuelve a reprogramar, y a las 09:01 sale una sola vez.
      *
      * @return void
      */
-    public function test_el_job_que_corre_de_noche_se_reprograma_una_sola_vez(): void
+    public function test_el_job_que_corre_fuera_de_la_franja_se_vuelve_a_reprogramar(): void
     {
         Queue::fake();
         $espia = $this->espiar_sender();
@@ -399,39 +448,81 @@ class SeguimientosNoVanADuenosNiDeMadrugadaTest extends TestCase
         $mensaje = $this->seguimiento_retenido($this->crear_lead('+5493415550012'));
         app(LeadAiSuggestionAutoSendScheduler::class)->schedule_for_suggested_message($mensaje);
         $original = $this->unico_job_encolado();
-        $this->assertFalse($this->propiedad($original, 'reprogramado_por_la_franja'));
+        $this->assertSame(0, $this->propiedad($original, 'reprogramaciones_por_la_franja'));
 
         /* El worker lo toma recién a las 21:15: ya cerró la franja. */
         $this->a_las('21:15:00');
         $original->handle(app(LeadSuggestionSendService::class), app(LeadAiSuggestionAutoSendScheduler::class));
 
-        $manana_a_las_nueve = Carbon::parse(self::DIA . ' 09:00:00', self::TZ)->addDay();
+        $manana_nueve_y_uno = Carbon::parse(self::DIA . ' 09:01:00', self::TZ)->addDay();
         $this->assertSame([], $espia->envios, 'De noche el respaldo no manda.');
         $this->assertSame('sugerido', $mensaje->fresh()->status);
-        $this->assertTrue($mensaje->fresh()->ai_auto_send_at->equalTo($manana_a_las_nueve));
+        $this->assertTrue($mensaje->fresh()->ai_auto_send_at->equalTo($manana_nueve_y_uno));
 
         $jobs = Queue::pushed(AutoSendLeadAiSuggestionJob::class)->values();
         $this->assertCount(2, $jobs, 'Tiene que haber exactamente un job nuevo: la reprogramación.');
-        $reprogramado = $jobs[1];
-        $this->assertTrue($reprogramado->delay->equalTo($manana_a_las_nueve));
-        $this->assertTrue($this->propiedad($reprogramado, 'reprogramado_por_la_franja'));
+        $primera = $jobs[1];
+        $this->assertTrue($primera->delay->equalTo($manana_nueve_y_uno));
+        $this->assertSame(1, $this->propiedad($primera, 'reprogramaciones_por_la_franja'));
 
         /* El job viejo ya no vale: su token se invalidó al reprogramar. */
-        $this->a_las('09:00:00', 1);
+        $this->a_las('09:01:00', 1);
         $original->handle(app(LeadSuggestionSendService::class), app(LeadAiSuggestionAutoSendScheduler::class));
         $this->assertSame([], $espia->envios, 'El job viejo quedó obsoleto: no manda dos veces.');
 
-        /* Si la reprogramación corriera de noche, no se vuelve a reprogramar ni manda. */
-        $this->a_las('23:45:00');
-        $reprogramado->handle(app(LeadSuggestionSendService::class), app(LeadAiSuggestionAutoSendScheduler::class));
+        /* La reprogramación corre a las 08:59:59 (fuera): se vuelve a reprogramar, no se abandona. */
+        $this->a_las('08:59:59', 1);
+        $primera->handle(app(LeadSuggestionSendService::class), app(LeadAiSuggestionAutoSendScheduler::class));
         $this->assertSame([], $espia->envios);
-        $this->assertCount(2, Queue::pushed(AutoSendLeadAiSuggestionJob::class), 'Sin cadena de reprogramaciones.');
 
-        /* Y a las 09:00 sale, una sola vez. */
-        $this->a_las('09:00:00', 1);
-        $reprogramado->handle(app(LeadSuggestionSendService::class), app(LeadAiSuggestionAutoSendScheduler::class));
+        $jobs = Queue::pushed(AutoSendLeadAiSuggestionJob::class)->values();
+        $this->assertCount(3, $jobs, 'La reprogramación que corrió fuera de la franja se reprograma otra vez.');
+        $segunda = $jobs[2];
+        $this->assertSame(2, $this->propiedad($segunda, 'reprogramaciones_por_la_franja'));
+        $this->assertTrue($segunda->delay->equalTo($manana_nueve_y_uno), 'De madrugada, la apertura de ese mismo día más el margen.');
+
+        /* Y a las 09:01 sale, una sola vez. */
+        $this->a_las('09:01:00', 1);
+        $primera->handle(app(LeadSuggestionSendService::class), app(LeadAiSuggestionAutoSendScheduler::class));
+        $segunda->handle(app(LeadSuggestionSendService::class), app(LeadAiSuggestionAutoSendScheduler::class));
         $this->assertCount(1, $espia->envios);
         $this->assertSame('enviado', $mensaje->fresh()->status);
+    }
+
+    /**
+     * El tope: un job que ya se reprogramó TOPE veces y vuelve a correr fuera de la franja no encola
+     * otro (con la cola `sync` de los tests, donde la demora no existe, sería un bucle). No manda: le
+     * saca el contador y deja la sugerencia en la bandeja para una persona.
+     *
+     * @return void
+     */
+    public function test_con_el_tope_de_reprogramaciones_queda_en_la_bandeja(): void
+    {
+        Queue::fake();
+        $espia = $this->espiar_sender();
+        $this->demora_de_respaldo(30);
+
+        /* Programado a las 07:30 (queda para las 09:01, con el token vivo hasta entonces): así el token
+           sigue vigente cuando el job del tope corre a las 08:00 y la única razón para no mandar es el
+           tope, no un token vencido. */
+        $this->a_las('07:30:00');
+        $mensaje = $this->seguimiento_retenido($this->crear_lead('+5493415550017'));
+        app(LeadAiSuggestionAutoSendScheduler::class)->schedule_for_suggested_message($mensaje);
+        $token = $this->propiedad($this->unico_job_encolado(), 'auto_send_token');
+
+        $en_el_tope = new AutoSendLeadAiSuggestionJob(
+            (int) $mensaje->id,
+            (int) $token,
+            AutoSendLeadAiSuggestionJob::TOPE_DE_REPROGRAMACIONES_POR_LA_FRANJA
+        );
+
+        $this->a_las('08:00:00');
+        $en_el_tope->handle(app(LeadSuggestionSendService::class), app(LeadAiSuggestionAutoSendScheduler::class));
+
+        $this->assertSame([], $espia->envios);
+        $this->assertCount(1, Queue::pushed(AutoSendLeadAiSuggestionJob::class), 'En el tope no se encola otra reprogramación.');
+        $this->assertSame('sugerido', $mensaje->fresh()->status, 'Queda en la bandeja para una persona.');
+        $this->assertNull($mensaje->fresh()->ai_auto_send_at, 'Sin contador: no se va a mandar sola.');
     }
 
     /**
