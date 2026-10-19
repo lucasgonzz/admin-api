@@ -8,6 +8,8 @@ use App\Models\ClientSerperUsage;
 use App\Models\SharedProductFact;
 use Carbon\Carbon;
 use Illuminate\Support\Str;
+use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Support\Facades\RateLimiter;
 use Laravel\Sanctum\Sanctum;
 use Tests\Feature\AsistenteWhatsapp\BaseDelCanal;
 
@@ -154,5 +156,40 @@ class FichasCompartidasYConsumoSerperTest extends BaseDelCanal
     {
         $client = $this->negocio(); $this->login();
         $this->getJson('/api/admin/client/' . $client->id . '/serper')->assertOk()->assertJsonPath('has_telemetry', false)->assertJsonPath('totales.credits', null)->assertJsonPath('cost_usd', null);
+    }
+
+    public function test_la_cubeta_es_por_negocio_aunque_compartan_ip_y_no_gasta_la_del_legacy()
+    {
+        config(['services.shared_catalog.rate_limit_per_minute' => 3]);
+        $a = $this->negocio(); $b = $this->negocio();
+        $this->withServerVariables(['REMOTE_ADDR' => '192.0.2.44']);
+        // Una cubeta legacy mínima vuelve observable cualquier consumo accidental de ella.
+        RateLimiter::for('api', function ($request) {
+            return Limit::perMinute(1)->by($request->ip());
+        });
+        $this->getJson('/api/inbound/product-facts/7791234567898', $this->headers($a))->assertOk()->assertHeader('X-RateLimit-Limit', '3');
+        $this->postJson('/api/inbound/product-facts/7791234567898/claim', [], $this->headers($a))->assertOk();
+        $this->postJson('/api/inbound/serper-usage', ['events' => [$this->evento()]], $this->headers($a))->assertOk();
+        $this->getJson('/api/inbound/product-facts/7791234567898', $this->headers($a))->assertStatus(429);
+        $this->getJson('/api/inbound/product-facts/7791234567898', $this->headers($b))->assertOk();
+        $this->getJson('/api/inbound/product-facts/7791234567898', ['X-Admin-Api-Key' => 'invalida'])->assertUnauthorized();
+
+        // El mismo IP todavía tiene disponible su primer pedido en la cubeta general.
+        $this->login();
+        $this->getJson('/api/admin/serper/resumen')->assertOk();
+        $this->getJson('/api/admin/serper/resumen')->assertStatus(429);
+
+        $router = app('router');
+        $checked = 0;
+        foreach ($router->getRoutes() as $route) {
+            if (strpos($route->uri(), 'api/inbound/product-facts/') === 0 || $route->uri() === 'api/inbound/serper-usage') {
+                $middleware = $router->gatherRouteMiddleware($route);
+                $this->assertNotContains('Illuminate\\Routing\\Middleware\\ThrottleRequests:api', $middleware);
+                $this->assertContains('Illuminate\\Routing\\Middleware\\ThrottleRequests:shared-catalog-inbound', $middleware);
+                $this->assertLessThan(array_search('Illuminate\\Routing\\Middleware\\ThrottleRequests:shared-catalog-inbound', $middleware), array_search('App\\Http\\Middleware\\StrictAdminInboundKey', $middleware));
+                $checked++;
+            }
+        }
+        $this->assertSame(4, $checked);
     }
 }

@@ -5,6 +5,12 @@ Contrato aditivo v1. Las rutas `/api/inbound/product-facts/{gtin}`, `/claim` y
 El middleware estricto no depende del interruptor legacy. La identidad del negocio
 sale de esa clave; `client_uuid` y `client_id` del payload no tienen autoridad.
 
+Las cuatro rutas comparten una cubeta propia de 180 pedidos/minuto por negocio
+autenticado, configurable con `SHARED_CATALOG_RATE_LIMIT_PER_MINUTE`. La credencial
+se valida antes del limitador y nunca se usa en claro como clave de caché. Estas
+rutas quedan fuera de la cubeta general por IP para no compartir el cupo entre
+empresas del mismo VPS ni consumir el de los callbacks legacy de soporte.
+
 El GTIN se valida con su dígito verificador y se guarda como cadena de 14 dígitos.
 EAN-8, UPC-A, EAN-13 y GTIN-14 equivalentes comparten clave. Los prefijos restringidos
 020–029, 040–049 y 200–299 no se investigan.

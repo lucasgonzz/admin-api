@@ -6,6 +6,14 @@ use Illuminate\Foundation\Http\Kernel as HttpKernel;
 
 class Kernel extends HttpKernel
 {
+    public function __construct(\Illuminate\Contracts\Foundation\Application $app, \Illuminate\Routing\Router $router)
+    {
+        parent::__construct($app, $router);
+        // Laravel adelanta los throttle de ruta al ordenar SubstituteBindings. El limitador
+        // del catálogo necesita primero la identidad validada del negocio, nunca su IP.
+        $this->prependToMiddlewarePriority(\App\Http\Middleware\StrictAdminInboundKey::class);
+    }
+
     /**
      * The application's global HTTP middleware stack.
      *
