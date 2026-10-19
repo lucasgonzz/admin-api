@@ -693,7 +693,13 @@ class DeploymentService
      */
     private function comando_para_levantar(): string
     {
-        return 'cd ' . $this->get_api_path() . ' && php artisan up';
+        /* En el VPS, a mano también como el usuario del sitio: levantarlo como root (la sesión SSH) es
+           justo lo que el pipeline dejó de hacer (como_usuario_del_sitio()). */
+        $usuario = $this->usuario_del_sitio_en_vps();
+
+        return 'cd ' . $this->get_api_path() . ' && '
+            . ($usuario === '' ? '' : 'sudo -H -u ' . $usuario . ' ')
+            . 'php artisan up';
     }
 
     /**
@@ -3178,7 +3184,8 @@ class DeploymentService
             try {
                 $clear_output = $this->run_command(
                     'run_migrations',
-                    "cd {$api_path} && php artisan {$clear_command} --no-ansi 2>&1",
+                    "cd {$api_path} && "
+                    . $this->como_usuario_del_sitio("php artisan {$clear_command} --no-ansi 2>&1"),
                     false
                 );
 
@@ -3222,7 +3229,7 @@ class DeploymentService
         $this->log('run_migrations', 'Corriendo migraciones...');
         $this->run_command(
             'run_migrations',
-            "cd {$api_path} && php artisan migrate --force",
+            "cd {$api_path} && " . $this->como_usuario_del_sitio('php artisan migrate --force'),
             true
         );
         $this->log('run_migrations', 'Migraciones completadas', 'success');
@@ -3333,7 +3340,7 @@ class DeploymentService
             try {
                 $this->run_command(
                     'run_seeders',
-                    "cd {$api_path} && {$resolved_seeder_command}"
+                    "cd {$api_path} && " . $this->como_usuario_del_sitio($resolved_seeder_command)
                 );
                 $this->log('run_seeders', "Seeder completado: {$version_seeder->seeder_class}", 'success');
 
@@ -3444,7 +3451,7 @@ class DeploymentService
             try {
                 $this->run_command(
                     'run_commands',
-                    "cd {$api_path} && {$resolved_command}",
+                    "cd {$api_path} && " . $this->como_usuario_del_sitio($resolved_command),
                     true
                 );
                 $this->log('run_commands', "Comando completado: {$resolved_command}", 'success');
@@ -3562,7 +3569,8 @@ class DeploymentService
            con código viejo. Se degrada a warning para que quede visible en deployment_logs. */
         $output = $this->run_command(
             'restart_queue_workers',
-            'cd ' . escapeshellarg($api_path) . ' && php artisan queue:restart --no-ansi 2>&1',
+            'cd ' . escapeshellarg($api_path) . ' && '
+            . $this->como_usuario_del_sitio('php artisan queue:restart --no-ansi 2>&1'),
             false
         );
 
@@ -4159,6 +4167,63 @@ class DeploymentService
     }
 
     /**
+     * Usuario de sistema dueño del sitio de la API destino, o '' si el destino no es un VPS.
+     *
+     * En el VPS (CloudPanel) cada sitio tiene su usuario (`api-<vps_path>`) y es el que corre PHP-FPM
+     * y los workers de supervisor. En el shared hosting el usuario SSH es el único dueño de todo, así
+     * que devuelve '' en vez de inventar un nombre.
+     *
+     * @return string
+     * @throws \RuntimeException Si es un VPS sin vps_path (no se cae a root en silencio).
+     */
+    private function usuario_del_sitio_en_vps(): string
+    {
+        return (new ClientApiPathResolver())->vps_site_user($this->target_api);
+    }
+
+    /**
+     * Envuelve un comando que arranca Laravel (artisan, o lo que la versión mande) para que corra
+     * COMO EL USUARIO DEL SITIO cuando el destino es un VPS (misión `deploy-vps-artisan-como-usuario-del-sitio`,
+     * 18/10/2026). En el shared hosting devuelve el comando idéntico, byte por byte.
+     *
+     * 🔴 Por qué existe. La credencial SSH del VPS es root. Todo lo que arranca Laravel como root crea
+     * sus archivos de root: el log del día (`storage/logs/laravel-AAAA-MM-DD.log`), la caché de datos y
+     * de vistas, `storage/framework/down`. PHP-FPM y los workers corren como `api-<sitio>` y no pueden
+     * escribir un archivo `root:root 664`. Medido en el upgrade #356 de Ananda (18/10/2026): un warning
+     * de AuditLogRecorder escrito por una migración (la tabla `audit_logs` todavía no existía) creó el
+     * log del día de root a las 22:09:37 y el sistema no pudo loguear hasta la medianoche.
+     *
+     * 🔴 Es el ÚNICO camino para armar un artisan de este servicio: migraciones, clears, seeders,
+     * comandos de la versión, `queue:restart`, `down` y `up` pasan todos por acá, y el test
+     * `ArtisanDelDeploymentCorreComoElUsuarioDelSitioTest` falla si algún `artisan` sale pelado en un
+     * VPS. Un artisan nuevo que no pase por acá reabre el hueco.
+     *
+     * `bash -c '<comando>'` y no un prefijo pegado al `php`: lo que llega es TEXTO LIBRE de la versión
+     * (`USER_ID=2700 php artisan x`, `a && b`, comillas del `--class='…'`) y un `sudo` delante de la
+     * primera palabra no lo cubre entero. Con `-c` el comando corre completo como el usuario del sitio
+     * y las comillas viajan por posix_single_quote(). El `cd` va afuera, del lado de quien llama
+     * (como root; no arranca nada de Laravel). `-H` fija HOME al del usuario del sitio.
+     *
+     * El nombre del usuario sale de client_apis.vps_path, texto libre del CRUD, y la credencial es
+     * root: va entrecomillado igual que el comando.
+     *
+     * @param  string  $comando  Lo que corre después del `cd` (sin el `cd`).
+     * @return string
+     * @throws \RuntimeException Si es un VPS sin vps_path.
+     */
+    private function como_usuario_del_sitio(string $comando): string
+    {
+        $usuario = $this->usuario_del_sitio_en_vps();
+
+        if ($usuario === '') {
+            return $comando;
+        }
+
+        return 'sudo -H -u ' . $this->posix_single_quote($usuario)
+            . ' /bin/bash -c ' . $this->posix_single_quote($comando);
+    }
+
+    /**
      * Ruta SSH del directorio público del SPA en el servidor destino.
      *
      * VPS: el path ya es absoluto (ej: /home/arfren2/htdocs/arfren.comerciocity.com).
@@ -4261,7 +4326,60 @@ class DeploymentService
             false
         );
 
+        $this->devolver_storage_al_usuario_del_sitio($step, $api_path);
+
         $this->log($step, 'Directorios de storage asegurados', 'success');
+    }
+
+    /**
+     * En el VPS, deja `storage/logs`, `storage/framework` y `bootstrap/cache` con el dueño del sitio
+     * (misión `deploy-vps-artisan-como-usuario-del-sitio`, 18/10/2026). En el shared hosting no hace
+     * nada: el usuario SSH es el único dueño de todo.
+     *
+     * Es la guarda de la corrección, NO la corrección: lo que arranca Laravel en las etapas que siguen
+     * ya corre como el usuario del sitio (como_usuario_del_sitio()), así que root no vuelve a crear
+     * nada. Esto cubre lo que sigue siendo de root y corre ANTES: el `composer install` de upload_api
+     * (sus scripts arrancan Laravel y escriben `bootstrap/cache/*.php`, y podrían loguear un aviso) y el
+     * `mkdir -p` de arriba, que crea el árbol de root si faltaba. También cura un log o un directorio de
+     * root que haya dejado un despliegue anterior, antes de que el usuario del sitio los necesite.
+     *
+     * Solo esos tres árboles, que son chicos (el chmod -R de arriba ya recorre los dos últimos en cada
+     * despliegue): `storage/app` puede tener años de adjuntos y un `chown -R` ahí tardaría minutos. Nunca
+     * aborta: llegado este punto el código ya está subido, y si no se confirma queda un warning.
+     *
+     * @param  string  $step      Etapa de log.
+     * @param  string  $api_path  Raíz de la API destino ya resuelta.
+     * @return void
+     */
+    private function devolver_storage_al_usuario_del_sitio(string $step, string $api_path): void
+    {
+        $usuario = $this->usuario_del_sitio_en_vps();
+        if ($usuario === '') {
+            return;
+        }
+
+        $output = $this->run_command(
+            $step,
+            'cd ' . $this->posix_single_quote($api_path)
+            . ' && chown -R ' . $this->posix_single_quote($usuario . ':' . $usuario)
+            . ' storage/logs storage/framework bootstrap/cache 2>&1'
+            . ' && echo CC_STORAGE_DEL_SITIO_OK',
+            false
+        );
+
+        if (strpos($output, 'CC_STORAGE_DEL_SITIO_OK') !== false) {
+            $this->log($step, 'storage/logs, storage/framework y bootstrap/cache con el dueño del sitio (' . $usuario . ').', 'success');
+
+            return;
+        }
+
+        $this->log(
+            $step,
+            'No se pudo confirmar el dueño de storage/logs, storage/framework y bootstrap/cache. El usuario del '
+            . 'sitio (' . $usuario . ') podría no poder escribir el log del día: revisar que no haya archivos de root. '
+            . 'Salida: ' . $this->truncate_for_log($output),
+            'warning'
+        );
     }
 
     /**
@@ -5622,10 +5740,9 @@ class DeploymentService
      * Si el `down` falla, lanza: es mejor no reemplazar la API que reemplazarla con el sistema
      * atendiendo.
      *
-     * ⚠️ En el VPS corre como root, igual que el `migrate` de siempre: no hay un ayudante que corra
-     * artisan como el usuario del sitio con su PHP (vps_site_user() solo da el nombre, lo usa el
-     * chown de la instalación). `storage/framework/down` queda de root con permisos 644, que php-fpm
-     * del sitio puede leer, y el `up` (también como root) lo borra.
+     * En el VPS corre como el usuario del sitio (`api-<vps_path>`), igual que el `up`, las migraciones,
+     * los seeders y los comandos: ver como_usuario_del_sitio(). Hasta el 18/10/2026 corría como root
+     * (la credencial SSH del VPS) y dejaba `storage/framework/down` de root.
      *
      * @param  string  $api_path
      * @return void
@@ -5640,7 +5757,8 @@ class DeploymentService
 
         $this->exec_hosting_ssh(
             'upload_api',
-            'cd ' . $this->posix_single_quote($api_path) . ' && php artisan down --no-ansi 2>&1',
+            'cd ' . $this->posix_single_quote($api_path) . ' && '
+            . $this->como_usuario_del_sitio('php artisan down --no-ansi 2>&1'),
             true,
             true
         );
@@ -5691,7 +5809,8 @@ class DeploymentService
 
         $this->run_command(
             'restart_queue_workers',
-            'cd ' . $this->posix_single_quote($api_path) . ' && php artisan up --no-ansi 2>&1'
+            'cd ' . $this->posix_single_quote($api_path) . ' && '
+            . $this->como_usuario_del_sitio('php artisan up --no-ansi 2>&1')
         );
 
         $this->mantenimiento_posible = false;

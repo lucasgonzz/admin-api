@@ -1520,7 +1520,10 @@ SH
         $this->assertNull($error, $error === null ? '' : $error->getMessage() . "\n" . $this->logs($e['upgrade']));
 
         $upgrade = $e['upgrade']->fresh();
-        $this->assertNotNull($this->ssh->posicion_de("cd '/home/api-" . $e['carpeta'] . "/empresa-api' && php artisan up"));
+        /* El `up` apunta a la carpeta del sitio y, en el VPS, corre como su usuario (no como root). */
+        $this->assertNotNull($this->ssh->posicion_de(
+            "cd '/home/api-" . $e['carpeta'] . "/empresa-api' && sudo -H -u 'api-" . $e['carpeta'] . "' /bin/bash -c 'php artisan up"
+        ));
         $this->assertCount(1, $this->comandos_con('php artisan up'));
         $this->assertSame('paused', (string) $upgrade->deployment_status);
         $this->assertNotNull($upgrade->vps_supervisor_moved_at);
