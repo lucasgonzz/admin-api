@@ -56,6 +56,17 @@ class RouteServiceProvider extends ServiceProvider
      */
     protected function configureRateLimiting()
     {
+        RateLimiter::for('shared-catalog-inbound', function (Request $request) {
+            $client = $request->attributes->get('sync_client');
+            abort_unless($client, 401, 'Falta la identidad validada del negocio.');
+            $perMinute = max(1, (int) config('services.shared_catalog.rate_limit_per_minute', 180));
+
+            // Las empresas alojadas en el mismo VPS comparten IP de salida. Reservas,
+            // polling y telemetría de un negocio no pueden gastar la cubeta de los demás
+            // ni la de los callbacks legacy. No se usa la clave privada como cache key.
+            return Limit::perMinute($perMinute)->by('shared-catalog:client:' . $client->id);
+        });
+
         RateLimiter::for('api', function (Request $request) {
             // Local: conversación + Pusher superan 60 req/min; en prod usar API_RATE_LIMIT_PER_MINUTE.
             $default_per_minute = app()->environment('local') ? 600 : 60;

@@ -6,6 +6,14 @@ use Illuminate\Foundation\Http\Kernel as HttpKernel;
 
 class Kernel extends HttpKernel
 {
+    public function __construct(\Illuminate\Contracts\Foundation\Application $app, \Illuminate\Routing\Router $router)
+    {
+        parent::__construct($app, $router);
+        // Laravel adelanta los throttle de ruta al ordenar SubstituteBindings. El limitador
+        // del catálogo necesita primero la identidad validada del negocio, nunca su IP.
+        $this->prependToMiddlewarePriority(\App\Http\Middleware\StrictAdminInboundKey::class);
+    }
+
     /**
      * The application's global HTTP middleware stack.
      *
@@ -64,6 +72,7 @@ class Kernel extends HttpKernel
         'throttle' => \Illuminate\Routing\Middleware\ThrottleRequests::class,
         'verified' => \Illuminate\Auth\Middleware\EnsureEmailIsVerified::class,
         'admin.inbound.key' => \App\Http\Middleware\AdminInboundKey::class,
+        'admin.inbound.strict' => \App\Http\Middleware\StrictAdminInboundKey::class,
         // Endpoint de ingesta de tareas creadas por Claude desde la conversación (grupo 180).
         'claude.task.key' => \App\Http\Middleware\ClaudeTaskKey::class,
         // Canal por el que una instancia de demo reporta lo que el lead hace adentro (misión 48).

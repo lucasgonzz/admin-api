@@ -548,6 +548,10 @@ return [
         'web_dataset_id'  => env('META_CAPI_WEB_DATASET_ID', ''),
     ],
 
+    'shared_catalog' => [
+        'rate_limit_per_minute' => (int) env('SHARED_CATALOG_RATE_LIMIT_PER_MINUTE', 180),
+    ],
+
     // Ingesta de tareas creadas por Claude desde la conversación (grupo 180).
     // Si la clave no está definida, el endpoint queda cerrado: no se acepta ninguna request.
     'claude_task_ingest' => [
