@@ -188,6 +188,14 @@ Route::middleware('demo.eventos.key')
 /*
 | Callback desde empresa-api cliente (inbound)
 */
+// Catálogo público compartido: credencial obligatoria, independiente del modo legacy.
+Route::middleware('admin.inbound.strict')->prefix('inbound')->group(function () {
+    Route::get('product-facts/{gtin}', [\App\Http\Controllers\SharedProductFactsController::class, 'show']);
+    Route::post('product-facts/{gtin}/claim', [\App\Http\Controllers\SharedProductFactsController::class, 'claim']);
+    Route::put('product-facts/{gtin}', [\App\Http\Controllers\SharedProductFactsController::class, 'update']);
+    Route::post('serper-usage', [\App\Http\Controllers\SerperUsageController::class, 'store']);
+});
+
 Route::middleware('admin.inbound.key')
     ->prefix('inbound')
     ->group(function () {
@@ -776,6 +784,8 @@ Route::prefix('admin')->group(function () {
         Route::get('client/{clientId}/tokens', [ClientTokensController::class, 'show_json']);
         Route::post('client/{clientId}/tokens/sync', [ClientTokensController::class, 'sync_json']);
         Route::get('tokens/resumen', [TokensResumenController::class, 'index_json']);
+        Route::get('serper/resumen', [\App\Http\Controllers\SerperUsageController::class, 'index']);
+        Route::get('client/{clientId}/serper', [\App\Http\Controllers\SerperUsageController::class, 'client']);
 
         /* Registro de las consultas del circuito de imágenes de artículos (misión
            imagenes-catalogo-completo, 27/9/2026): cada búsqueda de imágenes (Serper / Google) y cada
