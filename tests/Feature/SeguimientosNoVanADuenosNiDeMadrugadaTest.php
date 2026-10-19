@@ -226,6 +226,66 @@ class SeguimientosNoVanADuenosNiDeMadrugadaTest extends TestCase
         $this->assertSame(0, $this->seguimientos_en_el_hilo($mismo_numero));
     }
 
+    /**
+     * 🔴 Revisión independiente, sonda 4: fichas cargadas a mano con el 15 del celular o con dos
+     * números en el mismo campo. La guarda tiene que callar al dueño igual —el destino es el número
+     * completo, sin el 15— y seguir sin callar a un lead que solo coincide en los últimos 8 dígitos.
+     *
+     * @return void
+     */
+    public function test_la_ficha_con_el_15_o_con_varios_numeros_tambien_calla_al_dueno(): void
+    {
+        $this->crear_cliente('(0345) 15-462-2139', true);
+        $this->crear_cliente('351 15 4622139', true);
+        $this->crear_cliente('+54 381 15 4622139', true);
+        $this->crear_cliente('11 15 4444-5555', true);
+        $this->crear_cliente('2966 15 123456', true);
+        $this->crear_cliente('3424622139 / 3424000000', true);
+        $con_empleado = $this->crear_cliente(null, true);
+        $this->crear_empleado($con_empleado, '3434000001, 3434000002; 3434000003 y 3434000004');
+
+        /* Un número sin código de área no se puede resolver a un número completo: se deja como está
+           (documentado en ClientPhoneDirectory). Lo que NO se hace es caer a comparar sufijos. */
+        $this->crear_cliente('4777888', true);
+
+        $directorio = new ClientPhoneDirectory();
+
+        $callados = [
+            '+5493454622139' => '(0345) 15-462-2139',
+            '+5493514622139' => '351 15 4622139',
+            '+5493814622139' => '+54 381 15 4622139',
+            '+5491144445555' => '11 15 4444-5555 (área de 2 dígitos)',
+            '+5492966123456' => '2966 15 123456 (área de 4 dígitos)',
+            '+5493424622139' => 'primer número de «3424622139 / 3424000000»',
+            '+5493424000000' => 'segundo número de «3424622139 / 3424000000»',
+            '+5493434000001' => 'empleado, separado por coma',
+            '+5493434000002' => 'empleado, separado por punto y coma',
+            '+5493434000003' => 'empleado, antes de « y »',
+            '+5493434000004' => 'empleado, después de « y »',
+        ];
+        foreach ($callados as $telefono => $formato) {
+            $this->assertTrue($directorio->es_telefono_de_cliente($telefono), "Ficha «{$formato}»: {$telefono} es el dueño y tiene que quedar callado.");
+        }
+
+        /* Control: solo los últimos 8 dígitos en común con «(0345) 15-462-2139» → es otro número. */
+        $this->assertTrue(WhatsappNormalizer::phones_match('3454622139', '+5491154622139'), 'Montaje: el comparador laxo los confundiría.');
+        $this->assertFalse($directorio->es_telefono_de_cliente('+5491154622139'), 'Un lead que coincide solo en los últimos 8 dígitos no es el dueño.');
+
+        /* El número sin área no calla a nadie: ni a uno que termina igual. */
+        $this->assertFalse($directorio->es_telefono_de_cliente('+5493414777888'));
+
+        /* Y de punta a punta, por el cron: el dueño con el 15 en la ficha no recibe; el parecido, sí. */
+        $espia = $this->espiar_sender();
+        $this->sembrar_regla_y_plantilla();
+        $this->crear_lead('+5493454622139');
+        $this->crear_lead('+5491154622139');
+
+        app(LeadFollowupService::class)->process_all_active_leads();
+
+        $this->assertSame([], $this->envios_a($espia, '+5493454622139'));
+        $this->assertCount(1, $this->envios_a($espia, '+5491154622139'));
+    }
+
     /* ---------------------------------------------------------------------------------------------
      | 3. La franja horaria del cron
      * ------------------------------------------------------------------------------------------- */

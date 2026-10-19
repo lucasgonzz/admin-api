@@ -33,6 +33,13 @@ class ClientPhoneDirectory
     private const PREFIJO_DIGITOS = 'd:';
 
     /**
+     * Separadores con los que se cargan dos o más números en el mismo campo de teléfono:
+     * `3454622139 / 3454000000`, `…, …`, `…; …` y `… y …` (la «y» como palabra suelta, para no partir
+     * nada que la tenga adentro). Ver candidatos_del_campo().
+     */
+    private const SEPARADORES_DE_TELEFONOS = '/\s*[\/,;]\s*|\s+y\s+/iu';
+
+    /**
      * Índice de los teléfonos de clientes para {@see es_telefono_de_cliente()}: clave de búsqueda →
      * teléfonos tal como están guardados en la ficha. Se arma UNA vez por instancia, en la primera
      * consulta, y vale para toda la corrida (el cron de seguimientos recorre cientos de leads: sin
@@ -247,7 +254,9 @@ class ClientPhoneDirectory
      *
      * El índice se arma una vez por instancia (ver {@see $indice_de_telefonos_de_clientes}); acá solo
      * se buscan los candidatos por clave y se confirma cada uno con `equals_estricto()`, que es el
-     * único que decide.
+     * único que decide. Una ficha cargada con el 15 del celular o con varios números en el mismo campo
+     * entra al índice con cada número completo que se puede leer en ella (ver candidatos_del_campo());
+     * una sin código de área no se puede resolver y no calla a nadie.
      *
      * @param string $phone Teléfono del lead, en cualquier formato.
      *
@@ -345,8 +354,17 @@ class ClientPhoneDirectory
 
         $guardados = array_merge($guardados, $telefonos_de_admins);
 
+        /* Cada campo puede traer más de un número, o el número con el 15 del celular: se indexan
+           todos los números COMPLETOS que se pueden leer en él (ver candidatos_del_campo()). */
+        $candidatos = [];
+        foreach ($guardados as $campo) {
+            foreach (self::candidatos_del_campo((string) $campo) as $candidato) {
+                $candidatos[] = $candidato;
+            }
+        }
+
         $indice = [];
-        foreach ($guardados as $guardado) {
+        foreach ($candidatos as $guardado) {
             $guardado = trim((string) $guardado);
             $digitos  = preg_replace('/\D+/', '', $guardado) ?? '';
             if ($digitos === '') {
@@ -369,5 +387,97 @@ class ClientPhoneDirectory
         $this->indice_de_telefonos_de_clientes = $indice;
 
         return $indice;
+    }
+
+    /**
+     * Los números completos que se pueden leer en un campo de teléfono cargado a mano.
+     *
+     * 🔴 Revisión independiente (misión asistente-arreglos-segunda-prueba, 19/10/2026): la guarda no
+     * callaba al dueño cuando la ficha traía el 15 del celular (`(0345) 15-462-2139`,
+     * `345 15 4622139`, `+54 345 15 4622139`) o dos números en el mismo campo
+     * (`3454622139 / 3454000000`): `normalize()` no saca el 15 ni parte el campo, así que el número
+     * guardado no coincidía con el destino. Devuelve, sin repetir:
+     *   - el campo entero, como estaba (lo que había antes de esta corrección);
+     *   - cada número del campo, partido por `/`, `,`, `;` y ` y ` ({@see SEPARADORES_DE_TELEFONOS});
+     *   - de cada uno de esos, la versión SIN el 15 ({@see variantes_sin_el_15()}).
+     *
+     * Siempre son números COMPLETOS (área + abonado): la comparación sigue siendo `equals_estricto()`
+     * contra el destino entero y nunca por los últimos dígitos.
+     *
+     * ⚠️ Lo que no se puede resolver, y se deja así a propósito: un número sin código de área
+     * (`4622139`, `15-462-2139`). Para leerlo habría que adivinar el área o comparar por sufijo, que es
+     * exactamente lo que le callaría los seguimientos a un lead real de otra ciudad. Esa ficha no calla
+     * a nadie; la solución es cargarla completa.
+     *
+     * @param string $campo Contenido crudo del campo de teléfono.
+     *
+     * @return array<int, string>
+     */
+    private static function candidatos_del_campo(string $campo): array
+    {
+        $campo = trim($campo);
+        if ($campo === '') {
+            return [];
+        }
+
+        $numeros = [$campo];
+        $partes  = preg_split(self::SEPARADORES_DE_TELEFONOS, $campo);
+        if (is_array($partes) && count($partes) > 1) {
+            foreach ($partes as $parte) {
+                $parte = trim((string) $parte);
+                if ($parte !== '') {
+                    $numeros[] = $parte;
+                }
+            }
+        }
+
+        $candidatos = $numeros;
+        foreach ($numeros as $numero) {
+            foreach (self::variantes_sin_el_15($numero) as $variante) {
+                $candidatos[] = $variante;
+            }
+        }
+
+        return array_values(array_unique($candidatos));
+    }
+
+    /**
+     * El número sin el 15 del celular, si lo tiene: los 10 dígitos de área + abonado.
+     *
+     * El 15 es el prefijo de móvil que se marcaba dentro del país entre el código de área y el
+     * abonado (`0345 15 462-2139`); WhatsApp no lo usa (`+54 9 345 462-2139`). Se reconoce así:
+     * quitados el 0 de larga distancia, el 54 del país y el 9 de móvil internacional, quedan 12
+     * dígitos —uno de área de 2 a 4, el 15 y el abonado— y al sacar el 15 quedan los 10 de un número
+     * argentino completo. Si hay más de una lectura posible (el 15 podría estar después de un área de
+     * 2, de 3 o de 4 dígitos), se devuelven todas: cada una es un número completo y distinto, y solo
+     * calla al lead cuyo destino es exactamente ese número.
+     *
+     * @param string $numero Un solo número, en cualquier formato.
+     *
+     * @return array<int, string> Cero, una o varias variantes de 10 dígitos.
+     */
+    private static function variantes_sin_el_15(string $numero): array
+    {
+        $digitos = ltrim(preg_replace('/\D+/', '', $numero) ?? '', '0');
+
+        if (strpos($digitos, '54') === 0) {
+            $digitos = ltrim(substr($digitos, 2), '0');
+        }
+        if (strlen($digitos) === 13 && $digitos[0] === '9') {
+            $digitos = substr($digitos, 1);
+        }
+
+        if (strlen($digitos) !== 12) {
+            return [];
+        }
+
+        $variantes = [];
+        foreach ([2, 3, 4] as $largo_del_area) {
+            if (substr($digitos, $largo_del_area, 2) === '15') {
+                $variantes[] = substr($digitos, 0, $largo_del_area) . substr($digitos, $largo_del_area + 2);
+            }
+        }
+
+        return $variantes;
     }
 }
