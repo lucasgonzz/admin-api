@@ -110,6 +110,12 @@ class CheckPaginaSinDemo extends Command
                 . FranjaHorariaDeSeguimientos::HORA_DE_INICIO . ':00 a ' . FranjaHorariaDeSeguimientos::HORA_DE_FIN
                 . ':00): no se manda nada, la corrida de la mañana lo vuelve a evaluar.');
 
+            /* Rastro en el log (no solo en la salida del comando, que en el scheduler no lee nadie):
+               si un lead esperaba este mensaje y no le llegó, el motivo queda escrito. */
+            Log::info('CheckPaginaSinDemo: fuera de la franja horaria de seguimientos; no se evalúa a nadie.', [
+                'ahora' => $now->toDateTimeString(),
+            ]);
+
             return 0;
         }
 
@@ -202,7 +208,13 @@ class CheckPaginaSinDemo extends Command
              * le manda el seguimiento de la página: es la cadencia de un lead, la misma guarda que el
              * cron de seguimientos. No se marca: la columna dice "enviado", no "descartado", y si el
              * número deja de ser de un cliente el próximo tick lo vuelve a evaluar. */
-            if ($directorio->es_lead_de_un_cliente($lead)) {
+            $motivo_cliente = $directorio->motivo_de_lead_de_un_cliente($lead);
+            if ($motivo_cliente !== null) {
+                Log::info('CheckPaginaSinDemo: lead callado por ser de un cliente; no recibe el seguimiento de la página.', [
+                    'lead_id' => $lead->id,
+                    'motivo'  => $motivo_cliente,
+                ]);
+
                 continue;
             }
 

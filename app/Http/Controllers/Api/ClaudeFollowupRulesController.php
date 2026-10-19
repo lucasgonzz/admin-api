@@ -100,12 +100,18 @@ class ClaudeFollowupRulesController extends Controller
      *
      * Con `horas_espera = 1` o `= 2`, CADA corrida del cron cumple la condición: el lead recibe un
      * mensaje, el reloj se reinicia con ese mensaje, dos horas después vuelve a cumplirse. La
-     * cadencia real pasa a ser "un mensaje cada dos horas" —diez mensajes en veinte horas a una
-     * persona real, que es el tope de `max_followups`— y el mínimo de 1 que había hasta el 3/9/2026
-     * NO frenaba nada de eso: era un mínimo que decía impedir el martilleo y lo dejaba pasar entero.
+     * cadencia real pasa a ser "un mensaje cada dos horas" —seis por día dentro de la franja horaria
+     * (corridas de las 10, 12, 14, 16, 18 y 20), o sea los diez de `max_followups` en menos de dos
+     * días a una persona real— y el mínimo de 1 que había hasta el 3/9/2026 NO frenaba nada de eso:
+     * era un mínimo que decía impedir el martilleo y lo dejaba pasar entero.
      *
      * 3 es el primer valor que obliga a saltear una corrida: a las 2 horas `2 < 3` y no manda, a
      * las 4 sí. O sea que el piso REAL entre dos mensajes queda en 4 horas.
+     *
+     * Desde el 19/10/2026 (misión asistente-arreglos-segunda-prueba, N11) el cron sigue corriendo
+     * cada dos horas pero procesa solo dentro de la franja de 09:00 a 21:00, hora de Argentina
+     * ({@see \App\Services\FranjaHorariaDeSeguimientos}): de noche no manda nada y la primera corrida
+     * que procesa es la de las 10:00. El razonamiento del mínimo no cambia.
      */
     const HORAS_ESPERA_MIN = 3;
 
@@ -328,7 +334,9 @@ class ClaudeFollowupRulesController extends Controller
                 $fila_resultado['advertencia'] = 'ESTO NO ES UNA CADENCIA QUE ARRANCA MAÑANA: hay '
                     . $disparo_inmediato . ' lead(s) en "' . $estado . '" cuyo último mensaje ya es más viejo que '
                     . 'las ' . (int) $propuesto['horas_espera'] . ' horas propuestas, así que reciben el seguimiento '
-                    . 'en la PRÓXIMA corrida del cron, dentro de las 2 horas. Un lead sin ningún mensaje cuenta '
+                    . 'en la PRÓXIMA corrida del cron que procese: dentro de las 2 horas si es entre las 09:00 y '
+                    . 'las 21:00 (hora de Argentina); de noche el cron no manda nada y los toma la corrida de las '
+                    . '10:00. Un lead sin ningún mensaje cuenta '
                     . 'desde que se creó (LeadFollowupService::last_message_at()), o sea que los parados hace meses '
                     . 'cumplen cualquier horas_espera.';
             }
@@ -361,7 +369,8 @@ class ClaudeFollowupRulesController extends Controller
                 'nota'                  => 'Simulación: no se escribió ninguna regla. Mirá DOS números de cada fila '
                     . 'antes de seguir: `leads_en_ese_estado` es a cuánta gente real le cambia la cadencia, y '
                     . '`disparo_inmediato` es a cuántos de ésos les sale el mensaje en la próxima corrida del cron '
-                    . '(dentro de las 2 horas), no dentro de las horas_espera. Y mirá `motor_de_seguimientos`, que '
+                    . 'que procese (dentro de las 2 horas entre las 09:00 y las 21:00, hora de Argentina; de noche, '
+                    . 'la de las 10:00), no dentro de las horas_espera. Y mirá `motor_de_seguimientos`, que '
                     . 'dice cuántas reglas activas quedan después de este lote. Para aplicar de verdad, repetí la '
                     . 'misma llamada con dry_run=false, confirm_count=' . $cambiarian . ' y confirm_token='
                     . $confirm_token . '.',
@@ -558,13 +567,17 @@ class ClaudeFollowupRulesController extends Controller
      * `LeadFollowupService::last_message_at()` (línea ~563) cae a `$lead->created_at` cuando el lead
      * no tiene ningún mensaje. O sea que un lead parado hace meses tiene un `$hours` enorme y cumple
      * CUALQUIER `horas_espera`. Prender una regla nueva en un estado con leads viejos adentro no es
-     * "empezar una cadencia": es mandarles un WhatsApp a todos ellos dentro de las dos horas
-     * siguientes. `leads_en_ese_estado` no alcanzaba para verlo — decía cuántos hay, no a cuántos
-     * les sale el mensaje ya.
+     * "empezar una cadencia": es mandarles un WhatsApp a todos ellos en la próxima corrida que
+     * procese (dentro de las dos horas siguientes si es de día; de noche, en la de las 10:00, porque
+     * el cron solo procesa entre las 09:00 y las 21:00). `leads_en_ese_estado` no alcanzaba para
+     * verlo — decía cuántos hay, no a cuántos les sale el mensaje ya.
      *
      * ⚠️ Es una ESTIMACIÓN, y de las que se pasan para arriba, no para abajo:
-     *   - se usa `MAX(created_at)` de los mensajes y el servicio usa el último por `id`; con los
-     *     `created_at` desordenados podrían diferir por minutos;
+     *   - se usa `MAX(created_at)` de los mensajes y el servicio, desde el 19/10/2026, el máximo de
+     *     `COALESCE(sent_at, created_at)` en los salientes: como un mensaje sale después de crearse,
+     *     el servicio ve un último mensaje igual o más nuevo y la estimación queda igual o más alta;
+     *   - no descuenta a los leads que el cron saltea por ser de un cliente o estar promovidos
+     *     (`ClientPhoneDirectory::es_lead_de_un_cliente()`), así que también ahí se pasa para arriba;
      *   - no se replica el guard de `demo_agendada` con demo futura (el cron ahí no manda), así que
      *     en ese estado el número puede quedar más alto que la realidad.
      * Una cota superior es el error que corresponde para un número que existe para frenar a alguien.
@@ -663,7 +676,8 @@ class ClaudeFollowupRulesController extends Controller
         if ($horas < self::HORAS_ESPERA_MIN) {
             return 'el mínimo es ' . self::HORAS_ESPERA_MIN . ': el cron `leads:check-followups` corre cada DOS '
                 . 'horas (app/Console/Kernel.php, everyTwoHours()), así que con 1 o con 2 cada corrida cumple la '
-                . 'condición y la cadencia real pasa a ser un mensaje cada dos horas.';
+                . 'condición y la cadencia real pasa a ser un mensaje cada dos horas (dentro de la franja de '
+                . '09:00 a 21:00, la única en la que el cron manda).';
         }
 
         if ($horas > self::HORAS_ESPERA_MAX) {

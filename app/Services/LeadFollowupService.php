@@ -317,7 +317,15 @@ class LeadFollowupService
          * porque, contestara o no, a un cliente no se le manda la cadencia de un lead.
          */
         $directorio = $directorio !== null ? $directorio : new ClientPhoneDirectory();
-        if ($directorio->es_lead_de_un_cliente($lead)) {
+        $motivo     = $directorio->motivo_de_lead_de_un_cliente($lead);
+        if ($motivo !== null) {
+            /* El rastro de por qué este lead no recibió nada (una línea por lead y por corrida): sin
+               él, un lead de prueba con el número de un admin queda mudo sin explicación. */
+            Log::info('LeadFollowupService: lead callado por ser de un cliente; no recibe seguimientos automáticos.', [
+                'lead_id' => $lead->id,
+                'motivo'  => $motivo,
+            ]);
+
             return null;
         }
 

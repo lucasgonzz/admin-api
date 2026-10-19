@@ -24,6 +24,8 @@ use App\Services\LeadWhatsappOnboardingSettings;
 use App\Services\WhatsappSendService;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
+use Illuminate\Log\Events\MessageLogged;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
@@ -826,8 +828,163 @@ class SeguimientosNoVanADuenosNiDeMadrugadaTest extends TestCase
     }
 
     /* ---------------------------------------------------------------------------------------------
+     | 7. Rastro: que un lead callado o una corrida frenada se puedan explicar
+     * ------------------------------------------------------------------------------------------- */
+
+    /**
+     * Revisión independiente, punto 5: un lead de prueba de Lucas con su número de admin no puede
+     * quedar mudo sin explicación. Cuando la guarda calla a un lead queda una línea de log (info) con
+     * el lead y el motivo, en el cron y en la página sin demo; y cuando la franja frena una corrida,
+     * también, en los dos comandos.
+     *
+     * @return void
+     */
+    public function test_la_guarda_y_la_franja_dejan_rastro_en_el_log(): void
+    {
+        $logs = $this->capturar_logs();
+        $this->espiar_sender();
+        $this->sembrar_regla_y_plantilla();
+        $this->crear_admin('3415550031');
+        $lead = $this->crear_lead('+5493415550031');
+
+        app(LeadFollowupService::class)->process_all_active_leads();
+        $this->assertNotEmpty($this->logs_con($logs, 'info', ['lead_id' => $lead->id, 'motivo' => 'telefono_de_cliente']), 'El cron tiene que dejar dicho por qué calló al lead.');
+
+        $this->a_las('00:00:00');
+        app(LeadFollowupService::class)->process_all_active_leads();
+        $this->assertNotEmpty($this->logs_que_dicen($logs, 'info', 'fuera de la franja'), 'El cron tiene que dejar dicho que la franja frenó la corrida.');
+
+        /* La página sin demo: de noche, y de día con un lead que es cliente. */
+        $this->preparar_pagina_sin_demo();
+        $this->a_las('23:00:00');
+        $this->artisan('leads:check-pagina-sin-demo')->assertExitCode(0);
+        $this->assertNotEmpty($this->logs_que_dicen($logs, 'info', 'CheckPaginaSinDemo: fuera de la franja'), 'La página sin demo tiene que dejar dicho que la franja la frenó.');
+
+        $this->a_las('14:00:00');
+        $promovido                     = $this->lead_de_pagina('5493519999990');
+        $promovido->promoted_client_id = $this->crear_cliente(null, true)->id;
+        $promovido->save();
+        $this->mensaje_de_pagina($promovido, 'lead', $this->momento('11:00:00'));
+        $this->mensaje_de_pagina($promovido, 'sistema', $this->momento('11:10:00'));
+        $this->apertura($promovido, $this->momento('11:30:00'));
+
+        $this->artisan('leads:check-pagina-sin-demo')->assertExitCode(0);
+        $this->assertNotEmpty($this->logs_con($logs, 'info', ['lead_id' => $promovido->id, 'motivo' => 'promovido']), 'La página sin demo tiene que dejar dicho por qué calló al lead.');
+    }
+
+    /**
+     * `leads:check-followups` dice en su salida si la corrida quedó fuera de la franja.
+     *
+     * @return void
+     */
+    public function test_el_comando_del_cron_dice_si_quedo_fuera_de_la_franja(): void
+    {
+        $this->espiar_sender();
+
+        $this->a_las('00:00:00');
+        $this->artisan('leads:check-followups')
+            ->expectsOutput('Fuera de la franja horaria (09:00 a 21:00): sí, no se procesó ningún lead.')
+            ->assertExitCode(0);
+
+        $this->a_las('10:00:00');
+        $this->artisan('leads:check-followups')
+            ->expectsOutput('Fuera de la franja horaria (09:00 a 21:00): no.')
+            ->assertExitCode(0);
+    }
+
+    /**
+     * Los textos que `POST claude/followup-rules` le devuelve a Claude ya no prometen «dentro de las 2
+     * horas» sin más: con la franja, de noche el cron no manda y los toma la corrida de las 10:00. La
+     * simulación lo dice en la nota y en la advertencia del disparo inmediato.
+     *
+     * @return void
+     */
+    public function test_la_simulacion_de_reglas_habla_de_la_franja(): void
+    {
+        config(['services.claude_task_ingest.key' => 'clave-de-prueba-seguimientos']);
+
+        $parado               = new Lead();
+        $parado->uuid         = (string) Str::uuid();
+        $parado->contact_name = 'Lead parado hace meses';
+        $parado->status       = 'solicita_disponibilidad';
+        $parado->created_at   = Carbon::now()->subMonths(6);
+        $parado->save();
+
+        $respuesta = $this->withHeaders([
+            'X-Claude-Task-Key' => 'clave-de-prueba-seguimientos',
+            'Accept'            => 'application/json',
+        ])->postJson('/api/claude/followup-rules', ['reglas' => [
+            ['estado' => 'solicita_disponibilidad', 'horas_espera' => 24, 'max_followups' => 3, 'activa' => true],
+        ]]);
+
+        $respuesta->assertStatus(200);
+        $this->assertStringContainsString('de noche, la de las 10:00', (string) $respuesta->json('nota'));
+        $this->assertStringContainsString(
+            'de noche el cron no manda nada y los toma la corrida de las 10:00',
+            (string) $respuesta->json('cambios.0.advertencia')
+        );
+    }
+
+    /* ---------------------------------------------------------------------------------------------
      | Armado
      * ------------------------------------------------------------------------------------------- */
+
+    /**
+     * Junta todo lo que se loguea durante el test (cualquier canal), sin reemplazar el logger: escucha
+     * el evento `MessageLogged` que Laravel dispara por cada línea.
+     *
+     * @return \ArrayObject Filas `['level' => ..., 'message' => ..., 'context' => [...]]`.
+     */
+    private function capturar_logs(): \ArrayObject
+    {
+        $logs = new \ArrayObject();
+        Event::listen(MessageLogged::class, function (MessageLogged $evento) use ($logs) {
+            $logs->append(['level' => $evento->level, 'message' => $evento->message, 'context' => $evento->context]);
+        });
+
+        return $logs;
+    }
+
+    /**
+     * Logs de un nivel cuyo contexto incluye todos los pares pedidos.
+     *
+     * @param \ArrayObject         $logs
+     * @param string               $nivel
+     * @param array<string, mixed> $contexto
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function logs_con(\ArrayObject $logs, string $nivel, array $contexto): array
+    {
+        return array_values(array_filter($logs->getArrayCopy(), function ($fila) use ($nivel, $contexto) {
+            if ($fila['level'] !== $nivel) {
+                return false;
+            }
+            foreach ($contexto as $clave => $valor) {
+                if (! array_key_exists($clave, $fila['context']) || $fila['context'][$clave] != $valor) {
+                    return false;
+                }
+            }
+
+            return true;
+        }));
+    }
+
+    /**
+     * Logs de un nivel cuyo mensaje contiene el texto pedido (sin distinguir mayúsculas).
+     *
+     * @param \ArrayObject $logs
+     * @param string       $nivel
+     * @param string       $texto
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function logs_que_dicen(\ArrayObject $logs, string $nivel, string $texto): array
+    {
+        return array_values(array_filter($logs->getArrayCopy(), function ($fila) use ($nivel, $texto) {
+            return $fila['level'] === $nivel && mb_stripos((string) $fila['message'], $texto) !== false;
+        }));
+    }
 
     /**
      * Mueve el reloj (Carbon y, por lo tanto, AppTime::now()) a una hora del día de referencia.

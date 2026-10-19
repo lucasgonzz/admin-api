@@ -224,11 +224,30 @@ class ClientPhoneDirectory
      */
     public function es_lead_de_un_cliente(Lead $lead): bool
     {
+        return $this->motivo_de_lead_de_un_cliente($lead) !== null;
+    }
+
+    /**
+     * El MOTIVO por el que {@see es_lead_de_un_cliente()} da true, para dejarlo en el log: el que calla
+     * a un lead lo tiene que poder explicar después (un lead de prueba de Lucas con su número de admin
+     * no puede quedar mudo sin que se sepa por qué; revisión independiente, 19/10/2026).
+     *
+     * @param Lead $lead Lead a evaluar.
+     *
+     * @return string|null `promovido` (tiene promoted_client_id), `telefono_de_cliente` (su número es el
+     *                     de un cliente activo, de su equipo o de un admin) o null si es un lead más.
+     */
+    public function motivo_de_lead_de_un_cliente(Lead $lead): ?string
+    {
         if (! empty($lead->promoted_client_id)) {
-            return true;
+            return 'promovido';
         }
 
-        return $this->es_telefono_de_cliente((string) ($lead->phone ?? ''));
+        if ($this->es_telefono_de_cliente((string) ($lead->phone ?? ''))) {
+            return 'telefono_de_cliente';
+        }
+
+        return null;
     }
 
     /**
