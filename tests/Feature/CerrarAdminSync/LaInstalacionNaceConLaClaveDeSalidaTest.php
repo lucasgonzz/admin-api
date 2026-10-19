@@ -181,9 +181,11 @@ class LaInstalacionNaceConLaClaveDeSalidaTest extends TestCase
      */
     public function test_las_demos_no_reciben_la_clave_de_salida(): void
     {
-        foreach (['clave-de-la-demo-de-prueba-0123', null] as $api_key) {
+        foreach (['clave-de-la-demo-de-prueba-0123', null] as $indice => $api_key) {
             $demo = Demo::create([
-                'user_id'           => 4242,
+                /* Un `user_id` por demo: desde la misión pusher-canales-por-sistema (19/10/2026) el
+                 * admin no acepta dos demos con el mismo id de dueño. */
+                'user_id'           => 4242 + $indice,
                 'api_key'           => $api_key,
                 'erp_spa_url'       => 'https://demo-s6.comerciocity.com',
                 'erp_api_url'       => 'https://api-demo-s6.comerciocity.com',

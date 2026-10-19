@@ -34,6 +34,13 @@ class LaInstalacionNaceCerradaAAdminSyncTest extends TestCase
 {
     use DatabaseTransactions;
 
+    /**
+     * Demos creadas en este test, para darle a cada una su propio `user_id` (ver `variables_de_la_demo()`).
+     *
+     * @var int
+     */
+    private $demos_creadas = 0;
+
     /** @var EnvSshServiceFake Reemplazo en memoria del servicio SSH. */
     private $ssh;
 
@@ -267,7 +274,10 @@ class LaInstalacionNaceCerradaAAdminSyncTest extends TestCase
     private function variables_de_la_demo(?string $api_key): array
     {
         $demo = Demo::create([
-            'user_id'           => 4242,
+            /* Un `user_id` por demo: `test_una_demo_sin_clave_no_recibe_nada_de_esto` arma tres en el
+             * mismo test y, desde la misión pusher-canales-por-sistema (19/10/2026), el admin no
+             * acepta dos demos con el mismo id de dueño. */
+            'user_id'           => 4242 + $this->demos_creadas++,
             'api_key'           => $api_key,
             'erp_spa_url'       => 'https://demo-s6.comerciocity.com',
             'erp_api_url'       => 'https://api-demo-s6.comerciocity.com',

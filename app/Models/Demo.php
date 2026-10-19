@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\ModelProperties\DemoProperties;
 use App\Models\Concerns\HasUuid;
+use App\Services\UserIdUnicoService;
 use Illuminate\Database\Eloquent\Model;
 
 /**
@@ -21,6 +22,28 @@ class Demo extends Model
     public static function properties()
     {
         return DemoProperties::all();
+    }
+
+    /**
+     * Engancha las guardas de guardado del modelo.
+     *
+     * 🔴 `user_id` único entre sistemas (misión pusher-canales-por-sistema, 19/10/2026): el
+     * `user_id` de una demo es el `USER_ID` del `.env` de su ERP, o sea el id de su dueño, y no
+     * puede ser el que ya tiene otra demo u otro cliente. El 19/10 demo3 (2600) le mandó a
+     * Ferretotal (dueño 2600) el aviso en vivo del escaneo de una factura, porque toda la flota
+     * comparte una app de Pusher. Va en `saving` para cubrir el panel (`DemoController` con
+     * `ModelPropertiesHelper`), los endpoints `claude/*` y los seeders. Solo mira el valor cuando la
+     * demo es nueva o cuando su `user_id` cambió, así que el duplicado heredado de la demo 1 con el
+     * cliente 45 «DEMO» (los dos con 400, son el mismo sistema) se sigue pudiendo guardar. La regla
+     * entera está en `UserIdUnicoService`.
+     *
+     * @return void
+     */
+    protected static function booted()
+    {
+        static::saving(function (Demo $demo) {
+            app(UserIdUnicoService::class)->validar($demo);
+        });
     }
 
     protected $guarded = [];

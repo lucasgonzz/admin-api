@@ -34,6 +34,13 @@ class InstalacionDelEcommercePorClaudeTest extends TestCase
 {
     use DatabaseTransactions;
 
+    /**
+     * Escenarios armados en este test, para darle a cada cliente su propio `user_id` (ver `escenario()`).
+     *
+     * @var int
+     */
+    private $escenarios_creados = 0;
+
     /** Clave de ingesta de las requests del test. */
     const CLAVE = 'clave-de-prueba-claude-installs';
 
@@ -107,7 +114,10 @@ class InstalacionDelEcommercePorClaudeTest extends TestCase
         $client->api_key         = 'clave-api';
         $client->inbound_api_key = 'clave-inbound';
         $client->is_active       = true;
-        $client->user_id         = 4200;
+        /* Un bloque distinto por escenario del mismo test (4200, 4300...): desde la misión
+         * pusher-canales-por-sistema (19/10/2026) el admin no acepta dos clientes con el mismo
+         * `user_id`, y `test_las_demas_precondiciones_no_crean_nada` arma dos escenarios. */
+        $client->user_id         = 4200 + 100 * $this->escenarios_creados++;
         $client->save();
 
         if ($con_api) {

@@ -35,7 +35,10 @@ class UserIdBlockAllocatorService
 
         // Salvaguarda de colisión: si ese bloque ya está reservado (ventana de creación en
         // paralelo de otro lead), avanzar de 100 en 100 hasta uno libre.
-        while ($this->is_block_reserved($candidate)) {
+        // Tampoco se sugiere un bloque que ya tiene una demo (misión pusher-canales-por-sistema,
+        // 19/10/2026): el ancla sale solo de `clients`, y desde que `Client` no acepta un `user_id`
+        // de otro sistema, sugerir el de una demo haría fallar la promoción del lead con un 422.
+        while ($this->is_block_reserved($candidate) || $this->is_user_id_taken_by_another_system($candidate)) {
             $candidate += 100;
         }
 
@@ -167,5 +170,21 @@ class UserIdBlockAllocatorService
     private function is_block_reserved($block_start)
     {
         return UserIdBlock::where('block_start', $block_start)->exists();
+    }
+
+    /**
+     * Dice si el inicio de bloque ya lo tiene cargado como `user_id` algún cliente o alguna demo.
+     *
+     * Delega en `UserIdUnicoService::esta_tomado()`, que es la misma regla que aplica el evento
+     * `saving` de `Client` y `Demo`: así lo que sugiere el asignador es exactamente lo que después el
+     * modelo acepta guardar.
+     *
+     * @param int $block_start
+     *
+     * @return bool
+     */
+    private function is_user_id_taken_by_another_system($block_start)
+    {
+        return app(UserIdUnicoService::class)->esta_tomado($block_start);
     }
 }

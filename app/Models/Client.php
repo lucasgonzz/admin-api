@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\ModelProperties\ClientProperties;
 use App\Models\Concerns\HasUuid;
+use App\Services\UserIdUnicoService;
 use Illuminate\Database\Eloquent\Model;
 
 /**
@@ -24,6 +25,27 @@ class Client extends Model
     public static function properties()
     {
         return ClientProperties::all();
+    }
+
+    /**
+     * Engancha las guardas de guardado del modelo.
+     *
+     * 🔴 `user_id` único entre sistemas (misión pusher-canales-por-sistema, 19/10/2026): un cliente
+     * no puede cargar el `user_id` que ya tiene otro cliente u otra demo, porque toda la flota habla
+     * por una sola app de Pusher y dos sistemas con el mismo id de dueño se escuchan los avisos en
+     * vivo (demo3 ↔ Ferretotal, los dos con 2600). Va en `saving` y no en el controlador para cubrir
+     * todos los caminos de escritura a la vez: la ficha del panel, los endpoints `claude/*`, los
+     * servicios (`RunUserSetupService`) y los seeders. Solo mira el valor cuando el cliente es nuevo
+     * o cuando su `user_id` cambió, así que los duplicados heredados (El Kiosco Verde y Feitoamao
+     * con 1) se siguen pudiendo guardar. La regla entera está en `UserIdUnicoService`.
+     *
+     * @return void
+     */
+    protected static function booted()
+    {
+        static::saving(function (Client $client) {
+            app(UserIdUnicoService::class)->validar($client);
+        });
     }
 
     protected $guarded = [];

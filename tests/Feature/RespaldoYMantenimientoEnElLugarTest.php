@@ -138,7 +138,10 @@ class RespaldoYMantenimientoEnElLugarTest extends TestCase
         $client->api_key            = 'clave-api';
         $client->inbound_api_key    = 'clave-inbound';
         $client->is_active          = true;
-        $client->user_id            = 2700;
+        /* 2700 para el primer escenario de cada test y un bloque distinto para cada escenario extra
+         * del mismo test: desde la misión pusher-canales-por-sistema (19/10/2026) el admin no acepta
+         * dos clientes con el mismo `user_id`, y varios tests de acá arman más de un escenario. */
+        $client->user_id            = 2700 + ($this->contador - 1) * 100;
         $client->current_version_id = $from->id;
         $client->save();
 
