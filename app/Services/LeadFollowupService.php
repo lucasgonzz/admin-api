@@ -44,11 +44,33 @@ class LeadFollowupService
     /**
      * Procesa todos los leads que no están cerrados / en pausa final.
      *
-     * @return array{processed:int,suggestions:int,paused:int,errors:int}
+     * 🔴 Solo dentro de la franja horaria de los seguimientos automáticos (09:00 a 21:00, hora de
+     * Argentina, {@see FranjaHorariaDeSeguimientos}; misión asistente-arreglos-segunda-prueba, N11,
+     * 19/10/2026). El cron corre cada dos horas también de noche (`Kernel.php`, `everyTwoHours()`), y
+     * el 18/10 a las 00:00 esta corrida le mandó «Hace un par de días te escribimos…» al dueño de
+     * demo3. Fuera de la franja no se procesa NINGÚN lead —ni plantilla, ni sugerencia, ni pausa—:
+     * la primera corrida de la mañana (10:00) los toma igual, porque `process_lead()` decide por horas
+     * desde el último mensaje y de noche no se escribió nada. La franja va acá y no en
+     * `process_lead()` a propósito: `process_single_lead()` (el comando de prueba local) y el botón
+     * manual no son la cadencia automática.
+     *
+     * @return array{processed:int,suggestions:int,paused:int,errors:int,fuera_de_franja:bool}
+     *   `fuera_de_franja` en true: la corrida no procesó nada porque era de noche.
      */
     public function process_all_active_leads(): array
     {
-        $stats = ['processed' => 0, 'suggestions' => 0, 'paused' => 0, 'errors' => 0];
+        $stats = ['processed' => 0, 'suggestions' => 0, 'paused' => 0, 'errors' => 0, 'fuera_de_franja' => false];
+
+        if (! FranjaHorariaDeSeguimientos::ahora_esta_dentro()) {
+            $stats['fuera_de_franja'] = true;
+            Log::info('LeadFollowupService: corrida fuera de la franja horaria de seguimientos; no se procesa ningún lead.', [
+                'ahora'  => AppTime::now(FranjaHorariaDeSeguimientos::ZONA_HORARIA)->toDateTimeString(),
+                'franja' => FranjaHorariaDeSeguimientos::HORA_DE_INICIO . ':00-' . FranjaHorariaDeSeguimientos::HORA_DE_FIN . ':00',
+            ]);
+
+            return $stats;
+        }
+
         $rules = FollowupRule::query()->where('activa', true)->get()->keyBy('estado');
 
         $leads = Lead::query()

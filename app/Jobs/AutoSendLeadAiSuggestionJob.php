@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\LeadMessage;
 use App\Services\ClientPhoneDirectory;
+use App\Services\FranjaHorariaDeSeguimientos;
 use App\Services\LeadAiSuggestionAutoSendScheduler;
 use App\Services\LeadBroadcastService;
 use App\Services\LeadSuggestionSendService;
@@ -32,13 +33,34 @@ class AutoSendLeadAiSuggestionJob implements ShouldQueue
     private $auto_send_token;
 
     /**
-     * @param int $message_id
-     * @param int $auto_send_token
+     * true si este job YA es el respaldo corrido a la mañana por la franja horaria de los seguimientos
+     * (misión asistente-arreglos-segunda-prueba, N11, 19/10/2026): lo encola así el scheduler cuando
+     * el vencimiento caía de noche, o `reprogramar_a_la_franja()` cuando un job corrió de noche.
+     *
+     * Sirve para cortar la cadena: un job reprogramado que igual corre fuera de la franja no se vuelve
+     * a reprogramar, se queda quieto (la sugerencia sigue en la bandeja para una persona). Con la cola
+     * `sync` —la de los tests, donde la demora no existe y el job corre en el acto— reprogramar desde
+     * un job reprogramado sería un bucle infinito.
+     *
+     * 🔴 El default va EN LA DECLARACIÓN y no solo en el constructor: al deserializar un job que ya
+     * estaba en la cola desde antes de este cambio el constructor no corre, y la propiedad tiene que
+     * valer false igual.
+     *
+     * @var bool
      */
-    public function __construct(int $message_id, int $auto_send_token)
+    private $reprogramado_por_la_franja = false;
+
+    /**
+     * @param int  $message_id
+     * @param int  $auto_send_token
+     * @param bool $reprogramado_por_la_franja Ver la propiedad. Default false: todos los llamadores de
+     *                                         antes siguen igual.
+     */
+    public function __construct(int $message_id, int $auto_send_token, bool $reprogramado_por_la_franja = false)
     {
         $this->message_id = $message_id;
         $this->auto_send_token = $auto_send_token;
+        $this->reprogramado_por_la_franja = $reprogramado_por_la_franja;
     }
 
     /**
@@ -87,6 +109,26 @@ class AutoSendLeadAiSuggestionJob implements ShouldQueue
                     'message_id' => $this->message_id,
                     'lead_id'    => $message->lead_id,
                 ]);
+
+                return;
+            }
+
+            /*
+             * 🔴 Franja horaria (misma misión): un seguimiento automático no sale fuera de las 09:00 a
+             * 21:00, hora de Argentina. El scheduler ya programa a las 09:00 lo que vencería de noche;
+             * esto atrapa al job que igual corre de noche (worker atrasado, job encolado antes de la
+             * franja): no manda y se reprograma, UNA vez, al próximo inicio de la franja. Si el que corre
+             * de noche ya es la reprogramación, no se encadena otra: queda la sugerencia en la bandeja.
+             */
+            if (! FranjaHorariaDeSeguimientos::ahora_esta_dentro()) {
+                if (! $this->reprogramado_por_la_franja) {
+                    $scheduler->reprogramar_a_la_franja($message);
+                } else {
+                    Log::channel('daily')->warning('AutoSendLeadAiSuggestionJob: respaldo ya reprogramado que corrió fuera de la franja; queda para el setter.', [
+                        'message_id' => $this->message_id,
+                        'lead_id'    => $message->lead_id,
+                    ]);
+                }
 
                 return;
             }

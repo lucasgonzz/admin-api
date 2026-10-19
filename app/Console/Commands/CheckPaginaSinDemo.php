@@ -8,6 +8,7 @@ use App\Models\DemoEventoRecibido;
 use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Services\ClientPhoneDirectory;
+use App\Services\FranjaHorariaDeSeguimientos;
 use App\Services\LeadBroadcastService;
 use App\Services\LeadDemoSettings;
 use App\Services\WhatsappSendService;
@@ -38,6 +39,9 @@ use Illuminate\Support\Facades\Log;
  *    falla: reintentar cada cinco minutos contra un número que rebota quema el canal.
  *
  * Se ejecuta cada cinco minutos (Kernel). Sólo dinámica nueva: en la actual la página no es landing.
+ * Desde el 19/10/2026 (misión asistente-arreglos-segunda-prueba, N11) manda solo dentro de la franja
+ * horaria de los seguimientos automáticos ({@see FranjaHorariaDeSeguimientos}, 09:00 a 21:00) y nunca
+ * al número de un cliente ({@see ClientPhoneDirectory::es_lead_de_un_cliente()}).
  */
 class CheckPaginaSinDemo extends Command
 {
@@ -91,6 +95,23 @@ class CheckPaginaSinDemo extends Command
     public function handle(): int
     {
         $now = AppTime::now(self::TZ);
+
+        /* 🔴 Franja horaria de los seguimientos automáticos (misión asistente-arreglos-segunda-prueba,
+         * N11, 19/10/2026): este mensaje es un seguimiento comercial más y de noche no sale. No se
+         * consulta ni se marca a nadie: la columna `pagina_seguimiento_enviado_at` queda vacía y la
+         * primera corrida de la mañana (09:00, este comando corre cada cinco minutos) vuelve a evaluar a
+         * los mismos candidatos con las mismas reglas. Ninguna de esas reglas se vuelve más exigente con
+         * el paso de las horas (la apertura sigue teniendo más de N minutos, el silencio se alarga) salvo
+         * una: la ventana de 24 hs de Meta. Si se cierra durante la noche, a la mañana no se manda —
+         * igual que hoy con cualquier lead fuera de la ventana: no se marca, y si vuelve a escribir la
+         * ventana se abre—. Es preferible eso a un texto libre a las tres de la mañana. */
+        if (! FranjaHorariaDeSeguimientos::esta_dentro($now)) {
+            $this->info('Fuera de la franja horaria de seguimientos ('
+                . FranjaHorariaDeSeguimientos::HORA_DE_INICIO . ':00 a ' . FranjaHorariaDeSeguimientos::HORA_DE_FIN
+                . ':00): no se manda nada, la corrida de la mañana lo vuelve a evaluar.');
+
+            return 0;
+        }
 
         $espera_minutos   = LeadDemoSettings::get_pagina_seguimiento_minutos();
         $silencio_minutos = LeadDemoSettings::get_check_ingreso_silencio_minutos();
