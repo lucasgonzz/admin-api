@@ -647,6 +647,53 @@ class SeguimientosNoVanADuenosNiDeMadrugadaTest extends TestCase
         $this->assertCount(1, $this->envios_a($espia, '+5493415550030'), 'Sin ningún motivo, el respaldo sale como siempre.');
     }
 
+    /**
+     * 🔴 Revisión independiente, sonda 3: la cadencia cuenta desde que el seguimiento SALIÓ, no desde
+     * que se creó. F1 se crea retenido a las 20:50, la franja lo pasa a la mañana y sale a las 09:01;
+     * a las 10:00 el cron no puede ver «13 horas desde el último mensaje» y mandar F2 una hora después
+     * de F1. `last_message_at()` usa `COALESCE(sent_at, created_at)` para los salientes.
+     *
+     * @return void
+     */
+    public function test_la_cadencia_cuenta_desde_que_salio_el_retenido_y_no_desde_que_se_creo(): void
+    {
+        Queue::fake();
+        $espia = $this->espiar_sender();
+        $this->demora_de_respaldo(30);
+        FollowupRule::query()->updateOrCreate(
+            ['estado' => 'nuevo'],
+            ['horas_espera' => 12, 'max_followups' => 3, 'activa' => true]
+        );
+        $lead = $this->crear_lead('+5493415550018');
+
+        $this->a_las('20:50:00');
+        $f1 = $this->seguimiento_retenido($lead);
+
+        /* La plantilla del segundo seguimiento, para que F2 (si saliera) salga por el espía. */
+        $segunda                = new FollowupTemplate();
+        $segunda->estado        = 'nuevo';
+        $segunda->dia_numero    = 2;
+        $segunda->template_name = 'cc_seg_prueba_nuevo_d2';
+        $segunda->language_code = 'es_AR';
+        $segunda->body_template = 'Hola {{1}}! Te vuelvo a escribir.';
+        $segunda->activa        = true;
+        $segunda->save();
+
+        app(LeadAiSuggestionAutoSendScheduler::class)->schedule_for_suggested_message($f1);
+        $job = $this->unico_job_encolado();
+
+        $this->a_las('09:01:00', 1);
+        $job->handle(app(LeadSuggestionSendService::class), app(LeadAiSuggestionAutoSendScheduler::class));
+        $this->assertCount(1, $this->envios_a($espia, '+5493415550018'), 'Montaje: F1 tiene que salir a las 09:01.');
+        $this->assertFalse((bool) $lead->fresh()->tiene_sugerencia_pendiente, 'Montaje: ya no hay nada pendiente.');
+
+        $this->a_las('10:00:00', 1);
+        app(LeadFollowupService::class)->process_all_active_leads();
+
+        $this->assertCount(1, $this->envios_a($espia, '+5493415550018'), 'F2 no puede salir una hora después de F1.');
+        $this->assertSame(1, $this->seguimientos_en_el_hilo($lead));
+    }
+
     /* ---------------------------------------------------------------------------------------------
      | 5. El seguimiento único de la página sin demo
      * ------------------------------------------------------------------------------------------- */

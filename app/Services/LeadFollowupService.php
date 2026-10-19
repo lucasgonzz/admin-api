@@ -686,7 +686,21 @@ class LeadFollowupService
     }
 
     /**
-     * Timestamp del último mensaje no rechazado, o creación del lead.
+     * Momento del último mensaje no rechazado del hilo, o la creación del lead si no tiene ninguno.
+     *
+     * 🔴 Para los SALIENTES cuenta cuándo salieron (`sent_at`), no cuándo se crearon, con
+     * `COALESCE(sent_at, created_at)`; para los entrantes, `created_at` (cuando llegaron). Revisión
+     * independiente de la misión asistente-arreglos-segunda-prueba (N11, 19/10/2026): con la franja
+     * horaria, un seguimiento retenido creado a las 20:50 sale recién a las 09:01 del día siguiente, y
+     * midiendo por `created_at` el cron de las 10:00 veía 13 horas «desde el último mensaje» y mandaba
+     * el siguiente seguimiento una hora después del anterior. Lo mismo pasaba, con menos horas, con
+     * cualquier seguimiento retenido que un setter aprobaba tarde.
+     *
+     * El `COALESCE` deja todo lo demás como estaba: un saliente sin `sent_at` (el seguimiento directo
+     * por plantilla no lo graba; una sugerencia todavía `sugerido`) cuenta por su `created_at`, igual
+     * que siempre. Y se toma el MÁXIMO de esas fechas en vez de «el último por `id`»: con `sent_at`, el
+     * mensaje que salió más tarde no es necesariamente el de `id` más alto (un seguimiento creado de
+     * noche y aprobado a la mañana tiene un `id` más bajo que lo que se escribió en el medio).
      *
      * @param Lead $lead
      *
@@ -694,13 +708,13 @@ class LeadFollowupService
      */
     protected function last_message_at(Lead $lead): Carbon
     {
-        $m = LeadMessage::query()
+        $fila = LeadMessage::query()
             ->where('lead_id', $lead->id)
             ->where('status', '!=', 'rechazado')
-            ->orderByDesc('id')
+            ->selectRaw("MAX(CASE WHEN sender = 'lead' THEN created_at ELSE COALESCE(sent_at, created_at) END) AS ultimo_at")
             ->first();
-        if ($m && $m->created_at) {
-            return Carbon::parse($m->created_at);
+        if ($fila && ! empty($fila->ultimo_at)) {
+            return Carbon::parse((string) $fila->ultimo_at);
         }
 
         return $lead->created_at ? Carbon::parse($lead->created_at) : AppTime::now();
