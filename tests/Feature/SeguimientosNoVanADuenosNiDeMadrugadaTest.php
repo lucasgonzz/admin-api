@@ -470,6 +470,92 @@ class SeguimientosNoVanADuenosNiDeMadrugadaTest extends TestCase
         $this->assertNull($previo->fresh()->ai_auto_send_at, 'Sin contador: no se va a mandar sola.');
     }
 
+    /**
+     * 🔴 Revisión independiente, sonda 1: el respaldo que la franja pasó a la mañana vuelve a mirar si
+     * corresponde antes de mandar. Retenido a las 20:50 (queda para la mañana), el lead escribe a las
+     * 23:10 y el agente le contesta: a la mañana la plantilla NO sale (un seguimiento retenido no lo
+     * borra `clear_stale_pending_suggestions()`, que filtra `is_followup = false`). Se le saca el
+     * contador y queda en la bandeja para una persona.
+     *
+     * @return void
+     */
+    public function test_el_retenido_pasado_a_la_manana_no_sale_si_el_lead_escribio_de_noche(): void
+    {
+        Queue::fake();
+        $espia = $this->espiar_sender();
+        $this->demora_de_respaldo(30);
+        $lead = $this->crear_lead('+5493415550014');
+
+        $this->a_las('20:50:00');
+        $mensaje = $this->seguimiento_retenido($lead);
+        app(LeadAiSuggestionAutoSendScheduler::class)->schedule_for_suggested_message($mensaje);
+        $job = $this->unico_job_encolado();
+
+        $this->a_las('23:10:00');
+        $this->mensaje_suelto($lead, 'lead', 'Hola, sí, contame');
+        $this->mensaje_suelto($lead, 'sistema', 'Dale, te cuento cómo funciona.');
+
+        $this->a_las('09:05:00', 1);
+        $job->handle(app(LeadSuggestionSendService::class), app(LeadAiSuggestionAutoSendScheduler::class));
+
+        $this->assertSame([], $espia->envios, 'El lead ya escribió: la plantilla de seguimiento no tiene que salir.');
+        $this->assertSame('sugerido', $mensaje->fresh()->status, 'Queda en la bandeja para una persona.');
+        $this->assertNull($mensaje->fresh()->ai_auto_send_at, 'Sin contador: no se va a mandar sola.');
+    }
+
+    /**
+     * Los demás motivos por los que un seguimiento retenido ya no se auto-envía al vencer, aunque sea
+     * de día: el lead pasó a cerrado o en pausa, pide intervención humana, tiene la respuesta automática
+     * apagada o está marcado como "no recibe mensajes". Control: el mismo armado sin ninguno de esos
+     * motivos sale.
+     *
+     * @return void
+     */
+    public function test_el_retenido_no_sale_si_el_lead_ya_no_esta_para_seguimientos(): void
+    {
+        Queue::fake();
+        $espia = $this->espiar_sender();
+        $this->demora_de_respaldo(30);
+
+        $casos = [
+            'en pausa'              => ['status' => 'en_pausa'],
+            'cerrado'               => ['status' => 'cerrado_perdido'],
+            'intervención humana'   => ['requiere_intervencion_humana' => true],
+            'sin respuesta automática' => ['claude_auto_reply' => false],
+            'no recibe mensajes'    => ['no_recibe_mensajes_at' => Carbon::now()->subHour()],
+        ];
+
+        $numero = 20;
+        foreach ($casos as $nombre => $cambios) {
+            $numero++;
+            $telefono = '+54934155500' . $numero;
+            $lead     = $this->crear_lead($telefono);
+            $mensaje  = $this->seguimiento_retenido($lead);
+            app(LeadAiSuggestionAutoSendScheduler::class)->schedule_for_suggested_message($mensaje);
+            $job = Queue::pushed(AutoSendLeadAiSuggestionJob::class)->last();
+
+            /* El cambio llega DESPUÉS de programado el respaldo: el scheduler no lo pudo ver. */
+            foreach ($cambios as $campo => $valor) {
+                $lead->{$campo} = $valor;
+            }
+            $lead->save();
+
+            $job->handle(app(LeadSuggestionSendService::class), app(LeadAiSuggestionAutoSendScheduler::class));
+
+            $this->assertSame([], $this->envios_a($espia, $telefono), "Lead {$nombre}: el respaldo no tiene que salir.");
+            $this->assertSame('sugerido', $mensaje->fresh()->status, "Lead {$nombre}: queda en la bandeja.");
+            $this->assertNull($mensaje->fresh()->ai_auto_send_at, "Lead {$nombre}: sin contador.");
+        }
+
+        $control = $this->crear_lead('+5493415550030');
+        $mensaje = $this->seguimiento_retenido($control);
+        app(LeadAiSuggestionAutoSendScheduler::class)->schedule_for_suggested_message($mensaje);
+        Queue::pushed(AutoSendLeadAiSuggestionJob::class)->last()
+            ->handle(app(LeadSuggestionSendService::class), app(LeadAiSuggestionAutoSendScheduler::class));
+
+        $this->assertCount(1, $this->envios_a($espia, '+5493415550030'), 'Sin ningún motivo, el respaldo sale como siempre.');
+    }
+
     /* ---------------------------------------------------------------------------------------------
      | 5. El seguimiento único de la página sin demo
      * ------------------------------------------------------------------------------------------- */
@@ -757,6 +843,29 @@ class SeguimientosNoVanADuenosNiDeMadrugadaTest extends TestCase
     private function seguimientos_en_el_hilo(Lead $lead): int
     {
         return LeadMessage::query()->where('lead_id', $lead->id)->where('is_followup', true)->count();
+    }
+
+    /**
+     * Mensaje del hilo fechado AHORA (el reloj del test), en cualquier dirección.
+     *
+     * @param Lead   $lead
+     * @param string $sender  'lead' | 'sistema' | 'setter'.
+     * @param string $content
+     *
+     * @return LeadMessage
+     */
+    private function mensaje_suelto(Lead $lead, string $sender, string $content): LeadMessage
+    {
+        $mensaje                      = new LeadMessage();
+        $mensaje->lead_id             = $lead->id;
+        $mensaje->sender              = $sender;
+        $mensaje->content             = $content;
+        $mensaje->status              = 'enviado';
+        $mensaje->is_followup         = false;
+        $mensaje->whatsapp_message_id = $sender === 'lead' ? null : 'wamid.suelto.' . Str::random(6);
+        $mensaje->save();
+
+        return $mensaje;
     }
 
     /**

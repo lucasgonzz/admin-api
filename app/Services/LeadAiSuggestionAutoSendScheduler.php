@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Helpers\AppTime;
 use App\Jobs\AutoSendLeadAiSuggestionJob;
+use App\Models\Lead;
 use App\Models\LeadMessage;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Cache;
@@ -21,6 +22,15 @@ class LeadAiSuggestionAutoSendScheduler
 
     /** TTL de la clave de token. */
     private const CACHE_TTL_SECONDS = 7200;
+
+    /**
+     * Estados en los que el lead ya no está para seguimientos: los mismos que
+     * `LeadFollowupService::process_all_active_leads()` saltea siempre (cierres y pausa). Los usa
+     * motivo_para_no_auto_enviar_seguimiento() (misión asistente-arreglos-segunda-prueba, 19/10/2026).
+     *
+     * @var array<int, string>
+     */
+    public const ESTADOS_SIN_SEGUIMIENTOS = ['cerrado_ganado', 'cerrado_perdido', 'en_pausa'];
 
     /**
      * Encola el envío automático de una sugerencia recién creada por Claude.
@@ -191,6 +201,73 @@ class LeadAiSuggestionAutoSendScheduler
         return (string) $message->sender === 'sistema'
             && (bool) $message->is_followup
             && (bool) $message->requiere_verificacion;
+    }
+
+    /**
+     * ¿Por qué ya NO hay que auto-enviar este seguimiento retenido? Null si corresponde mandarlo.
+     *
+     * 🔴 Misión asistente-arreglos-segunda-prueba (N11, 19/10/2026), a raíz de la revisión
+     * independiente: el respaldo se programa en un momento y vence en otro —con la franja horaria,
+     * a veces a la mañana siguiente—, y en el medio el lead puede haber cambiado. Un seguimiento
+     * retenido no lo limpia nadie cuando el lead escribe (`clear_stale_pending_suggestions()` filtra
+     * `is_followup = false`), así que esta revisión al vencer es la única que hay. Lo llama
+     * `AutoSendLeadAiSuggestionJob` antes de mandar, con el lead recién leído de la base.
+     *
+     * Motivos, en este orden (el primero que aplica es el que queda en el log):
+     *   - `es_cliente`: {@see ClientPhoneDirectory::es_lead_de_un_cliente()} — el número es de un
+     *     cliente activo, de su equipo o de un admin, o el lead ya fue promovido;
+     *   - `lead_escribio_despues`: hay un entrante del lead (sin contar eventos de estado) posterior al
+     *     seguimiento. Se mide por `id` y no por `created_at`: el `id` es el orden real en que se
+     *     guardaron las filas y no empata nunca, mientras que dos `created_at` en el mismo segundo sí.
+     *     Es el mismo criterio de «contestó» de `LeadFollowupService::lead_respondio()` (entrante con
+     *     `id` mayor que un saliente), tomando como saliente este seguimiento;
+     *   - `lead_cerrado_o_en_pausa`: {@see ESTADOS_SIN_SEGUIMIENTOS};
+     *   - `intervencion_humana`: `requiere_intervencion_humana` prendido;
+     *   - `respuesta_automatica_apagada`: `claude_auto_reply` apagado (los mismos dos que ya frenan el
+     *     respaldo al programarlo, ver schedule_for_suggested_message(); acá se vuelven a mirar porque
+     *     pueden haber cambiado después);
+     *   - `no_recibe_mensajes`: la marca manual de número bloqueado o dado de baja.
+     *
+     * @param LeadMessage $message Seguimiento retenido (ver es_seguimiento_retenido()).
+     * @param Lead        $lead    Su lead, leído ahora.
+     *
+     * @return string|null Motivo, o null si el seguimiento todavía corresponde.
+     */
+    public function motivo_para_no_auto_enviar_seguimiento(LeadMessage $message, Lead $lead): ?string
+    {
+        if ((new ClientPhoneDirectory())->es_lead_de_un_cliente($lead)) {
+            return 'es_cliente';
+        }
+
+        $escribio_despues = LeadMessage::query()
+            ->where('lead_id', $lead->id)
+            ->where('sender', 'lead')
+            ->where(function ($query) {
+                $query->whereNull('is_status_event')->orWhere('is_status_event', false);
+            })
+            ->where('id', '>', (int) $message->id)
+            ->exists();
+        if ($escribio_despues) {
+            return 'lead_escribio_despues';
+        }
+
+        if (in_array((string) $lead->status, self::ESTADOS_SIN_SEGUIMIENTOS, true)) {
+            return 'lead_cerrado_o_en_pausa';
+        }
+
+        if ((bool) $lead->requiere_intervencion_humana) {
+            return 'intervencion_humana';
+        }
+
+        if (! (bool) $lead->claude_auto_reply) {
+            return 'respuesta_automatica_apagada';
+        }
+
+        if (! empty($lead->no_recibe_mensajes_at)) {
+            return 'no_recibe_mensajes';
+        }
+
+        return null;
     }
 
     /**

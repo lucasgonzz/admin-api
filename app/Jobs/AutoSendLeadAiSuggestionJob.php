@@ -3,7 +3,6 @@
 namespace App\Jobs;
 
 use App\Models\LeadMessage;
-use App\Services\ClientPhoneDirectory;
 use App\Services\FranjaHorariaDeSeguimientos;
 use App\Services\LeadAiSuggestionAutoSendScheduler;
 use App\Services\LeadBroadcastService;
@@ -92,22 +91,34 @@ class AutoSendLeadAiSuggestionJob implements ShouldQueue
         }
 
         /*
-         * 🔴 Misión asistente-arreglos-segunda-prueba (N11, 19/10/2026): el respaldo de un SEGUIMIENTO
-         * retenido no le escribe al número de un cliente (ni a un lead ya promovido). El scheduler ya no
-         * lo programa en ese caso; esto es la red para los jobs que quedaron en la cola desde antes, o
-         * para el número que pasó a ser de un cliente entre que se programó y que vence. No se manda,
-         * no se rechaza: la sugerencia queda en la bandeja para una persona y se le saca el contador
-         * (cancel_for_message), para que el panel no prometa un envío que no va a ocurrir.
+         * 🔴 Misión asistente-arreglos-segunda-prueba (N11, 19/10/2026): antes de mandar un SEGUIMIENTO
+         * retenido se vuelve a mirar si todavía corresponde, con el lead tal como está AHORA. Entre que
+         * se programó y que vence pueden pasar horas —con la franja horaria, toda una noche— y un
+         * seguimiento retenido no lo borra nadie cuando el lead escribe
+         * (LeadAiSuggestionScheduler::clear_stale_pending_suggestions() filtra `is_followup = false`).
+         * La revisión independiente lo reprodujo: retenido a las 20:50, el lead escribe a las 23:10, el
+         * agente le contesta, y a la mañana salía igual «Hace un par de días te escribimos…».
+         *
+         * Los motivos (uno solo decide, ver LeadAiSuggestionAutoSendScheduler::
+         * motivo_para_no_auto_enviar_seguimiento()): el lead es un cliente; escribió después de creado
+         * el seguimiento; está cerrado o en pausa; pide intervención humana; tiene la respuesta
+         * automática apagada; o está marcado como "no recibe mensajes". Vale para TODOS los
+         * seguimientos retenidos, no solo los que pasó a la mañana la franja.
+         *
+         * No se manda, no se rechaza: la sugerencia queda en la bandeja para una persona y se le saca el
+         * contador (cancel_for_message), para que el panel no prometa un envío que no va a ocurrir.
          */
         if ($scheduler->es_seguimiento_retenido($message)) {
-            $lead = $message->lead;
-            if ($lead !== null && (new ClientPhoneDirectory())->es_lead_de_un_cliente($lead)) {
+            $lead   = $message->lead;
+            $motivo = $lead !== null ? $scheduler->motivo_para_no_auto_enviar_seguimiento($message, $lead) : null;
+            if ($motivo !== null) {
                 $scheduler->cancel_for_message($this->message_id);
                 LeadBroadcastService::emit_conversation_updated((int) $message->lead_id, $this->message_id);
 
-                Log::channel('daily')->info('AutoSendLeadAiSuggestionJob: seguimiento retenido de un lead que es cliente; no se auto-envía.', [
+                Log::channel('daily')->info('AutoSendLeadAiSuggestionJob: el seguimiento retenido ya no corresponde; no se auto-envía y queda en la bandeja.', [
                     'message_id' => $this->message_id,
                     'lead_id'    => $message->lead_id,
+                    'motivo'     => $motivo,
                 ]);
 
                 return;
