@@ -13,6 +13,8 @@ class DemoChatCatalogoService
     {
         $urls = DemoMedia::url_por_slot();
         $videos = [];
+        $fuente = DemoCatalogoService::get();
+        $ids_vigentes = array_fill_keys(array_column(array_merge((array) ($fuente['clips'] ?? []), (array) ($fuente['videos_sueltos'] ?? [])), 'id'), true);
         foreach (DemoCatalogoService::slots() as $clip) {
             $id = (string) ($clip['id'] ?? '');
             if (! isset($urls[$id]) || ! $this->url_video($urls[$id])) {
@@ -22,6 +24,10 @@ class DemoChatCatalogoService
                 'clave' => 'demo:' . $id, 'origen' => 'demo', 'clip_id' => $id, 'codigo' => null,
                 'titulo' => (string) ($clip['titulo'] ?? $id), 'url' => $urls[$id],
                 'miniatura_url' => null, 'duracion' => 0, 'descripcion' => (string) ($clip['grupo'] ?? ''),
+                'seccion_id' => 'demo:' . ($clip['grupo'] ?? 'Tu recorrido'),
+                'seccion' => $this->nombre_seccion((string) ($clip['grupo'] ?? 'Tu recorrido')),
+                // El scroll conserva adjuntos históricos, pero no integra el selector de videos.
+                'en_catalogo' => isset($ids_vigentes[$id]),
             ];
         }
         // Un plan antiguo sigue siendo útil aunque el clip haya salido del catálogo de hoy.
@@ -32,10 +38,15 @@ class DemoChatCatalogoService
                     'clave' => 'demo:' . $id, 'origen' => 'demo', 'clip_id' => $id, 'codigo' => null,
                     'titulo' => (string) ($clip['titulo'] ?? $id), 'url' => $urls[$id],
                     'miniatura_url' => null, 'duracion' => 0, 'descripcion' => '',
+                    'seccion_id' => 'demo:' . ($clip['seccion'] ?? 'Tu recorrido'),
+                    'seccion' => $this->nombre_seccion((string) ($clip['seccion'] ?? 'Tu recorrido')),
+                    'en_catalogo' => false,
                 ];
             }
         }
-        foreach (app(RecursosCatalogoService::class)->catalogo()['videos'] as $video) {
+        $recursos = app(RecursosCatalogoService::class)->catalogo();
+        $carpetas = array_column($recursos['carpetas'], 'nombre', 'nro');
+        foreach ($recursos['videos'] as $video) {
             if (! $this->url_video((string) $video['url'])) {
                 continue;
             }
@@ -44,8 +55,26 @@ class DemoChatCatalogoService
                 'clave' => $clave, 'origen' => 'recurso', 'clip_id' => null, 'codigo' => $video['codigo'],
                 'titulo' => $video['titulo'], 'url' => $video['url'], 'miniatura_url' => $video['miniatura_url'],
                 'duracion' => (int) ceil($video['duracion']), 'descripcion' => (string) $video['para_que'],
+                'seccion_id' => 'recurso:' . $video['carpeta'],
+                'seccion' => (string) ($carpetas[$video['carpeta']] ?? 'Centro de recursos'),
+                'en_catalogo' => true,
             ];
         }
+
+        // Se cuenta después de filtrar: el código global y los videos sin publicar no
+        // determinan la posición que el lead puede recorrer en esta sección.
+        $vigentes = array_filter($videos, function ($video) { return $video['en_catalogo']; });
+        $cantidades = array_count_values(array_column($vigentes, 'seccion_id'));
+        $posiciones = [];
+        foreach ($videos as &$video) {
+            if (! $video['en_catalogo']) { unset($video['en_catalogo']); continue; }
+            unset($video['en_catalogo']);
+            $seccion = $video['seccion_id'];
+            $posiciones[$seccion] = ($posiciones[$seccion] ?? 0) + 1;
+            $video['posicion'] = $posiciones[$seccion];
+            $video['cantidad'] = $cantidades[$seccion];
+        }
+        unset($video);
         return $videos;
     }
 
@@ -55,6 +84,7 @@ class DemoChatCatalogoService
         foreach ((array) (($lead->demo_plan ?? [])['secciones'] ?? []) as $seccion) {
             foreach ((array) ($seccion['clips'] ?? []) as $clip) {
                 if (($clip['tipo'] ?? 'nucleo') === 'nucleo') {
+                    $clip['seccion'] = $clip['seccion'] ?? $seccion['id'] ?? $seccion['nombre'] ?? 'Tu recorrido';
                     $clips[] = $clip;
                 }
             }
@@ -103,6 +133,14 @@ class DemoChatCatalogoService
 
     private function url_video(string $url): bool
     {
-        return preg_match('~^https://~i', $url) === 1 && preg_match('~\.(mp4|webm|m3u8)(\?|$)~i', $url) === 1;
+        $partes = parse_url($url);
+        return is_array($partes) && strtolower($partes['scheme'] ?? '') === 'https'
+            && ! empty($partes['host']) && ! isset($partes['user']) && ! isset($partes['pass'])
+            && preg_match('~\.(mp4|webm|m3u8)$~i', $partes['path'] ?? '') === 1;
+    }
+
+    private function nombre_seccion(string $seccion): string
+    {
+        return preg_replace('/^S\d+\s*[-–·]\s*/u', '', $seccion);
     }
 }

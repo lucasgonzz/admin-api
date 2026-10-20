@@ -55,4 +55,15 @@ class DemoChatController extends Controller
         $service->progreso($lead, $datos['clave'], [], 0, true);
         return response()->json($service->snapshot($lead));
     }
+
+    public function seleccionar(Request $request, DemoChatService $service)
+    {
+        $datos = $request->validate([
+            'clave' => ['required', 'string', 'max:50', 'regex:/^(demo|recurso):[a-zA-Z0-9._-]+$/'],
+            'cliente_uuid' => 'required|uuid',
+        ]);
+        $lead = $this->lead($request);
+        $service->seleccionar($lead, $datos['clave'], $datos['cliente_uuid']);
+        return response()->json($service->snapshot($lead));
+    }
 }

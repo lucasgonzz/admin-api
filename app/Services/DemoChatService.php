@@ -72,6 +72,30 @@ class DemoChatService
         $this->despachar($job[0], $job[1], $job[2]);
     }
 
+    /** Una elección explícita entrega una tarjeta real, también en modo manual. */
+    public function seleccionar(Lead $lead, string $clave, string $uuid): void
+    {
+        $catalogo = app(DemoChatCatalogoService::class)->videos($lead);
+        if (! isset($catalogo[$clave]['posicion'])) {
+            throw ValidationException::withMessages(['clave' => 'Ese video ya no está disponible. Elegí otro del catálogo.']);
+        }
+        $this->iniciar($lead);
+        DB::transaction(function () use ($lead, $clave, $uuid, $catalogo) {
+            $chat = DemoChatConversacion::where('lead_id', $lead->id)->lockForUpdate()->firstOrFail();
+            // El UUID pertenece al hilo, nunca al navegador ni a un lead elegido en el body.
+            if ($chat->mensajes()->where('cliente_uuid', $uuid)->exists()) {
+                return;
+            }
+            if ($chat->mensajes()->where('origen', 'seleccion')->count() >= 300) {
+                throw ValidationException::withMessages(['clave' => 'Llegaste al límite de selecciones de esta demo.']);
+            }
+            $this->crear($chat, 'asistente', 'Acá tenés «' . $catalogo[$clave]['titulo'] . '». Miralo a tu ritmo y preguntame lo que necesites.',
+                [$clave], 'seleccion', 'publicado', $uuid);
+            $chat->revision++;
+            $chat->save();
+        });
+    }
+
     private function programar(DemoChatConversacion $chat): array
     {
         $chat->mensajes()->where('estado', 'borrador')->update(['estado' => 'descartado']);
@@ -267,23 +291,20 @@ class DemoChatService
             'responder_desde' => $chat && $chat->responder_desde ? $chat->responder_desde->toIso8601String() : null,
             'revision' => $chat ? $chat->revision : 0,
             'espera_segundos' => $chat ? $chat->espera_segundos : self::ESPERA_SEGUNDOS,
-        ], 'mensajes' => []];
-        if ($chat === null) { return $salida; }
+        ], 'mensajes' => [], 'catalogo' => []];
         $videos = app(DemoChatCatalogoService::class)->videos($lead);
-        $progresos = $chat->progresos()->get()->keyBy('clave');
+        $progresos = $chat ? $chat->progresos()->get()->keyBy('clave') : collect();
+        foreach ($videos as $clave => $video) {
+            $videos[$clave] = $this->video_con_progreso($video, $progresos->get($clave));
+        }
+        // Un clip retirado sigue en el historial, pero no inventa un ordinal ni vuelve al selector.
+        $salida['catalogo'] = array_values(array_filter($videos, function ($video) { return isset($video['posicion']); }));
+        if ($chat === null) { return $salida; }
         foreach ($chat->mensajes()->whereIn('estado', $admin ? ['publicado', 'borrador'] : ['publicado'])->orderBy('id')->get() as $mensaje) {
             $adjuntos = [];
             foreach ((array) $mensaje->videos as $clave) {
                 if (! isset($videos[$clave])) { continue; }
-                $video = $videos[$clave];
-                unset($video['descripcion']);
-                $p = $progresos->get($clave);
-                $duracion = $p && $p->duracion > 0 ? $p->duracion : $video['duracion'];
-                $video['duracion'] = (int) $duracion;
-                $video['porcentaje'] = $p && $duracion > 0 ? min(100, (int) floor(count((array) $p->segundos_vistos) * 100 / $duracion)) : 0;
-                $video['completado'] = $p && $p->completado_at !== null;
-                $video['omitido'] = $p ? (bool) $p->omitido : false;
-                $adjuntos[] = $video;
+                $adjuntos[] = $videos[$clave];
             }
             $fila = ['id' => $mensaje->id, 'rol' => $mensaje->rol, 'contenido' => $mensaje->contenido,
                 'creado_at' => $mensaje->created_at->toIso8601String(), 'videos' => $adjuntos];
@@ -292,6 +313,17 @@ class DemoChatService
         }
         if ($admin) { $salida['conversacion']['ultimo_error'] = $chat->ultimo_error; }
         return $salida;
+    }
+
+    private function video_con_progreso(array $video, ?DemoChatProgreso $progreso): array
+    {
+        unset($video['descripcion']);
+        $duracion = $progreso && $progreso->duracion > 0 ? $progreso->duracion : $video['duracion'];
+        $video['duracion'] = (int) $duracion;
+        $video['porcentaje'] = $progreso && $duracion > 0 ? min(100, (int) floor(count((array) $progreso->segundos_vistos) * 100 / $duracion)) : 0;
+        $video['completado'] = $progreso && $progreso->completado_at !== null;
+        $video['omitido'] = $progreso ? (bool) $progreso->omitido : false;
+        return $video;
     }
 
     private function crear(DemoChatConversacion $chat, string $rol, string $contenido, array $videos, string $origen,

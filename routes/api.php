@@ -191,6 +191,7 @@ Route::withoutMiddleware('throttle:api')->middleware(['demo.eventos.key', 'throt
     Route::post('mensajes', [\App\Http\Controllers\DemoChatController::class, 'mensaje']);
     Route::post('videos/progreso', [\App\Http\Controllers\DemoChatController::class, 'progreso']);
     Route::post('videos/omitir', [\App\Http\Controllers\DemoChatController::class, 'omitir']);
+    Route::post('videos/seleccionar', [\App\Http\Controllers\DemoChatController::class, 'seleccionar']);
 });
 
 /*
