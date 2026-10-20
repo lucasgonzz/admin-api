@@ -9,6 +9,7 @@ class DemoChatConversacion extends Model
     protected $table = 'demo_chat_conversaciones';
     protected $guarded = [];
     protected $casts = [
+        'espera_segundos' => 'integer', 'espera_iniciada_at' => 'datetime',
         'auto_responder' => 'boolean', 'revision' => 'integer', 'generacion' => 'integer',
         'iniciado_at' => 'datetime', 'responder_desde' => 'datetime',
     ];

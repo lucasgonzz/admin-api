@@ -58,7 +58,7 @@ class DemoChatService
             return $this->programar($chat);
         });
         if ($job !== null) {
-            $this->despachar($job[0], $job[1]);
+            $this->despachar($job[0], $job[1], $job[2]);
         }
     }
 
@@ -69,7 +69,7 @@ class DemoChatService
             $chat = DemoChatConversacion::where('lead_id', $lead->id)->lockForUpdate()->firstOrFail();
             return $this->programar($chat);
         });
-        $this->despachar($job[0], $job[1]);
+        $this->despachar($job[0], $job[1], $job[2]);
     }
 
     private function programar(DemoChatConversacion $chat): array
@@ -78,18 +78,19 @@ class DemoChatService
         $chat->generacion++;
         $chat->revision++;
         $chat->estado = 'esperando';
-        $chat->responder_desde = now()->addSeconds(self::ESPERA_SEGUNDOS);
+        $chat->espera_iniciada_at = now();
+        $chat->responder_desde = now()->addSeconds($chat->espera_segundos);
         $chat->ultimo_error = null;
         $chat->save();
-        return [(int) $chat->id, (int) $chat->generacion];
+        return [(int) $chat->id, (int) $chat->generacion, $chat->responder_desde->copy()];
     }
 
-    private function despachar(int $id, int $generacion): void
+    private function despachar(int $id, int $generacion, $desde): void
     {
         // El worker permanente de esta cola ya existe. default se consume una vez por minuto.
         GenerateDemoChatReplyJob::dispatch($id, $generacion)
             ->onConnection('database')->onQueue(AsistenteWhatsappService::COLA_DEL_ASISTENTE)
-            ->delay(now()->addSeconds(self::ESPERA_SEGUNDOS));
+            ->delay($desde->isFuture() ? $desde : now());
     }
 
     public function generar(int $id, int $generacion): void
@@ -138,16 +139,31 @@ class DemoChatService
         }
     }
 
-    public function configurar(Lead $lead, bool $automatico): void
+    public function configurar(Lead $lead, ?bool $automatico = null, ?int $espera = null): void
     {
         $id = $this->conversacion($lead)->id;
-        DB::transaction(function () use ($id, $automatico) {
+        $job = DB::transaction(function () use ($id, $automatico, $espera) {
             $chat = DemoChatConversacion::lockForUpdate()->findOrFail($id);
-            $chat->auto_responder = $automatico;
+            $job = null;
+            if ($automatico !== null) { $chat->auto_responder = $automatico; }
+            if ($espera !== null && $espera !== $chat->espera_segundos) {
+                if ($chat->estado === 'esperando') {
+                    // El contrato anterior no guardaba el inicio: se recupera desde su vencimiento.
+                    $inicio = $chat->espera_iniciada_at ?: $chat->responder_desde->copy()->subSeconds($chat->espera_segundos);
+                    $chat->espera_iniciada_at = $inicio;
+                    $chat->responder_desde = $inicio->copy()->addSeconds($espera);
+                    // El job anterior queda invalidado aunque ya esté reservado por un worker.
+                    $chat->generacion++;
+                    $job = [(int) $chat->id, (int) $chat->generacion, $chat->responder_desde->copy()];
+                }
+                $chat->espera_segundos = $espera;
+            }
             // Prender automático no publica un borrador viejo sin revisión.
             $chat->revision++;
             $chat->save();
+            return $job;
         });
+        if ($job !== null) { $this->despachar($job[0], $job[1], $job[2]); }
     }
 
     public function mensaje_admin(Lead $lead, string $accion, ?int $mensaje_id, array $datos, ?int $admin_id): void
@@ -250,6 +266,7 @@ class DemoChatService
             'auto_responder' => $chat ? $chat->auto_responder : true, 'estado' => $chat ? $chat->estado : 'inactivo',
             'responder_desde' => $chat && $chat->responder_desde ? $chat->responder_desde->toIso8601String() : null,
             'revision' => $chat ? $chat->revision : 0,
+            'espera_segundos' => $chat ? $chat->espera_segundos : self::ESPERA_SEGUNDOS,
         ], 'mensajes' => []];
         if ($chat === null) { return $salida; }
         $videos = app(DemoChatCatalogoService::class)->videos($lead);

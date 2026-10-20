@@ -138,6 +138,64 @@ class DemoChatTest extends TestCase
         Queue::assertPushed(GenerateDemoChatReplyJob::class, function ($job) { return $job->queue === 'asistente' && $job->connection === 'database'; });
     }
 
+    public function test_cambiar_espera_en_vivo_reprograma_desde_ultimo_mensaje_e_invalida_jobs_viejos(): void
+    {
+        $lead = $this->lead(); $otro = $this->lead(); $this->admin();
+        $ruta = '/api/admin/lead/' . $lead->id . '/demo-chat/configuracion';
+        $this->mensaje($lead)->assertJsonPath('conversacion.espera_segundos', 10);
+        Carbon::setTestNow(now()->addSeconds(4));
+        $this->mensaje($lead, 'Otro dato');
+        $viejo = DemoChatConversacion::where('lead_id', $lead->id)->firstOrFail();
+        Carbon::setTestNow(now()->addSeconds(3));
+        $this->putJson($ruta, ['espera_segundos' => 30])->assertOk()->assertJsonPath('conversacion.espera_segundos', 30);
+        $largo = $viejo->fresh();
+        $this->assertSame(27, now()->diffInSeconds($largo->responder_desde));
+        $this->putJson($ruta, ['espera_segundos' => 2])->assertOk();
+        $corto = $largo->fresh();
+        $this->assertTrue($corto->responder_desde->isPast());
+        $this->mock(DemoChatAiService::class, function ($mock) { $mock->shouldReceive('responder')->once()->andReturn(['contenido' => 'Respuesta vigente', 'videos' => []]); });
+        $service = app(DemoChatService::class);
+        $service->generar($viejo->id, $viejo->generacion);
+        $service->generar($largo->id, $largo->generacion);
+        $this->assertSame('esperando', $corto->fresh()->estado);
+        $service->generar($corto->id, $corto->generacion);
+        $service->generar($corto->id, $corto->generacion);
+        $this->assertSame('inactivo', $corto->fresh()->estado);
+        Queue::assertPushed(GenerateDemoChatReplyJob::class, function ($job) use ($corto) { return $job->generacion === $corto->generacion && $job->delay->equalTo(now()); });
+        $this->getJson('/api/admin/lead/' . $otro->id . '/demo-chat')->assertJsonPath('conversacion.espera_segundos', 10);
+        foreach ([-1, 121, 1.5, 'abc'] as $valor) { $this->putJson($ruta, ['espera_segundos' => $valor])->assertStatus(422); }
+        $this->putJson($ruta, [])->assertStatus(422);
+    }
+
+    public function test_nuevo_mensaje_tras_cambio_de_espera_invalida_el_job_reprogramado(): void
+    {
+        $lead = $this->lead(); $this->admin(); $this->mensaje($lead);
+        $this->putJson('/api/admin/lead/' . $lead->id . '/demo-chat/configuracion', ['espera_segundos' => 0])->assertOk();
+        $viejo = DemoChatConversacion::where('lead_id', $lead->id)->firstOrFail();
+        $this->mensaje($lead, 'Me faltaba esto');
+        $this->mock(DemoChatAiService::class, function ($mock) { $mock->shouldReceive('responder')->once()->andReturn(['contenido' => 'Respuesta completa', 'videos' => []]); });
+        app(DemoChatService::class)->generar($viejo->id, $viejo->generacion);
+        $this->assertSame('esperando', $viejo->fresh()->estado);
+        app(DemoChatService::class)->generar($viejo->id, $viejo->fresh()->generacion);
+        $this->getJson('/api/demo-chat', $this->headers($lead))->assertJsonCount(4, 'mensajes');
+    }
+
+    public function test_cambiar_espera_mientras_piensa_no_descarta_respuesta_y_conserva_modo_manual(): void
+    {
+        $lead = $this->lead(); $this->admin(); $this->mensaje($lead);
+        $this->mock(DemoChatAiService::class, function ($mock) use ($lead) {
+            $mock->shouldReceive('responder')->once()->andReturnUsing(function () use ($lead) {
+                $this->putJson('/api/admin/lead/' . $lead->id . '/demo-chat/configuracion', ['espera_segundos' => 120, 'auto_responder' => false])->assertOk()->assertJsonPath('conversacion.estado', 'pensando');
+                return ['contenido' => 'Borrador vigente', 'videos' => []];
+            });
+        });
+        $this->responder($lead);
+        $this->getJson('/api/demo-chat', $this->headers($lead))->assertJsonCount(2, 'mensajes')->assertJsonPath('conversacion.estado', 'listo');
+        $this->mensaje($lead, 'Nueva pregunta');
+        $chat = DemoChatConversacion::where('lead_id', $lead->id)->firstOrFail();
+        $this->assertSame(120, now()->diffInSeconds($chat->responder_desde));
+    }
+
     public function test_manual_genera_borrador_oculto_y_el_operador_edita_envia_y_borra_sin_marcas_publicas(): void
     {
         $lead = $this->lead(); $this->admin();

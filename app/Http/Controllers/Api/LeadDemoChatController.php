@@ -17,9 +17,11 @@ class LeadDemoChatController extends Controller
 
     public function configurar($id, Request $request, DemoChatService $service)
     {
-        $datos = $request->validate(['auto_responder' => 'required|boolean']);
+        $datos = $request->validate(['auto_responder' => 'required_without:espera_segundos|boolean',
+            'espera_segundos' => 'required_without:auto_responder|integer|min:0|max:120']);
         $lead = Lead::findOrFail($id);
-        $service->configurar($lead, (bool) $datos['auto_responder']);
+        $service->configurar($lead, isset($datos['auto_responder']) ? (bool) $datos['auto_responder'] : null,
+            isset($datos['espera_segundos']) ? (int) $datos['espera_segundos'] : null);
         return response()->json($service->snapshot($lead, true));
     }
 
