@@ -68,6 +68,10 @@ class LeadDemoFormMapper
      */
     public static function to_lead(Lead $lead, array $respuestas): Lead
     {
+        // Un formulario anterior no manda esta clave: no pisa una elección ya guardada.
+        if (array_key_exists('demo_industria', $respuestas)) {
+            $lead->demo_industria = DemoIndustriaCatalogo::normalizar($respuestas['demo_industria']);
+        }
         // tipo_precios es la única respuesta no-booleana del formulario: 'listas' activa la
         // columna existente use_price_lists; cualquier otro valor (incluido 'unico', el default
         // del catálogo) cae en precio único (false).
@@ -108,7 +112,7 @@ class LeadDemoFormMapper
      */
     public static function from_lead(Lead $lead): array
     {
-        return [
+        $respuestas = [
             'tipo_precios' => $lead->use_price_lists ? 'listas' : 'unico',
 
             'usa_depositos' => (bool) $lead->use_deposits,
@@ -124,6 +128,10 @@ class LeadDemoFormMapper
             'registra_compras'                   => (bool) $lead->registra_compras,
             'usa_ecommerce'                      => (bool) $lead->usa_ecommerce,
         ];
+        if ($lead->demo_industria !== null) {
+            $respuestas['demo_industria'] = DemoIndustriaCatalogo::normalizar($lead->demo_industria);
+        }
+        return $respuestas;
     }
 
     /**

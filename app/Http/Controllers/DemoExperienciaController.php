@@ -127,6 +127,7 @@ class DemoExperienciaController extends Controller
         // Validación acotada a las nueve claves del formulario. Todas "sometimes": el formulario
         // nunca debe fallar por un campo que no llegó (autoguardado parcial desde la página).
         $validated = $request->validate([
+            'demo_industria'                     => \App\Services\DemoIndustriaCatalogo::regla(),
             'tipo_precios'                       => 'sometimes|string|in:unico,listas',
             'usa_depositos'                       => 'sometimes|boolean',
             'usa_cuentas_corrientes_clientes'     => 'sometimes|boolean',

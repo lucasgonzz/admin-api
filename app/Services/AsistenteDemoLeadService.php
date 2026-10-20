@@ -17,16 +17,14 @@ use Carbon\Carbon;
  * El asistente personal para el lead mientras dura su demo (misión mail-demo-turno-y-asistente,
  * 16/10/2026).
  *
- * El número del asistente atiende solo al DUEÑO de un cliente (`WhatsappWebhookController::
- * handle_mensaje_del_asistente`). Lucas pidió que el lead lo pueda probar durante su demo: que le
- * escriba desde el mismo WhatsApp con el que habla con nosotros y le haga preguntas y pedidos
- * sobre los datos de su instancia de demostración. Esta clase concentra las cuatro decisiones que
+ * El lead prueba el asistente en el mismo número principal con el que coordinó la demo. El número
+ * separado del asistente mantiene el canal de los dueños de clientes reales. Se reconoce al lead
+ * por su teléfono exacto y se consulta exclusivamente su instancia durante el turno. Esta clase concentra las cuatro decisiones que
  * eso necesita, para que ni el webhook ni el job ni el mail tengan cada uno su propia copia:
  *
  *   1. **Cuándo está disponible el canal** (`config_disponible()`): el interruptor propio y que el
- *      número del asistente esté LISTO (`WhatsappConfig::canalListo`). Mientras el número no exista
- *      de verdad —hoy no existe—, el mail no muestra el bloque, el agente de leads no lo menciona y
- *      el webhook ni se entera: todo queda inerte, sin prometerle al lead algo que no funciona.
+ *      número principal esté LISTO (`WhatsappConfig::canalListo`). Sin un canal operativo, el mail
+ *      no muestra el bloque y el agente de leads no lo ofrece.
  *   2. **Quién puede usarlo** (`situacion_del_lead()`): un lead con una instancia asignada,
  *      en un estado que la ocupa, con el setup terminado y DENTRO de su turno, cuyo teléfono es
  *      EXACTAMENTE el que escribe. Comparación estricta (`equals_estricto`), no los últimos ocho
@@ -107,7 +105,7 @@ class AsistenteDemoLeadService
     }
 
     /**
-     * La fila del número del asistente, SOLO si el canal está en condiciones de atender a un lead.
+     * La fila del número principal, SOLO si el canal está en condiciones de atender a un lead.
      *
      * Es el único punto que decide "¿le prometemos el asistente al lead?": lo leen el mail, el
      * contexto del agente de leads y el webhook. Las tres cosas tienen que coincidir siempre.
@@ -120,7 +118,13 @@ class AsistenteDemoLeadService
             return null;
         }
 
-        return WhatsappConfig::canalListo(WhatsappConfig::PROPOSITO_ASISTENTE);
+        // Durante la demo el lead sigue en el mismo chat donde coordinó su turno.
+        // El número separado sigue siendo el canal de los dueños de clientes reales.
+        $config = WhatsappConfig::canalListo(WhatsappConfig::PROPOSITO_PRINCIPAL);
+
+        // El principal histórico acepta una fila activa; para ofrecer una demo además debe poder
+        // enviar y validar el webhook entrante. Esta exigencia no cambia el canal comercial.
+        return $config !== null && $config->tieneLoNecesarioParaAtender() ? $config : null;
     }
 
     /**
@@ -157,7 +161,7 @@ class AsistenteDemoLeadService
     }
 
     /**
-     * El número del asistente tal como se lee ("+1 201-534-4158"), o '' si no está disponible.
+     * El número principal con el que se coordina la demo, o '' si no está disponible.
      *
      * @return string
      */
@@ -165,7 +169,14 @@ class AsistenteDemoLeadService
     {
         $config = self::config_disponible();
 
-        return $config !== null ? trim((string) $config->display_phone) : '';
+        if ($config === null) {
+            return '';
+        }
+
+        $visible = trim((string) $config->display_phone);
+
+        // El principal histórico puede no tener display_phone: el CTA público conserva ese dato.
+        return $visible !== '' ? $visible : LeadDemoSettings::get_whatsapp_numero_leads();
     }
 
     /**
@@ -181,7 +192,7 @@ class AsistenteDemoLeadService
             return '';
         }
 
-        $digitos = preg_replace('/\D+/', '', (string) $config->display_phone);
+        $digitos = preg_replace('/\D+/', '', self::numero_visible());
         if ($digitos === null || $digitos === '') {
             return '';
         }

@@ -185,6 +185,14 @@ Route::middleware('demo.eventos.key')
 Route::middleware('demo.eventos.key')
     ->get('demo-media-urls', [DemoMediaUrlsController::class, 'index']);
 
+Route::withoutMiddleware('throttle:api')->middleware(['demo.eventos.key', 'throttle:demo-chat'])->prefix('demo-chat')->group(function () {
+    Route::get('/', [\App\Http\Controllers\DemoChatController::class, 'index']);
+    Route::post('iniciar', [\App\Http\Controllers\DemoChatController::class, 'iniciar']);
+    Route::post('mensajes', [\App\Http\Controllers\DemoChatController::class, 'mensaje']);
+    Route::post('videos/progreso', [\App\Http\Controllers\DemoChatController::class, 'progreso']);
+    Route::post('videos/omitir', [\App\Http\Controllers\DemoChatController::class, 'omitir']);
+});
+
 /*
 | Callback desde empresa-api cliente (inbound)
 */
@@ -953,6 +961,16 @@ Route::prefix('admin')->group(function () {
         // Recorrido de la demo del lead (misión 49): plan congelado, hitos y progreso en una sola
         // llamada. Es de sólo lectura y lo poléa el panel cada 10s mientras el lead está adentro.
         Route::get('lead/{id}/demo-roadmap', [LeadController::class, 'demo_roadmap_json']);
+
+        Route::prefix('lead/{id}/demo-chat')->group(function () {
+            Route::get('/', [\App\Http\Controllers\Api\LeadDemoChatController::class, 'index']);
+            Route::put('configuracion', [\App\Http\Controllers\Api\LeadDemoChatController::class, 'configurar']);
+            Route::post('sugerir', [\App\Http\Controllers\Api\LeadDemoChatController::class, 'sugerir']);
+            Route::post('mensajes', [\App\Http\Controllers\Api\LeadDemoChatController::class, 'crear']);
+            Route::put('mensajes/{mensaje}', [\App\Http\Controllers\Api\LeadDemoChatController::class, 'editar']);
+            Route::delete('mensajes/{mensaje}', [\App\Http\Controllers\Api\LeadDemoChatController::class, 'eliminar']);
+            Route::post('mensajes/{mensaje}/enviar', [\App\Http\Controllers\Api\LeadDemoChatController::class, 'enviar']);
+        });
 
         // Cotizador del sistema (misión cotizador-lead-mercado-pago, 22/9/2026): recalcula el
         // total desde los precios recibidos, pide la preferencia a Mercado Pago y guarda la foto

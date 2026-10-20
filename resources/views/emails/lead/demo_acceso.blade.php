@@ -309,7 +309,8 @@
                   <p style="margin:12px 0 0 0;font-family:{!! $font !!};font-size:15px;line-height:24px;color:#566078;">
                     Mientras dure tu turno
                     podés escribirle al asistente de tu demo, igual que lo haría el dueño de un negocio con su sistema.
-                    Escribile <strong style="color:#1c2333;font-weight:600;">desde este mismo WhatsApp</strong>, el que usás con nosotros, al
+                    Escribile <strong style="color:#1c2333;font-weight:600;">desde este mismo WhatsApp</strong>, el que usás con nosotros,
+                    al mismo número de ComercioCity con el que coordinaste la demo:
                     <strong style="color:#1c2333;font-weight:600;white-space:nowrap;">{{ $asistente_numero }}</strong>.
                   </p>
                   <p style="margin:14px 0 0 0;font-family:{!! $font !!};font-size:15px;line-height:24px;color:#566078;">

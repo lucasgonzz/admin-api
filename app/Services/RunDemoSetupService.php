@@ -520,6 +520,12 @@ class RunDemoSetupService
                 : null,
         ];
 
+        // La industria es opcional: una instancia anterior la ignora y una nueva sin elección
+        // conserva la ferretería de siempre. business_type sigue siendo el rubro comercial libre.
+        if ($lead->demo_industria !== null) {
+            $payload['demo_industria'] = DemoIndustriaCatalogo::normalizar($lead->demo_industria);
+        }
+
         // La API key de Google solo viaja si está cargada en admin. Si está vacía no se manda
         // el campo, y empresa-api usa la constante de fallback que tiene en DemoSetupHelper.
         // Se lee la key de DEMO (distinta de la de clientes reales) para no compartir cuota.

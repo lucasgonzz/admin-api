@@ -253,6 +253,11 @@ return [
         'proveedor' => env('LEAD_AI_PROVEEDOR', 'deepseek'),
     ],
 
+    // Agente del chat de la demo: proveedor fijo DeepSeek, independiente del agente comercial.
+    'demo_chat' => [
+        'model' => env('DEEPSEEK_MODEL_DEMO', 'deepseek-flash'),
+    ],
+
     // Google Calendar OAuth2: permite que los closers conecten su calendario dedicado
     // de Google para bloquear disponibilidad de demos automáticamente.
     // Credenciales creadas en Google Cloud Console (tipo "Web application",

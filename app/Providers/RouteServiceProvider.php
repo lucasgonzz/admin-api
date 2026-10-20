@@ -56,6 +56,15 @@ class RouteServiceProvider extends ServiceProvider
      */
     protected function configureRateLimiting()
     {
+        RateLimiter::for('demo-chat', function (Request $request) {
+            // Todas las demos del VPS comparten IP: cada conversación necesita su propia cuota.
+            // Throttle puede ejecutarse antes del middleware de identidad. El hash no revela la clave;
+            // DemoEventosKey sigue autenticándola antes de entrar al controlador.
+            $token = trim((string) $request->header('X-Demo-Eventos-Key'));
+            $limite = max(1, (int) config('services.demo_chat.rate_limit_per_minute', 240));
+            return Limit::perMinute($limite)->by('demo-chat:' . ($token !== '' ? hash('sha256', $token) : $request->ip()));
+        });
+
         RateLimiter::for('shared-catalog-inbound', function (Request $request) {
             $client = $request->attributes->get('sync_client');
             abort_unless($client, 401, 'Falta la identidad validada del negocio.');

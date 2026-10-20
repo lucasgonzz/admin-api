@@ -10286,7 +10286,7 @@ BLOQUE_DEL_MANUAL;
          * prometerlo. El mail trae el detalle: el agente no lo explica por su cuenta. */
         if (AsistenteDemoLeadService::disponible_para($lead, $demo_para_tienda)) {
             $linea_del_asistente_en_reglas = "  - Asistente personal para probar durante la demo: DISPONIBLE (" . AsistenteDemoLeadService::numero_visible() . "). El mail de\n"
-                . "    acceso se lo explica. Si el lead pregunta, decile que durante su turno puede escribirle a ese numero desde este\n"
+                . "    acceso se lo explica. Si el lead pregunta, decile que durante su turno este mismo numero de ComercioCity funciona como su asistente desde este\n"
                 . "    mismo WhatsApp y pedirle cosas sobre los datos de su demo (ventas del dia, stock, cargar un cliente). No lo ofrezcas\n"
                 . "    por tu cuenta y no prometas mas que eso.\n";
         } else {

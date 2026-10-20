@@ -29,9 +29,10 @@ class DemoPlanResolver
      * estructura se resolvió: `condiciones_secciones` y `evento_esperado` existen recién desde la
      * v2 (13/8/2026). La v3 (19/8) bifurcó el clip de precios por condicion_fiscal, y la v4
      * (24/8) sumó la sección S0 - Introduccion con el clip 0.1. La const acompaña a la version
-     * del JSON sincronizado — quedó clavada en 2 durante la v3 y se corrigió al entrar la v4.
+     * del JSON sincronizado. La v7 agrega el asistente personal y el recorrido por chat; la tienda
+     * se muestra en todas las demos. Las v5 y v6 habían sumado el escaneo y el agente de clientes.
      */
-    const VERSION_CATALOGO = 4;
+    const VERSION_CATALOGO = 7;
 
     /**
      * Dominio de los campos NO booleanos que la forma `campo=valor` puede comparar.
@@ -44,6 +45,7 @@ class DemoPlanResolver
      */
     const VALORES_VALIDOS = [
         'tipo_precios' => ['unico', 'listas'],
+        'demo_industria' => ['ferreteria', 'indumentaria', 'autopartes', 'jugueteria', 'construccion', 'bebidas', 'mascotas', 'limpieza', 'belleza', 'almacen', 'pesca', 'hogar', 'tecnologia', 'distribuidora'],
     ];
 
     /**

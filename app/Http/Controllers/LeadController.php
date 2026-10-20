@@ -1223,6 +1223,7 @@ class LeadController extends Controller
         /* Mismas reglas que el endpoint público, incluido el `sometimes` de las nueve: la tarjeta
            manda sólo lo que cambió, y una clave ausente significa "dejala como está", no "apagala". */
         $validated = $request->validate([
+            'demo_industria'                     => \App\Services\DemoIndustriaCatalogo::regla(),
             'tipo_precios'                       => 'sometimes|string|in:unico,listas',
             'usa_depositos'                      => 'sometimes|boolean',
             'usa_cuentas_corrientes_clientes'    => 'sometimes|boolean',
