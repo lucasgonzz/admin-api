@@ -3265,6 +3265,15 @@ TXT;
             && empty($parsed['correo_corregido_manualmente'])) {
             $conflicto = 'La acción guardar_email trae una casilla que no está respaldada por un mensaje del lead.';
         }
+        $destinatario = trim((string) ($parsed['guardar_email'] ?? ''));
+        $destinatario = $destinatario !== '' ? $destinatario : trim((string) $lead->email);
+        preg_match_all('/[A-Z0-9.!#$%&\x27*+\/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i', $texto, $correos_del_texto);
+        foreach ($correos_del_texto[0] as $correo_del_texto) {
+            if ($destinatario !== '' && filter_var($correo_del_texto, FILTER_VALIDATE_EMAIL)
+                && strcasecmp($correo_del_texto, $destinatario) !== 0) {
+                $conflicto = 'La casilla que nombra la respuesta no coincide con el destinatario de la acción.';
+            }
+        }
         // No basta que una IA invente una casilla y asegure haber enviado el correo.
         if ($accion === '' && empty($parsed['guardar_email']) && trim((string) $lead->email) === ''
             && preg_match('/(?:te (?:mand[eé]|envi[eé])|te (?:llega|mando|env[ií]o)).{0,50}(?:mail|correo)/iu', $texto)) {
@@ -6007,6 +6016,14 @@ TXT;
         ?array $calendar_snapshot = null
     ): LeadMessage {
         if (AgendaDemoAutomaticaPolicy::activa()) {
+            if (! empty($parsed['agendar_demo'])) {
+                $parsed['agendar_demo']['evidencia_temporal'] = app(AgendaDemoTemporalService::class)->pedido($lead);
+            }
+            if (! empty($parsed['agendar_demo']) || ! empty($parsed['guardar_email']) || ! empty($parsed['reenviar_mail_demo'])) {
+                $parsed['evidencia_correo'] = app(AgendaDemoTemporalService::class)->correo_reciente($lead);
+                $correo_accion = trim((string) ($parsed['guardar_email'] ?? ''));
+                $parsed['destinatario_correo'] = $correo_accion !== '' ? $correo_accion : trim((string) $lead->email);
+            }
             $decision = app(AgendaDemoAutomaticaPolicy::class)->evaluar($lead->fresh() ?: $lead, $parsed, null, 'generacion');
             $parsed['decision_agenda'] = $decision;
             // También el camino automático difiere los efectos hasta el servicio de envío:
@@ -6411,9 +6428,9 @@ TXT;
      *
      * @return LeadMessage Mismo mensaje, actualizado in-place con el resultado real de aplicar las acciones.
      */
-    public function apply_pending_actions(LeadMessage $message, ?array $final_actions = null, bool $automatico = false): LeadMessage
+    public function apply_pending_actions(LeadMessage $message, ?array $final_actions = null, bool $automatico = false, ?string $texto_aprobado = null): LeadMessage
     {
-        if ($automatico && $final_actions !== null) {
+        if ($automatico && ($final_actions !== null || $texto_aprobado !== null)) {
             throw new \InvalidArgumentException('El envío automático no puede traer correcciones ni forzados del operador.');
         }
         $lead_fin_manual = $this->validar_confirmacion_fin_demo_manual($message, $final_actions);
@@ -6438,7 +6455,10 @@ TXT;
 
         /* Paquete efectivo a aplicar: por defecto, el de Claude sin cambios. */
         $parsed_efectivo = $parsed;
-        unset($parsed_efectivo['correo_corregido_manualmente']);
+        unset($parsed_efectivo['correo_corregido_manualmente'], $parsed_efectivo['texto_validado_por_operador']);
+        if (! $automatico && $texto_aprobado !== null) {
+            $parsed_efectivo['texto_validado_por_operador'] = $texto_aprobado;
+        }
         if ($automatico) {
             $lead = $lead->fresh() ?: $lead;
             $decision = app(AgendaDemoAutomaticaPolicy::class)->evaluar($lead, $parsed_efectivo, $message->fresh() ?: $message, 'aplicacion');
@@ -6774,10 +6794,15 @@ TXT;
 
         // La advertencia no se resuelve apretando Aprobar sin corregir sus datos.
         if ($for_approval && ! empty($parsed['conflicto_correo'])) {
-            $parsed = $this->normalizar_correo_de_agenda($lead, $parsed, false);
-            if (! empty($parsed['conflicto_correo'])) {
-                throw new \InvalidArgumentException($parsed['conflicto_correo'] . ' Corregí el correo y el texto antes de aprobar.');
+            $para_verificar = $parsed;
+            if (isset($parsed['texto_validado_por_operador'])) {
+                $para_verificar['mensaje_sugerido'] = $parsed['texto_validado_por_operador'];
             }
+            $verificado = $this->normalizar_correo_de_agenda($lead, $para_verificar, false);
+            if (! empty($verificado['conflicto_correo'])) {
+                throw new \InvalidArgumentException($verificado['conflicto_correo'] . ' Corregí el correo y el texto antes de aprobar.');
+            }
+            unset($parsed['conflicto_correo']);
         }
 
         /* Extraer los campos obligatorios de la respuesta (ya validados por validate_parsed_response). */

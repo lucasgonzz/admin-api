@@ -52,6 +52,8 @@ class AgendaDemoAutomaticaPolicy
             $pedido = app(AgendaDemoTemporalService::class)->pedido($lead);
             if ($pedido === null || ! in_array($pedido['tipo'], ['ahora', 'momento'], true)) {
                 $motivo = 'momento_sin_evidencia';
+            } elseif (! $this->misma_intencion($pedido, $parsed['agendar_demo'])) {
+                $motivo = 'intencion_desactualizada';
             } else {
                 $servicio = app(DemoDirectaService::class);
                 $ventana = ! empty($parsed['agendar_demo']['ahora']) ? $servicio->ventana_desde()
@@ -67,6 +69,17 @@ class AgendaDemoAutomaticaPolicy
                 }
             }
         }
+        if ($motivo === null && (! empty($parsed['agendar_demo']) || ! empty($parsed['guardar_email']) || ! empty($parsed['reenviar_mail_demo']))) {
+            $correo_actual = app(AgendaDemoTemporalService::class)->correo_reciente($lead);
+            $destinatario = trim((string) ($parsed['destinatario_correo'] ?? $parsed['guardar_email'] ?? $lead->email));
+            if (count($correo_actual['correos']) > 1) {
+                $motivo = 'correo_ambiguo';
+            } elseif (count($correo_actual['correos']) === 1 && strcasecmp($correo_actual['correos'][0], $destinatario) !== 0) {
+                $motivo = 'correo_desactualizado';
+            } elseif (empty($parsed['guardar_email']) && strcasecmp(trim((string) $lead->email), $destinatario) !== 0) {
+                $motivo = 'correo_guardado_desactualizado';
+            }
+        }
         if ($motivo === null && ! empty($parsed['cancelar_demo']) && empty($parsed['agendar_demo'])) {
             $ultimo = LeadMessage::query()->where('lead_id', $lead->id)->where('sender', 'lead')->orderByDesc('id')->value('content');
             if (! preg_match('/\b(?:cancel|anul|no voy a|no la voy a|no puedo|dejalo|dejala)/iu', (string) $ultimo)) {
@@ -79,5 +92,22 @@ class AgendaDemoAutomaticaPolicy
         }
 
         return $decision;
+    }
+
+    /** No basta que el pedido nuevo siga siendo «momento»: debe ser la MISMA intención. */
+    private function misma_intencion(array $actual, array $agendar): bool
+    {
+        $origen = $agendar['evidencia_temporal'] ?? null;
+        if (! is_array($origen) || (int) ($origen['mensaje_id'] ?? 0) !== (int) $actual['mensaje_id']
+            || ($origen['tipo'] ?? '') !== $actual['tipo']) {
+            return false;
+        }
+        if (! empty($agendar['ahora'])) {
+            return $actual['tipo'] === 'ahora';
+        }
+
+        return $actual['tipo'] === 'momento'
+            && ($origen['inicio'] ?? '') === $actual['inicio']
+            && ($agendar['inicio_resuelto'] ?? '') === $actual['inicio'];
     }
 }

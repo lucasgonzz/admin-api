@@ -208,8 +208,19 @@ class AgendaCaoticaTest extends TestCase
         }
         $this->assertNull($lead->fresh()->email);
         Mail::assertNothingSent();
-        (new LeadAiService())->apply_pending_actions($msg, ['guardar_email' => 'corregido@fixture.test']);
+        (new LeadAiService())->apply_pending_actions($msg, ['guardar_email' => 'corregido@fixture.test'], false, 'Te mandé todo al mail corregido@fixture.test.');
         $this->assertSame('corregido@fixture.test', $lead->fresh()->email);
+    }
+
+    public function test_casilla_inventada_en_la_prosa_se_retiene_aunque_la_accion_sea_valida(): void
+    {
+        $lead = $this->lead(null);
+        $this->mensaje($lead, 'Mi correo es correcto@fixture.test');
+        $msg = $this->generar($lead, ['mensaje_sugerido' => 'Te mandé el correo a inventado@fixture.test.', 'guardar_email' => 'correcto@fixture.test']);
+        $this->assertTrue((bool) $msg->requiere_verificacion);
+        $this->assertStringContainsString('no coincide', $msg->pending_actions['conflicto_correo']);
+        $this->assertNull($lead->fresh()->email);
+        Mail::assertNothingSent();
     }
 
     public function test_dos_casillas_se_retienen_sin_efectos(): void

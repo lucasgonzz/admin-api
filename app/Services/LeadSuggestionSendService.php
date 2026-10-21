@@ -392,7 +392,7 @@ class LeadSuggestionSendService
             }
 
             try {
-                $message = app(\App\Services\LeadAiService::class)->apply_pending_actions($message, $final_actions, $is_auto_send && AgendaDemoAutomaticaPolicy::activa());
+                $message = app(\App\Services\LeadAiService::class)->apply_pending_actions($message, $final_actions, $is_auto_send && AgendaDemoAutomaticaPolicy::activa(), $is_auto_send ? null : $edited_content);
             } catch (\InvalidArgumentException | \App\Exceptions\SinDemoLibreException | \App\Exceptions\AprobacionEnCursoException $error_agenda) {
                 if (! $is_auto_send || ! AgendaDemoAutomaticaPolicy::activa()) {
                     throw $error_agenda;

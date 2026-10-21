@@ -22,6 +22,7 @@ use Database\Seeders\LeadPipelineStatusGroupOrderSeeder;
 use Database\Seeders\LeadPipelineStatusSeeder;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
@@ -152,6 +153,88 @@ class AgendaDemoAutomaticaPolicyTest extends TestCase
         $this->assertSame('verificado@fixture.test', $lead->fresh()->email);
     }
 
+    public function test_un_cambio_de_momento_entre_el_lease_y_el_lock_retiene_y_conserva_reserva(): void
+    {
+        $this->activar();
+        $demo = $this->demo();
+        $lead = $this->lead();
+        $lead->update(['status' => 'demo_agendada', 'demo_id' => $demo->id, 'demo_date' => '2026-10-22', 'demo_start_time' => '12:00', 'demo_end_time' => '14:00']);
+        $this->inbound($lead, 'Mañana a las 15 me sirve.');
+        $msg = $this->generar_pendiente($lead, ['dia' => 'manana', 'hora' => '15:00', 'inicio_resuelto' => '2026-10-22 15:00'], ['cancelar_demo' => true]);
+        $this->assertFalse((bool) $msg->requiere_verificacion);
+        $this->intercalar_al_tomar_lock(function () use ($lead) { $this->inbound($lead, 'Mejor hoy a las 16'); });
+        $sender = \Mockery::mock(WhatsappSendService::class);
+        $sender->shouldNotReceive('send_text');
+        (new LeadSuggestionSendService($sender))->send_suggestion($msg, null, null, true);
+        $this->assertSame('sugerido', $msg->fresh()->status);
+        $this->assertTrue((bool) $msg->fresh()->requiere_verificacion);
+        $this->assertSame($msg->content, $msg->fresh()->content);
+        $this->assertSame('2026-10-22', $lead->fresh()->demo_date->format('Y-m-d'));
+        $this->assertSame('12:00', substr((string) $lead->fresh()->demo_start_time, 0, 5));
+        $this->assertSame('Mejor hoy a las 16', LeadMessage::query()->where('lead_id', $lead->id)->where('sender', 'lead')->orderByDesc('id')->value('content'));
+        Mail::assertNothingSent();
+    }
+
+    public function test_un_correo_nuevo_entre_el_lease_y_el_lock_no_guarda_ni_envia_el_anterior(): void
+    {
+        $this->activar();
+        $this->demo();
+        $lead = $this->lead();
+        $this->inbound($lead, 'Ahora puedo, viejo@fixture.test');
+        $msg = $this->generar_pendiente($lead, ['ahora' => true], ['guardar_email' => 'viejo@fixture.test']);
+        $this->assertFalse((bool) $msg->requiere_verificacion);
+        $this->intercalar_al_tomar_lock(function () use ($lead) { $this->inbound($lead, 'Corrección: usá nuevo@fixture.test'); });
+        $sender = \Mockery::mock(WhatsappSendService::class);
+        $sender->shouldNotReceive('send_text');
+        (new LeadSuggestionSendService($sender))->send_suggestion($msg, null, null, true);
+        $this->assertTrue((bool) $msg->fresh()->requiere_verificacion);
+        $this->assertNull($lead->fresh()->email);
+        $this->assertNull($lead->fresh()->demo_id);
+        $this->assertSame('Corrección: usá nuevo@fixture.test', LeadMessage::query()->where('lead_id', $lead->id)->where('sender', 'lead')->orderByDesc('id')->value('content'));
+        Mail::assertNothingSent();
+    }
+
+    public function test_cambiar_el_email_guardado_durante_el_lease_no_cambia_silenciosamente_el_destinatario(): void
+    {
+        $this->activar();
+        $this->demo();
+        $lead = $this->lead();
+        $lead->update(['email' => 'anterior@fixture.test']);
+        $this->inbound($lead, 'Ahora puedo');
+        $msg = $this->generar_pendiente($lead, ['ahora' => true], ['guardar_email' => '']);
+        $this->assertSame('anterior@fixture.test', $msg->pending_actions['destinatario_correo']);
+        $this->assertFalse((bool) $msg->requiere_verificacion);
+        $this->intercalar_al_tomar_lock(function () use ($lead) { Lead::query()->whereKey($lead->id)->update(['email' => 'actualizado@fixture.test']); });
+        $sender = \Mockery::mock(WhatsappSendService::class);
+        $sender->shouldNotReceive('send_text');
+        (new LeadSuggestionSendService($sender))->send_suggestion($msg, null, null, true);
+        $this->assertTrue((bool) $msg->fresh()->requiere_verificacion);
+        $this->assertSame('actualizado@fixture.test', $lead->fresh()->email);
+        $this->assertNull($lead->fresh()->demo_id);
+        Mail::assertNothingSent();
+    }
+
+    /** Se intercalan escrituras reales de BD en el instante exacto de tomar el lock real. */
+    private function intercalar_al_tomar_lock(callable $intercalar): void
+    {
+        $real = Cache::lock('demo_asignacion_directa', 8);
+        $lock = new class($real, $intercalar) {
+            private $real;
+            private $intercalar;
+            public function __construct($real, callable $intercalar) { $this->real = $real; $this->intercalar = $intercalar; }
+            public function block($segundos) { ($this->intercalar)(); return $this->real->block($segundos); }
+            public function release() { return $this->real->release(); }
+        };
+        $manager = Cache::getFacadeRoot();
+        Cache::swap(new class($manager, $lock) {
+            private $manager;
+            private $lock;
+            public function __construct($manager, $lock) { $this->manager = $manager; $this->lock = $lock; }
+            public function lock($nombre, $segundos) { return $nombre === 'demo_asignacion_directa' ? $this->lock : $this->manager->lock($nombre, $segundos); }
+            public function __call($metodo, $argumentos) { return $this->manager->{$metodo}(...$argumentos); }
+        });
+    }
+
     private function activar(): void { AdminSetting::set(AgendaDemoAutomaticaPolicy::KEY_ACTIVA, '1'); }
     private function lead(): Lead
     {
@@ -165,10 +248,10 @@ class AgendaDemoAutomaticaPolicyTest extends TestCase
     {
         LeadMessage::create(['lead_id' => $lead->id, 'sender' => 'lead', 'status' => 'enviado', 'content' => $texto, 'is_followup' => false, 'sent_at' => AppTime::now()]);
     }
-    private function generar_pendiente(Lead $lead): LeadMessage
+    private function generar_pendiente(Lead $lead, array $agendar = ['ahora' => true], array $extras = []): LeadMessage
     {
         $metodo = new \ReflectionMethod(LeadAiService::class, 'create_message_and_update_lead');
         $metodo->setAccessible(true);
-        return $metodo->invoke(new LeadAiService(), $lead, ['mensaje_sugerido' => 'Dale, te dejo tu página.', 'estado_sugerido' => 'demo_agendada', 'agendar_demo' => ['ahora' => true]], false, null);
+        return $metodo->invoke(new LeadAiService(), $lead, array_merge(['mensaje_sugerido' => 'Dale, te dejo tu página.', 'estado_sugerido' => 'demo_agendada', 'agendar_demo' => $agendar], $extras), false, null);
     }
 }
