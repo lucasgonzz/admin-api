@@ -36,7 +36,8 @@ class DemoChatAiService
             'respuestas' => LeadDemoFormMapper::respuestas_efectivas($lead),
             'siguiente_sugerido' => $siguiente ? $siguiente['clave'] : null,
             'videos_terminados_o_salteados' => array_keys($terminados),
-            'asistente_personal_whatsapp' => AsistenteDemoLeadService::numero_visible(),
+            'asistente_personal_whatsapp' => AsistenteDemoLeadService::disponible_para($lead, $lead->demo)
+                ? AsistenteDemoLeadService::numero_visible() : '',
         ];
         $system = 'Sos el asistente de la demo de ComercioCity. Español rioplatense, práctico y breve: '
             . 'una a tres frases, sin discurso de venta. Acompañás al lead mientras prueba, no ejecutás cambios en el negocio. '
@@ -47,7 +48,9 @@ class DemoChatAiService
             . 'El lead puede saltear cualquier video. No lo felicites por terminar uno que no figura terminado. '
             . 'No repitas el saludo de presentación. El sistema ya ofrece el primer video. '
             . 'Hechos de la demo (fuente demo): el chat es para preguntas y videos; el asistente personal se prueba '
-            . 'escribiendo al mismo número de ComercioCity con el que coordinó la demo, durante su turno. '
+            . 'durante su turno escribiendo al número dedicado que figura en asistente_personal_whatsapp. '
+            . 'Es un chat separado del comercial: no lo mandes al número con el que coordinó la demo. '
+            . 'Si ese dato está vacío, no ofrezcas el canal ni inventes un número o un enlace. '
             . 'Puede mandarle una foto de factura para preparar una compra y revisarla antes de confirmar, '
             . 'foto de código de barras para cargar un artículo, pedir cambios de precios con confirmación, '
             . 'o consultar stock y ventas. El agente de clientes se prueba en simulación: primero elegir personalidad '

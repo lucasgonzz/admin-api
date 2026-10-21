@@ -135,11 +135,11 @@ class DemoDirectaCorreoPrimeroTest extends TestCase
     {
         $config = new WhatsappConfig();
         $config->forceFill([
-            'proposito'       => WhatsappConfig::PROPOSITO_PRINCIPAL,
+            'proposito'       => WhatsappConfig::PROPOSITO_ASISTENTE,
             'kapso_api_key'   => 'clave-kapso-del-asistente',
             'phone_number_id' => '5550001112223',
             'webhook_secret'  => 'secreto-del-asistente',
-            'display_phone'   => '+54 9 3444 544199',
+            'display_phone'   => '+1 201 555 0123',
             'is_active'       => true,
             'test_mode'       => false,
         ]);
@@ -544,8 +544,10 @@ class DemoDirectaCorreoPrimeroTest extends TestCase
 
         $bloque = $this->contexto($this->crear_lead());
 
-        $this->assertStringContainsString('Asistente personal para probar durante la demo: DISPONIBLE (+54 9 3444 544199)', $bloque);
-        $this->assertStringContainsString('desde este', $bloque);
+        $this->assertStringContainsString('Asistente personal para probar durante la demo: DISPONIBLE (+1 201 555 0123)', $bloque);
+        $this->assertStringContainsString('numero dedicado del asistente', $bloque);
+        $this->assertStringContainsString('un chat separado del comercial', $bloque);
+        $this->assertStringNotContainsString('este mismo numero de ComercioCity funciona como su asistente', $bloque);
         $this->assertStringContainsString('No lo ofrezcas', $bloque);
         $this->assertStringNotContainsString('NO DISPONIBLE', $bloque);
     }

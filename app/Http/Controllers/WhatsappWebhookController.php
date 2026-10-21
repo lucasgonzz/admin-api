@@ -178,8 +178,8 @@ class WhatsappWebhookController extends Controller
              * 🔴 EL ENRUTADO SE DECIDE POR NÚMERO, no por un flag del cliente (misión
              * whatsapp-dos-numeros, 13/10/2026).
              *
-             * Al número del asistente entra UNA sola cosa: el dueño hablando con el asistente de
-             * IA de su propio sistema. Ahí no se abren tickets, no se crean leads y no se contesta
+             * Al número del asistente entra el dueño hablando con su sistema, o un lead que prueba
+             * la instancia de su demo durante el turno. Ahí no se abren tickets, no se crean leads y no se contesta
              * ninguna implementación —todo eso vive en el número institucional—, así que la rama
              * corta acá y no sigue al árbol de abajo.
              */
@@ -292,8 +292,6 @@ class WhatsappWebhookController extends Controller
                         'is_audio'           => $this->is_inbound_audio_kind((string) ($parsed['type'] ?? '')),
                     ]);
                 }
-            } elseif ($this->handle_lead_en_demo_principal($parsed)) {
-                // El asistente de la demo usa el mismo chat institucional donde habló con el equipo.
             } else {
                 $this->handle_lead_message($parsed, $payload);
                 Log::channel('daily')->info('WhatsApp webhook: mensaje enrutado a lead.', [
@@ -1369,7 +1367,7 @@ class WhatsappWebhookController extends Controller
      */
     private function handle_lead_en_demo_del_asistente(array $parsed, string $desde): bool
     {
-        if (! AsistenteDemoLeadService::interruptor_prendido()) {
+        if (! AsistenteDemoLeadService::disponible()) {
             return false;
         }
 
@@ -1422,28 +1420,6 @@ class WhatsappWebhookController extends Controller
                 'Lead con demo escribe al asistente fuera de su turno'
             );
 
-        return true;
-    }
-
-    /** Solo intercepta el turno vigente y armado; fuera de él sigue el agente comercial habitual. */
-    private function handle_lead_en_demo_principal(array $parsed): bool
-    {
-        if (! AsistenteDemoLeadService::interruptor_prendido()) {
-            return false;
-        }
-        $resultado = app(AsistenteDemoLeadService::class)->situacion_del_lead($this->telefono_del_remitente($parsed));
-        if ($resultado['situacion'] !== AsistenteDemoLeadService::SITUACION_ACTIVO || $resultado['lead'] === null) {
-            return false;
-        }
-        $lead = $resultado['lead'];
-        $demo = Demo::find((int) $lead->demo_id);
-        if ($demo === null) {
-            return false;
-        }
-        app(AsistenteWhatsappService::class)->recibir($parsed, null, $demo, $lead);
-        Log::channel('daily')->info('WhatsApp webhook: lead en demo atendido por el número principal.', [
-            'lead_id' => $lead->id, 'demo_id' => $demo->id, 'route' => 'asistente-demo-principal',
-        ]);
         return true;
     }
 

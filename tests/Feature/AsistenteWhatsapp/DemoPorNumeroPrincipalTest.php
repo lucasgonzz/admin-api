@@ -8,6 +8,7 @@ use App\Models\ClientAssistantMessage;
 use App\Models\Demo;
 use App\Models\Lead;
 use App\Models\LeadMessage;
+use App\Models\WhatsappConfig;
 use App\Services\AsistenteDemoLeadService;
 use App\Services\DemoDirectaService;
 use App\Services\LeadDemoSettings;
@@ -16,7 +17,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 
-/** El mismo chat comercial se convierte en asistente solo durante el turno del teléfono exacto. */
+/** El principal conserva el chat comercial y el número dedicado atiende la demo del teléfono exacto. */
 class DemoPorNumeroPrincipalTest extends BaseDelCanal
 {
     const TELEFONO = '5493417778899';
@@ -52,14 +53,15 @@ class DemoPorNumeroPrincipalTest extends BaseDelCanal
             'demo_start_time' => '15:10', 'demo_end_time' => '17:10', 'demo_setup_status' => 'exitoso'], $campos));
     }
 
-    public function test_el_principal_atiende_y_responde_desde_el_mismo_numero_sin_config_separada(): void
+    public function test_el_asistente_dedicado_atiende_y_responde_por_el_mismo_canal_de_entrada(): void
     {
+        $this->crear_config_asistente(['display_phone' => '+1 201 555 0123']);
         $lead = $this->lead();
         $espia = $this->espiar_sender();
-        $this->postear_webhook($this->payload_de_texto(self::TELEFONO, 'Cuánto vendí hoy?', 'wamid.DEMO-PRINCIPAL', null, self::PHONE_NUMBER_ID_PRINCIPAL))->assertOk();
+        $this->postear_webhook($this->payload_de_texto(self::TELEFONO, 'Cuánto vendí hoy?', 'wamid.DEMO-ASISTENTE', null, self::PHONE_NUMBER_ID_ASISTENTE), self::SECRETO_DEL_ASISTENTE)->assertOk();
         $fila = ClientAssistantMessage::where('lead_id', $lead->id)->firstOrFail();
         $this->assertSame((int) $lead->demo_id, (int) $fila->demo_id);
-        $this->assertSame(self::PHONE_NUMBER_ID_PRINCIPAL, (string) $fila->phone_number_id);
+        $this->assertSame(self::PHONE_NUMBER_ID_ASISTENTE, (string) $fila->phone_number_id);
         Queue::assertPushed(EnviarMensajeAlAsistenteJob::class);
         $this->assertSame(0, LeadMessage::where('lead_id', $lead->id)->count());
 
@@ -72,10 +74,35 @@ class DemoPorNumeroPrincipalTest extends BaseDelCanal
         $this->correr_job($job, $espia);
         Http::assertSent(function ($r) { return strpos($r->url(), 'https://api-demo-principal.test/api/admin-sync/asistente/mensajes') === 0 && $r->hasHeader('X-Admin-Api-Key', 'clave-de-prueba-principal'); });
         $this->assertSame('+' . self::TELEFONO, $espia->textos[0]['to']);
-        $this->assertSame(self::PHONE_NUMBER_ID_PRINCIPAL, (string) $espia->destinos[0]);
+        $this->assertSame(self::PHONE_NUMBER_ID_ASISTENTE, (string) $espia->destinos[0]);
         $this->assertSame('Hoy vendiste $120.000.', $espia->textos[0]['body']);
-        $this->assertSame('543444544199', AsistenteDemoLeadService::numero_visible());
-        $this->assertStringContainsString('wa.me/543444544199', AsistenteDemoLeadService::url_whatsapp());
+        $this->assertSame('+1 201 555 0123', AsistenteDemoLeadService::numero_visible());
+        $this->assertStringContainsString('wa.me/12015550123', AsistenteDemoLeadService::url_whatsapp());
+    }
+
+    public function test_el_principal_con_turno_activo_conserva_el_chat_comercial(): void
+    {
+        $this->crear_config_asistente();
+        $lead = $this->lead();
+        $this->espiar_sender();
+        $this->postear_webhook($this->payload_de_texto(self::TELEFONO, 'Quiero hablar con el equipo', 'wamid.PRINCIPAL-COMERCIAL', null, self::PHONE_NUMBER_ID_PRINCIPAL))->assertOk();
+        $this->assertSame(0, ClientAssistantMessage::where('lead_id', $lead->id)->count());
+        $this->assertTrue(LeadMessage::where('lead_id', $lead->id)->exists());
+        Queue::assertNotPushed(EnviarMensajeAlAsistenteJob::class);
+    }
+
+    public function test_sin_numero_dedicado_listo_no_se_ofrece_el_principal_como_asistente(): void
+    {
+        $this->assertFalse(AsistenteDemoLeadService::disponible());
+        $this->assertSame('', AsistenteDemoLeadService::numero_visible());
+        $this->assertSame('', AsistenteDemoLeadService::url_whatsapp());
+
+        $this->crear_config_asistente(['webhook_secret' => null]);
+        $this->assertFalse(AsistenteDemoLeadService::disponible());
+        $this->assertSame('', AsistenteDemoLeadService::numero_visible());
+        $this->assertSame('', AsistenteDemoLeadService::url_whatsapp());
+
+        $this->assertNotNull(WhatsappConfig::canalListo(WhatsappConfig::PROPOSITO_PRINCIPAL));
     }
 
     public function test_un_turno_vencido_sigue_en_el_canal_comercial(): void

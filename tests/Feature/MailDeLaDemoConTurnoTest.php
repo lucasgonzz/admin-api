@@ -23,8 +23,8 @@ use Tests\TestCase;
  *
  *  1. **Que la hora del mail sea la del turno asignado** (la misma que el agente le dijo por el chat y
  *     que muestra la página), no un reloj propio: un mail con una hora supuesta es peor que ninguno.
- *  2. **Que el asistente NO se prometa si el número principal no está listo.** Durante la demo se usa
- *     el mismo número de ComercioCity con el que el lead coordinó el turno.
+ *  2. **Que el asistente NO se prometa si su número dedicado no está listo.** El principal conserva
+ *     la conversación comercial y el asistente se prueba en otro chat.
  *  3. **Que el mail viejo siga saliendo** para un lead sin turno (reenvío tardío) y para un llamador
  *     que arme el Mailable con los siete argumentos de antes.
  *  4. Que el mail diga qué es la instancia: sistema de gestión, tienda online y sistema de agentes.
@@ -125,11 +125,11 @@ class MailDeLaDemoConTurnoTest extends TestCase
     {
         $config = new WhatsappConfig();
         $config->forceFill(array_merge([
-            'proposito'       => WhatsappConfig::PROPOSITO_PRINCIPAL,
+            'proposito'       => WhatsappConfig::PROPOSITO_ASISTENTE,
             'kapso_api_key'   => 'clave-kapso-del-asistente',
             'phone_number_id' => '5550001112223',
             'webhook_secret'  => 'secreto-del-asistente',
-            'display_phone'   => '+54 9 3444 544199',
+            'display_phone'   => '+1 201 555 0123',
             'is_active'       => true,
             'test_mode'       => false,
         ], $campos));
@@ -257,7 +257,7 @@ class MailDeLaDemoConTurnoTest extends TestCase
     }
 
     /**
-     * (2) Sin el número principal listo, el mail no ofrece el asistente: ni el bloque, ni
+     * (2) Sin el número dedicado listo, el mail no ofrece el asistente: ni el bloque, ni
      * el enlace, ni la frase suelta en la fila de agentes.
      *
      * @return void
@@ -295,10 +295,11 @@ class MailDeLaDemoConTurnoTest extends TestCase
         $html = LeadDemoAccesoMailHelper::build($lead)->render();
 
         $this->assertStringContainsString('Probalo desde tu WhatsApp', $html);
-        $this->assertStringContainsString('+54 9 3444 544199', $html);
-        $this->assertStringContainsString('al mismo número de ComercioCity con el que coordinaste la demo', $html);
-        $this->assertStringContainsString('desde este mismo WhatsApp', $html);
-        $this->assertStringContainsString('href="https://wa.me/5493444544199?text=Hola%2C%20estoy%20en%20mi%20demo%20de%20ComercioCity"', $html);
+        $this->assertStringContainsString('+1 201 555 0123', $html);
+        $this->assertStringContainsString('en un chat separado del equipo comercial', $html);
+        $this->assertStringContainsString('desde tu número de WhatsApp', $html);
+        $this->assertStringNotContainsString('al mismo número de ComercioCity con el que coordinaste la demo', $html);
+        $this->assertStringContainsString('href="https://wa.me/12015550123?text=Hola%2C%20estoy%20en%20mi%20demo%20de%20ComercioCity"', $html);
         $this->assertStringContainsString('Mientras dure tu turno', $html);
         $this->assertStringContainsString('un asistente', $html);
     }
