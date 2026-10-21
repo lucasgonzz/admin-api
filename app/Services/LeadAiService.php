@@ -6522,7 +6522,7 @@ TXT;
                     && empty($agendar_admin['ahora'])
                     && empty($agendar_admin['demo_date'])
                     && empty($agendar_admin['demo_start_time'])) {
-                    foreach (['dia', 'hora', 'inicio_resuelto', 'demo_id_previsto', 'url_tienda_prevista', 'evidencia_temporal'] as $clave_turno) {
+                    foreach (['dia', 'hora', 'inicio_resuelto', 'demo_id_previsto', 'url_tienda_prevista', 'evidencia_temporal', 'conflicto_temporal'] as $clave_turno) {
                         if (! array_key_exists($clave_turno, $agendar_admin) && array_key_exists($clave_turno, $parsed['agendar_demo'])) {
                             $agendar_admin[$clave_turno] = $parsed['agendar_demo'][$clave_turno];
                         }

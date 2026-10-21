@@ -267,7 +267,7 @@ class AgendaCaoticaTest extends TestCase
         $this->assertSame('2026-10-22 10:00', $msg->pending_actions['agendar_demo']['inicio_resuelto']);
         $this->assertNull($lead->fresh()->demo_id);
         $this->expectException(\InvalidArgumentException::class);
-        (new LeadAiService())->apply_pending_actions($msg);
+        (new LeadAiService())->apply_pending_actions($msg, ['agendar_demo' => ['dia' => 'manana', 'hora' => '10:00']]);
     }
 
     private function reloj(string $hora): void { Carbon::setTestNow(Carbon::parse($hora, DemoDirectaService::TZ)); }
