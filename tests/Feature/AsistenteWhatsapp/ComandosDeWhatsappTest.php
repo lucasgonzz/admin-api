@@ -214,16 +214,17 @@ class ComandosDeWhatsappTest extends BaseDelCanal
             return $request->method() === 'DELETE'
                 && strpos($request->url(), '/webhooks/8d3f1a9e-0000-0000-0000-000000000001') !== false;
         });
-        Http::assertSent(function ($request) {
-            return $request->method() === 'POST'
-                && $request['url'] === 'https://api-admin.ejemplo.test/public/api/webhook/whatsapp'
-                && in_array('whatsapp.message.received', $request['events'], true)
-                && is_string($request['secret_key']) && strlen($request['secret_key']) >= 32;
-        });
-
         $secreto = WhatsappConfig::porProposito('asistente')->webhook_secret;
         $this->assertNotEmpty($secreto, 'El secreto quedó guardado en la fila.');
         $this->assertStringNotContainsString($secreto, $salida, 'Y no se imprimió.');
+        Http::assertSent(function ($request) use ($secreto) {
+            return $request->method() === 'POST' && json_decode($request->body(), true) == ['whatsapp_webhook' => [
+                'url' => 'https://api-admin.ejemplo.test/public/api/webhook/whatsapp', 'secret_key' => $secreto,
+                'events' => ['whatsapp.message.received', 'whatsapp.message.sent', 'whatsapp.message.delivered', 'whatsapp.message.read', 'whatsapp.message.failed'],
+            ]];
+        });
+        $this->assertSame(['GET', 'GET', 'POST', 'DELETE'], Http::recorded()->map(function ($par) { return $par[0]->method(); })->all(),
+            'El webhook anterior sólo se borra después de que el alta fue aceptada.');
     }
 
     /**
@@ -251,11 +252,13 @@ class ComandosDeWhatsappTest extends BaseDelCanal
      * 🔴 Primero se da de alta el nuestro y recién DESPUÉS se borra el viejo: si el alta falla, el número
      * sigue como estaba y no se borró nada.
      *
+     * @dataProvider rechazos_del_alta
      * @return void
      */
-    public function test_si_el_alta_falla_no_se_borra_nada(): void
+    public function test_si_el_alta_falla_no_se_borra_nada(int $http, array $respuesta): void
     {
-        $this->crear_config_asistente(['webhook_secret' => null]);
+        $this->crear_config_asistente(['webhook_secret' => 'secreto-anterior-sintetico']);
+        $antes = WhatsappConfig::porProposito('asistente')->getAttributes();
 
         $this->fakear_http([
             '*/webhooks/*' => Http::response('', 204),
@@ -263,7 +266,7 @@ class ComandosDeWhatsappTest extends BaseDelCanal
                 ->push(['data' => [[
                     'id' => '8d3f1a9e-0000-0000-0000-000000000001', 'url' => 'https://x.ngrok-free.app/a', 'events' => [], 'active' => true, 'kind' => 'kapso',
                 ]]], 200)
-                ->push(['error' => 'invalid'], 422),
+                ->push($respuesta, $http),
             '*/health'     => Http::response(['status' => 'healthy'], 200),
         ]);
 
@@ -277,7 +280,12 @@ class ComandosDeWhatsappTest extends BaseDelCanal
         Http::assertNotSent(function ($request) {
             return $request->method() === 'DELETE';
         });
-        $this->assertNull(WhatsappConfig::porProposito('asistente')->webhook_secret);
+        $this->assertSame($antes, WhatsappConfig::porProposito('asistente')->getAttributes(), 'El rechazo conserva la fila completa y el secreto anterior.');
+    }
+
+    public function rechazos_del_alta(): array
+    {
+        return [[400, ['message' => 'missing_parameter']], [422, ['error' => 'invalid']]];
     }
 
     /**

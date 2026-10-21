@@ -246,9 +246,11 @@ class WhatsappRegistrarWebhookCommand extends Command
         $respuesta = KapsoHttpClient::make($api_key, self::TIMEOUT)->post(
             $this->endpoint_de_webhooks($phone_number_id),
             [
-                'url'        => $url,
-                'secret_key' => $secreto,
-                'events'     => self::EVENTOS,
+                'whatsapp_webhook' => [
+                    'url'        => $url,
+                    'secret_key' => $secreto,
+                    'events'     => self::EVENTOS,
+                ],
             ]
         );
 
