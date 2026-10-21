@@ -402,9 +402,13 @@ class DemoDirectaService
         $pedida_desde = $inicio->copy()->subMinutes($setup_antes);
         $pedida_hasta = $fin->copy()->addMinutes($gracia);
 
-        /* demo_date es DATE puro: se compara con la fecha calendario del inicio pedido. */
+        /* Un turno de ayer puede ocupar hoy por gracia/bloqueo real. También importa el setup
+         * de un turno del día siguiente. La fecha de cada fila se conserva al armar su intervalo. */
         $ocupantes = Lead::query()
-            ->whereDate('demo_date', $inicio->format('Y-m-d'))
+            ->whereBetween('demo_date', [
+                $pedida_desde->copy()->subMinutes(max(1440, $bloqueo_real, $duracion + $gracia))->toDateString(),
+                $pedida_hasta->copy()->addMinutes($setup_antes)->toDateString(),
+            ])
             ->whereNotNull('demo_id')
             ->whereNotNull('demo_start_time')
             ->whereIn('status', self::ESTADOS_QUE_OCUPAN_LA_INSTANCIA)
@@ -434,11 +438,12 @@ class DemoDirectaService
         $por_demo = [];
 
         foreach ($ocupantes as $ocupante) {
-            $ocupa_inicio = $this->parse_hora($fecha, (string) $ocupante->demo_start_time);
+            $fecha_ocupante = $ocupante->demo_date ? $ocupante->demo_date->format('Y-m-d') : $fecha;
+            $ocupa_inicio = $this->parse_hora($fecha_ocupante, (string) $ocupante->demo_start_time);
             if ($ocupa_inicio === null) {
                 continue;
             }
-            $ocupa_fin = $this->parse_hora($fecha, (string) $ocupante->demo_end_time);
+            $ocupa_fin = $this->parse_hora($fecha_ocupante, (string) $ocupante->demo_end_time);
             if ($ocupa_fin === null) {
                 $ocupa_fin = $ocupa_inicio->copy()->addMinutes($duracion);
             }

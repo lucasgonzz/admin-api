@@ -839,6 +839,7 @@ TXT;
          * {ahora: true} más la previsión de instancia, y la instancia real se elige al aplicar.
          */
         if ($demo_directa) {
+            $parsed = $this->normalizar_correo_de_agenda($lead, $parsed);
             if ($solicita_disponibilidad) {
                 Log::channel('disponibilidad')->info('[DISPONIBILIDAD] Demo directa: el modelo pidió disponibilidad y se ignora (no hay grilla en esta dinámica).', [
                     'lead_id' => $lead->id,
@@ -853,10 +854,21 @@ TXT;
             $parsed['horarios_ofrecidos'] = [];
 
             $agendar_crudo          = isset($parsed['agendar_demo']) ? $parsed['agendar_demo'] : null;
-            $parsed['agendar_demo'] = $this->normalizar_agendar_demo_directa($agendar_crudo, $lead);
+            $parsed['agendar_demo'] = $this->normalizar_agendar_demo_directa($agendar_crudo, $lead, (string) ($parsed['mensaje_sugerido'] ?? ''));
+
+            // Una espera dentro de su turno no es una nueva aceptación ni otro agendamiento.
+            $pedido_temporal = app(AgendaDemoTemporalService::class)->pedido($lead);
+            if ($lead->demo_id !== null && ($pedido_temporal['tipo'] ?? '') === 'conservar'
+                && empty($parsed['cancelar_demo'])) {
+                $parsed['agendar_demo'] = null;
+                $parsed['estado_sugerido'] = $estado_sugerido = (string) $lead->status;
+            }
 
             $mensaje_directa = isset($parsed['mensaje_sugerido']) ? trim((string) $parsed['mensaje_sugerido']) : '';
             $notas_directa   = [];
+            if (! empty($parsed['agendar_demo']['conflicto_temporal'])) {
+                $notas_directa[] = 'La acción se asigna para ahora pero el lead pidió otro momento: corregí la acción y el texto antes de aprobar.';
+            }
 
             if ($parsed['agendar_demo'] !== null && array_key_exists('inicio_ilegible', $parsed['agendar_demo'])) {
                 /* `{dia, hora}` que el servidor no pudo convertir en un instante ("a la tarde", un
@@ -3132,7 +3144,7 @@ TXT;
      *
      * @return array<string, mixed>|null
      */
-    protected function normalizar_agendar_demo_directa($crudo, Lead $lead): ?array
+    protected function normalizar_agendar_demo_directa($crudo, Lead $lead, ?string $texto = null): ?array
     {
         if (empty($crudo)) {
             return null;
@@ -3142,18 +3154,32 @@ TXT;
 
         $dia  = is_array($crudo) && isset($crudo['dia']) ? trim((string) $crudo['dia']) : '';
         $hora = is_array($crudo) && isset($crudo['hora']) ? trim((string) $crudo['hora']) : '';
-        /* El mail puede llegar en el turno siguiente a «en media hora». No se transforma
-         * esa demora en «ahora» ni se vuelve a contar desde que el modelo recibe el mail. */
-        if ($dia === '' && $hora === '') {
-            $relativo = $this->inicio_relativo_pedido_por_el_lead($lead);
-            if ($relativo !== null) {
-                $dias = AppTime::now(DemoDirectaService::TZ)->startOfDay()->diffInDays($relativo->copy()->startOfDay(), false);
-                $dia = $dias === 0 ? 'hoy' : '+' . $dias;
-                $hora = $relativo->format('H:i');
+        if (($dia !== '' || $hora !== '') && $this->resolver_inicio_de_demo_pedida($dia, $hora) === null) {
+            return ['dia' => $dia, 'hora' => $hora, 'inicio_ilegible' => true];
+        }
+        $pedido = app(AgendaDemoTemporalService::class)->pedido($lead);
+        $inicio_anclado = null;
+        $conflicto_temporal = false;
+        if (($pedido['tipo'] ?? '') === 'ahora') {
+            // «Ahora» es intención inmediata, nunca el minuto absoluto que el modelo recordó.
+            $dia = $hora = '';
+        } elseif (($pedido['tipo'] ?? '') === 'momento') {
+            $inicio_anclado = Carbon::parse($pedido['inicio'], DemoDirectaService::TZ);
+            if ($texto !== null && ! empty($crudo['ahora']) && ! $this->texto_nombra_la_hora($texto, $inicio_anclado)) {
+                // No corregir sólo la BD mientras el texto confirma otra hora. Se retiene el
+                // paquete anterior y se impide aplicarlo hasta que se corrija la contradicción.
+                $inicio_anclado = null;
+                $conflicto_temporal = true;
+            } else {
+                $dias = AppTime::now(DemoDirectaService::TZ)->startOfDay()->diffInDays($inicio_anclado->copy()->startOfDay(), false);
+                $dia = $dias === 0 ? 'hoy' : ($dias === 1 ? 'manana' : '+' . $dias);
+                $hora = $inicio_anclado->format('H:i');
             }
+        } elseif (($pedido['tipo'] ?? '') === 'ambiguo') {
+            return ['dia' => $dia, 'hora' => $hora, 'inicio_ilegible' => true, 'evidencia_temporal' => $pedido];
         }
         if ($dia !== '' || $hora !== '') {
-            $inicio = $this->resolver_inicio_de_demo_pedida($dia, $hora);
+            $inicio = $inicio_anclado ?: $this->resolver_inicio_de_demo_pedida($dia, $hora);
             if ($inicio === null) {
                 return ['dia' => $dia, 'hora' => $hora, 'inicio_ilegible' => true];
             }
@@ -3167,6 +3193,7 @@ TXT;
                 'inicio_resuelto'     => $inicio->format('Y-m-d H:i'),
                 'demo_id_previsto'    => $libre !== null ? (int) $libre['demo']->id : null,
                 'url_tienda_prevista' => DemoDirectaService::url_tienda($libre !== null ? $libre['demo'] : null),
+                'evidencia_temporal'   => $pedido,
             ];
         }
 
@@ -3176,36 +3203,50 @@ TXT;
             'ahora'               => true,
             'demo_id_previsto'    => $prevista['demo'] !== null ? (int) $prevista['demo']->id : null,
             'url_tienda_prevista' => DemoDirectaService::url_tienda($prevista['demo']),
+            'evidencia_temporal'   => $pedido,
+            'conflicto_temporal'   => $conflicto_temporal,
         ];
     }
 
-    /** Momento relativo del pedido reciente; una hora explícita o un nuevo «ahora» lo reemplazan. */
-    private function inicio_relativo_pedido_por_el_lead(Lead $lead): ?Carbon
+    /** El correo650 nombrado sin acción se recupera sólo desde evidencia inequívoca del lead. */
+    private function normalizar_correo_de_agenda(Lead $lead, array $parsed, bool $recuperar = true): array
     {
-        if ($lead->demo_id !== null) {
-            return null;
+        unset($parsed['conflicto_correo']);
+        if ($recuperar) {
+            unset($parsed['correo_corregido_manualmente']);
         }
-
-        $mensajes = LeadMessage::query()->where('lead_id', $lead->id)->where('sender', 'lead')
-            ->where('created_at', '>=', AppTime::now()->subDay())->orderByDesc('id')->limit(12)->get();
-        foreach ($mensajes as $mensaje) {
-            $texto = mb_strtolower(trim((string) $mensaje->content), 'UTF-8');
-            if (preg_match('/\ben\s+(media\s+hora|un\s+cuarto\s+de\s+hora|una\s+hora|(\d{1,3})\s+minutos?)\b/u', $texto, $m)) {
-                $minutos = ! empty($m[2]) ? (int) $m[2]
-                    : (strpos($m[1], 'media') !== false ? 30 : (strpos($m[1], 'cuarto') !== false ? 15 : 60));
-                if ($minutos < 1 || $minutos > 240) {
-                    return null;
-                }
-                $momento = $mensaje->sent_at ?: $mensaje->created_at;
-
-                return Carbon::parse($momento)->setTimezone(DemoDirectaService::TZ)->addMinutes($minutos)->second(0);
-            }
-            if ($this->mensaje_menciona_una_hora($texto) || preg_match('/\bahora\b|\bma[ñn]ana\b|\ba la tarde\b/u', $texto)) {
-                return null;
+        $evidencia = app(AgendaDemoTemporalService::class)->correo_reciente($lead);
+        $correos = $evidencia['correos'];
+        $accion = trim((string) ($parsed['guardar_email'] ?? ''));
+        $texto = (string) ($parsed['mensaje_sugerido'] ?? '');
+        $conflicto = '';
+        if (count($correos) > 1 && (empty($parsed['correo_corregido_manualmente']) || ! in_array($accion, $correos, true))) {
+            $conflicto = 'El lead mencionó varias casillas: hay que confirmar cuál usar.';
+        } elseif (count($correos) === 1) {
+            $correo = $correos[0];
+            if ($accion !== '' && strcasecmp($accion, $correo) !== 0) {
+                $conflicto = 'La acción guardar_email no coincide con el correo explícito del lead.';
+            } elseif ($recuperar && $accion === '' && trim((string) $lead->email) === '' && stripos($texto, $correo) !== false) {
+                $parsed['guardar_email'] = $correo;
+                $parsed['evidencia_correo'] = $evidencia;
             }
         }
+        if ($accion !== '' && $correos === [] && strcasecmp($accion, trim((string) $lead->email)) !== 0
+            && empty($parsed['correo_corregido_manualmente'])) {
+            $conflicto = 'La acción guardar_email trae una casilla que no está respaldada por un mensaje del lead.';
+        }
+        // No basta que una IA invente una casilla y asegure haber enviado el correo.
+        if ($accion === '' && empty($parsed['guardar_email']) && trim((string) $lead->email) === ''
+            && preg_match('/(?:te (?:mand[eé]|envi[eé])|te (?:llega|mando|env[ií]o)).{0,50}(?:mail|correo)/iu', $texto)) {
+            $conflicto = $conflicto ?: 'La respuesta promete un correo sin una casilla guardada ni una acción válida.';
+        }
+        if ($conflicto !== '') {
+            $parsed['requiere_verificacion'] = true;
+            $parsed['conflicto_correo'] = $conflicto;
+            $parsed['razonamiento'] = trim((string) ($parsed['razonamiento'] ?? '')) . ' ⚠️ ' . $conflicto;
+        }
 
-        return null;
+        return $parsed;
     }
 
     /**
@@ -6352,6 +6393,7 @@ TXT;
 
         /* Paquete efectivo a aplicar: por defecto, el de Claude sin cambios. */
         $parsed_efectivo = $parsed;
+        unset($parsed_efectivo['correo_corregido_manualmente']);
 
         /*
          * FIX (prompt 409): true cuando el admin eligió, desde el panel, un estado DISTINTO al que
@@ -6407,7 +6449,7 @@ TXT;
                  * URL de la tienda), pero sin ellas el log de la asignación no puede decir si la
                  * instancia cambió entre generar y aprobar. */
                 if (is_array($agendar_admin) && ! empty($agendar_admin['ahora']) && is_array($parsed['agendar_demo'] ?? null)) {
-                    foreach (['demo_id_previsto', 'url_tienda_prevista'] as $clave_prevision) {
+                    foreach (['demo_id_previsto', 'url_tienda_prevista', 'evidencia_temporal', 'conflicto_temporal'] as $clave_prevision) {
                         if (! array_key_exists($clave_prevision, $agendar_admin) && array_key_exists($clave_prevision, $parsed['agendar_demo'])) {
                             $agendar_admin[$clave_prevision] = $parsed['agendar_demo'][$clave_prevision];
                         }
@@ -6426,7 +6468,7 @@ TXT;
                     && empty($agendar_admin['ahora'])
                     && empty($agendar_admin['demo_date'])
                     && empty($agendar_admin['demo_start_time'])) {
-                    foreach (['dia', 'hora', 'inicio_resuelto', 'demo_id_previsto', 'url_tienda_prevista'] as $clave_turno) {
+                    foreach (['dia', 'hora', 'inicio_resuelto', 'demo_id_previsto', 'url_tienda_prevista', 'evidencia_temporal'] as $clave_turno) {
                         if (! array_key_exists($clave_turno, $agendar_admin) && array_key_exists($clave_turno, $parsed['agendar_demo'])) {
                             $agendar_admin[$clave_turno] = $parsed['agendar_demo'][$clave_turno];
                         }
@@ -6504,6 +6546,13 @@ TXT;
             }
             if (array_key_exists('guardar_email', $final_actions)) {
                 $parsed_efectivo['guardar_email'] = $final_actions['guardar_email'];
+                // Corregir una dirección desde el panel es una decisión humana; repetir el campo
+                // precargado del modelo al apretar Aprobar no acredita esa corrección.
+                if (is_string($final_actions['guardar_email'])
+                    && filter_var($final_actions['guardar_email'], FILTER_VALIDATE_EMAIL)
+                    && strcasecmp(trim($final_actions['guardar_email']), trim((string) ($parsed['guardar_email'] ?? ''))) !== 0) {
+                    $parsed_efectivo['correo_corregido_manualmente'] = true;
+                }
             }
 
             /* cancelar_demo / requiere_intervencion_humana: flags booleanas, el admin las prende o apaga. */
@@ -6668,6 +6717,14 @@ TXT;
         bool $admin_override_estado = false
     ): LeadMessage {
         $this->validate_parsed_response($parsed);
+
+        // La advertencia no se resuelve apretando Aprobar sin corregir sus datos.
+        if ($for_approval && ! empty($parsed['conflicto_correo'])) {
+            $parsed = $this->normalizar_correo_de_agenda($lead, $parsed, false);
+            if (! empty($parsed['conflicto_correo'])) {
+                throw new \InvalidArgumentException($parsed['conflicto_correo'] . ' Corregí el correo y el texto antes de aprobar.');
+            }
+        }
 
         /* Extraer los campos obligatorios de la respuesta (ya validados por validate_parsed_response). */
         $mensaje    = isset($parsed['mensaje_sugerido']) ? trim((string) $parsed['mensaje_sugerido']) : '';
@@ -6969,6 +7026,9 @@ TXT;
             $directa_para_un_momento = ! empty($agendar_demo['dia']) && ! empty($agendar_demo['inicio_resuelto']);
 
             if ((! empty($agendar_demo['ahora']) || $directa_para_un_momento) && $lead->usa_experiencia_demo_nueva()) {
+                if (! empty($agendar_demo['conflicto_temporal'])) {
+                    throw new \InvalidArgumentException('La acción de agenda contradice el momento pedido por el lead. Corregí la acción y el texto antes de aprobar.');
+                }
                 $lock_directa    = Cache::lock('demo_asignacion_directa', 8);
                 $lock_directa_ok = false;
                 try {
@@ -10401,8 +10461,8 @@ BLOQUE_DEL_MANUAL;
          * prometerlo. El mail trae el detalle: el agente no lo explica por su cuenta. */
         if (AsistenteDemoLeadService::disponible_para($lead, $demo_para_tienda)) {
             $linea_del_asistente_en_reglas = "  - Asistente personal para probar durante la demo: DISPONIBLE (" . AsistenteDemoLeadService::numero_visible() . "). El mail de\n"
-                . "    acceso se lo explica. Si el lead pregunta, decile que durante su turno este mismo numero de ComercioCity funciona como su asistente desde este\n"
-                . "    mismo WhatsApp y pedirle cosas sobre los datos de su demo (ventas del dia, stock, cargar un cliente). No lo ofrezcas\n"
+                . "    acceso se lo explica. Si el lead pregunta, decile que durante su turno puede escribir al numero dedicado del asistente indicado arriba y en el mail,\n"
+                . "    en un chat separado del comercial, y pedirle cosas sobre los datos de su demo (ventas del dia, stock, cargar un cliente). No lo ofrezcas\n"
                 . "    por tu cuenta y no prometas mas que eso.\n";
         } else {
             $linea_del_asistente_en_reglas = "  - Asistente personal para probar durante la demo: NO DISPONIBLE todavia. No lo menciones ni prometas un numero: en la\n"
@@ -10470,6 +10530,36 @@ BLOQUE_DEL_MANUAL;
             . "  - NUNCA solicita_disponibilidad: true, NUNCA dia_solicitado, NUNCA demo_id/demo_date/demo_start_time: el dia y la hora van\n"
             . "    SOLO adentro de agendar_demo.\n"
             . "  - No existen usuario ni contrasena: todo el acceso pasa por el boton de la pagina (o por el link de ingreso directo de arriba).";
+
+        $pedido_temporal = app(AgendaDemoTemporalService::class)->pedido($lead);
+        if ($pedido_temporal !== null) {
+            $bloque .= "\n\nAUTORIDAD TEMPORAL DEL SERVIDOR (prevalece sobre interpretar el historial de nuevo):\n"
+                . 'Fuente: mensaje ' . $pedido_temporal['mensaje_id'] . ', enviado ' . $pedido_temporal['anclado_en'] . ".\n";
+            if ($pedido_temporal['tipo'] === 'ahora') {
+                $bloque .= "La última intención explícita es AHORA. La oferta de ahora no caduca porque pasaron uno o cinco minutos. "
+                    . "Si acepta, agendar_demo {\"ahora\": true}; el servidor prepara el inicio desde la aplicación. "
+                    . "No conviertas una hora escrita en una oferta anterior en una falta de disponibilidad. La ocupación real indicada arriba sí manda.\n";
+            } elseif ($pedido_temporal['tipo'] === 'conservar') {
+                $bloque .= "El lead está esperando/entrando a SU turno. Conservá la reserva y su hora de fin. No devuelvas agendar_demo ni cancelar_demo. "
+                    . "Pasar el minuto de inicio no significa que haya vencido.\n";
+            } elseif ($pedido_temporal['tipo'] === 'ambiguo') {
+                $bloque .= "El último pedido está incompleto o es ambiguo. Hacé una sola pregunta para aclarar día/hora; no heredes el pedido anterior ni confirmes una reserva nueva.\n";
+            } else {
+                $inicio = Carbon::parse($pedido_temporal['inicio'], DemoDirectaService::TZ);
+                $dias = $ahora->copy()->startOfDay()->diffInDays($inicio->copy()->startOfDay(), false);
+                $dia_accion = $dias === 0 ? 'hoy' : ($dias === 1 ? 'manana' : '+' . $dias);
+                $motivo = $this->validar_inicio_de_demo_pedida($inicio, $ahora);
+                $ventana_pedida = $directa->ventana_para($inicio);
+                $instancia_pedida = $motivo === null ? $directa->instancia_libre($lead, $inicio, $ventana_pedida['fin']) : null;
+                $bloque .= 'El pedido anclado es ' . $inicio->format('Y-m-d H:i') . '. El correo posterior no cambia ese día. '
+                    . 'Para la acción usá dia="' . $dia_accion . '", hora="' . $inicio->format('H:i') . '". '
+                    . 'Disponibilidad para ESE momento: ' . ($motivo !== null ? 'conflicto temporal: ' . $motivo : ($instancia_pedida === null ? 'sin instancia libre' : 'instancia libre')) . ".\n";
+                if ($instancia_pedida !== null) {
+                    $bloque .= 'Tienda para ESE turno (prevalece sobre la prevista para ahora): ' . DemoDirectaService::url_tienda($instancia_pedida['demo']) . ".\n";
+                }
+                $bloque .= "Si existe conflicto, no confirmes ni inventes que se ocupó por el reloj. Dejá requiere_verificacion=true con la causa real para revisar antes de negarle lo ofrecido.\n";
+            }
+        }
 
         return $bloque;
     }

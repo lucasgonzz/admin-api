@@ -452,6 +452,12 @@ class DemoDirectaTest extends TestCase
         $lead->demo_flexible   = true;
         $lead->save();
 
+        // El escenario es un correo que LLEGA del lead; la acción del modelo no acredita ese hecho.
+        LeadMessage::create([
+            'lead_id' => $lead->id, 'sender' => 'lead', 'status' => 'enviado',
+            'content' => 'Mi mail es lead@test.local', 'is_followup' => false,
+        ]);
+
         $mensaje = (new LeadAiService())->generate_suggestion($lead->refresh(), false);
 
         $this->assertFalse((bool) ($mensaje->pending_actions['requiere_intervencion_humana'] ?? false), 'guardar_email suelto es el camino normal de la demo directa, no una agenda fuera de secuencia.');
