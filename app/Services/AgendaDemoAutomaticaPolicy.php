@@ -36,6 +36,8 @@ class AgendaDemoAutomaticaPolicy
             $motivo = 'escudo_manual_o_historico';
         } elseif ($lead->requiere_intervencion_humana || ! $lead->claude_auto_reply) {
             $motivo = 'intervencion_explicita';
+        } elseif ($this->cancelacion_sin_accion($lead, $parsed)) {
+            $motivo = 'cancelacion_sin_accion';
         } elseif (! empty($parsed['requiere_intervencion_humana']) || ! empty($parsed['requiere_verificacion']) || ($mensaje && $mensaje->requiere_verificacion)) {
             $motivo = 'verificacion_explicita';
         } elseif (! empty($parsed['conflicto_correo']) || ! empty($parsed['agendar_demo']['conflicto_temporal']) || ! empty($parsed['agendar_demo']['inicio_ilegible'])) {
@@ -92,6 +94,18 @@ class AgendaDemoAutomaticaPolicy
         }
 
         return $decision;
+    }
+
+    /** Una pausa de conversación no libera una reserva: hace falta la acción canónica. */
+    public function cancelacion_sin_accion(Lead $lead, array $parsed): bool
+    {
+        // Sin paquete se consulta el permiso del lead, no la coherencia de una respuesta concreta.
+        if ($parsed === [] || ! empty($parsed['cancelar_demo']) || ($lead->demo_id === null && $lead->demo_date === null
+            && ! $lead->demo_start_time && ! $lead->demo_end_time)) { return false; }
+        $ultimo = (string) LeadMessage::query()->where('lead_id', $lead->id)->where('sender', 'lead')->orderByDesc('id')->value('content');
+        $respuesta = (string) ($parsed['mensaje_sugerido'] ?? '');
+        return preg_match('/\b(?:cancel\w*|anul\w*)\b|\bliber\w*\b.{0,40}\breserva\b/iu', $ultimo) === 1
+            || preg_match('/\b(?:cancel\w*|anulad[ao]|liberad[ao]|libero)\b/iu', $respuesta) === 1;
     }
 
     /** No basta que el pedido nuevo siga siendo «momento»: debe ser la MISMA intención. */

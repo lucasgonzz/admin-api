@@ -202,6 +202,69 @@ class AgendaDemoAutomaticaPolicyTest extends TestCase
         ];
     }
 
+    /** @dataProvider cancelaciones_sin_accion */
+    public function test_cancelacion_sin_accion_se_retiene_antes_de_cambiar_estado_o_reserva(string $consulta, string $respuesta, bool $optin, bool $omitir = true): void
+    {
+        if ($optin) { $this->activar(); }
+        Carbon::setTestNow(Carbon::parse('2026-10-21 17:03', DemoDirectaService::TZ));
+        $demo = $this->demo(); $lead = $this->lead();
+        $lead->update(['status' => 'demo_agendada', 'demo_id' => $demo->id, 'demo_date' => '2026-10-21', 'demo_start_time' => '16:36', 'demo_end_time' => '18:36']);
+        $this->inbound($lead, $consulta);
+        $campos = array_flip(['status', 'demo_id', 'demo_date', 'demo_start_time', 'demo_end_time']);
+        $antes = array_intersect_key($lead->fresh()->getAttributes(), $campos);
+        $parsed = ['mensaje_sugerido' => $respuesta, 'estado_sugerido' => 'en_pausa', 'requiere_verificacion' => false];
+        if (! $omitir) { $parsed['cancelar_demo'] = false; }
+        $msg = $this->generar_desde_el_agente($lead, $demo, $parsed);
+        $this->assertTrue((bool) $msg->requiere_verificacion);
+        $this->assertStringContainsString('cancelar_demo', (string) $msg->ai_reasoning);
+        $this->assertSame($antes, array_intersect_key($lead->fresh()->getAttributes(), $campos));
+        Queue::assertNotPushed(AutoSendLeadAiSuggestionJob::class); Mail::assertNothingSent();
+        // La relectura protege también un paquete anterior a esta guarda, aunque omita el flag humano.
+        if ($optin) {
+            $this->assertSame('cancelacion_sin_accion', app(AgendaDemoAutomaticaPolicy::class)->evaluar($lead->fresh(), $parsed)['motivo']);
+            $msg->update(['requiere_verificacion' => false, 'pending_actions' => $parsed]);
+            try { app(LeadAiService::class)->apply_pending_actions($msg->fresh(), null, true); $this->fail('No debe aplicar el paquete automático incompleto.'); }
+            catch (\InvalidArgumentException $e) { $this->assertStringContainsString('cancelacion_sin_accion', $e->getMessage()); }
+            $this->assertSame($antes, array_intersect_key($lead->fresh()->getAttributes(), $campos));
+        }
+    }
+
+    public function cancelaciones_sin_accion(): array
+    {
+        $pedido = 'Gracias. Cancelá esta demo y liberá la reserva. No quiero reprogramarla ni agendar una llamada; dejemos la conversación en pausa.';
+        return [[$pedido, 'La cancelo y queda la reserva liberada; todo en pausa.', true],
+            [$pedido, 'Dale, dejamos la conversación en pausa.', true],
+            ['Gracias, dejemos la conversación en pausa.', 'La demo queda cancelada y la reserva liberada.', true],
+            [$pedido, 'La cancelo y queda liberada.', false],
+            [$pedido, 'La cancelo y queda liberada.', true, false]];
+    }
+
+    /** @dataProvider modos_cancelacion_canonica */
+    public function test_cancelacion_canonica_se_aplica_y_un_escudo_manual_no_se_salta(bool $manual): void
+    {
+        $this->activar(); $demo = $this->demo(); $lead = $this->lead();
+        $lead->update(['status' => 'demo_agendada', 'demo_id' => $demo->id, 'demo_date' => '2026-10-21', 'demo_start_time' => '12:00', 'demo_end_time' => '14:00']);
+        $this->inbound($lead, 'Cancelá la demo y liberá la reserva.');
+        $respuesta = ['mensaje_sugerido' => 'La demo queda cancelada.', 'estado_sugerido' => 'en_pausa', 'cancelar_demo' => true];
+        $this->assertTrue(app(AgendaDemoAutomaticaPolicy::class)->evaluar($lead->fresh(), $respuesta)['permitido']);
+        if ($manual) { $lead->update(['requiere_verificacion_mensajes' => true]); }
+        $msg = $this->generar_desde_el_agente($lead, $demo, $respuesta);
+        $this->assertSame($manual, (bool) $msg->requiere_verificacion, json_encode($msg->pending_actions));
+        if ($manual) { Queue::assertNotPushed(AutoSendLeadAiSuggestionJob::class); }
+        else { Queue::assertPushed(AutoSendLeadAiSuggestionJob::class, 1); }
+        $this->assertNotNull($lead->fresh()->demo_id);
+        $sender = \Mockery::mock(WhatsappSendService::class);
+        $sender->shouldReceive('send_text')->once()->andReturn('cancelacion-ficticia');
+        $enviado = (new LeadSuggestionSendService($sender))->send_suggestion($msg->fresh(), null, null, ! $manual);
+        $this->assertSame('enviado', $enviado->status);
+        $this->assertSame('en_pausa', $lead->fresh()->status);
+        foreach (['demo_id', 'demo_date', 'demo_start_time', 'demo_end_time'] as $campo) { $this->assertNull($lead->fresh()->{$campo}); }
+        $this->assertSame($manual, (bool) $lead->fresh()->requiere_verificacion_mensajes);
+        Mail::assertNothingSent();
+    }
+
+    public function modos_cancelacion_canonica(): array { return [[false], [true]]; }
+
     public function test_conservar_sin_hora_sigue_siendo_conversacion_sin_reservar_de_nuevo(): void
     {
         $this->activar(); $demo = $this->demo(); $lead = $this->lead();

@@ -6023,6 +6023,12 @@ TXT;
         bool $is_followup,
         ?array $calendar_snapshot = null
     ): LeadMessage {
+        // Antes de cambiar el estado o encolar: nunca confirmar una liberación sin su acción.
+        if (app(AgendaDemoAutomaticaPolicy::class)->cancelacion_sin_accion($lead->fresh() ?: $lead, $parsed)) {
+            $parsed['requiere_verificacion'] = true;
+            $parsed['razonamiento'] = trim((string) ($parsed['razonamiento'] ?? ''))
+                . ' ⚠️ Cancelación pedida o afirmada sin cancelar_demo: la reserva y el estado se conservan hasta revisión del operador.';
+        }
         if (AgendaDemoAutomaticaPolicy::activa()) {
             if (! empty($parsed['agendar_demo'])) {
                 $parsed['agendar_demo']['evidencia_temporal'] = app(AgendaDemoTemporalService::class)->pedido($lead);
