@@ -56,6 +56,10 @@ class RouteServiceProvider extends ServiceProvider
      */
     protected function configureRateLimiting()
     {
+        RateLimiter::for('landing-whatsapp', function (Request $request) {
+            return Limit::perMinute((int) config('atribucion.limite_por_minuto', 30))
+                ->by('landing-whatsapp:' . $request->ip());
+        });
         RateLimiter::for('demo-chat', function (Request $request) {
             // Todas las demos del VPS comparten IP: cada conversación necesita su propia cuota.
             // Throttle puede ejecutarse antes del middleware de identidad. El hash no revela la clave;

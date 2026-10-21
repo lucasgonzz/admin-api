@@ -31,6 +31,11 @@ class OrigenDesdeElReferralObserver
     {
         try {
             app(LeadOrigenService::class)->al_crear_referral($referral);
+            $mensaje = \App\Models\LeadMessage::query()->where('whatsapp_message_id', $referral->wamid)
+                ->where('sender', 'lead')->where('is_status_event', false)->first();
+            if ($mensaje !== null) {
+                app(\App\Services\LeadAtribucionService::class)->registrar_ctwa($mensaje, $referral);
+            }
         } catch (\Throwable $exception) {
             Log::channel('daily')->error('Origen del lead: no se pudo atribuir el referral a un lead.', [
                 'whatsapp_ad_referral_id' => $referral->id,

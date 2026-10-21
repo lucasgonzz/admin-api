@@ -50,5 +50,6 @@ class AppServiceProvider extends ServiceProvider
          * no ve es `leads:meta-capi-conciliar`.
          */
         Lead::observe(ConversionesMetaObserver::class);
+        Lead::observe(\App\Observers\ReservaAtribucionObserver::class);
     }
 }

@@ -1945,6 +1945,8 @@ class WhatsappWebhookController extends Controller
             ->with('attachments')
             ->find($inbound_lead_message->id);
 
+        // El original queda en BD; el onboarding recibe el CTA sin su código acreditado.
+        $content = \App\Services\LeadAtribucionService::contenido_para_agente($inbound_lead_message);
         LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $inbound_lead_message->id);
 
         /*

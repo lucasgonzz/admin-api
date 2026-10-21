@@ -75,6 +75,10 @@ use Illuminate\Support\Facades\Route;
 |
 | La ruta, el verbo y el controlador NO cambian: Kapso sigue pegando al mismo lugar.
 */
+Route::post('landing/whatsapp-referencias', [\App\Http\Controllers\LeadAtribucionController::class, 'emitir'])
+    ->withoutMiddleware('throttle:api')
+    ->middleware('throttle:landing-whatsapp');
+
 Route::post('webhook/whatsapp', [WhatsappWebhookController::class, 'receive'])
     ->withoutMiddleware('throttle:api')
     ->middleware('throttle:whatsapp-webhook');
@@ -886,6 +890,8 @@ Route::prefix('admin')->group(function () {
         Route::delete('client/{clientId}/licencias/{cuotaId}', [ClientLicenciaController::class, 'destroy_json'])
             ->where('cuotaId', '[0-9]+');
 
+        Route::get('lead/atribucion/metricas', [\App\Http\Controllers\LeadAtribucionController::class, 'metricas']);
+        Route::get('lead/{id}/atribucion', [\App\Http\Controllers\LeadAtribucionController::class, 'detalle'])->where('id', '[0-9]+');
         Route::get('lead', [LeadController::class, 'index_json']);
         Route::get('lead/unread-badges', [LeadController::class, 'unread_badges_json']);
         // Ruta de recovery batch: debe ir antes de las rutas con {id} para evitar colisión.

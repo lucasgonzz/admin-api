@@ -316,11 +316,34 @@ class DemoDirectaTest extends TestCase
         $this->assertTrue((bool) $lead->demo_flexible, 'La demo directa siempre es ventana extendida.');
         $this->assertSame('demo_agendada', $lead->status);
 
+        // La reserva usa UPDATE directo bajo lock: el hito durable también debe existir por ese camino.
+        $this->assertDatabaseHas('lead_atribucion_reservas', ['lead_id' => $lead->id, 'demo_id' => $demo->id, 'demo_date' => '2026-09-08']);
+
         $mensaje->refresh();
         $this->assertNull($mensaje->pending_actions, 'Las acciones pendientes se consumen al aplicar.');
         $this->assertStringContainsString('Agendar demo: ahora', (string) json_encode($mensaje->applied_actions_summary, JSON_UNESCAPED_UNICODE));
 
         Mail::assertNothingSent();
+    }
+
+    public function test_aprobacion_http_registra_primera_reserva_solo_al_confirmar(): void
+    {
+        $demo = $this->crear_demo(1);
+        $lead = $this->crear_lead_de_la_dinamica_nueva();
+        $reference = app(\App\Services\LeadAtribucionService::class)->emitir(['ad_id' => '999000123'])['reference'];
+        LeadMessage::create(['lead_id' => $lead->id, 'sender' => 'lead', 'status' => 'enviado', 'content' => 'Hola, quiero hacer la demo de ComercioCity [CC:' . $reference . ']', 'sent_at' => now(), 'is_status_event' => false]);
+        $mensaje = $this->crear_mensaje_pendiente($lead, $demo);
+        $this->assertDatabaseMissing('lead_atribucion_reservas', ['lead_id' => $lead->id]);
+        $sender = \Mockery::mock(\App\Services\WhatsappSendService::class);
+        $sender->shouldReceive('send_text')->once()->andReturn('wamid.aprobacion-prueba');
+        $this->app->instance(\App\Services\LeadSuggestionSendService::class, new \App\Services\LeadSuggestionSendService($sender));
+        $admin = \App\Models\Admin::create(['name' => 'Operador local', 'email' => uniqid() . '@test.local', 'password' => 'fixture-no-utilizable']);
+        $this->actingAs($admin, 'sanctum')->putJson('/api/admin/lead-message/' . $mensaje->id . '/approve-with-actions', [
+            'final_actions' => $this->final_actions_del_panel($lead),
+        ])->assertStatus(200);
+        $this->assertDatabaseHas('lead_atribucion_reservas', ['lead_id' => $lead->id, 'demo_id' => $demo->id]);
+        $snapshot = \Illuminate\Support\Facades\DB::table('lead_atribucion_reservas')->where('lead_id', $lead->id)->first();
+        $this->assertSame('999000123', json_decode($snapshot->datos, true)['ad_id']);
     }
 
     /**

@@ -32,7 +32,8 @@ return [
     'allowed_origins' => env('ADMIN_SPA_URL')
         ? array_values(array_unique(array_merge(
             array_values(array_filter(array_map('trim', explode(',', env('ADMIN_SPA_URL'))))),
-            (array) ((require __DIR__ . '/recursos.php')['cors_origenes'] ?? [])
+            (array) ((require __DIR__ . '/recursos.php')['cors_origenes'] ?? []),
+            (array) ((require __DIR__ . '/atribucion.php')['cors_origenes'] ?? [])
         )))
         : ['*'],
 

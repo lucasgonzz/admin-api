@@ -33,6 +33,12 @@ class OrigenDesdeElPrimerMensajeObserver
                 return;
             }
 
+            $atribucion = app(\App\Services\LeadAtribucionService::class);
+            $atribucion->consumir($mensaje);
+            $referral = \App\Models\WhatsappAdReferral::query()->where('wamid', $mensaje->whatsapp_message_id)->first();
+            if ($referral !== null) {
+                $atribucion->registrar_ctwa($mensaje, $referral);
+            }
             app(LeadOrigenService::class)->al_crear_mensaje($mensaje);
         } catch (\Throwable $exception) {
             Log::channel('daily')->error('Origen del lead: no se pudo calcular desde el primer mensaje.', [

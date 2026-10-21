@@ -225,7 +225,7 @@ class LeadOrigenService
         }
 
         foreach (self::frases_de_cta() as $frase) {
-            if (self::es_frase_exacta((string) $ultimo->content, $frase)) {
+            if (self::es_frase_exacta(LeadAtribucionService::contenido_para_agente($ultimo), $frase)) {
                 return "  - OJO: el ULTIMO mensaje del lead es una de esas frases (\"" . $frase . "\"): es un SI a la demo.\n";
             }
         }

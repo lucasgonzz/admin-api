@@ -1264,7 +1264,7 @@ TXT;
             ->last();
 
         if ($last_lead_message) {
-            $last_content = trim((string) $last_lead_message->content);
+            $last_content = trim(LeadAtribucionService::contenido_para_agente($last_lead_message));
 
             /*
              * Detectar horario propuesto por el lead. Se usa solo como pista para Claude;
@@ -7155,6 +7155,9 @@ TXT;
                         $lead->{$campo_asignacion} = $valor_asignacion;
                     }
 
+                    // Este UPDATE no dispara observers: acreditar acá cubre la reserva directa real.
+                    app(LeadAtribucionService::class)->registrar_reserva($lead);
+
                     $lock_directa->release();
 
                     /* El token de ingreso, si ya hay uno vigente (re-asignación después de un
@@ -10949,7 +10952,7 @@ BLOQUE_DEL_MANUAL;
 
             /* Sugerencia de Claude que el setter no envió (canceló envío automático o rechazó). */
             if ($sender === 'sistema' && $status === 'rechazado') {
-                $body = LeadWhatsAppPasteCleaner::clean_export_paste((string) $msg->content);
+                $body = LeadWhatsAppPasteCleaner::clean_export_paste(LeadAtribucionService::contenido_para_agente($msg));
                 $historial .= "[{$fecha}] SISTEMA (sugerencia no enviada al lead): {$body}\n";
 
                 continue;
@@ -10961,7 +10964,7 @@ BLOQUE_DEL_MANUAL;
                 $label .= ' (enviado con ajuste)';
                 $body = LeadWhatsAppPasteCleaner::clean_export_paste($edited);
             } else {
-                $body = LeadWhatsAppPasteCleaner::clean_export_paste((string) $msg->content);
+                $body = LeadWhatsAppPasteCleaner::clean_export_paste(LeadAtribucionService::contenido_para_agente($msg));
             }
             $historial .= "[{$fecha}] {$label}: {$body}\n";
         }
