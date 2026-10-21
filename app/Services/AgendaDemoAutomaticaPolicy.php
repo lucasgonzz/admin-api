@@ -42,6 +42,9 @@ class AgendaDemoAutomaticaPolicy
             $motivo = 'datos_incoherentes';
         } elseif (! empty($parsed['confirmar_fin_demo']) || ! empty($parsed['agendar_llamada_closer']) || ! empty($parsed['confirmar_ingreso']) || ! empty($parsed['marcar_no_ingreso'])) {
             $motivo = 'accion_fuera_de_agenda';
+        } elseif (! empty($parsed['guardar_email']) && trim((string) $lead->email) !== ''
+            && strcasecmp(trim((string) $parsed['guardar_email']), trim((string) $lead->email)) !== 0) {
+            $motivo = 'correccion_correo_requiere_operador';
         }
 
         $pedido = null;

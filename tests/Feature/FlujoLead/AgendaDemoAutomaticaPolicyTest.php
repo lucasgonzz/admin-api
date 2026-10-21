@@ -140,6 +140,18 @@ class AgendaDemoAutomaticaPolicyTest extends TestCase
         $this->assertNull($lead->fresh()->demo_id);
     }
 
+    public function test_no_promete_un_correo_nuevo_si_el_modo_automatico_conserva_el_ya_guardado(): void
+    {
+        $this->activar();
+        $lead = $this->lead();
+        $lead->update(['email' => 'verificado@fixture.test']);
+        $this->inbound($lead, 'Ahora puedo, mi correo nuevo es nuevo@fixture.test');
+        $decision = app(AgendaDemoAutomaticaPolicy::class)->evaluar($lead->fresh(), ['guardar_email' => 'nuevo@fixture.test']);
+        $this->assertFalse($decision['permitido']);
+        $this->assertSame('correccion_correo_requiere_operador', $decision['motivo']);
+        $this->assertSame('verificado@fixture.test', $lead->fresh()->email);
+    }
+
     private function activar(): void { AdminSetting::set(AgendaDemoAutomaticaPolicy::KEY_ACTIVA, '1'); }
     private function lead(): Lead
     {
