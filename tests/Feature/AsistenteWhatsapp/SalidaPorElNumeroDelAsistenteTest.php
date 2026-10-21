@@ -232,12 +232,11 @@ class SalidaPorElNumeroDelAsistenteTest extends BaseDelCanal
     }
 
     /**
-     * Con la fila a medias (sin secreto de webhook) la respuesta tampoco se muda: el dueño no podría
-     * contestarle a ese número.
+     * Un mensaje que entró por el dedicado no se traslada al comercial si el canal se incompletó.
      *
      * @return void
      */
-    public function test_con_el_numero_a_medias_la_respuesta_sale_por_el_principal(): void
+    public function test_con_el_dedicado_a_medias_la_respuesta_se_detiene_sin_fallback(): void
     {
         $espia  = $this->espiar_sender();
         $client = $this->crear_cliente();
@@ -246,7 +245,54 @@ class SalidaPorElNumeroDelAsistenteTest extends BaseDelCanal
 
         $this->correr_la_respuesta($fila, $espia);
 
-        $this->assertSame([self::PHONE_NUMBER_ID_PRINCIPAL], $espia->destinos);
+        $this->assertSame([], $espia->destinos);
+        $this->assertSame([], $espia->textos);
+        $this->assertSame(ClientAssistantMessage::ESTADO_ERROR, $fila->fresh()->estado);
+        Http::assertNothingSent();
+    }
+
+    public function test_el_canal_que_cambia_mientras_se_consulta_la_respuesta_no_envia_por_otro_numero(): void
+    {
+        $espia = $this->espiar_sender();
+        $client = $this->crear_cliente();
+        $config = $this->crear_config_asistente();
+        $fila = $this->fila_entrante($client, self::PHONE_NUMBER_ID_ASISTENTE);
+        $fila->ai_message_id = 305;
+        $fila->estado = ClientAssistantMessage::ESTADO_ENVIADO;
+        $fila->save();
+        $this->fakear_http(['*/asistente/mensajes/305' => function () use ($config) {
+            $config->display_phone = null;
+            $config->save();
+            return Http::response(['estado' => 'listo', 'contenido' => 'Listo.', 'ai_conversation_id' => 91], 200);
+        }]);
+
+        $this->correr_job(new EnviarMensajeAlAsistenteJob((int) $fila->id), $espia);
+
+        $this->assertSame([], $espia->destinos);
+        $this->assertSame(ClientAssistantMessage::ESTADO_ERROR, $fila->fresh()->estado);
+    }
+
+    public function test_el_job_dedicado_desactivado_borrado_o_con_otro_id_tampoco_envia_disculpa_desde_principal(): void
+    {
+        $espia = $this->espiar_sender();
+        $client = $this->crear_cliente();
+        foreach (['is_active', 'phone_number_id', 'borrado'] as $cambio) {
+            $config = $this->crear_config_asistente();
+            $fila = $this->fila_entrante($client, self::PHONE_NUMBER_ID_ASISTENTE);
+            $job = new EnviarMensajeAlAsistenteJob((int) $fila->id);
+            if ($cambio === 'borrado') {
+                $config->delete();
+            } else {
+                $config->{$cambio} = $cambio === 'is_active' ? false : 'otro-id-dedicado';
+                $config->save();
+            }
+            $job->failed(new \RuntimeException('Falló la tarea en espera.'));
+            $this->assertSame(ClientAssistantMessage::ESTADO_ERROR, $fila->fresh()->estado);
+            if ($cambio !== 'borrado') { $config->delete(); }
+        }
+        $this->assertSame([], $espia->textos);
+        $this->assertSame([], $espia->destinos);
+        Http::assertNothingSent();
     }
 
     /**

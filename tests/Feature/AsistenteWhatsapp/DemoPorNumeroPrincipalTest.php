@@ -115,6 +115,48 @@ class DemoPorNumeroPrincipalTest extends BaseDelCanal
         Queue::assertNotPushed(EnviarMensajeAlAsistenteJob::class);
     }
 
+    public function test_el_webhook_dedicado_con_firma_valida_y_canal_incompleto_no_enruta_ni_responde(): void
+    {
+        $lead = $this->lead();
+        $dueno = $this->crear_cliente('5493415556677');
+        $espia = $this->espiar_sender();
+
+        foreach (['kapso_api_key', 'display_phone'] as $campo) {
+            $config = $this->crear_config_asistente([$campo => null]);
+            foreach ([self::TELEFONO, (string) $dueno->phone, '5493419992233'] as $telefono) {
+                $this->postear_webhook(
+                    $this->payload_de_texto($telefono, 'Hola', 'wamid.INCOMPLETO-' . $campo . '-' . $telefono, null, self::PHONE_NUMBER_ID_ASISTENTE),
+                    self::SECRETO_DEL_ASISTENTE
+                )->assertStatus(503);
+            }
+            $config->delete();
+        }
+
+        $this->assertSame([], $espia->textos);
+        $this->assertSame(0, ClientAssistantMessage::count());
+        $this->assertSame(0, LeadMessage::where('lead_id', $lead->id)->count());
+        Queue::assertNotPushed(EnviarMensajeAlAsistenteJob::class);
+        Http::assertNothingSent();
+    }
+
+    public function test_si_el_canal_se_incompleta_despues_de_encolar_la_demo_no_sale_por_el_principal(): void
+    {
+        $config = $this->crear_config_asistente();
+        $lead = $this->lead();
+        $espia = $this->espiar_sender();
+        $this->postear_webhook($this->payload_de_texto(self::TELEFONO, 'Cuánto vendí hoy?', 'wamid.CANAL-CAE', null, self::PHONE_NUMBER_ID_ASISTENTE), self::SECRETO_DEL_ASISTENTE)->assertOk();
+        $fila = ClientAssistantMessage::where('lead_id', $lead->id)->firstOrFail();
+        $config->kapso_api_key = null;
+        $config->save();
+
+        $this->correr_job(new EnviarMensajeAlAsistenteJob((int) $fila->id), $espia);
+
+        $this->assertSame(ClientAssistantMessage::ESTADO_ERROR, $fila->fresh()->estado);
+        $this->assertSame([], $espia->textos);
+        $this->assertSame([], $espia->destinos);
+        Http::assertNothingSent();
+    }
+
     public function test_otro_telefono_no_abre_la_instancia_del_lead(): void
     {
         $lead = $this->lead();

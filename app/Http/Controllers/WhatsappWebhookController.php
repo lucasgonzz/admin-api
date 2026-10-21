@@ -111,6 +111,13 @@ class WhatsappWebhookController extends Controller
             return response()->json(['message' => 'Invalid signature.'], 401);
         }
 
+        // Un dedicado a medias no recibe ni contesta por el principal como alternativa.
+        // La firma por sí sola no prueba que este número pueda completar el recorrido.
+        if ($config->proposito === WhatsappConfig::PROPOSITO_ASISTENTE
+            && ! $config->tieneLoNecesarioParaAtender()) {
+            return response()->json(['message' => 'WhatsApp integration unavailable.'], 503);
+        }
+
         if (empty($payload)) {
             return response()->json(['ok' => true], 200);
         }
@@ -184,7 +191,7 @@ class WhatsappWebhookController extends Controller
              * corta acá y no sigue al árbol de abajo.
              */
             if ($config->proposito === WhatsappConfig::PROPOSITO_ASISTENTE) {
-                $this->handle_mensaje_del_asistente($parsed);
+                $this->handle_mensaje_del_asistente($parsed, $config);
 
                 return response()->json(['ok' => true], 200);
             }
@@ -1275,7 +1282,7 @@ class WhatsappWebhookController extends Controller
      *
      * @return void
      */
-    private function handle_mensaje_del_asistente(array $parsed): void
+    private function handle_mensaje_del_asistente(array $parsed, WhatsappConfig $config): void
     {
         /* El crudo y no `$parsed['from']`: ver el comentario de `from_crudo` en
            `parse_inbound_message()`. Tanto para resolver al dueño como para contestarle hace falta
@@ -1299,7 +1306,7 @@ class WhatsappWebhookController extends Controller
         /* El lead dentro de su turno de demo (o el que escribe antes/después). Va DESPUÉS del dueño y ANTES
            del texto "ajeno": un dueño que además es lead sigue por su camino de siempre, y a un lead sin
            turno se le dice qué pasa en vez de la frase de los dueños. */
-        if ($this->handle_lead_en_demo_del_asistente($parsed, $desde)) {
+        if ($this->handle_lead_en_demo_del_asistente($parsed, $desde, $config)) {
             return;
         }
 
@@ -1333,11 +1340,11 @@ class WhatsappWebhookController extends Controller
             return;
         }
 
-        /* 🔴 `paraProposito('asistente')` no es adorno: sin él la respuesta saldría por el número
+        /* 🔴 La configuración validada fija el destino: sin ella la respuesta saldría por el número
            institucional, y la persona vería su pregunta en un chat y la respuesta en otro — que es
            exactamente la confusión que este texto viene a evitar. */
         app(WhatsappSendService::class)
-            ->paraProposito(WhatsappConfig::PROPOSITO_ASISTENTE)
+            ->para($config)
             ->send_text(
                 $desde,
                 $texto,
@@ -1365,7 +1372,7 @@ class WhatsappWebhookController extends Controller
      *
      * @return bool True si el mensaje quedó tramitado acá.
      */
-    private function handle_lead_en_demo_del_asistente(array $parsed, string $desde): bool
+    private function handle_lead_en_demo_del_asistente(array $parsed, string $desde, WhatsappConfig $config): bool
     {
         if (! AsistenteDemoLeadService::disponible()) {
             return false;
@@ -1413,7 +1420,7 @@ class WhatsappWebhookController extends Controller
         }
 
         app(WhatsappSendService::class)
-            ->paraProposito(WhatsappConfig::PROPOSITO_ASISTENTE)
+            ->para($config)
             ->send_text(
                 $desde,
                 $texto,

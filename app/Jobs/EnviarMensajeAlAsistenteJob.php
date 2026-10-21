@@ -320,6 +320,10 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             return;
         }
 
+        if (! $this->preparar_salida_por_el_canal_de_entrada($sender, $fila)) {
+            return;
+        }
+
         $client = $this->resolver_destino($fila);
         if ($client === null) {
             $this->cerrar_con_error($asistente, $fila, null, $sender, 'El cliente ya no existe.');
@@ -426,6 +430,10 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
          * error sería mandarle la disculpa al dueño mientras el asistente le está contestando. */
         if ($this->es_temporizador_de_foto()
             && (string) $fila->estado !== ClientAssistantMessage::ESTADO_ESPERANDO) {
+            return;
+        }
+
+        if (! $this->preparar_salida_por_el_canal_de_entrada(app(WhatsappSendService::class), $fila)) {
             return;
         }
 
@@ -984,8 +992,11 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
         /* 🔴 La respuesta sale por el MISMO número por el que entró el mensaje del dueño (misión
          * asistente-segundo-numero, 15/10/2026): contestarle desde el otro abriría una conversación
          * nueva en un chat distinto del que él está mirando, y fuera de la ventana de 24 hs de ese
-         * otro número Meta rechazaría el texto libre. Ver `proposito_de_salida()`. */
-        $whatsapp_message_id = $sender->paraProposito($this->proposito_de_salida($fila))->send_text(
+         * otro número Meta rechazaría el texto libre. La configuración se verifica otra vez acá. */
+        if (! $this->preparar_salida_por_el_canal_de_entrada($sender, $fila)) {
+            return;
+        }
+        $whatsapp_message_id = $sender->send_text(
             (string) $fila->telefono,
             $contenido,
             'Asistente por WhatsApp - cliente #' . $client->id
@@ -1257,7 +1268,9 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
         /* Las fotos de la respuesta salen por el mismo número que el texto que las precede: van
          * debajo de él en el chat del dueño, y por el otro número aparecerían en otra
          * conversación. Vale para los dos caminos de abajo (link y bytes). */
-        $sender->paraProposito($this->proposito_de_salida($fila));
+        if (! $this->preparar_salida_por_el_canal_de_entrada($sender, $fila)) {
+            return ['wamid' => null, 'motivo' => 'El canal de entrada ya no está disponible.', 'por_link' => false, 'convertida' => false];
+        }
 
         if ($fotos->va_por_link($url)) {
             $resultado = $this->con_reintento_transitorio($sender, $vence, function () use ($sender, $telefono, $url, $caption, $contexto) {
@@ -1511,33 +1524,42 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
     }
 
     /**
-     * Por qué número sale TODO lo que este job le manda al dueño por un mensaje: por el mismo por el que
-     * entró ese mensaje.
-     *
-     * 🔴 Se decide mirando la FILA y no «cuál es el número del asistente hoy». El día del corte hay
-     * mensajes en vuelo que entraron por el número de leads y clientes cuando el del asistente todavía
-     * no estaba listo; contestarlos por el número nuevo —donde ese dueño nunca escribió— sería texto
-     * libre fuera de ventana, que Meta rechaza. Lo mismo para el dueño que el webhook sigue atendiendo
-     * por el principal porque el número del asistente no lo reconoce.
-     *
-     * «Entró por el asistente» = la fila guarda el `phone_number_id` de la fila de propósito
-     * `asistente`. Sin dato (filas anteriores a la columna, o un payload que no traía el campo) o con
-     * cualquier otro número → `principal`, que es lo que este canal hacía antes de tener número propio.
-     * Y aunque la fila diga `asistente`, `paraProposito()` cae solo al principal si ese número ya no
-     * está listo.
-     *
-     * La regla vive en {@see AsistenteWhatsappService::proposito_de_salida()} desde la misión
-     * asistente-aviso-escaneo-factura (16/10/2026): el aviso de que terminó el escaneo de una
-     * factura también le habla al dueño por el número por el que entró su mensaje, y la regla no
-     * se copia. Este método queda como atajo para no tocar los cinco llamadores del job.
-     *
-     * @param ClientAssistantMessage $fila Fila entrante que se está procesando.
-     *
-     * @return string Uno de los WhatsappConfig::PROPOSITO_*.
+     * Fija la salida al canal de entrada sin trasladar un dedicado incompleto al principal.
+     * Las filas históricas sin identificador y las del principal conservan su recorrido.
+     * La consulta se repite antes de cada salida porque la configuración puede cambiar en la cola
+     * o mientras se consulta el sistema. No cambia el fallback de los demás servicios del admin.
      */
-    private function proposito_de_salida(ClientAssistantMessage $fila): string
+    private function preparar_salida_por_el_canal_de_entrada(WhatsappSendService $sender, ClientAssistantMessage $fila): bool
     {
-        return AsistenteWhatsappService::proposito_de_salida($fila);
+        $numero_de_entrada = trim((string) $fila->phone_number_id);
+        $entro_por_el_principal = $numero_de_entrada === '' || WhatsappConfig::query()
+            ->where('proposito', WhatsappConfig::PROPOSITO_PRINCIPAL)
+            ->where('phone_number_id', $numero_de_entrada)->exists();
+
+        if ($entro_por_el_principal) {
+            $sender->paraProposito(WhatsappConfig::PROPOSITO_PRINCIPAL);
+            return true;
+        }
+
+        $config = WhatsappConfig::canalListo(WhatsappConfig::PROPOSITO_ASISTENTE);
+        if ($config !== null && (string) $config->phone_number_id === $numero_de_entrada) {
+            // para(config) fija este canal explícito y no tiene fallback al comercial.
+            $sender->para($config);
+            return true;
+        }
+
+        $estaba_esperando = (string) $fila->estado === ClientAssistantMessage::ESTADO_ESPERANDO;
+        $fila->estado = ClientAssistantMessage::ESTADO_ERROR;
+        $fila->error = 'El número del asistente por el que entró el mensaje ya no está listo. No se envió por otro canal.';
+        $this->soltar_media_en_espera($fila);
+        $fila->save();
+        if ($estaba_esperando) {
+            app(AsistenteWhatsappService::class)->cerrar_fotos_anteriores_en_espera($fila, $fila->error);
+        }
+        Log::channel('daily')->warning('AsistenteWhatsapp: se detuvo la salida porque el canal de entrada no está listo.', [
+            'assistant_message_id' => $fila->id,
+        ]);
+        return false;
     }
 
     /**
@@ -1568,7 +1590,10 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
         $texto      = $es_de_demo ? AsistenteDemoLeadService::texto_sin_endpoint() : AsistenteWhatsappService::TEXTO_SIN_ENDPOINT;
 
         // Por el número por el que entró, igual que la respuesta: ver el comentario de `consultar()`.
-        $whatsapp_message_id = $sender->paraProposito($this->proposito_de_salida($fila))->send_text(
+        if (! $this->preparar_salida_por_el_canal_de_entrada($sender, $fila)) {
+            return;
+        }
+        $whatsapp_message_id = $sender->send_text(
             (string) $fila->telefono,
             $texto,
             'Asistente por WhatsApp sin endpoint - ' . ($es_de_demo ? 'demo #' . (int) $fila->demo_id : 'cliente #' . $client->id)
@@ -1625,7 +1650,10 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
         WhatsappSendService $sender
     ): void {
         // Por el número por el que entró, igual que la respuesta: ver el comentario de `consultar()`.
-        $whatsapp_message_id = $sender->paraProposito($this->proposito_de_salida($fila))->send_text(
+        if (! $this->preparar_salida_por_el_canal_de_entrada($sender, $fila)) {
+            return;
+        }
+        $whatsapp_message_id = $sender->send_text(
             (string) $fila->telefono,
             AsistenteWhatsappService::TEXTO_NO_SE_PUEDE_LEER,
             'Asistente por WhatsApp, mensaje que no se puede leer - cliente #' . $client->id
@@ -1717,7 +1745,10 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             : AsistenteWhatsappService::TEXTO_DE_DISCULPA;
 
         // Por el número por el que entró, igual que la respuesta: ver el comentario de `consultar()`.
-        $whatsapp_message_id = $sender->paraProposito($this->proposito_de_salida($fila))->send_text(
+        if (! $this->preparar_salida_por_el_canal_de_entrada($sender, $fila)) {
+            return;
+        }
+        $whatsapp_message_id = $sender->send_text(
             (string) $fila->telefono,
             $texto_de_disculpa,
             'Asistente por WhatsApp con error - ' . ($fila->es_de_demo() ? 'demo #' . (int) $fila->demo_id : 'cliente #' . ($client !== null ? $client->id : '?'))
