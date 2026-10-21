@@ -66,18 +66,23 @@ class AgendaDemoTemporalService
                 }
                 return $evidencia + ['tipo' => 'momento', 'inicio' => $ancla->addMinutes($minutos)->second(0)->format('Y-m-d H:i')];
             }
+            $consulta_ingreso = $this->consulta_de_ingreso($texto, $reserva, true);
+            if ($consulta_ingreso === null) {
+                // Una intención nueva rechazada corta el historial; no rescatar un «ya voy» viejo.
+                return $evidencia + ['tipo' => 'ambiguo'];
+            }
             if (preg_match('/\bahora\b/u', $texto)) {
                 if ($lead->demo_id !== null && $lead->demo_date !== null && $lead->demo_start_time && $lead->demo_end_time) {
                     $inicio = Carbon::parse($lead->demo_date->format('Y-m-d') . ' ' . $lead->demo_start_time, DemoDirectaService::TZ);
                     $fin = Carbon::parse($lead->demo_date->format('Y-m-d') . ' ' . $lead->demo_end_time, DemoDirectaService::TZ)->addMinutes(LeadDemoSettings::get_gracia_minutos_post());
                     $bloqueo = $inicio->copy()->addMinutes(LeadDemoSettings::get_bloqueo_real_minutos());
-                    if ($reserva !== null && $ancla->gte($inicio) && $ancla->lte($fin->max($bloqueo)) && $this->consulta_de_ingreso($texto, $reserva, true)) {
+                    if ($reserva !== null && $ancla->gte($inicio) && $ancla->lte($fin->max($bloqueo)) && $consulta_ingreso === true) {
                         return $evidencia + ['tipo' => 'conservar', 'reserva_vigente' => true];
                     }
                 }
                 return $evidencia + ['tipo' => 'ahora'];
             }
-            if ($reserva !== null && $this->consulta_de_ingreso($texto, $reserva)) {
+            if ($consulta_ingreso === true) {
                 return $evidencia + ['tipo' => 'conservar', 'reserva_vigente' => true];
             }
             // Una nueva hora sin día exige interpretarla; no hereda automáticamente el día anterior.
@@ -100,19 +105,22 @@ class AgendaDemoTemporalService
         } catch (\Throwable $e) { return null; }
     }
 
-    private function consulta_de_ingreso(string $texto, array $reserva, bool $admite_ahora = false): bool
+    /** true: conserva; false: no acredita ingreso (permite leer antecedentes); null: intención ambigua nueva. */
+    private function consulta_de_ingreso(string $texto, ?array $reserva, bool $admite_ahora = false): ?bool
     {
-        if ((! preg_match('/\b(?:entro|entrar|ingresar|un minuto|ya voy|dale|gracias)\b/u', $texto) && ! ($admite_ahora && preg_match('/\bahora\b/u', $texto)))
-            || preg_match('/\b(?:mejor|cambi\w*|reagend\w*|mov\w*|cancel\w*|anul\w*|reprogram\w*|pospon\w*|otr[oa]s?|hoy|ma[ñn]ana|pasado|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|fecha|d[ií]a|semana|mes|a[ñn]o|pr[oó]xim\w*|siguiente)\b/u', $texto)
+        if (! preg_match('/\b(?:entro|entrar|ingresar|un minuto|ya voy|dale|gracias|otr[oa]s?\s+(?:momento|horario|turno|fecha)|m[aá]s\s+(?:tarde|temprano))\b/u', $texto)
+            && ! ($admite_ahora && preg_match('/\bahora\b/u', $texto))) { return false; }
+        if (preg_match('/\b(?:mejor|cambi\w*|reagend\w*|mov\w*|cancel\w*|anul\w*|reprogram\w*|pospon\w*|otr[oa]s?|hoy|ma[ñn]ana|pasado|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|fecha|d[ií]a|semana|mes|a[ñn]o|pr[oó]xim\w*|siguiente)\b/u', $texto)
             || preg_match('/\bno\s+(?:(?:puedo|voy a|quiero|podemos|vamos a|queremos)\s+)?(?:entrar|ingresar|entro|ingreso)\b|\bm[aá]s\s+(?:tarde|temprano)\b/u', $texto)
-            || preg_match('/\bel\s+(?:uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|dieci\w*|veinte|veinti\w*|treinta)\b/u', $texto)) { return false; }
+            || preg_match('/\bel\s+(?:uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|dieci\w*|veinte|veinti\w*|treinta)\b/u', $texto)) { return null; }
+        if ($reserva === null) { return false; }
         preg_match_all('/\b([01]?\d|2[0-3]):([0-5]\d)\b/u', $texto, $horas, PREG_SET_ORDER);
         // Números fuera de HH:MM pueden ser otra fecha o una hora ambigua: no se adivinan.
-        if (preg_match('/\d/u', preg_replace('/\b([01]?\d|2[0-3]):([0-5]\d)\b/u', '', $texto))) { return false; }
-        if ($horas && ! preg_match('/\b(?:entro|entrar|ingresar)\b/u', $texto)) { return false; }
+        if (preg_match('/\d/u', preg_replace('/\b([01]?\d|2[0-3]):([0-5]\d)\b/u', '', $texto))) { return null; }
+        if ($horas && ! preg_match('/\b(?:entro|entrar|ingresar)\b/u', $texto)) { return null; }
         foreach ($horas as $hora) {
             $instante = $reserva['inicio']->copy()->setTime((int) $hora[1], (int) $hora[2]);
-            if ($instante->lt($reserva['inicio']) || ! $instante->lt($reserva['fin'])) { return false; }
+            if ($instante->lt($reserva['inicio']) || ! $instante->lt($reserva['fin'])) { return null; }
         }
         return true;
     }

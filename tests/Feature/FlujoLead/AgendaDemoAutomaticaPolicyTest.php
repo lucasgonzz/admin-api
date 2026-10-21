@@ -13,6 +13,7 @@ use App\Models\SyncedGithubFile;
 use App\Events\LeadSuggestionCreated;
 use App\Events\LeadConversationUpdated;
 use App\Services\AgendaDemoAutomaticaPolicy;
+use App\Services\AgendaDemoTemporalService;
 use App\Services\DemoDirectaService;
 use App\Services\LeadAiService;
 use App\Services\LeadAiSuggestionAutoSendScheduler;
@@ -130,7 +131,7 @@ class AgendaDemoAutomaticaPolicyTest extends TestCase
     }
 
     /** @dataProvider conservaciones_que_deben_seguir_retenidas */
-    public function test_la_excepcion_de_estado_no_abre_conflictos_ni_guardas_manual(string $caso, string $consulta, array $cambios = [], array $acciones = []): void
+    public function test_la_excepcion_de_estado_no_abre_conflictos_ni_guardas_manual(string $caso, string $consulta, array $cambios = [], array $acciones = [], ?string $previo = null): void
     {
         $this->activar(); Carbon::setTestNow(Carbon::parse('2026-10-21 16:29', DemoDirectaService::TZ));
         $demo = $this->demo(); $lead = $this->lead();
@@ -139,7 +140,16 @@ class AgendaDemoAutomaticaPolicyTest extends TestCase
         if ($caso === 'escudo') { $lead->update(['requiere_verificacion_mensajes' => true]); }
         if ($caso === 'intervencion') { $lead->update(['requiere_intervencion_humana' => true]); }
         if (strpos($caso, 'ahora_') === 0) { Carbon::setTestNow(Carbon::parse('2026-10-21 17:00', DemoDirectaService::TZ)); }
+        if ($previo !== null) {
+            Carbon::setTestNow(Carbon::parse('2026-10-21 16:50', DemoDirectaService::TZ)); $this->inbound($lead, $previo);
+            Carbon::setTestNow(Carbon::parse('2026-10-21 17:00', DemoDirectaService::TZ));
+        }
         $this->inbound($lead, $consulta);
+        if ($previo !== null) {
+            $pedido = app(AgendaDemoTemporalService::class)->pedido($lead);
+            $this->assertSame('ambiguo', $pedido['tipo']);
+            $this->assertSame((int) LeadMessage::where('lead_id', $lead->id)->where('sender', 'lead')->max('id'), $pedido['mensaje_id']);
+        }
         $campos_reserva = array_flip(['demo_id', 'demo_date', 'demo_start_time', 'demo_end_time']);
         $reserva = array_intersect_key($lead->fresh()->getAttributes(), $campos_reserva);
         $msg = $this->generar_desde_el_agente($lead, $demo, array_merge(['mensaje_sugerido' => 'La reserva sigue como estaba.',
@@ -180,6 +190,12 @@ class AgendaDemoAutomaticaPolicyTest extends TestCase
             ['modelo_manual', $pregunta, [], ['requiere_verificacion' => true]],
             ['escudo', $pregunta], ['intervencion', $pregunta],
             ['postdemo', $pregunta, ['status' => 'demo_realizada']],
+            'secuencia_no_puedo' => ['secuencia_no_puedo', 'No puedo entrar.', [], [], 'Ya voy, un minuto'],
+            'secuencia_otro_momento' => ['secuencia_otro_momento', 'Entro en otro momento.', [], [], 'Ya voy, un minuto'],
+            'secuencia_mas_tarde' => ['secuencia_mas_tarde', 'Entro más tarde.', [], [], 'Ya voy, un minuto'],
+            'secuencia_ahora_no_puedo' => ['secuencia_ahora_no_puedo', 'No puedo entrar.', [], [], 'Ahora entro'],
+            'secuencia_ahora_otro_momento' => ['secuencia_ahora_otro_momento', 'Entro en otro momento.', [], [], 'Ahora entro'],
+            'secuencia_ahora_mas_tarde' => ['secuencia_ahora_mas_tarde', 'Entro más tarde.', [], [], 'Ahora entro'],
         ];
     }
 
@@ -191,6 +207,16 @@ class AgendaDemoAutomaticaPolicyTest extends TestCase
         $msg = $this->generar_desde_el_agente($lead, $demo, ['mensaje_sugerido' => 'Tranquilo, te espero.', 'estado_sugerido' => 'demo_agendada']);
         $this->assertFalse((bool) $msg->requiere_verificacion); $this->assertTrue($msg->pending_actions['decision_agenda']['permitido']);
         $this->assertEmpty($msg->pending_actions['agendar_demo']); Queue::assertPushed(AutoSendLeadAiSuggestionJob::class, 1); Mail::assertNothingSent();
+    }
+
+    public function test_el_correo_posterior_solo_completa_la_intencion_temporal_anterior(): void
+    {
+        $lead = $this->lead(); $this->inbound($lead, 'Mañana a las 10:00 puedo hacer la demo.');
+        $fuente = (int) LeadMessage::where('lead_id', $lead->id)->max('id');
+        Carbon::setTestNow(now()->addMinute()); $this->inbound($lead, 'agenda@fixture.test');
+        $pedido = app(AgendaDemoTemporalService::class)->pedido($lead);
+        $this->assertSame('momento', $pedido['tipo']); $this->assertSame('2026-10-22 10:00', $pedido['inicio']);
+        $this->assertSame($fuente, $pedido['mensaje_id']);
     }
 
     public function test_un_conflicto_nuevo_entre_programar_y_enviar_retiene_sin_negativa(): void
