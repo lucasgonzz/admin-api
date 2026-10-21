@@ -16,7 +16,9 @@ class DemoChatAiService
             throw new \RuntimeException('La demo necesita DEEPSEEK_API_KEY configurada.');
         }
         $historial = $chat->mensajes()->where('estado', 'publicado')->orderByDesc('id')->limit(24)->get()->reverse()->values();
-        $consulta = $historial->where('rol', 'lead')->pluck('contenido')->take(-4)->implode(' ');
+        // Sólo el pedido actual: los temas ya respondidos no deben contaminar sus adjuntos.
+        $consulta = $historial->reverse()->takeWhile(function ($m) { return $m->rol === 'lead'; })
+            ->take(4)->reverse()->pluck('contenido')->implode(' ');
         $catalogo = app(DemoChatCatalogoService::class);
         $candidatos = $catalogo->buscar($lead, $consulta);
         $terminados = [];
@@ -24,7 +26,7 @@ class DemoChatAiService
             if ($p->omitido || $p->completado_at !== null) { $terminados[$p->clave] = true; }
         }
         $siguiente = $catalogo->siguiente($lead, $terminados);
-        if ($siguiente !== null) { $candidatos[] = $siguiente; }
+        if (trim($consulta) === '' && $siguiente !== null) { $candidatos[] = $siguiente; }
         $permitidos = [];
         foreach ($candidatos as $video) { $permitidos[$video['clave']] = $video; }
         $fuentes = ['demo' => true];
@@ -34,7 +36,7 @@ class DemoChatAiService
         $hechos = [
             'industria' => DemoIndustriaCatalogo::OPCIONES[DemoIndustriaCatalogo::normalizar($lead->demo_industria)],
             'respuestas' => LeadDemoFormMapper::respuestas_efectivas($lead),
-            'siguiente_sugerido' => $siguiente ? $siguiente['clave'] : null,
+            'siguiente_sugerido' => trim($consulta) === '' && $siguiente ? $siguiente['clave'] : null,
             'videos_terminados_o_salteados' => array_keys($terminados),
             'asistente_personal_whatsapp' => AsistenteDemoLeadService::disponible_para($lead, $lead->demo)
                 ? AsistenteDemoLeadService::numero_visible() : '',
@@ -42,8 +44,13 @@ class DemoChatAiService
         $system = 'Sos el asistente de la demo de ComercioCity. Español rioplatense, práctico y breve: '
             . 'una a tres frases, sin discurso de venta. Acompañás al lead mientras prueba, no ejecutás cambios en el negocio. '
             . 'El recorrido del formulario es una sugerencia; priorizá lo que pregunte. Ofrecé uno o dos videos pertinentes '
-            . 'del catálogo, nunca inventes clips, URLs, botones ni capacidades. Si no hay video, respondé por texto '
-            . 'solo con el manual leído o una transcripción provista; si falta información, decilo y pedí el detalle útil. '
+            . 'del catálogo, nunca inventes clips, URLs, botones ni capacidades. '
+            . 'Elegí el video que muestra la tarea específica preguntada: los candidatos están ordenados por pertinencia '
+            . '(título, luego propósito; una mención en transcripción pesa menos). Si un clip de demo muestra esa tarea, '
+            . 'priorizalo frente a un tutorial general que sólo la menciona. Conservá los recursos cuando explican mejor '
+            . 'lo preguntado. El siguiente del recorrido sólo se sugiere cuando no hay un pedido puntual; no lo adjuntes '
+            . 'para reemplazar una respuesta específica. '
+            . 'Si no hay video, respondé por texto solo con el manual leído o una transcripción provista; si falta información, decilo y pedí el detalle útil. '
             . 'Usá leer_manual para explicar pasos o pantallas y buscar_videos para otros temas. No muestres tus fuentes internas. '
             . 'El lead puede saltear cualquier video. No lo felicites por terminar uno que no figura terminado. '
             . 'No repitas el saludo de presentación. El sistema ya ofrece el primer video. '

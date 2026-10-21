@@ -3,13 +3,20 @@
 namespace Tests\Feature;
 
 use App\Models\DemoMedia;
+use App\Models\DemoChatConversacion;
 use App\Models\Lead;
+use App\Models\RecursosVideo;
 use App\Models\SyncedGithubFile;
 use App\Services\DemoCatalogoService;
 use App\Services\DemoChatCatalogoService;
+use App\Services\DemoChatAiService;
 use App\Services\DemoPlanResolver;
 use App\Services\LeadDemoFormMapper;
+use App\Services\RecursosCatalogoService;
+use App\Services\ManualRepositoryService;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Str;
 use Tests\TestCase;
 
 class DemoCatalogoChatTest extends TestCase
@@ -62,5 +69,63 @@ class DemoCatalogoChatTest extends TestCase
         DemoMedia::create(['slot_id' => '7.2', 'url' => 'https://videos.test/7.2.mp4']);
         $this->assertArrayHasKey('demo:7.2', $catalogo->videos($lead));
         $this->assertContains('demo:7.2', array_column($catalogo->buscar($lead, 'foto de la factura de compra'), 'clave'));
+    }
+
+    public function test_la_tarea_del_agente_prioriza_su_demo_y_los_permisos_conservan_su_recurso(): void
+    {
+        $this->catalogo();
+        DemoMedia::updateOrCreate(['slot_id' => '2.10'], ['url' => 'https://videos.test/agente-demo.mp4']);
+        RecursosVideo::query()->update(['activo' => false]);
+        RecursosVideo::updateOrCreate(['codigo' => 'PERMISOS-E2E'], ['carpeta' => 1, 'carpeta_nombre' => 'Configuración', 'orden' => 1,
+            'titulo' => 'Los permisos: qué habilita cada uno y por qué hay que recargar',
+            'para_que' => 'Configurar permisos del agente que responde por WhatsApp a mis clientes.',
+            'transcripcion' => 'Los permisos se configuran desde Usuarios. Cada empleado entra con su propia cuenta y sólo ve lo que tiene habilitado. '
+                . 'Elegís un usuario, abrís sus permisos y marcás las pantallas que necesita: artículos, ventas, clientes, compras o reportes. '
+                . 'Si el agente responde a clientes por WhatsApp, la atención del cliente no habilita por sí sola cambiar precios o borrar una venta. '
+                . 'El dueño puede permitir consultar y mantener deshabilitadas las acciones de modificación. Guardá los cambios y pedile al empleado que recargue la página: '
+                . 'las pantallas abiertas conservan la configuración anterior hasta recargar. Una prueba con la cuenta del empleado permite revisar qué opciones aparecen. '
+                . 'Si el usuario no encuentra un botón, verificá primero la cuenta y sus permisos. No hace falta compartir la contraseña del dueño para atender a los clientes. '
+                . 'Los permisos se pueden revisar de nuevo cuando cambian las tareas de cada persona.',
+            'url' => 'https://videos.test/permisos.mp4', 'duracion' => 60, 'activo' => true]);
+        RecursosVideo::updateOrCreate(['codigo' => 'BANCO-E2E'], ['carpeta' => 2, 'carpeta_nombre' => 'Administración', 'orden' => 2,
+            'titulo' => 'Conciliación bancaria', 'para_que' => 'Revisar movimientos bancarios y conciliar diferencias.',
+            'transcripcion' => 'El extracto bancario se compara con los movimientos.', 'url' => 'https://videos.test/bancos.mp4', 'duracion' => 40, 'activo' => true]);
+        $recursos = app(RecursosCatalogoService::class); $recursos->olvidar();
+        try {
+            $lead = new Lead(); $catalogo = app(DemoChatCatalogoService::class);
+            foreach (['¿Cómo pruebo el agente que responde a mis clientes por WhatsApp?',
+                'Quiero probar mi agente como cliente en WhatsApp'] as $pregunta) {
+                $hallados = $catalogo->buscar($lead, $pregunta);
+                $this->assertSame('demo:2.10', $hallados[0]['clave'], $pregunta);
+                $this->assertContains('recurso:PERMISOS-E2E', array_column($hallados, 'clave'));
+            }
+            $this->assertSame('recurso:PERMISOS-E2E', $catalogo->buscar($lead, '¿Qué permisos habilita cada empleado y por qué hay que recargar?')[0]['clave']);
+            $this->assertSame('recurso:BANCO-E2E', $catalogo->buscar($lead, '¿Cómo hago una conciliación bancaria?')[0]['clave']);
+            // La petición enviada al modelo debe conservar el contraste y excluir temas ya respondidos.
+            // El stub no acredita calidad del modelo: sólo observa el catálogo que recibe.
+            $lead = Lead::create(['uuid' => (string) Str::uuid(), 'contact_name' => 'Comercio sintético', 'demo_industria' => 'ferreteria']);
+            $lead->demo_plan = ['secciones' => [['clips' => [['id' => '0.1', 'tipo' => 'nucleo']]]]]; $lead->save();
+            DemoMedia::updateOrCreate(['slot_id' => '0.1'], ['url' => 'https://videos.test/inicio.mp4']);
+            $chat = DemoChatConversacion::create(['lead_id' => $lead->id]);
+            foreach ([['lead', 'Permisos habilita recargar empleados permisos recargar'], ['asistente', 'Ya vimos los permisos.'],
+                ['lead', '¿Cómo pruebo el agente que responde a mis clientes por WhatsApp?']] as $turno) {
+                $chat->mensajes()->create(['rol' => $turno[0], 'contenido' => $turno[1], 'estado' => 'publicado']);
+            }
+            $this->mock(ManualRepositoryService::class, function ($mock) { $mock->shouldReceive('file_list_cacheada')->andReturn(''); });
+            config(['services.deepseek.api_key' => 'sintetica-no-utilizable']);
+            $ofrecidos = [];
+            Http::fake(['api.deepseek.com/*' => function ($r) use (&$ofrecidos) {
+                $json = explode("\nClaves de fuentes", explode("\nVideos disponibles para esta pregunta: ", $r['system'])[1])[0];
+                $ofrecidos = json_decode($json, true);
+                return Http::response(['content' => [['type' => 'text', 'text' => json_encode(['contenido' => 'Probá la simulación como cliente.', 'videos' => ['demo:2.10'], 'fuentes' => ['demo:2.10']])]]]);
+            }]);
+            app(DemoChatAiService::class)->responder($lead, $chat);
+            Http::assertSentCount(1);
+            $this->assertSame('demo:2.10', $ofrecidos[0]['clave']);
+            $this->assertContains('recurso:PERMISOS-E2E', array_column($ofrecidos, 'clave'));
+            $this->assertNotContains('demo:0.1', array_column($ofrecidos, 'clave'));
+            DemoMedia::where('slot_id', '2.10')->delete();
+            $this->assertSame('recurso:PERMISOS-E2E', $catalogo->buscar($lead, 'agente WhatsApp clientes')[0]['clave']);
+        } finally { $recursos->olvidar(); }
     }
 }

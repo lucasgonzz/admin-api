@@ -107,20 +107,18 @@ class DemoChatCatalogoService
     /** Recuperación determinista: títulos y propósito pesan más que una mención en transcripción. */
     public function buscar(Lead $lead, string $pregunta): array
     {
-        $palabras = array_unique(array_filter(preg_split('/[^a-z0-9]+/', strtolower(Str::ascii($pregunta))), function ($p) {
-            return strlen($p) > 2 && ! in_array($p, ['que', 'como', 'para', 'con', 'una', 'por', 'del', 'los', 'las', 'quiero', 'puedo', 'tenes', 'video', 'ver']);
-        }));
+        $palabras = array_diff($this->palabras($pregunta), ['que', 'como', 'para', 'con', 'una', 'por', 'del', 'los', 'las', 'quiero', 'puedo', 'tenes', 'video', 'ver', 'mis', 'tus', 'sus']);
         $indice = app(RecursosCatalogoService::class)->indice();
         $encontrados = [];
         foreach ($this->videos($lead) as $video) {
-            $titulo = strtolower(Str::ascii($video['titulo'] . ' ' . $video['descripcion']));
+            $titulo = $this->palabras($video['titulo']);
+            $proposito = $this->palabras($video['descripcion']);
             $transcripcion = $video['origen'] === 'recurso' ? (string) ($indice[$video['codigo']] ?? '') : '';
-            $texto = strtolower(Str::ascii($transcripcion));
-            $puntos = 0;
-            foreach ($palabras as $palabra) {
-                $puntos += strpos($titulo, $palabra) !== false ? 5 : 0;
-                $puntos += strpos($texto, $palabra) !== false ? 1 : 0;
-            }
+            // El título nombra la tarea mostrada. Una mención incidental en una transcripción
+            // larga no debe desplazarla, sin importar si viene de la demo o de recursos.
+            $puntos = 10 * count(array_intersect($palabras, $titulo))
+                + 3 * count(array_intersect($palabras, $proposito))
+                + min(2, count(array_intersect($palabras, $this->palabras($transcripcion))));
             if ($puntos > 0) {
                 $video['puntaje'] = $puntos;
                 $video['transcripcion'] = mb_substr($transcripcion, 0, 6500);
@@ -129,6 +127,16 @@ class DemoChatCatalogoService
         }
         usort($encontrados, function ($a, $b) { return $b['puntaje'] <=> $a['puntaje']; });
         return array_slice($encontrados, 0, 8);
+    }
+
+    private function palabras(string $texto): array
+    {
+        $palabras = preg_split('/[^a-z0-9]+/', strtolower(Str::ascii($texto)));
+        $palabras = array_filter($palabras, function ($p) { return strlen($p) > 2; });
+        return array_values(array_unique(array_map(function ($p) {
+            // cliente/clientes comparten señal; no buscar substrings como «IA» dentro de otra palabra.
+            return strlen($p) > 4 && substr($p, -1) === 's' ? substr($p, 0, -1) : $p;
+        }, $palabras)));
     }
 
     private function url_video(string $url): bool
