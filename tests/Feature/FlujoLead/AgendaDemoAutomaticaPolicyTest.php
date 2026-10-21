@@ -196,6 +196,9 @@ class AgendaDemoAutomaticaPolicyTest extends TestCase
             'secuencia_ahora_no_puedo' => ['secuencia_ahora_no_puedo', 'No puedo entrar.', [], [], 'Ahora entro'],
             'secuencia_ahora_otro_momento' => ['secuencia_ahora_otro_momento', 'Entro en otro momento.', [], [], 'Ahora entro'],
             'secuencia_ahora_mas_tarde' => ['secuencia_ahora_mas_tarde', 'Entro más tarde.', [], [], 'Ahora entro'],
+            'secuencia_cancelar_sin_ingreso' => ['secuencia_cancelar_sin_ingreso', 'Cancelá la demo.', [], [], 'Ya voy, un minuto'],
+            'secuencia_otro_dia_sin_ingreso' => ['secuencia_otro_dia_sin_ingreso', 'Otro día.', [], [], 'Ya voy, un minuto'],
+            'secuencia_otra_hora_sin_ingreso' => ['secuencia_otra_hora_sin_ingreso', 'A otra hora.', [], [], 'Ya voy, un minuto'],
         ];
     }
 
@@ -209,14 +212,20 @@ class AgendaDemoAutomaticaPolicyTest extends TestCase
         $this->assertEmpty($msg->pending_actions['agendar_demo']); Queue::assertPushed(AutoSendLeadAiSuggestionJob::class, 1); Mail::assertNothingSent();
     }
 
-    public function test_el_correo_posterior_solo_completa_la_intencion_temporal_anterior(): void
+    /** @dataProvider correos_posteriores */
+    public function test_el_correo_posterior_solo_completa_la_intencion_temporal_anterior(string $correo): void
     {
         $lead = $this->lead(); $this->inbound($lead, 'Mañana a las 10:00 puedo hacer la demo.');
         $fuente = (int) LeadMessage::where('lead_id', $lead->id)->max('id');
-        Carbon::setTestNow(now()->addMinute()); $this->inbound($lead, 'agenda@fixture.test');
+        Carbon::setTestNow(now()->addMinute()); $this->inbound($lead, $correo);
         $pedido = app(AgendaDemoTemporalService::class)->pedido($lead);
         $this->assertSame('momento', $pedido['tipo']); $this->assertSame('2026-10-22 10:00', $pedido['inicio']);
         $this->assertSame($fuente, $pedido['mensaje_id']);
+    }
+
+    public function correos_posteriores(): array
+    {
+        return [['agenda@fixture.test'], ['correo5500@fixture.test'], ['Dale, mi correo es correo5500@fixture.test ahora.']];
     }
 
     public function test_un_conflicto_nuevo_entre_programar_y_enviar_retiene_sin_negativa(): void
