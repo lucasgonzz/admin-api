@@ -17,7 +17,10 @@ class DemoChatAiService
         }
         $historial = $chat->mensajes()->where('estado', 'publicado')->orderByDesc('id')->limit(24)->get()->reverse()->values();
         // Sólo el pedido actual: los temas ya respondidos no deben contaminar sus adjuntos.
-        $consulta = $historial->reverse()->takeWhile(function ($m) { return $m->rol === 'lead'; })
+        // La tarjeta elegida por el lead no es una respuesta a su pregunta pendiente.
+        // Se omite sólo para delimitar la consulta; el historial enviado conserva la tarjeta.
+        $consulta = $historial->reject(function ($m) { return $m->rol === 'asistente' && $m->origen === 'seleccion'; })
+            ->reverse()->takeWhile(function ($m) { return $m->rol === 'lead'; })
             ->take(4)->reverse()->pluck('contenido')->implode(' ');
         $catalogo = app(DemoChatCatalogoService::class);
         $candidatos = $catalogo->buscar($lead, $consulta);

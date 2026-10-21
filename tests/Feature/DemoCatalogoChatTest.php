@@ -10,12 +10,15 @@ use App\Models\SyncedGithubFile;
 use App\Services\DemoCatalogoService;
 use App\Services\DemoChatCatalogoService;
 use App\Services\DemoChatAiService;
+use App\Services\DemoChatService;
 use App\Services\DemoPlanResolver;
 use App\Services\LeadDemoFormMapper;
 use App\Services\RecursosCatalogoService;
 use App\Services\ManualRepositoryService;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 
@@ -127,5 +130,41 @@ class DemoCatalogoChatTest extends TestCase
             DemoMedia::where('slot_id', '2.10')->delete();
             $this->assertSame('recurso:PERMISOS-E2E', $catalogo->buscar($lead, 'agente WhatsApp clientes')[0]['clave']);
         } finally { $recursos->olvidar(); }
+    }
+
+    public function test_elegir_un_video_mientras_espera_no_borra_la_pregunta_que_debe_responder(): void
+    {
+        $this->catalogo(); Queue::fake();
+        RecursosVideo::query()->update(['activo' => false]); $recursos = app(RecursosCatalogoService::class); $recursos->olvidar();
+        Carbon::setTestNow(Carbon::parse('2026-10-21 12:00:00'));
+        try {
+            foreach (['0.1', '2.10'] as $id) { DemoMedia::updateOrCreate(['slot_id' => $id], ['url' => 'https://videos.test/' . $id . '.mp4']); }
+            $lead = Lead::create(['uuid' => (string) Str::uuid(), 'contact_name' => 'Demo sintética', 'demo_industria' => 'ferreteria']);
+            $lead->demo_plan = ['secciones' => [['clips' => [['id' => '0.1', 'tipo' => 'nucleo']]]]]; $lead->save();
+            $service = app(DemoChatService::class);
+            $pregunta = '¿Cómo pruebo el agente que responde a mis clientes por WhatsApp?';
+            $service->recibir($lead, $pregunta, (string) Str::uuid());
+            $chat = DemoChatConversacion::where('lead_id', $lead->id)->firstOrFail(); $generacion = $chat->generacion;
+            $service->seleccionar($lead, 'demo:0.1', (string) Str::uuid());
+            $chat->refresh(); $this->assertSame('esperando', $chat->estado); $this->assertSame($generacion, $chat->generacion);
+            $tarjeta = $chat->mensajes()->where('origen', 'seleccion')->firstOrFail();
+            $this->mock(ManualRepositoryService::class, function ($mock) { $mock->shouldReceive('file_list_cacheada')->andReturn(''); });
+            config(['services.deepseek.api_key' => 'sintetica-no-utilizable']);
+            $ofrecidos = []; $historial = [];
+            Http::fake(['api.deepseek.com/*' => function ($r) use (&$ofrecidos, &$historial) {
+                $ofrecidos = json_decode(explode("\nClaves de fuentes", explode("\nVideos disponibles para esta pregunta: ", $r['system'])[1])[0], true);
+                $historial = json_decode($r['messages'][0]['content'], true)['historial'];
+                return Http::response(['content' => [['type' => 'text', 'text' => json_encode(['contenido' => 'Probá la simulación como cliente.', 'videos' => ['demo:2.10'], 'fuentes' => ['demo:2.10']])]]]);
+            }]);
+            Carbon::setTestNow(now()->addSeconds(11)); $service->generar($chat->id, $generacion);
+            Http::assertSentCount(1);
+            $this->assertSame('demo:2.10', $ofrecidos[0]['clave']);
+            $this->assertNotContains('demo:0.1', array_column($ofrecidos, 'clave'));
+            $this->assertContains($pregunta, array_column($historial, 'contenido'));
+            $this->assertSame(['rol' => 'asistente', 'contenido' => $tarjeta->contenido, 'videos' => ['demo:0.1']], $historial[count($historial) - 1]);
+            $respuesta = $chat->mensajes()->where('origen', 'ia')->firstOrFail();
+            $this->assertSame('publicado', $respuesta->estado); $this->assertSame(['demo:2.10'], $respuesta->videos);
+            $this->assertSame('inactivo', $chat->fresh()->estado);
+        } finally { Carbon::setTestNow(); $recursos->olvidar(); }
     }
 }
