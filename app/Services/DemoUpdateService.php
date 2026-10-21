@@ -410,9 +410,9 @@ class DemoUpdateService
      * Dos vías (misión `instalar-sin-el-vps`, 10/9/2026):
      *
      *  1. **Artefacto del release.** `empresa-api-v{version}.zip` trae el repo en la raíz CON
-     *     `vendor/` y sin `.git`/`.env`/`storage`/`public`/`tests`. Las mismas exclusiones que
-     *     hacía el `zip -r` de la vía vieja, así que el `unzip -o` de este pipeline sigue sin pisar
-     *     `public/` ni `storage/` de la demo. NO se toca el VPS de builds.
+     *     `vendor/`, sin `.git`/`.env`/`storage`/`tests`, y desde el 20/10 con
+     *     `public/demo-industrias`. Esa es la única parte pública distribuible en un update:
+     *     el resto de `public/` y todo `storage/` de la demo se conservan.
      *  2. **VPS de builds, APAGADA.** El checkout + `composer install` allá + el zip siguen acá
      *     abajo, detrás de `DEPLOY_PERMITIR_BUILD_EN_VPS`. Sin artefacto la etapa FALLA.
      *
@@ -429,6 +429,7 @@ class DemoUpdateService
         $api_path  = $this->demo_api_path();
 
         if ($this->artefacto_bajar_api($tag, $local_zip, 'upload_api')) {
+            $this->preparar_zip_de_actualizacion_demo($local_zip);
             $this->artefacto_desplegar_zip_api(
                 $local_zip,
                 $api_path,
@@ -478,7 +479,8 @@ class DemoUpdateService
         $zip_command = 'cd ' . escapeshellarg($api_build_path)
             . ' && rm -f ' . escapeshellarg($zip_name)
             . ' && zip -r ' . escapeshellarg($zip_name) . ' . '
-            . "--exclude='.env' --exclude='vendor/*' --exclude='storage/*' --exclude='public/*' 2>&1";
+            . "--exclude='.env' --exclude='vendor/*' --exclude='storage/*' --exclude='public/*' 2>&1"
+            . ' && if [ -d public/demo-industrias ]; then zip -r ' . escapeshellarg($zip_name) . ' public/demo-industrias; fi';
         $this->exec_build_ssh('upload_api', $zip_command, true, true);
         $api_zip_bytes = $this->verify_zip_on_vps($api_zip_remote, 'upload_api');
         $this->append_log("[upload_api] API empaquetada ({$api_zip_bytes} bytes en VPS)");
@@ -486,6 +488,7 @@ class DemoUpdateService
         // Descarga ZIP del VPS al admin.
         $sftp_build = $this->open_sftp_session('vps');
         $this->sftp_download_file($sftp_build, $api_zip_remote, $local_zip, $api_zip_bytes, 'upload_api');
+        $this->preparar_zip_de_actualizacion_demo($local_zip);
         $this->append_log('[upload_api] ZIP descargado al servidor de admin');
 
         $remote_zip = "{$api_path}/{$zip_name}";
@@ -531,6 +534,46 @@ class DemoUpdateService
             'rm -f ' . escapeshellarg($api_build_path . '/' . $zip_name)
         );
         $this->append_log('[upload_api] Archivos temporales eliminados');
+    }
+
+    /**
+     * Las imágenes de cada rubro son parte del código de la demo, sus archivos subidos no.
+     * Se filtra el paquete ANTES de subirlo: ni un release ni el fallback de builds pueden
+     * reemplazar index.php, logos del dueño, public/storage o archivos privados de la instancia.
+     * Un release anterior sin demo-industrias sigue siendo válido y conserva los assets existentes.
+     */
+    private function preparar_zip_de_actualizacion_demo(string $archivo): void
+    {
+        $zip = new \ZipArchive();
+        if ($zip->open($archivo) !== true) {
+            throw new \RuntimeException('No se pudo abrir el paquete de actualización de la demo.');
+        }
+
+        try {
+            $excluir = [];
+            for ($i = 0; $i < $zip->numFiles; $i++) {
+                $nombre = $zip->getNameIndex($i);
+                $ruta = (string) preg_replace('#^(\./)+#', '', str_replace('\\', '/', (string) $nombre));
+                if (preg_match('#(^|/)\.\.(/|$)#', $ruta) || strpos($ruta, '/') === 0 || preg_match('/^[a-z]:/i', $ruta)) {
+                    throw new \RuntimeException('El paquete de demo contiene una ruta fuera del destino permitido.');
+                }
+                $publica = $ruta === 'public' || strpos($ruta, 'public/') === 0;
+                $de_rubro = $ruta === 'public/demo-industrias/' || strpos($ruta, 'public/demo-industrias/') === 0;
+                $privada = $ruta === 'storage' || strpos($ruta, 'storage/') === 0;
+                if (($publica && ! $de_rubro) || $privada) {
+                    $excluir[] = $nombre;
+                }
+            }
+            foreach ($excluir as $nombre) {
+                if (! $zip->deleteName($nombre)) {
+                    throw new \RuntimeException('No se pudo preservar public/storage al preparar el paquete de demo.');
+                }
+            }
+        } finally {
+            if (! $zip->close()) {
+                throw new \RuntimeException('No se pudo guardar el paquete de actualización de la demo.');
+            }
+        }
     }
 
     /**
