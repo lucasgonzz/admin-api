@@ -111,6 +111,88 @@ class AgendaDemoAutomaticaPolicyTest extends TestCase
         $this->assertNull($msg->fresh()->actions_override_log);
     }
 
+    public function test_una_consulta_de_ingreso_con_estado_redundante_no_pide_otra_reserva(): void
+    {
+        $this->activar(); Carbon::setTestNow(Carbon::parse('2026-10-21 16:29', DemoDirectaService::TZ));
+        $demo = $this->demo(); $lead = $this->lead();
+        $lead->update(['status' => 'demo_agendada', 'demo_id' => $demo->id, 'demo_date' => '2026-10-21', 'demo_start_time' => '16:36', 'demo_end_time' => '18:36']);
+        $this->inbound($lead, 'Perfecto. Veo que empieza a las 16:36; ¿puedo entrar a las 16:37? Es sólo un minuto después.');
+        $antes = $lead->fresh()->getAttributes();
+        $msg = $this->generar_desde_el_agente($lead, $demo, ['mensaje_sugerido' => 'Sí, el botón se habilita a las 16:36 y podés entrar a las 16:37. La tenés reservada hasta las 18:36.',
+            'estado_sugerido' => 'demo_agendada', 'requiere_verificacion' => false, 'tipo_respuesta' => 'conversacional']);
+        $this->assertFalse((bool) $msg->requiere_verificacion);
+        $this->assertTrue($msg->pending_actions['decision_agenda']['permitido']);
+        $this->assertEmpty($msg->pending_actions['agendar_demo']);
+        $antes['tiene_sugerencia_pendiente'] = 1;
+        $this->assertSame($antes, $lead->fresh()->getAttributes());
+        Queue::assertPushed(AutoSendLeadAiSuggestionJob::class, 1);
+        Mail::assertNothingSent();
+    }
+
+    /** @dataProvider conservaciones_que_deben_seguir_retenidas */
+    public function test_la_excepcion_de_estado_no_abre_conflictos_ni_guardas_manual(string $caso, string $consulta, array $cambios = [], array $acciones = []): void
+    {
+        $this->activar(); Carbon::setTestNow(Carbon::parse('2026-10-21 16:29', DemoDirectaService::TZ));
+        $demo = $this->demo(); $lead = $this->lead();
+        $lead->update(array_merge(['status' => 'demo_agendada', 'demo_id' => $demo->id, 'demo_date' => '2026-10-21', 'demo_start_time' => '16:36', 'demo_end_time' => '18:36'], $cambios));
+        if ($caso === 'instancia_ausente') { $demo->delete(); }
+        if ($caso === 'escudo') { $lead->update(['requiere_verificacion_mensajes' => true]); }
+        if ($caso === 'intervencion') { $lead->update(['requiere_intervencion_humana' => true]); }
+        if (strpos($caso, 'ahora_') === 0) { Carbon::setTestNow(Carbon::parse('2026-10-21 17:00', DemoDirectaService::TZ)); }
+        $this->inbound($lead, $consulta);
+        $campos_reserva = array_flip(['demo_id', 'demo_date', 'demo_start_time', 'demo_end_time']);
+        $reserva = array_intersect_key($lead->fresh()->getAttributes(), $campos_reserva);
+        $msg = $this->generar_desde_el_agente($lead, $demo, array_merge(['mensaje_sugerido' => 'La reserva sigue como estaba.',
+            'estado_sugerido' => $lead->status, 'requiere_verificacion' => false, 'tipo_respuesta' => 'conversacional'], $acciones));
+        $this->assertFalse(app(AgendaDemoAutomaticaPolicy::class)->evaluar($lead->fresh(), $msg->pending_actions ?? [], $msg)['permitido'], $caso);
+        Queue::assertNotPushed(AutoSendLeadAiSuggestionJob::class);
+        $this->assertSame($reserva, array_intersect_key($lead->fresh()->getAttributes(), $campos_reserva));
+        if (! in_array($caso, ['escudo', 'intervencion', 'postdemo'], true)) { $this->assertTrue((bool) $msg->requiere_verificacion, $caso); }
+        Mail::assertNothingSent();
+    }
+
+    public function conservaciones_que_deben_seguir_retenidas(): array
+    {
+        $pregunta = '¿Puedo entrar a las 16:37?';
+        return [
+            ['sin_reserva', $pregunta, ['demo_id' => null, 'demo_date' => null, 'demo_start_time' => null, 'demo_end_time' => null]],
+            ['incompleta', $pregunta, ['demo_end_time' => null]],
+            ['invertida', $pregunta, ['demo_end_time' => '16:35']],
+            ['vencida', 'Ya voy, un minuto', ['demo_start_time' => '14:00', 'demo_end_time' => '16:28']],
+            ['instancia_ausente', $pregunta],
+            ['otro_dia', '¿Puedo entrar mañana a las 16:37?'],
+            ['fecha_en_palabras', '¿Puedo entrar el veintidós de octubre a las 16:37?'],
+            ['fecha_numerica', '¿Puedo entrar el 22/10 a las 16:37?'],
+            ['dia_suelto', '¿Puedo entrar el 22 a las 16:37?'],
+            ['dia_en_palabras', '¿Puedo entrar el veintidós a las 16:37?'],
+            ['semana_ajena', '¿Puedo entrar la próxima semana a las 16:37?'],
+            ['otro_momento', 'Entro en otro momento.'],
+            ['no_puedo', 'No puedo entrar.'],
+            ['ya_no_voy', 'Ya no voy a entrar.'],
+            ['no_quiero', 'No quiero ingresar.'],
+            ['mas_tarde', 'Entro más tarde.'],
+            ['ahora_fuera_de_ventana', 'Ahora entro a las 19:00.'],
+            ['ahora_otro_dia', 'Ahora entro otro día.'],
+            ['hora_ajena', '¿Puedo entrar a las 19:00?'],
+            ['mover', 'Mejor movemos la demo a las 16:37 para entrar después.'],
+            ['cancelar', 'Cancelá la demo, no voy a entrar.', [], ['cancelar_demo' => true]],
+            ['otra_accion', $pregunta, [], ['guardar_nombre' => 'Otro negocio ficticio']],
+            ['modelo_manual', $pregunta, [], ['requiere_verificacion' => true]],
+            ['escudo', $pregunta], ['intervencion', $pregunta],
+            ['postdemo', $pregunta, ['status' => 'demo_realizada']],
+        ];
+    }
+
+    public function test_conservar_sin_hora_sigue_siendo_conversacion_sin_reservar_de_nuevo(): void
+    {
+        $this->activar(); $demo = $this->demo(); $lead = $this->lead();
+        $lead->update(['status' => 'demo_agendada', 'demo_id' => $demo->id, 'demo_date' => '2026-10-21', 'demo_start_time' => '12:00', 'demo_end_time' => '14:00']);
+        $this->inbound($lead, 'Ya voy, dame un minuto para entrar.');
+        $msg = $this->generar_desde_el_agente($lead, $demo, ['mensaje_sugerido' => 'Tranquilo, te espero.', 'estado_sugerido' => 'demo_agendada']);
+        $this->assertFalse((bool) $msg->requiere_verificacion); $this->assertTrue($msg->pending_actions['decision_agenda']['permitido']);
+        $this->assertEmpty($msg->pending_actions['agendar_demo']); Queue::assertPushed(AutoSendLeadAiSuggestionJob::class, 1); Mail::assertNothingSent();
+    }
+
     public function test_un_conflicto_nuevo_entre_programar_y_enviar_retiene_sin_negativa(): void
     {
         $this->activar();
@@ -253,13 +335,13 @@ class AgendaDemoAutomaticaPolicyTest extends TestCase
     }
 
     private function activar(): void { AdminSetting::set(AgendaDemoAutomaticaPolicy::KEY_ACTIVA, '1'); }
-    private function generar_desde_el_agente(Lead $lead, Demo $demo): LeadMessage
+    private function generar_desde_el_agente(Lead $lead, Demo $demo, ?array $respuesta = null): LeadMessage
     {
         config(['services.anthropic.api_key' => 'clave-local-ficticia']);
         AiSystemPrompt::create(['contenido' => 'System de prueba determinista.', 'activa' => true]);
         SyncedGithubFile::create(['key' => WhatsappProtocolService::SYSTEM_BASE_KEY, 'repo_path' => 'prueba', 'content' => 'System base de prueba.']);
         SyncedGithubFile::create(['key' => WhatsappProtocolService::RECURSO_KEY_PREFIX_V2 . 'demo_agenda', 'repo_path' => 'prueba', 'content' => LeadAiService::MARCADOR_DEMO_DIRECTA]);
-        $respuesta = ['mensaje_sugerido' => 'Te dejo tu página ' . $lead->demo_experiencia_url . ' y la tienda ' . DemoDirectaService::url_tienda($demo) . '. Te mandé todo al correo agenda@fixture.test.', 'estado_sugerido' => 'demo_agendada', 'guardar_email' => 'agenda@fixture.test', 'agendar_demo' => ['ahora' => true]];
+        $respuesta = $respuesta ?? ['mensaje_sugerido' => 'Te dejo tu página ' . $lead->demo_experiencia_url . ' y la tienda ' . DemoDirectaService::url_tienda($demo) . '. Te mandé todo al correo agenda@fixture.test.', 'estado_sugerido' => 'demo_agendada', 'guardar_email' => 'agenda@fixture.test', 'agendar_demo' => ['ahora' => true]];
         Http::swap(new \Tests\Fakes\HttpFactorySinSalida());
         Http::fake(['api.anthropic.com/*' => Http::response(['stop_reason' => 'end_turn', 'content' => [['type' => 'text', 'text' => json_encode($respuesta)]]]), '*' => Http::response(['ok' => true])]);
         return (new LeadAiService())->generate_suggestion($lead, false);

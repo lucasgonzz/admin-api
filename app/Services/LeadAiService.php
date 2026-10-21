@@ -839,6 +839,7 @@ TXT;
          * {ahora: true} más la previsión de instancia, y la instancia real se elige al aplicar.
          */
         if ($demo_directa) {
+            $respuesta_directa_original = $parsed;
             $parsed = $this->normalizar_correo_de_agenda($lead, $parsed);
             if ($solicita_disponibilidad) {
                 Log::channel('disponibilidad')->info('[DISPONIBILIDAD] Demo directa: el modelo pidió disponibilidad y se ignora (no hay grilla en esta dinámica).', [
@@ -935,8 +936,15 @@ TXT;
             } elseif ($estado_sugerido === 'demo_agendada') {
                 /* `demo_agendada` sin agendar_demo: el modelo confirma una demo que nadie asignó (el
                  * lead 30 del 4/8/2026). Con grilla lo frenaba la segunda llamada; acá no hay. */
+                $solo_metadatos = ['mensaje_sugerido', 'estado_sugerido', 'razonamiento', 'tipo_respuesta', 'fuentes_kb', 'requiere_verificacion', 'nota_para_setter'];
+                $acciones_originales = array_filter(array_diff_key($respuesta_directa_original, array_flip($solo_metadatos)));
+                $estado_redundante = ($pedido_temporal['tipo'] ?? '') === 'conservar' && ! empty($pedido_temporal['reserva_vigente'])
+                    && ($respuesta_directa_original['estado_sugerido'] ?? null) === $lead->status && $lead->status === 'demo_agendada'
+                    && empty($acciones_originales);
                 $parsed['estado_sugerido'] = (string) $lead->status;
-                $notas_directa[]           = 'El agente sugirió demo_agendada sin devolver agendar_demo: no se asigna ninguna demo. Si el lead aceptó, pedí una sugerencia nueva.';
+                if (! $estado_redundante) {
+                    $notas_directa[] = 'El agente sugirió demo_agendada sin devolver agendar_demo: no se asigna ninguna demo. Si el lead aceptó, pedí una sugerencia nueva.';
+                }
             }
 
             if (! empty($notas_directa)) {
