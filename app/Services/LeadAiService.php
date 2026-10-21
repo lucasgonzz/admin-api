@@ -6314,6 +6314,7 @@ TXT;
      *   guardar_nombre: string|null,
      *   guardar_email: string|null,
      *   cancelar_demo: bool,
+     *   confirmar_fin_demo: bool,                   // decisión explícita del operador al aprobar
      *   requiere_intervencion_humana: bool,
      *   motivo_intervencion: string|null
      * }
@@ -6329,13 +6330,22 @@ TXT;
      */
     public function apply_pending_actions(LeadMessage $message, ?array $final_actions = null): LeadMessage
     {
+        $lead_fin_manual = $this->validar_confirmacion_fin_demo_manual($message, $final_actions);
         /* Base = lo que Claude había sugerido originalmente (pending_actions). */
         $parsed = $message->pending_actions;
+        // Un operador puede confirmar sobre una sugerencia de texto sin paquete del modelo.
+        // False o ausencia no deben convertir el camino histórico vacío en una ejecución nueva.
+        if (empty($parsed) && $lead_fin_manual !== null) {
+            $parsed = [
+                'mensaje_sugerido' => (string) $message->content,
+                'estado_sugerido' => (string) $lead_fin_manual->status,
+            ];
+        }
         if (empty($parsed) || ! is_array($parsed)) {
             throw new \InvalidArgumentException('Este mensaje no tiene acciones pendientes de aplicar.');
         }
 
-        $lead = $message->lead ?? Lead::find($message->lead_id);
+        $lead = $lead_fin_manual ?? $message->lead ?? Lead::find($message->lead_id);
         if ($lead === null) {
             throw new \InvalidArgumentException('Lead no encontrado para el mensaje.');
         }
@@ -6500,6 +6510,9 @@ TXT;
             if (array_key_exists('cancelar_demo', $final_actions)) {
                 $parsed_efectivo['cancelar_demo'] = (bool) $final_actions['cancelar_demo'];
             }
+            if (array_key_exists('confirmar_fin_demo', $final_actions)) {
+                $parsed_efectivo['confirmar_fin_demo'] = $final_actions['confirmar_fin_demo'];
+            }
             if (array_key_exists('requiere_intervencion_humana', $final_actions)) {
                 $parsed_efectivo['requiere_intervencion_humana'] = (bool) $final_actions['requiere_intervencion_humana'];
             }
@@ -6532,6 +6545,7 @@ TXT;
                 'guardar_nombre',
                 'guardar_email',
                 'cancelar_demo',
+                'confirmar_fin_demo',
                 'requiere_intervencion_humana',
                 'motivo_intervencion',
                 'reenviar_mail_demo',
@@ -6571,6 +6585,53 @@ TXT;
             true,
             $admin_override_estado
         );
+    }
+
+    /**
+     * La decisión agregada desde el panel es humana y se valida antes de cualquier efecto.
+     * Se relee el estado: una burbuja abierta no habilita cerrar una demo ya cancelada.
+     */
+    public function validar_confirmacion_fin_demo_manual(LeadMessage $message, ?array $final_actions, bool $is_auto_send = false, ?int $sent_by_admin_id = null): ?Lead
+    {
+        if ($final_actions === null || ! array_key_exists('confirmar_fin_demo', $final_actions)) {
+            return null;
+        }
+        if (! is_bool($final_actions['confirmar_fin_demo'])) {
+            throw new \InvalidArgumentException('Confirmar el fin de la demo debe ser verdadero o falso.');
+        }
+        if ($final_actions['confirmar_fin_demo'] !== true) {
+            return null;
+        }
+        $admin = \Illuminate\Support\Facades\Auth::user();
+        if ($is_auto_send || ! ($admin instanceof \App\Models\Admin)
+            || ($sent_by_admin_id !== null && (int) $admin->id !== $sent_by_admin_id)) {
+            throw new \InvalidArgumentException('El fin de la demo requiere aprobación de un administrador autenticado.');
+        }
+        if ((string) $message->status !== 'sugerido' || (string) $message->sender !== 'sistema'
+            || ($message->is_followup && ! empty($message->followup_template_id))) {
+            throw new \InvalidArgumentException('Confirmá el fin desde una sugerencia de texto pendiente de aprobación.');
+        }
+        $lead = Lead::find($message->lead_id);
+        if ($lead === null || ! in_array((string) $lead->status, ['demo_en_curso', 'demo_pendiente_de_terminar'], true)) {
+            throw new \InvalidArgumentException('Solo se puede confirmar el fin de una demo en curso o pendiente de terminar.');
+        }
+        // Cerrar la demo no autoriza una agenda o un pase al closer oculto en el paquete.
+        $pending = is_array($message->pending_actions) ? $message->pending_actions : [];
+        foreach (['agendar_demo', 'cancelar_demo', 'agendar_llamada_closer', 'confirmar_interes_closer',
+            'descartar_llamada_closer', 'confirmar_ingreso', 'marcar_no_ingreso', 'posponer_check_fin_demo'] as $accion) {
+            // El panel precarga el fin inferido. Conservarlo no agrega una decisión nueva:
+            // los paquetes históricos fin + interés/descarte siguen siendo revisables juntos.
+            if (($pending['confirmar_fin_demo'] ?? false) === true
+                && in_array($accion, ['confirmar_interes_closer', 'descartar_llamada_closer'], true)) {
+                continue;
+            }
+            $valor = in_array($accion, ['agendar_demo', 'cancelar_demo'], true) && array_key_exists($accion, $final_actions)
+                ? $final_actions[$accion] : ($pending[$accion] ?? null);
+            if (! empty($valor)) {
+                throw new \InvalidArgumentException('Confirmá el fin de la demo por separado de las acciones de agenda, ingreso o closer.');
+            }
+        }
+        return $lead;
     }
 
     /**
@@ -8241,6 +8302,9 @@ TXT;
             $parsed_para_resumen['estado_sugerido'] = 'solicita_disponibilidad';
         }
         $applied_actions_summary = \App\Models\LeadMessage::build_actions_summary($parsed_para_resumen, $previous_status);
+        if ($confirmar_fin_demo && in_array($previous_status, ['demo_en_curso', 'demo_pendiente_de_terminar'], true)) {
+            $applied_actions_summary[] = 'Confirmar que terminó la demo';
+        }
 
         $message_payload = [
             'lead_id'               => $lead->id,

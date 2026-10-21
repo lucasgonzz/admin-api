@@ -88,6 +88,9 @@ class LeadSuggestionSendService
         }
         $message->setRelation('lead', $lead);
 
+        // Antes de plantillas y acciones: un checkbox manual nunca se ignora ni autoriza a un job.
+        app(LeadAiService::class)->validar_confirmacion_fin_demo_manual($message, $final_actions, $is_auto_send, $sent_by_admin_id);
+
         // Antes de plantillas, revalidación y acciones: tampoco un job previo puede vencer el gate.
         if ($is_auto_send && LeadConversationAiState::requiere_aprobacion_humana($lead)) {
             app(LeadAiSuggestionAutoSendScheduler::class)->retener_para_aprobacion_humana($message);
@@ -355,7 +358,8 @@ class LeadSuggestionSendService
             ]);
         }
 
-        if (! empty($message->pending_actions) && ! $paquete_directo_sin_ventana) {
+        $fin_demo_manual = ! $is_auto_send && ($final_actions['confirmar_fin_demo'] ?? false) === true;
+        if ((! empty($message->pending_actions) || $fin_demo_manual) && ! $paquete_directo_sin_ventana) {
             if ($is_auto_send) {
                 /*
                  * FIX (prompt 337): Caso B del respaldo automático. Llegar hasta acá ya significa
