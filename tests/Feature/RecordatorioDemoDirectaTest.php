@@ -247,6 +247,7 @@ class RecordatorioDemoDirectaTest extends TestCase
         $lead->demo_date                     = '2026-09-08';
         $lead->demo_start_time               = $inicio;
         $lead->demo_end_time                 = $fin;
+        $lead->demo_setup_status             = 'exitoso';
         $lead->demo_flexible                 = true;
         $lead->automatizaciones_demo_activas = true;
         $lead->auto_recordatorio_demo        = true;

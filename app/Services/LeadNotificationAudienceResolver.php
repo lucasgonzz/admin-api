@@ -72,6 +72,12 @@ class LeadNotificationAudienceResolver
         $campanita     = self::ids_campanita($lead);
         $es_del_closer = in_array((string) $lead->status, Lead::ESTADOS_DUENO_CLOSER, true);
 
+        /* La dinámica nueva conserva su estado/pipeline, pero Lucas revisa el post-demo
+         * antes de coordinar. El rol avisa al setter; una campanita explícita se conserva. */
+        if ($es_del_closer && $lead->usa_experiencia_demo_nueva()) {
+            return self::unir(self::ids_por_rol_con_fallback(self::ROL_SETTER), $campanita);
+        }
+
         /* 🔴 El gate de campanita NO se aplica en el tramo del closer (decisión de Lucas, 2/9/2026,
          * después de que el chequeo mostrara que sin esto el closer no recibía nada).
          *

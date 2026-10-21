@@ -320,7 +320,7 @@ TXT;
          * sus mensajes) va DENTRO de <chat> y nunca acá: el rubro del lead (`business_type`, texto
          * libre) estuvo en este bloque y se sacó, porque lo que entra acá pasa por verdad. */
         $datos = [];
-        $datos[] = '- Recordatorio: ' . $this->describir_el_tipo($tipo);
+        $datos[] = '- Recordatorio: ' . $this->describir_el_tipo($tipo, $lead);
         $datos[] = '- Primer nombre del lead: ' . ($nombre !== '' ? $nombre : '(no lo tenemos: no lo nombres)');
         $datos[] = '- Hablaron hoy en este chat: ' . ($hablaron_hoy ? 'sí' : 'no');
         if ($hora !== null) {
@@ -345,10 +345,14 @@ TXT;
      *
      * @return string
      */
-    private function describir_el_tipo(string $tipo): string
+    private function describir_el_tipo(string $tipo, Lead $lead): string
     {
         if ($tipo === self::TIPO_MANANA) {
             return 'es la mañana del día de su demo: recordale que HOY tiene la demo.';
+        }
+
+        if ((string) $lead->demo_setup_status !== 'exitoso') {
+            return 'su demo se está preparando. NO afirmes que el acceso ya está disponible ni inventes cuándo termina.';
         }
 
         return 'su demo ya está disponible y todavía no entró: un empujón amable para que entre cuando pueda.';

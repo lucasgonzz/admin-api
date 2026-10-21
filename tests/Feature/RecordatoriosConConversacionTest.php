@@ -1052,6 +1052,7 @@ class RecordatoriosConConversacionTest extends TestCase
         $lead->demo_date                     = '2026-10-16';
         $lead->demo_start_time               = $inicio;
         $lead->demo_end_time                 = '16:10';
+        $lead->demo_setup_status             = 'exitoso';
         $lead->demo_flexible                 = true;
         $lead->automatizaciones_demo_activas = true;
         $lead->auto_recordatorio_demo        = true;

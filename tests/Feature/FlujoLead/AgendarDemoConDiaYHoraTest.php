@@ -256,6 +256,25 @@ class AgendarDemoConDiaYHoraTest extends TestCase
         $this->assertTrue((bool) $lead->auto_check_fin_demo);
     }
 
+    public function test_aprobar_dia_y_hora_sin_inicio_resuelto_no_da_un_exito_vacio(): void
+    {
+        $demo = $this->crear_demo(1);
+        $lead = $this->crear_lead_calificado_con_mail();
+        $mensaje = $this->crear_mensaje_pendiente_con_turno($lead, $demo, 'manana', '10:00', '2026-09-09 10:00');
+        $paquete = $mensaje->pending_actions;
+        unset($paquete['agendar_demo']['inicio_resuelto']);
+        $mensaje->pending_actions = $paquete;
+        $mensaje->save();
+
+        (new LeadAiService())->apply_pending_actions($mensaje, $this->final_actions_del_panel_sin_dia_ni_hora());
+
+        $lead->refresh();
+        $this->assertSame($demo->id, (int) $lead->demo_id);
+        $this->assertSame('2026-09-09', $lead->demo_date->format('Y-m-d'));
+        $this->assertSame('10:00', $lead->demo_start_time);
+        Mail::assertSent(LeadDemoAccesoMail::class);
+    }
+
     /**
      * (8) 🔴 Mínimo quince minutos: "hoy a las 10:10" dicho a las 10:00 no se asigna. En aprobación es
      *     una excepción reintentable que no escribe nada.

@@ -366,6 +366,12 @@ class SendDemoReminders extends Command
      */
     protected function send_reminder_message_directa(Lead $lead, ?Carbon $demo_inicio = null): string
     {
+        /* El horario reservado no prueba que el setup terminó. El recordatorio promete acceso;
+         * si todavía se prepara, se reevalúa en el próximo tick sin marcarlo como enviado. */
+        if ((string) $lead->demo_setup_status !== 'exitoso') {
+            return self::ENVIO_PENDIENTE;
+        }
+
         $contact_name = trim((string) $lead->contact_first_name);
         $content      = $this->build_reminder_content_directa($contact_name, ! empty($lead->demo_mail_sent_at));
 

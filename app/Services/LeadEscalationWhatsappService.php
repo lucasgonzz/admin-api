@@ -91,6 +91,14 @@ class LeadEscalationWhatsappService
             /* Sin lista: comportamiento histórico intacto. Es el que usan los tres avisos al
              * closer que reciclan esta misma plantilla sin ser escalados. */
             $query->where('notify_lead_escalation_whatsapp', true);
+            /* Los avisos automáticos post-demo ya no convocan al closer antes de que Lucas
+             * revise. Una lista explícita (roles/campanita) conserva su decisión de ruteo. */
+            if ($lead->usa_experiencia_demo_nueva()
+                && in_array((string) $lead->status, ['demo_en_curso', 'demo_realizada', 'demo_pendiente_de_terminar', 'closer_activo'], true)) {
+                $query->where(function ($q) {
+                    $q->where('is_closer', false)->orWhereNull('is_closer')->orWhere('es_setter', true);
+                });
+            }
         }
 
         $admins = $query->get();

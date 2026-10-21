@@ -88,7 +88,7 @@ class PostDemoConThomasTest extends TestCase
      *
      * @return void
      */
-    public function test_confirmar_interes_closer_lleva_a_closer_activo_y_avisa_al_enviar(): void
+    public function test_confirmar_interes_closer_lleva_a_closer_activo_sin_aviso_automatico(): void
     {
         $closer               = new Admin();
         $closer->name         = 'Thomás';
@@ -117,7 +117,8 @@ class PostDemoConThomasTest extends TestCase
 
         $lead->refresh();
         $this->assertSame('closer_activo', (string) $lead->status);
-        $this->assertNotNull($lead->closer_notified_at, 'El aviso al closer sale al pasar a closer_activo.');
+        // Cambio explícito de Lucas el 20/10: él revisa el post-demo antes de coordinar la llamada.
+        $this->assertNull($lead->closer_notified_at, 'El pase conserva el estado y el pipeline, sin aviso automático al closer.');
         $this->assertSame(0, LeadCall::where('lead_id', $lead->id)->count());
     }
 

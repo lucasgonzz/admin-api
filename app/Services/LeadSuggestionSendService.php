@@ -395,6 +395,7 @@ class LeadSuggestionSendService
          */
         $lead_fresco_para_tienda = $lead->fresh();
         if ($lead_fresco_para_tienda !== null && $lead_fresco_para_tienda->usa_experiencia_demo_nueva() && ! empty($lead_fresco_para_tienda->demo_id)) {
+            $body = $this->corregir_fin_de_reserva($body, $lead_fresco_para_tienda);
             $lead_fresco_para_tienda->loadMissing('demo');
             if ($lead_fresco_para_tienda->demo !== null) {
                 $body = app(\App\Services\DemoDirectaService::class)->corregir_links_de_tienda($body, $lead_fresco_para_tienda->demo);
@@ -656,6 +657,19 @@ class LeadSuggestionSendService
         LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
 
         return $this->fresh_o_en_memoria($message);
+    }
+
+    /** La aprobación puede llegar tarde: la reserva se calcula allí, no cuando el modelo redactó. */
+    private function corregir_fin_de_reserva(string $texto, Lead $lead): string
+    {
+        $fin = substr((string) $lead->demo_end_time, 0, 5);
+        if (! preg_match('/^\d{2}:\d{2}$/', $fin)) {
+            return $texto;
+        }
+
+        return (string) preg_replace_callback('/(\breservad[ao]\b[^.!?\n]{0,100}?\bhasta\s+las\s+)\d{1,2}:\d{2}/iu', function ($m) use ($fin) {
+            return $m[1] . $fin;
+        }, $texto);
     }
 
     /**

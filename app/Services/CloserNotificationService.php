@@ -35,6 +35,13 @@ class CloserNotificationService
      */
     public function notify_for_lead(Lead $lead): void
     {
+        /* Lucas revisa el post-demo y coordina la llamada (20/10/2026). Se protege acá,
+         * además del webhook, porque el consentimiento y los timeouts también pueden llegar
+         * a closer_activo. El estado y su tarjeta siguen existiendo sin avisar al closer. */
+        if ($lead->usa_experiencia_demo_nueva()) {
+            return;
+        }
+
         // Anti-duplicado: si ya se notificó por este lead, no repetir el envío.
         if ($lead->closer_notified_at !== null) {
             return;

@@ -94,11 +94,11 @@ class RuteoDePushPorRolTest extends TestCase
      * ------------------------------------------------------------------------------------ */
 
     /**
-     * Lead en closer_activo: el mensaje es del closer, no del setter.
+     * Dinámica nueva: Lucas revisa el post-demo incluso cuando el estado ya es closer_activo.
      *
      * @return void
      */
-    public function test_mensaje_entrante_de_lead_en_closer_activo_va_al_closer()
+    public function test_mensaje_entrante_post_demo_nuevo_va_al_setter_que_revisa()
     {
         $closer = $this->crear_admin('ruteo-closer@test.local', ['is_closer' => true]);
         $setter = $this->crear_admin('ruteo-setter@test.local', ['es_setter' => true]);
@@ -107,33 +107,26 @@ class RuteoDePushPorRolTest extends TestCase
 
         $ids = LeadNotificationAudienceResolver::for_mensaje_entrante($lead);
 
-        $this->assertContains((int) $closer->id, $ids, 'El closer no recibió el mensaje de su lead.');
-        $this->assertNotContains((int) $setter->id, $ids, 'El setter recibió un mensaje de un lead que ya es del closer.');
+        $this->assertContains((int) $setter->id, $ids, 'El operador tiene que revisar antes de coordinar la llamada.');
+        $this->assertNotContains((int) $closer->id, $ids, 'El closer no recibe avisos automáticos post-demo.');
     }
 
     /**
-     * 🔴 El closer recibe los mensajes de sus leads AUNQUE NADIE TENGA LA CAMPANITA.
-     *
-     * Decisión de Lucas del 2/9/2026, tomada después de que el chequeo mostrara que con el gate de
-     * campanita aplicado también acá el closer no se enteraba de nada: la campanita se prende
-     * siempre a mano y no hay una sola línea en el repo que la prenda sola, así que un lead que
-     * llega, agenda, hace la demo y pasa a closer_activo le escribía al closer sin que el closer lo
-     * supiera nunca.
-     *
-     * Si este test se pone en rojo, el closer se quedó sordo: no lo aflojes, revisá el gate de
-     * for_mensaje_entrante().
+     * Cambio explícito de Lucas el 20/10/2026: sin campanita, el aviso post-demo es del operador,
+     * no una convocatoria automática al closer. Conserva la cobertura aunque nadie siga el lead.
      *
      * @return void
      */
-    public function test_el_closer_recibe_su_lead_aunque_nadie_tenga_la_campanita()
+    public function test_el_operador_recibe_el_post_demo_aunque_nadie_tenga_la_campanita()
     {
         $closer = $this->crear_admin('ruteo-closer-sin-campanita@test.local', ['is_closer' => true]);
+        $setter = $this->crear_admin('ruteo-operador-post-demo@test.local', ['es_setter' => true]);
 
         $lead = $this->crear_lead('closer_activo');
 
         $ids = LeadNotificationAudienceResolver::for_mensaje_entrante($lead);
 
-        $this->assertSame([(int) $closer->id], $ids);
+        $this->assertSame([(int) $setter->id], $ids);
     }
 
     /**
@@ -292,6 +285,7 @@ class RuteoDePushPorRolTest extends TestCase
     public function test_el_suscrito_por_campanita_se_suma_al_grupo_de_rol()
     {
         $closer   = $this->crear_admin('ruteo-closer8@test.local', ['is_closer' => true]);
+        $setter   = $this->crear_admin('ruteo-operador8@test.local', ['es_setter' => true]);
         $curioso  = $this->crear_admin('ruteo-curioso@test.local');
 
         $lead = $this->crear_lead('closer_activo');
@@ -299,7 +293,8 @@ class RuteoDePushPorRolTest extends TestCase
 
         $ids = LeadNotificationAudienceResolver::for_mensaje_entrante($lead);
 
-        $this->assertContains((int) $closer->id, $ids, 'Falta el dueño por rol.');
+        $this->assertContains((int) $setter->id, $ids, 'Falta el operador que revisa el post-demo.');
+        $this->assertNotContains((int) $closer->id, $ids, 'El closer no está suscrito manualmente a este lead.');
         $this->assertContains((int) $curioso->id, $ids, 'La campanita prendida tiene que notificar siempre.');
     }
 

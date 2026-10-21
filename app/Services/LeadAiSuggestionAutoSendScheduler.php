@@ -150,11 +150,12 @@ class LeadAiSuggestionAutoSendScheduler
         $message_id = (int) $message->id;
         $auto_send_token = $this->bump_auto_send_token($message_id, $ttl_del_token);
 
-        /* 0 = enviar por WhatsApp de inmediato, sin countdown ni ai_auto_send_at. */
+        /* 0 = listo para el próximo worker, sin countdown ni ai_auto_send_at.
+         * La generación ya corre dentro de un worker persistente: afterResponse espera a que
+         * termine ESE proceso, no a que termine su job, y dejaba respuestas sin enviar. */
         if ($delay_seconds <= 0) {
             AutoSendLeadAiSuggestionJob::dispatch($message_id, $auto_send_token)
-                ->onConnection('sync')
-                ->afterResponse();
+                ->onConnection('database');
 
             Log::channel('daily')->debug('LeadAiSuggestionAutoSendScheduler: envío automático inmediato programado.', [
                 'message_id'      => $message_id,
@@ -171,6 +172,7 @@ class LeadAiSuggestionAutoSendScheduler
         $message->save();
 
         AutoSendLeadAiSuggestionJob::dispatch($message_id, $auto_send_token, $reprogramaciones_por_franja)
+            ->onConnection('database')
             ->delay($auto_send_at);
 
         Log::channel('daily')->debug('LeadAiSuggestionAutoSendScheduler: envío automático programado.', [

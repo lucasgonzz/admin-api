@@ -314,7 +314,7 @@ class DemoCicloAdminNotificationService
     public function notify_fin_confirmado(Lead $lead): array
     {
         /* Obtener admins suscritos con teléfono cargado. */
-        $admins = $this->get_subscribed_admins();
+        $admins = $this->get_subscribed_admins($lead);
 
         if ($admins->isEmpty()) {
             Log::info('DemoCicloAdminNotificationService: sin admins suscritos (fin_confirmado).', [
@@ -389,7 +389,7 @@ class DemoCicloAdminNotificationService
     public function notify_pendiente_terminar(Lead $lead): array
     {
         /* Obtener admins suscritos con teléfono cargado. */
-        $admins = $this->get_subscribed_admins();
+        $admins = $this->get_subscribed_admins($lead);
 
         if ($admins->isEmpty()) {
             Log::info('DemoCicloAdminNotificationService: sin admins suscritos (pendiente_terminar).', [
@@ -447,12 +447,19 @@ class DemoCicloAdminNotificationService
      *
      * @return \Illuminate\Database\Eloquent\Collection
      */
-    private function get_subscribed_admins()
+    private function get_subscribed_admins(?Lead $post_demo = null)
     {
-        return Admin::where('notify_demo_scheduled_whatsapp', true)
+        $query = Admin::where('notify_demo_scheduled_whatsapp', true)
             ->whereNotNull('phone_number')
-            ->where('phone_number', '!=', '')
-            ->get();
+            ->where('phone_number', '!=', '');
+        // Solo los dos eventos post-demo: ingreso, no-show y los otros avisos mantienen su público.
+        if ($post_demo !== null && $post_demo->usa_experiencia_demo_nueva()) {
+            $query->where(function ($q) {
+                $q->where('is_closer', false)->orWhereNull('is_closer')->orWhere('es_setter', true);
+            });
+        }
+
+        return $query->get();
     }
 
     /**

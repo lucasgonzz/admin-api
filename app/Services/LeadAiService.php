@@ -3142,6 +3142,16 @@ TXT;
 
         $dia  = is_array($crudo) && isset($crudo['dia']) ? trim((string) $crudo['dia']) : '';
         $hora = is_array($crudo) && isset($crudo['hora']) ? trim((string) $crudo['hora']) : '';
+        /* El mail puede llegar en el turno siguiente a «en media hora». No se transforma
+         * esa demora en «ahora» ni se vuelve a contar desde que el modelo recibe el mail. */
+        if ($dia === '' && $hora === '') {
+            $relativo = $this->inicio_relativo_pedido_por_el_lead($lead);
+            if ($relativo !== null) {
+                $dias = AppTime::now(DemoDirectaService::TZ)->startOfDay()->diffInDays($relativo->copy()->startOfDay(), false);
+                $dia = $dias === 0 ? 'hoy' : '+' . $dias;
+                $hora = $relativo->format('H:i');
+            }
+        }
         if ($dia !== '' || $hora !== '') {
             $inicio = $this->resolver_inicio_de_demo_pedida($dia, $hora);
             if ($inicio === null) {
@@ -3167,6 +3177,35 @@ TXT;
             'demo_id_previsto'    => $prevista['demo'] !== null ? (int) $prevista['demo']->id : null,
             'url_tienda_prevista' => DemoDirectaService::url_tienda($prevista['demo']),
         ];
+    }
+
+    /** Momento relativo del pedido reciente; una hora explícita o un nuevo «ahora» lo reemplazan. */
+    private function inicio_relativo_pedido_por_el_lead(Lead $lead): ?Carbon
+    {
+        if ($lead->demo_id !== null) {
+            return null;
+        }
+
+        $mensajes = LeadMessage::query()->where('lead_id', $lead->id)->where('sender', 'lead')
+            ->where('created_at', '>=', AppTime::now()->subDay())->orderByDesc('id')->limit(12)->get();
+        foreach ($mensajes as $mensaje) {
+            $texto = mb_strtolower(trim((string) $mensaje->content), 'UTF-8');
+            if (preg_match('/\ben\s+(media\s+hora|un\s+cuarto\s+de\s+hora|una\s+hora|(\d{1,3})\s+minutos?)\b/u', $texto, $m)) {
+                $minutos = ! empty($m[2]) ? (int) $m[2]
+                    : (strpos($m[1], 'media') !== false ? 30 : (strpos($m[1], 'cuarto') !== false ? 15 : 60));
+                if ($minutos < 1 || $minutos > 240) {
+                    return null;
+                }
+                $momento = $mensaje->sent_at ?: $mensaje->created_at;
+
+                return Carbon::parse($momento)->setTimezone(DemoDirectaService::TZ)->addMinutes($minutos)->second(0);
+            }
+            if ($this->mensaje_menciona_una_hora($texto) || preg_match('/\bahora\b|\bma[ñn]ana\b|\ba la tarde\b/u', $texto)) {
+                return null;
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -6858,6 +6897,14 @@ TXT;
             /* Dos pedidos de la demo directa (17/10/2026): `{ahora: true}` (en diez minutos) y
              * `{dia, hora}` (para el momento concreto que nombró el lead; el instante ya viene resuelto
              * por normalizar_agendar_demo_directa() en `inicio_resuelto`). */
+            /* El panel o un recurso anterior puede traer día/hora sin el derivado interno.
+             * Antes se caía al camino viejo, devolvía 200 y no asignaba ninguna instancia. */
+            if ($lead->usa_experiencia_demo_nueva() && ! empty($agendar_demo['dia']) && empty($agendar_demo['inicio_resuelto'])) {
+                $agendar_demo = $this->normalizar_agendar_demo_directa($agendar_demo, $lead);
+                if (! empty($agendar_demo['inicio_ilegible'])) {
+                    throw new \InvalidArgumentException('No se puede leer el día y la hora de la demo. Corregilos antes de aprobar.');
+                }
+            }
             $directa_para_un_momento = ! empty($agendar_demo['dia']) && ! empty($agendar_demo['inicio_resuelto']);
 
             if ((! empty($agendar_demo['ahora']) || $directa_para_un_momento) && $lead->usa_experiencia_demo_nueva()) {
@@ -7986,11 +8033,11 @@ TXT;
          *  - fuerza `closer_activo` y apaga el agente (`claude_auto_reply = false`): desde acá habla
          *    Thomás, no Martín;
          *  - NO crea evento de calendario ni LeadCall: no hay horario que registrar;
-         *  - el aviso a Thomás (CloserNotificationService::notify_for_lead) y la oportunidad en el
-         *    tablero "Leads" de Pipelines salen SOLOS al aplicarse el estado, al enviar el mensaje
+         *  - la oportunidad en el tablero "Leads" de Pipelines sale al aplicarse el estado, al enviar el mensaje
          *    (LeadSuggestionSendService::apply_suggested_pipeline_status y el hook `saved` de Lead),
          *    por el mismo camino que cualquier paso a closer_activo. No se duplican acá: si el admin
-         *    rechazara el mensaje, Thomás no tiene por qué enterarse de un lead que no cambió de estado.
+         *    rechazara el mensaje, no hay cambio de estado. Lucas revisa y coordina la llamada:
+         *    no sale un aviso automático a Thomás (decisión del 20/10/2026).
          * Válida desde demo_realizada, demo_en_curso o demo_pendiente_de_terminar: el turno en que el
          * lead dice "sí, me sirvió, hablemos" puede ser el mismo en que confirma que terminó.
          */
@@ -10162,7 +10209,8 @@ BLOQUE_DEL_MANUAL;
             $inicio_previsto       = $directa->ventana_desde($ahora)['inicio'];
             $minutos_de_la_reserva = (int) $inicio_previsto->diffInMinutes($prevista['fin']);
         }
-        $frase_de_la_reserva = $this->frase_de_la_reserva($fin_para_la_frase, $minutos_de_la_reserva);
+        /* Antes de aprobar todavía no hay fin real: el turno «ahora» se calcula al aprobar. */
+        $frase_de_la_reserva = $this->frase_de_la_reserva($fin_para_la_frase, $minutos_de_la_reserva, ! ($tiene_demo_asignada && ! $demo_asignada_vencida));
 
         /* ORDEN DEL CORREO (misión mail-demo-turno-y-asistente, 16/10/2026, decisión de Lucas): el mail se pide
          * al aceptar y ANTES de los links, para que el mail con el día y la hora de la demo sea lo que se manda
@@ -10328,6 +10376,9 @@ BLOQUE_DEL_MANUAL;
             . "    gusta, despues coordinamos una videollamada para ver como se implementa en su negocio. Cerra con UNA pregunta: ¿la hace\n"
             . "    ahora o cuando le queda comodo? Sin grilla y sin pedir disponibilidad.\n"
             . "  - Si dice AHORA: pedi el mail (si no lo tenemos) y con el mail devolve guardar_email + agendar_demo {\"ahora\": true}.\n"
+            . "    Si dijo 'en media hora' o 'en N minutos', NO es ahora: tomá la hora de ESE mensaje del lead, sumá la demora y\n"
+            . "    devolvé dia y hora concretos; pedir el mail después no mueve el momento pedido. Si es ambiguo, preguntá la hora.\n"
+            . "    Antes de aprobar no prometas una hora de fin: la carta y su página mostrarán el turno real al asignarse.\n"
             . "  - Si nombra un momento concreto (hoy a las 18, manana a las 10, el lunes a las 9): si no tenemos el mail pediselo primero; con\n"
             . "    el mail devolve agendar_demo {\"dia\": \"hoy|manana|pasado_manana|lunes...domingo|<dia>_proximo|+N\", \"hora\": \"HH:MM\"} y\n"
             . "    escribi esa misma hora en el mensaje (HH:MM). Minimo quince minutos desde ahora. Si solo dice una parte del dia (\"a la\n"
@@ -10746,11 +10797,14 @@ BLOQUE_DEL_MANUAL;
             . "  las dudas técnicas que le hayan quedado (qué se puede y qué no), y armar juntos la estrategia para implementar la\n"
             . "  plataforma en su negocio, con toda su información cargada y con soporte, para que en menos de una semana ya estén\n"
             . "  trabajando con ella.\n"
-            . "- Si acepta: devolvé confirmar_interes_closer: true y decile que {$closer} se comunica con él por acá para coordinar día y\n"
-            . "  hora. NO ofrezcas horarios ni links de reunión: los coordina {$closer}.\n"
+            . "- Si acepta: devolvé confirmar_interes_closer: true y decile que el equipo revisa cómo le fue y coordina con él por acá\n"
+            . "  la videollamada. NO prometas que {$closer} ya recibió un aviso ni que le va a escribir automáticamente.\n"
+            . "  NO ofrezcas horarios ni links de reunión: primero lo revisa Lucas y después se coordina la llamada.\n"
             . "- Si no quiere avanzar: devolvé descartar_llamada_closer: {\"motivo\": \"...\"}, sin insistir ni rebatir.\n"
             . "- Si pregunta precio: la inversión depende de lo que necesite su implementación y lo evalúa {$closer} en la llamada; la\n"
             . "  mensualidad sí se puede adelantar (recurso precios).\n"
+            . "  Esta regla POST-DEMO prevalece sobre los escalones de precio anteriores: NO preguntes cuánto pensaba invertir,\n"
+            . "  no cotices la puesta en marcha ni digas que ya se lo cotizaste. Respondé corto y cerrá con UNA pregunta sobre la llamada.\n"
             . "- Si plantea algo técnico o una necesidad puntual: el sistema se adapta y lo que no esté tal cual se desarrolla a medida\n"
             . "  para su negocio; por eso la charla es con {$closer}, que se lo confirma y, si algo no se puede, se lo explica. No afirmes\n"
             . "  que una función concreta existe si no está en tus recursos.\n"

@@ -2146,7 +2146,9 @@ class WhatsappWebhookController extends Controller
 
         // Caso B: check de fin enviado, esperando confirmación de fin.
         // Solo si el ingreso ya estaba confirmado.
-        if ($lead->demo_fin_check_enviado && $lead->demo_ingreso_confirmado) {
+        /* En la dinámica nueva el agente interpreta el fin y Lucas aprueba el post-demo.
+         * Este detector por palabras disparaba un aviso al closer incluso antes del consentimiento. */
+        if ($lead->demo_fin_check_enviado && $lead->demo_ingreso_confirmado && ! $lead->usa_experiencia_demo_nueva()) {
             if ($this->content_confirms_demo_done($content_lower)) {
                 $this->mark_demo_realizada($lead);
             }
