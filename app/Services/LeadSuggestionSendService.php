@@ -80,13 +80,18 @@ class LeadSuggestionSendService
             throw new \InvalidArgumentException('Solo se pueden enviar mensajes en estado sugerido.');
         }
 
-        $lead = $message->lead;
-        if ($lead === null) {
-            $lead = Lead::query()->find($message->lead_id);
-        }
+        // No usar una relación cacheada: el escudo puede haberse activado desde que nació el job.
+        $lead = Lead::query()->find($message->lead_id);
 
         if ($lead === null) {
             throw new \RuntimeException('Lead no encontrado para el mensaje.');
+        }
+        $message->setRelation('lead', $lead);
+
+        // Antes de plantillas, revalidación y acciones: tampoco un job previo puede vencer el gate.
+        if ($is_auto_send && LeadConversationAiState::requiere_aprobacion_humana($lead)) {
+            app(LeadAiSuggestionAutoSendScheduler::class)->retener_para_aprobacion_humana($message);
+            return $message->fresh() ?? $message;
         }
 
         $message_id = (int) $message->id;

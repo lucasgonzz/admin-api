@@ -104,6 +104,12 @@ class AutoSendLeadAiSuggestionJob implements ShouldQueue
             return;
         }
 
+        // El job pudo encolarse antes del escudo. Frenar también antes de reprogramar la franja.
+        if ($message->lead !== null && \App\Services\LeadConversationAiState::requiere_aprobacion_humana($message->lead)) {
+            $scheduler->retener_para_aprobacion_humana($message);
+            return;
+        }
+
         /*
          * 🔴 Misión asistente-arreglos-segunda-prueba (N11, 19/10/2026): antes de mandar un SEGUIMIENTO
          * retenido se vuelve a mirar si todavía corresponde, con el lead tal como está AHORA. Entre que

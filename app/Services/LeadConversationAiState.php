@@ -13,6 +13,18 @@ use App\Models\LeadMessage;
 class LeadConversationAiState
 {
     /**
+     * El escudo y la ventana supervisada son aprobación humana, no una demora larga.
+     * Se usa también al ejecutar jobs viejos: el lead puede entrar al tramo después
+     * de haber encolado una respuesta que todavía no tenía requiere_verificacion.
+     */
+    public static function requiere_aprobacion_humana(Lead $lead): bool
+    {
+        return (bool) $lead->requiere_verificacion_mensajes
+            || (LeadWhatsappOnboardingSettings::get_auto_activar_verificacion_al_solicitar_disponibilidad()
+                && in_array((string) $lead->status, Lead::ESTADOS_VENTANA_VERIFICACION_MENSAJES, true));
+    }
+
+    /**
      * Cuenta mensajes entrantes del lead (excluye el primero, que dispara onboarding sin IA).
      *
      * @param int $lead_id

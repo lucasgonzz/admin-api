@@ -53,6 +53,12 @@ class LeadAiSuggestionAutoSendScheduler
             return;
         }
 
+        $lead_actual = Lead::query()->find($message->lead_id);
+        if ($lead_actual !== null && LeadConversationAiState::requiere_aprobacion_humana($lead_actual)) {
+            $this->retener_para_aprobacion_humana($message);
+            return;
+        }
+
         if ($message->requiere_verificacion) {
             /*
              * Decisión de Lucas (6/7/2026, revisada - prompt 276): los mensajes de verificación de agenda
@@ -343,6 +349,22 @@ class LeadAiSuggestionAutoSendScheduler
         LeadMessage::query()
             ->where('id', $message_id)
             ->update(['ai_auto_send_at' => null]);
+    }
+
+    /** Conserva la sugerencia y sus acciones para el operador, sin prometer un envío futuro. */
+    public function retener_para_aprobacion_humana(LeadMessage $message): void
+    {
+        $this->bump_auto_send_token((int) $message->id);
+        // Una aprobación manual concurrente ya pudo terminar: nunca ensuciar la fila enviada.
+        $retenido = LeadMessage::query()->where('id', $message->id)->where('status', 'sugerido')
+            ->update(['ai_auto_send_at' => null, 'requiere_verificacion' => true]);
+        $actual = $message->fresh();
+        if ($actual !== null) {
+            $message->setRawAttributes($actual->getAttributes(), true);
+        }
+        if ($retenido && $actual !== null && $actual->status === 'sugerido') {
+            LeadBroadcastService::emit_conversation_updated((int) $message->lead_id, (int) $message->id);
+        }
     }
 
     /**
