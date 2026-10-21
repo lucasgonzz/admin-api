@@ -5,9 +5,13 @@ namespace Tests\Feature\FlujoLead;
 use App\Helpers\AppTime;
 use App\Jobs\AutoSendLeadAiSuggestionJob;
 use App\Models\AdminSetting;
+use App\Models\AiSystemPrompt;
 use App\Models\Demo;
 use App\Models\Lead;
 use App\Models\LeadMessage;
+use App\Models\SyncedGithubFile;
+use App\Events\LeadSuggestionCreated;
+use App\Events\LeadConversationUpdated;
 use App\Services\AgendaDemoAutomaticaPolicy;
 use App\Services\DemoDirectaService;
 use App\Services\LeadAiService;
@@ -17,12 +21,14 @@ use App\Services\LeadDemoSettings;
 use App\Services\LeadSuggestionSendService;
 use App\Services\LeadWhatsappOnboardingSettings;
 use App\Services\WhatsappSendService;
+use App\Services\WhatsappProtocolService;
 use Carbon\Carbon;
 use Database\Seeders\LeadPipelineStatusGroupOrderSeeder;
 use Database\Seeders\LeadPipelineStatusSeeder;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
@@ -73,15 +79,25 @@ class AgendaDemoAutomaticaPolicyTest extends TestCase
     public function test_generar_programar_y_job_aplican_una_reserva_valida_sin_aprobacion_ficticia(): void
     {
         $this->activar();
-        $this->demo();
+        $demo = $this->demo();
         $lead = $this->lead();
-        $this->inbound($lead, 'Ahora sí puedo');
-        $msg = $this->generar_pendiente($lead);
+        $lead->update(['status' => 'solicita_disponibilidad']);
+        $this->inbound($lead, 'Ahora sí puedo, agenda@fixture.test');
+        Event::fake([LeadSuggestionCreated::class, LeadConversationUpdated::class]);
+        $msg = $this->generar_desde_el_agente($lead, $demo);
         $this->assertFalse((bool) $msg->requiere_verificacion);
+        $this->assertSame('sugerido', $msg->status);
+        $this->assertTrue($msg->pending_actions['decision_agenda']['permitido']);
+        $this->assertTrue($msg->pending_actions['agendar_demo']['ahora']);
+        $this->assertSame('agenda@fixture.test', $msg->pending_actions['guardar_email']);
         $this->assertNull($lead->fresh()->demo_id, 'Generar no reserva ni envía correo.');
-        $scheduler = app(LeadAiSuggestionAutoSendScheduler::class);
-        $scheduler->schedule_for_suggested_message($msg);
+        $this->assertNull($lead->fresh()->email);
+        $this->assertNull($msg->ai_auto_send_at, 'El job inmediato no necesita un timer futuro.');
+        // Esta es la integración que faltaba: el generador tiene que haber encolado SOLO.
         Queue::assertPushed(AutoSendLeadAiSuggestionJob::class, 1);
+        Event::assertDispatched(LeadSuggestionCreated::class, 1);
+        Event::assertDispatched(LeadConversationUpdated::class);
+        $scheduler = app(LeadAiSuggestionAutoSendScheduler::class);
         $job = Queue::pushed(AutoSendLeadAiSuggestionJob::class)->first();
         $sender = \Mockery::mock(WhatsappSendService::class);
         $sender->shouldReceive('send_text')->once()->andReturn('salida-ficticia');
@@ -89,6 +105,8 @@ class AgendaDemoAutomaticaPolicyTest extends TestCase
         $this->assertSame('enviado', $msg->fresh()->status);
         $this->assertSame('12:10', substr((string) $lead->fresh()->demo_start_time, 0, 5));
         $this->assertFalse((bool) $lead->fresh()->requiere_verificacion_mensajes);
+        $this->assertSame('agenda@fixture.test', $lead->fresh()->email);
+        Queue::assertPushed(AutoSendLeadAiSuggestionJob::class, 1);
         $this->assertNull($msg->fresh()->sent_by_admin_id);
         $this->assertNull($msg->fresh()->actions_override_log);
     }
@@ -101,7 +119,6 @@ class AgendaDemoAutomaticaPolicyTest extends TestCase
         $this->inbound($lead, 'Ahora puedo');
         $msg = $this->generar_pendiente($lead);
         $scheduler = app(LeadAiSuggestionAutoSendScheduler::class);
-        $scheduler->schedule_for_suggested_message($msg);
         $ocupante = $this->lead();
         $ocupante->update(['demo_id' => $demo->id, 'status' => 'demo_agendada', 'demo_date' => '2026-10-21', 'demo_start_time' => '12:00', 'demo_end_time' => '14:00']);
         $sender = \Mockery::mock(WhatsappSendService::class);
@@ -236,6 +253,17 @@ class AgendaDemoAutomaticaPolicyTest extends TestCase
     }
 
     private function activar(): void { AdminSetting::set(AgendaDemoAutomaticaPolicy::KEY_ACTIVA, '1'); }
+    private function generar_desde_el_agente(Lead $lead, Demo $demo): LeadMessage
+    {
+        config(['services.anthropic.api_key' => 'clave-local-ficticia']);
+        AiSystemPrompt::create(['contenido' => 'System de prueba determinista.', 'activa' => true]);
+        SyncedGithubFile::create(['key' => WhatsappProtocolService::SYSTEM_BASE_KEY, 'repo_path' => 'prueba', 'content' => 'System base de prueba.']);
+        SyncedGithubFile::create(['key' => WhatsappProtocolService::RECURSO_KEY_PREFIX_V2 . 'demo_agenda', 'repo_path' => 'prueba', 'content' => LeadAiService::MARCADOR_DEMO_DIRECTA]);
+        $respuesta = ['mensaje_sugerido' => 'Te dejo tu página ' . $lead->demo_experiencia_url . ' y la tienda ' . DemoDirectaService::url_tienda($demo) . '. Te mandé todo al correo agenda@fixture.test.', 'estado_sugerido' => 'demo_agendada', 'guardar_email' => 'agenda@fixture.test', 'agendar_demo' => ['ahora' => true]];
+        Http::swap(new \Tests\Fakes\HttpFactorySinSalida());
+        Http::fake(['api.anthropic.com/*' => Http::response(['stop_reason' => 'end_turn', 'content' => [['type' => 'text', 'text' => json_encode($respuesta)]]]), '*' => Http::response(['ok' => true])]);
+        return (new LeadAiService())->generate_suggestion($lead, false);
+    }
     private function lead(): Lead
     {
         return Lead::create(['uuid' => (string) Str::uuid(), 'contact_name' => 'Comerciante ficticio', 'status' => 'calificado', 'phone' => '5493510000000', 'claude_auto_reply' => true]);

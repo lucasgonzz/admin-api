@@ -6319,6 +6319,11 @@ TXT;
         $lead->save();
 
         if (! $espera_humana) {
+            // Diferir las acciones no difiere la programación: el generador debe entregar el
+            // paquete al job inmediato antes de salir, igual que el camino común de abajo.
+            (new LeadAiSuggestionAutoSendScheduler())->schedule_for_suggested_message($msg);
+            $msg = $msg->fresh();
+            LeadSuggestionCreated::dispatch($lead->id);
             LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $msg->id);
             return $msg;
         }
