@@ -104,6 +104,12 @@ class AutoSendLeadAiSuggestionJob implements ShouldQueue
             return;
         }
 
+        if (\App\Services\AgendaDemoAutomaticaPolicy::activa() && $message->lead !== null
+            && ! app(\App\Services\AgendaDemoAutomaticaPolicy::class)->evaluar($message->lead, $message->pending_actions ?: [], $message, 'job')['permitido']) {
+            $scheduler->retener_para_aprobacion_humana($message);
+            return;
+        }
+
         // El job pudo encolarse antes del escudo. Frenar también antes de reprogramar la franja.
         if ($message->lead !== null && \App\Services\LeadConversationAiState::requiere_aprobacion_humana($message->lead)) {
             $scheduler->retener_para_aprobacion_humana($message);

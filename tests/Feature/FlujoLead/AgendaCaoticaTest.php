@@ -101,7 +101,12 @@ class AgendaCaoticaTest extends TestCase
 
     public function cambios(): array
     {
-        return [['Mañana a las 10', 'Mejor hoy a las 15', '2026-10-21 15:00'], ['Hoy a las 15', 'Mejor mañana a las 10', '2026-10-22 10:00']];
+        return [
+            ['Mañana a las 10', 'Mejor hoy a las 15', '2026-10-21 15:00'],
+            ['Hoy a las 15', 'Mejor mañana a las 10', '2026-10-22 10:00'],
+            ['Mañana a las 10', 'Mañana no, mejor hoy a las 15', '2026-10-21 15:00'],
+            ['Hoy a las 15', 'Hoy no puedo, mañana a las 10', '2026-10-22 10:00'],
+        ];
     }
 
     /** @dataProvider esperas_dentro_del_turno */
@@ -250,6 +255,19 @@ class AgendaCaoticaTest extends TestCase
         $msg = $this->pendiente($lead, ['ahora' => true, 'conflicto_temporal' => true]);
         $this->expectException(\InvalidArgumentException::class);
         (new LeadAiService())->apply_pending_actions($msg, ['agendar_demo' => ['ahora' => true]]);
+    }
+
+    public function test_texto_hoy_con_accion_para_manana_se_retiene_antes_de_reservar(): void
+    {
+        $demo = $this->demo();
+        $lead = $this->lead();
+        $this->mensaje($lead, 'Mañana a las 10 me sirve.');
+        $msg = $this->generar($lead, ['mensaje_sugerido' => 'Dale, hoy a las 10:00 la tenés. ' . $lead->demo_experiencia_url . ' ' . DemoDirectaService::url_tienda($demo), 'agendar_demo' => ['dia' => 'manana', 'hora' => '10:00']]);
+        $this->assertTrue($msg->pending_actions['agendar_demo']['conflicto_temporal']);
+        $this->assertSame('2026-10-22 10:00', $msg->pending_actions['agendar_demo']['inicio_resuelto']);
+        $this->assertNull($lead->fresh()->demo_id);
+        $this->expectException(\InvalidArgumentException::class);
+        (new LeadAiService())->apply_pending_actions($msg);
     }
 
     private function reloj(string $hora): void { Carbon::setTestNow(Carbon::parse($hora, DemoDirectaService::TZ)); }

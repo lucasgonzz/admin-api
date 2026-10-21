@@ -72,6 +72,9 @@ class LeadSuggestionSendService
      */
     public function send_suggestion(LeadMessage $message, ?string $edited_content = null, ?array $final_actions = null, bool $is_auto_send = false, ?int $sent_by_admin_id = null): LeadMessage
     {
+        if ($is_auto_send && AgendaDemoAutomaticaPolicy::activa() && ($final_actions !== null || $edited_content !== null || $sent_by_admin_id !== null)) {
+            throw new \InvalidArgumentException('El envío automático no puede simular una edición o aprobación del operador.');
+        }
         if ((string) $message->sender !== 'sistema') {
             throw new \InvalidArgumentException('Solo se pueden enviar sugerencias del sistema.');
         }
@@ -199,6 +202,14 @@ class LeadSuggestionSendService
      */
     private function enviar_sugerencia_aprobada(LeadMessage $message, Lead $lead, ?string $edited_content, ?array $final_actions, bool $is_auto_send, ?int $sent_by_admin_id, ?callable $al_enviar_parte = null): LeadMessage
     {
+        if ($is_auto_send && AgendaDemoAutomaticaPolicy::activa()) {
+            $lead = $lead->fresh() ?: $lead;
+            $message = $message->fresh() ?: $message;
+            if (! app(AgendaDemoAutomaticaPolicy::class)->evaluar($lead, $message->pending_actions ?: [], $message, 'envio_bajo_lease')['permitido']) {
+                app(LeadAiSuggestionAutoSendScheduler::class)->retener_para_aprobacion_humana($message);
+                return $message->fresh() ?: $message;
+            }
+        }
         /*
          * Revalidación de horarios ofrecidos (grupo 306, prompt 04). La disponibilidad se calculó
          * al GENERAR la sugerencia, pero el mensaje se envía recién después de la aprobación humana
@@ -318,7 +329,7 @@ class LeadSuggestionSendService
          * horario al lead y no hay forma segura de mandarlo sin persistir la reserva. El mensaje
          * queda `sugerido` sin tocar, a la espera de que un humano lo apruebe desde el panel.
          */
-        if ($is_auto_send && ! empty($message->pending_actions)) {
+        if ($is_auto_send && ! AgendaDemoAutomaticaPolicy::activa() && ! empty($message->pending_actions)) {
             $pending_actions = $message->pending_actions;
             if (! empty($pending_actions['agendar_demo']) || ! empty($pending_actions['cancelar_demo'])) {
                 return $this->handle_auto_send_agendamiento_gate($message, $lead);
@@ -360,7 +371,7 @@ class LeadSuggestionSendService
 
         $fin_demo_manual = ! $is_auto_send && ($final_actions['confirmar_fin_demo'] ?? false) === true;
         if ((! empty($message->pending_actions) || $fin_demo_manual) && ! $paquete_directo_sin_ventana) {
-            if ($is_auto_send) {
+            if ($is_auto_send && ! AgendaDemoAutomaticaPolicy::activa()) {
                 /*
                  * FIX (prompt 337): Caso B del respaldo automático. Llegar hasta acá ya significa
                  * que el paquete NO trae agendar_demo ni cancelar_demo (se filtró arriba), así que
@@ -380,7 +391,16 @@ class LeadSuggestionSendService
                 ];
             }
 
-            $message = app(\App\Services\LeadAiService::class)->apply_pending_actions($message, $final_actions);
+            try {
+                $message = app(\App\Services\LeadAiService::class)->apply_pending_actions($message, $final_actions, $is_auto_send && AgendaDemoAutomaticaPolicy::activa());
+            } catch (\InvalidArgumentException | \App\Exceptions\SinDemoLibreException | \App\Exceptions\AprobacionEnCursoException $error_agenda) {
+                if (! $is_auto_send || ! AgendaDemoAutomaticaPolicy::activa()) {
+                    throw $error_agenda;
+                }
+                app(LeadAiSuggestionAutoSendScheduler::class)->retener_para_aprobacion_humana($message);
+                \Illuminate\Support\Facades\Log::info('Agenda automática retenida al aplicar, sin enviar una negativa.', ['lead_id' => $lead->id, 'message_id' => $message->id, 'motivo' => $error_agenda->getMessage()]);
+                return $message->fresh() ?: $message;
+            }
 
             if ($is_auto_send) {
                 // El mensaje salió por WhatsApp sin que nadie lo revisara: Lucas quiere verlo en

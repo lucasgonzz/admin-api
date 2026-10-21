@@ -19,6 +19,9 @@ class LeadConversationAiState
      */
     public static function requiere_aprobacion_humana(Lead $lead): bool
     {
+        if (AgendaDemoAutomaticaPolicy::activa()) {
+            return ! app(AgendaDemoAutomaticaPolicy::class)->evaluar($lead)['permitido'];
+        }
         return (bool) $lead->requiere_verificacion_mensajes
             || (LeadWhatsappOnboardingSettings::get_auto_activar_verificacion_al_solicitar_disponibilidad()
                 && in_array((string) $lead->status, Lead::ESTADOS_VENTANA_VERIFICACION_MENSAJES, true));

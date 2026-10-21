@@ -199,6 +199,7 @@ class Lead extends Model
             if ($entra_a_la_ventana
                 && ! (bool) $lead->requiere_verificacion_mensajes
                 && LeadWhatsappOnboardingSettings::get_auto_activar_verificacion_al_solicitar_disponibilidad()
+                && ! (\App\Services\AgendaDemoAutomaticaPolicy::activa() && \App\Services\AgendaDemoAutomaticaPolicy::es_pre_demo($nuevo))
             ) {
                 $lead->requiere_verificacion_mensajes = true;
             }

@@ -894,6 +894,10 @@ TXT;
                     $notas_directa[] = 'El agente agendó la demo para el ' . $inicio_pedido->format('d/m') . ' a las ' . $inicio_pedido->format('H:i')
                         . ' pero el texto no nombra esa hora: revisalo antes de aprobar.';
                 }
+                if ($this->texto_confirma_otro_dia($mensaje_directa, $inicio_pedido)) {
+                    $parsed['agendar_demo']['conflicto_temporal'] = true;
+                    $notas_directa[] = 'El texto confirma otro día que la acción de agenda: pedí una sugerencia coherente antes de aprobar.';
+                }
                 $motivo_invalido = $this->validar_inicio_de_demo_pedida($inicio_pedido, AppTime::now(DemoDirectaService::TZ));
                 if ($motivo_invalido !== null) {
                     $notas_directa[] = 'El momento pedido (' . $inicio_pedido->format('d/m H:i') . ') no se puede asignar: '
@@ -3206,6 +3210,32 @@ TXT;
             'evidencia_temporal'   => $pedido,
             'conflicto_temporal'   => $conflicto_temporal,
         ];
+    }
+
+    /** Contrasta la fecha que acompaña a la hora confirmada, no otros «hoy» del mensaje. */
+    private function texto_confirma_otro_dia(string $texto, Carbon $inicio): bool
+    {
+        $hoy = AppTime::now(DemoDirectaService::TZ)->startOfDay();
+        $dias = ['domingo' => 0, 'lunes' => 1, 'martes' => 2, 'miercoles' => 3, 'jueves' => 4, 'viernes' => 5, 'sabado' => 6];
+        preg_match_all('/\b(hoy|ma[ñn]ana|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)\b\s*(?:,?\s*a\s+las?\s+)?(\d{1,2})(?::(\d{2}))?\b/u', mb_strtolower($texto, 'UTF-8'), $menciones, PREG_SET_ORDER);
+        foreach ($menciones as $mencion) {
+            $hora = sprintf('%02d:%02d', (int) $mencion[2], isset($mencion[3]) ? (int) $mencion[3] : 0);
+            if ($hora !== $inicio->format('H:i')) {
+                continue;
+            }
+            $nombre = strtr($mencion[1], ['ñ' => 'n', 'é' => 'e', 'á' => 'a']);
+            if ($nombre === 'hoy' && ! $inicio->isSameDay($hoy)) {
+                return true;
+            }
+            if ($nombre === 'manana' && ! $inicio->isSameDay($hoy->copy()->addDay())) {
+                return true;
+            }
+            if (isset($dias[$nombre]) && $inicio->dayOfWeek !== $dias[$nombre]) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /** El correo650 nombrado sin acción se recupera sólo desde evidencia inequívoca del lead. */
@@ -5976,6 +6006,13 @@ TXT;
         bool $is_followup,
         ?array $calendar_snapshot = null
     ): LeadMessage {
+        if (AgendaDemoAutomaticaPolicy::activa()) {
+            $decision = app(AgendaDemoAutomaticaPolicy::class)->evaluar($lead->fresh() ?: $lead, $parsed, null, 'generacion');
+            $parsed['decision_agenda'] = $decision;
+            // También el camino automático difiere los efectos hasta el servicio de envío:
+            // disponibilidad y permisos se releen bajo los locks existentes, sin promesas huérfanas.
+            return $this->create_pending_agendamiento_message($lead, $parsed, $is_followup, $calendar_snapshot, ! $decision['permitido']);
+        }
         /*
          * GENERALIZACIÓN (prompt 319, 9/7/2026): hasta acá solo el tramo de agenda difería sus
          * acciones (pending_actions sin aplicar) hasta la aprobación humana. Lucas quiere que
@@ -6175,7 +6212,7 @@ TXT;
      *
      * @return LeadMessage
      */
-    protected function create_pending_agendamiento_message(Lead $lead, array $parsed, bool $is_followup, ?array $calendar_snapshot): LeadMessage
+    protected function create_pending_agendamiento_message(Lead $lead, array $parsed, bool $is_followup, ?array $calendar_snapshot, bool $espera_humana = true): LeadMessage
     {
         $this->validate_parsed_response($parsed);
 
@@ -6237,7 +6274,7 @@ TXT;
             'horarios_ofrecidos'    => array_key_exists('horarios_ofrecidos', $parsed) ? $parsed['horarios_ofrecidos'] : null,
             'status'                => 'sugerido',
             'is_followup'           => $is_followup,
-            'requiere_verificacion' => true,
+            'requiere_verificacion' => $espera_humana,
             'sent_at'               => null,
         ]);
 
@@ -6263,6 +6300,11 @@ TXT;
         }
 
         $lead->save();
+
+        if (! $espera_humana) {
+            LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $msg->id);
+            return $msg;
+        }
 
         /*
          * GENERALIZACIÓN (prompt 319): antes este bloque solo cubría el tramo de agenda. Ahora
@@ -6369,8 +6411,11 @@ TXT;
      *
      * @return LeadMessage Mismo mensaje, actualizado in-place con el resultado real de aplicar las acciones.
      */
-    public function apply_pending_actions(LeadMessage $message, ?array $final_actions = null): LeadMessage
+    public function apply_pending_actions(LeadMessage $message, ?array $final_actions = null, bool $automatico = false): LeadMessage
     {
+        if ($automatico && $final_actions !== null) {
+            throw new \InvalidArgumentException('El envío automático no puede traer correcciones ni forzados del operador.');
+        }
         $lead_fin_manual = $this->validar_confirmacion_fin_demo_manual($message, $final_actions);
         /* Base = lo que Claude había sugerido originalmente (pending_actions). */
         $parsed = $message->pending_actions;
@@ -6394,6 +6439,15 @@ TXT;
         /* Paquete efectivo a aplicar: por defecto, el de Claude sin cambios. */
         $parsed_efectivo = $parsed;
         unset($parsed_efectivo['correo_corregido_manualmente']);
+        if ($automatico) {
+            $lead = $lead->fresh() ?: $lead;
+            $decision = app(AgendaDemoAutomaticaPolicy::class)->evaluar($lead, $parsed_efectivo, $message->fresh() ?: $message, 'aplicacion');
+            if (! $decision['permitido']) {
+                throw new \InvalidArgumentException('Agenda retenida: ' . $decision['motivo']);
+            }
+            unset($parsed_efectivo['forzar_slot'], $parsed_efectivo['correo_corregido_manualmente']);
+            $parsed_efectivo['origen_agenda_automatico'] = true;
+        }
 
         /*
          * FIX (prompt 409): true cuando el admin eligió, desde el panel, un estado DISTINTO al que
@@ -6778,7 +6832,7 @@ TXT;
          *   que puede CORREGIR un nombre ya cargado. Solo se escribe si el valor realmente cambió.
          */
         $guardar_nombre       = isset($parsed['guardar_nombre']) ? trim((string) $parsed['guardar_nombre']) : '';
-        $puede_pisar_contacto = $for_approval;
+        $puede_pisar_contacto = $for_approval && empty($parsed['origen_agenda_automatico']);
         $tenia_nombre_previo  = ! empty($lead->contact_name);
         if ($guardar_nombre !== ''
             && ($puede_pisar_contacto || ! $tenia_nombre_previo)
@@ -7035,6 +7089,14 @@ TXT;
                     $lock_directa_ok = (bool) $lock_directa->block(5);
                 } catch (LockTimeoutException $e) {
                     $lock_directa_ok = false;
+                }
+
+                if ($lock_directa_ok && ! empty($parsed['origen_agenda_automatico'])) {
+                    $decision_bajo_lock = app(AgendaDemoAutomaticaPolicy::class)->evaluar($lead->fresh() ?: $lead, $parsed, null, 'asignacion_bajo_lock');
+                    if (! $decision_bajo_lock['permitido']) {
+                        $lock_directa->release();
+                        throw new SinDemoLibreException('Agenda retenida: ' . $decision_bajo_lock['motivo']);
+                    }
                 }
 
                 $directa       = app(DemoDirectaService::class);

@@ -31,8 +31,13 @@ class AgendaDemoTemporalService
             if (preg_match('/\b(?:no puedo|no me sirve|no quiero)\b.*\bahora\b|\bahora\b.*\b(?:no puedo|no me sirve|no quiero)\b/u', $texto)) {
                 return $evidencia + ['tipo' => 'ambiguo'];
             }
-            if (preg_match('/\b(?:pasado\s+ma[ñn]ana|ma[ñn]ana|hoy|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)\b/u', $texto, $dia)) {
-                if (! preg_match('/\b(?:a\s+las?\s+)?(\d{1,2})(?::(\d{2})|\s*(?:hs?|horas?)\b)|\ba\s+las?\s+(\d{1,2})\b/u', $texto, $hora)) {
+            if (preg_match_all('/\b(?:pasado\s+ma[ñn]ana|ma[ñn]ana|hoy|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)\b/u', $texto, $dias_mencionados, PREG_OFFSET_CAPTURE)) {
+                $ultima = end($dias_mencionados[0]);
+                $dia = [$ultima[0]];
+                // Con varias intenciones no se toma una hora de la cláusula anterior.
+                $clausula = count($dias_mencionados[0]) > 1 ? substr($texto, $ultima[1]) : $texto;
+                if (preg_match('/\bno (?:puedo|me sirve|quiero)\b|\b(?:hoy|ma[ñn]ana)\s+no\b/u', $clausula)
+                    || ! preg_match('/\b(?:a\s+las?\s+)?(\d{1,2})(?::(\d{2})|\s*(?:hs?|horas?)\b)|\ba\s+las?\s+(\d{1,2})\b/u', $clausula, $hora)) {
                     return $evidencia + ['tipo' => 'ambiguo'];
                 }
                 $hh = ! empty($hora[3]) ? (int) $hora[3] : (int) $hora[1];

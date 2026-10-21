@@ -54,6 +54,11 @@ class LeadAiSuggestionAutoSendScheduler
         }
 
         $lead_actual = Lead::query()->find($message->lead_id);
+        if (AgendaDemoAutomaticaPolicy::activa() && $lead_actual !== null
+            && ! app(AgendaDemoAutomaticaPolicy::class)->evaluar($lead_actual, $message->pending_actions ?: [], $message, 'programacion')['permitido']) {
+            $this->retener_para_aprobacion_humana($message);
+            return;
+        }
         if ($lead_actual !== null && LeadConversationAiState::requiere_aprobacion_humana($lead_actual)) {
             $this->retener_para_aprobacion_humana($message);
             return;
