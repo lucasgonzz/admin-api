@@ -6207,11 +6207,13 @@ TXT;
      *     el mensaje que mete al lead en el tramo (ver la segunda llamada de disponibilidad): son
      *     paquetes que el SISTEMA detectó defectuosos, no una «verificación» que Lucas controle.
      *
-     *   - `$parsed['requiere_intervencion_humana']`: la IA derivó el caso a una persona (reclamo,
-     *     tema legal, algo que no sabe resolver). El prompt le pide en ese caso un borrador para que
-     *     «el setter decida si lo usa»: no es una sugerencia para enviar sola, y retenerlo es otro
-     *     control, el de la derivación, no el escudo de verificación. Es una derivación explícita de
-     *     la IA o de una guarda, nunca una inseguridad suelta.
+     *   - `$parsed['requiere_intervencion_humana']` JUNTO CON el `requiere_verificacion` que pidió la
+     *     IA: la IA derivó el caso a una persona (reclamo, tema legal, algo que no sabe resolver) y,
+     *     como el prompt le pide en ese caso, marcó el borrador para que «el setter decida si lo
+     *     usa». No es una sugerencia para enviar sola: retenerlo es el control de la derivación, no
+     *     el escudo de verificación. Es exactamente lo que retenía antes del 22/10/2026. La derivación
+     *     SIN ese pedido sigue como siempre (se aplica en el acto y el mensaje sale), y la inseguridad
+     *     suelta sin derivación ya no retiene.
      *
      * Ya NO retiene: que la IA se muestre insegura (`requiere_verificacion` de su propia respuesta),
      * ni estar parado en un estado del tramo.
@@ -6225,7 +6227,7 @@ TXT;
     {
         return (bool) $lead->requiere_verificacion_mensajes
             || ! empty($parsed['requiere_verificacion'])
-            || ! empty($parsed['requiere_intervencion_humana']);
+            || (! empty($parsed['requiere_intervencion_humana']) && ! empty($parsed['requiere_verificacion_pedida_por_claude']));
     }
 
     /**
