@@ -670,6 +670,69 @@ class ListaDeChatsDeLeadsTest extends TestCase
     }
 
     /**
+     * El filtro `sin_responder` con los grupos de las tarjetas (`demo`, `otros`), con `q`, con el
+     * paginado y con un fijado adentro; y la fila puntual (`show_json`) trae las dos claves nuevas.
+     * El número de la tarjeta de grupo tiene que ser el de las filas: es justo lo que se rompió el 2/9.
+     *
+     * @return void
+     */
+    public function test_sin_responder_con_grupos_busqueda_paginado_y_fila_puntual(): void
+    {
+        $demo_a = $this->crear_lead('Demo Ana', 'demo_agendada', ['company_name' => 'Kiosco Ana']);
+        $this->crear_mensaje($demo_a, ['content' => 'Hola', 'sent_at' => now()->subMinutes(30)]);
+        $demo_b = $this->crear_lead('Demo Beto', 'demo_en_curso', ['pinned_at' => now()]);
+        $this->crear_mensaje($demo_b, ['content' => 'Hola', 'sent_at' => now()->subMinutes(20)]);
+        $demo_ok = $this->crear_lead('Demo Contestado', 'demo_agendada');
+        $this->crear_mensaje($demo_ok, ['content' => 'Hola']);
+        $this->crear_saliente_entregado($demo_ok);
+
+        $otro = $this->crear_lead('Otro Carlos', 'nuevo');
+        $this->crear_mensaje($otro, ['content' => 'Hola']);
+
+        $calificado = $this->crear_lead('Califi Dora', 'calificado');
+        $this->crear_mensaje($calificado, ['content' => 'Hola']);
+
+        // Grupo «demo»: dos sin responder; el fijado va primero.
+        $this->assertSame(
+            [(int) $demo_b->id, (int) $demo_a->id],
+            array_keys($this->filas('sin_responder=1&status=demo')),
+            'Grupo demo: los dos sin responder, el fijado primero.'
+        );
+        // Grupo «otros»: el de estado `nuevo`.
+        $this->assertSame([(int) $otro->id], array_keys($this->filas('sin_responder=1&status=otros')));
+
+        // El número de cada tarjeta de grupo es el de las filas.
+        $response = $this->actingAs($this->admin, 'sanctum')->getJson('/api/admin/lead/status-cards');
+        $response->assertStatus(200);
+        $por_tarjeta = [];
+        foreach ($response->json('cards') as $card) {
+            $por_tarjeta[$card['value']] = (int) $card['sin_responder'];
+        }
+        $this->assertSame(2, $por_tarjeta['demo']);
+        $this->assertSame(1, $por_tarjeta['otros']);
+        $this->assertSame(count($this->filas('sin_responder=1&status=demo')), $por_tarjeta['demo']);
+        $this->assertSame(count($this->filas('sin_responder=1&status=otros')), $por_tarjeta['otros']);
+
+        // Con búsqueda de texto.
+        $this->assertSame([(int) $demo_a->id], array_keys($this->filas('sin_responder=1&status=demo&q=kiosco')));
+
+        // Paginado: el total y las páginas son los del filtro, no los de la lista entera.
+        $pagina = $this->chats('sin_responder=1&status=demo&per_page=1');
+        $this->assertSame(2, $pagina['meta']['total']);
+        $this->assertSame(2, $pagina['meta']['last_page']);
+        $this->assertCount(1, $pagina['data']);
+
+        // La fila puntual (la que refresca Pusher) trae las dos claves.
+        $response = $this->actingAs($this->admin, 'sanctum')->getJson('/api/admin/lead/chats/' . $demo_a->id);
+        $response->assertStatus(200);
+        $this->assertTrue($response->json('data.sin_responder'));
+        $this->assertTrue($response->json('data.mensaje_sin_responder'));
+        $response = $this->actingAs($this->admin, 'sanctum')->getJson('/api/admin/lead/chats/' . $demo_ok->id);
+        $this->assertFalse($response->json('data.sin_responder'));
+        $this->assertFalse($response->json('data.mensaje_sin_responder'));
+    }
+
+    /**
      * «Marcar como leído» (POST marcar-respondido sin message_id) saca al lead del filtro `sin_responder`
      * y le apaga el amarillo; un mensaje nuevo del lead lo vuelve a poner.
      *
