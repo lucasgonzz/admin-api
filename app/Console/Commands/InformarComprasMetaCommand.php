@@ -44,7 +44,9 @@ class InformarComprasMetaCommand extends Command
      */
     protected $signature = 'leads:meta-capi-compras
         {--enviar : Registra y encola (sin esto, solo simula)}
-        {--confirmar : Da la confirmación de --enviar sin preguntar}';
+        {--confirmar : Da la confirmación de --enviar sin preguntar}
+        {--probar= : Manda UN Purchase de prueba con este test_event_code, sin registrar nada (va con --lead)}
+        {--lead= : El lead de la prueba}';
 
     /**
      * @var string
@@ -58,6 +60,10 @@ class InformarComprasMetaCommand extends Command
      */
     public function handle(MetaConversionesService $service): int
     {
+        if ((string) $this->option('probar') !== '') {
+            return $this->probar($service);
+        }
+
         $enviar = (bool) $this->option('enviar');
         $ahora  = AppTime::now();
         $desde  = $ahora->copy()->subDays(LeadEventoMeta::DIAS_DE_VIGENCIA);
@@ -142,6 +148,41 @@ class InformarComprasMetaCommand extends Command
         }
 
         $this->info('Registrados: ' . $mandados . ' Purchase encolados y ' . $omitidos . ' omitidos. El estado de cada uno queda en lead_eventos_meta.');
+
+        return 0;
+    }
+
+    /**
+     * `--probar=TEST… --lead=N`: un Purchase de prueba del lead, para verlo en «Probar eventos» de
+     * Events Manager. No registra nada. Muestra el body (los datos de contacto ya van hasheados) y
+     * la respuesta de Meta.
+     *
+     * @param MetaConversionesService $service
+     *
+     * @return int
+     */
+    private function probar(MetaConversionesService $service): int
+    {
+        $lead = Lead::query()->find((int) $this->option('lead'));
+        if ($lead === null) {
+            $this->error('Falta --lead con el id de un lead que exista.');
+
+            return 1;
+        }
+
+        $resultado = $service->enviar_prueba($lead, (string) $this->option('probar'));
+        if ($resultado['payload'] !== null) {
+            $this->line(json_encode($resultado['payload'], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        }
+        $this->line('HTTP ' . $resultado['status'] . ': ' . json_encode($resultado['respuesta'], JSON_UNESCAPED_UNICODE));
+
+        if ($resultado['error'] !== null) {
+            $this->error($resultado['error']);
+
+            return 1;
+        }
+
+        $this->info('Purchase de prueba mandado. Miralo en Events Manager → Probar eventos.');
 
         return 0;
     }

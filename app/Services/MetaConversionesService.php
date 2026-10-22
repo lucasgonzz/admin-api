@@ -460,6 +460,63 @@ class MetaConversionesService
     }
 
     /**
+     * Manda UN `Purchase` de prueba del lead con el `test_event_code` de la pestaña «Probar eventos»
+     * de Events Manager, sin registrar nada en `lead_eventos_meta` (`leads:meta-capi-compras
+     * --probar`). Es el body real (canal, datos de contacto, moneda y valor del contrato), con un
+     * `event_id` propio (`…-purchase-prueba`) para que no deduplique contra la compra de verdad.
+     *
+     * 🔴 El código va solo en esta llamada: cargar `META_CAPI_TEST_EVENT_CODE` en el `.env` de
+     * producción convertiría en prueba a TODOS los eventos reales mientras esté puesto.
+     *
+     * @param Lead   $lead
+     * @param string $codigo El test_event_code (TEST…).
+     *
+     * @return array<string, mixed> `status` (HTTP o 0 si no salió), `respuesta` (resumen sin token),
+     *                              `payload` (lo que viajó, con los datos ya hasheados) y `error`.
+     */
+    public function enviar_prueba(Lead $lead, string $codigo): array
+    {
+        $canal = self::canal_de_la_compra($lead);
+        if ($canal === null) {
+            return ['status' => 0, 'respuesta' => null, 'payload' => null, 'error' => 'El lead no está promovido ni tiene canal: no hay compra que probar.'];
+        }
+        if (! self::config_completa($canal)) {
+            return ['status' => 0, 'respuesta' => null, 'payload' => null, 'error' => 'Falta ' . self::config_que_falta($canal) . '.'];
+        }
+
+        $muestra = new LeadEventoMeta([
+            'lead_id'    => (int) $lead->id,
+            'canal'      => $canal,
+            'evento'     => LeadEventoMeta::EVENTO_PURCHASE,
+            'event_id'   => self::event_id_para((int) $lead->id, LeadEventoMeta::EVENTO_PURCHASE, $canal) . '-prueba',
+            'event_time' => AppTime::now(),
+        ]);
+        $payload                    = $this->armar_payload($muestra, $lead);
+        $payload['test_event_code'] = trim($codigo);
+
+        try {
+            $respuesta = Http::withToken(self::token_del_canal($canal))
+                ->acceptJson()
+                ->asJson()
+                ->timeout((int) config('services.meta_capi.timeout', 15))
+                ->post($this->url_de_eventos($canal), $payload);
+        } catch (\Throwable $exception) {
+            return ['status' => 0, 'respuesta' => null, 'payload' => $payload, 'error' => 'No se pudo conectar con Meta: ' . $this->sin_token($exception->getMessage())];
+        }
+
+        $json = $respuesta->json();
+
+        return [
+            'status'    => $respuesta->status(),
+            'respuesta' => $this->resumen_de_respuesta(is_array($json) ? $json : []),
+            'payload'   => $payload,
+            'error'     => $respuesta->successful() ? null : $this->sin_token(
+                is_array($json) && isset($json['error']['message']) && is_string($json['error']['message']) ? $json['error']['message'] : 'sin mensaje'
+            ),
+        ];
+    }
+
+    /**
      * ¿El lead ya es cliente?
      *
      * @param Lead $lead

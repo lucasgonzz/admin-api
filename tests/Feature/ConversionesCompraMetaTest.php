@@ -382,6 +382,33 @@ class ConversionesCompraMetaTest extends TestCase
         Queue::assertNotPushed(EnviarEventoMetaJob::class);
     }
 
+    /**
+     * `--probar`: manda el body real con el código de prueba y un event_id propio, y no registra
+     * ninguna fila (el .env no se toca).
+     *
+     * @return void
+     */
+    public function test_probar_manda_un_purchase_de_prueba_sin_registrar_nada(): void
+    {
+        Http::fake(['graph.facebook.com/*' => Http::response(['events_received' => 1, 'fbtrace_id' => 'Prueba1'], 200)]);
+        $lead = $this->crear_promovido_de_antes(30);
+        $lead->update(['contract_currency' => 'USD', 'contract_precio_licencia' => '2.200']);
+
+        $this->assertSame(0, Artisan::call('leads:meta-capi-compras', ['--probar' => 'TEST4321', '--lead' => $lead->id]));
+
+        Http::assertSentCount(1);
+        Http::assertSent(function ($request) use ($lead) {
+            $data = $request->data();
+
+            return $data['test_event_code'] === 'TEST4321'
+                && $data['data'][0]['event_name'] === 'Purchase'
+                && $data['data'][0]['event_id'] === 'cc-lead-' . $lead->id . '-web-purchase-prueba'
+                && $data['data'][0]['custom_data'] === ['currency' => 'USD', 'value' => 2200];
+        });
+        $this->assertSame([], $this->filas_de($lead));
+        $this->assertSame('', (string) config('services.meta_capi.test_event_code'));
+    }
+
     /* ------------------------------------------------------------------------------------------
      | Ayudas
      |----------------------------------------------------------------------------------------- */
