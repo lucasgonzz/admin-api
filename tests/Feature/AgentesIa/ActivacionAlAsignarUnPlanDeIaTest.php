@@ -348,6 +348,118 @@ class ActivacionAlAsignarUnPlanDeIaTest extends BaseDelCanal
     }
 
     /**
+     * 🔴 Si el push del plan falló por TRANSPORTE (el cliente no contestó), la activación NO se intenta (no suma otro
+     * timeout) y la respuesta lo dice; el plan igual queda asignado.
+     *
+     * @return void
+     */
+    public function test_si_el_push_del_plan_falla_por_transporte_no_se_intenta_activar(): void
+    {
+        $this->admin_logueado();
+        $this->fakear_http([
+            '*admin-sync/plan-ia*'    => function () {
+                throw new ConnectionException('cURL error 28: timeout');
+            },
+            '*admin-sync/agentes-ia*' => Http::response(['ok' => true, 'activa' => true], 200),
+        ]);
+
+        $client = $this->crear_cliente();
+        $plan   = $this->sembrar_plan('Básico');
+
+        $respuesta = $this->asignar($client, $plan->id);
+
+        $respuesta->assertStatus(200);
+        $this->assertSame('failed', $respuesta->json('sincronizacion.estado'));
+        $this->assertSame('sin_conexion', $respuesta->json('agentes_ia.estado'));
+        $this->assertNull($respuesta->json('agentes_ia.activa'));
+        $this->assertStringContainsString('No se intentó activar Agentes de IA', (string) $respuesta->json('agentes_ia.mensaje'));
+        $this->assertSame(0, $this->pedidos_a_agentes_ia());
+        $this->assertSame((int) $plan->id, (int) $client->refresh()->ai_plan_id);
+    }
+
+    /**
+     * Si el push del plan falló por versión vieja (404: el cliente SÍ contestó), la activación se intenta igual.
+     *
+     * @return void
+     */
+    public function test_si_el_push_del_plan_da_404_se_intenta_activar_igual(): void
+    {
+        $this->admin_logueado();
+        $this->fakear_http([
+            '*admin-sync/plan-ia*'    => Http::response('', 404),
+            '*admin-sync/agentes-ia*' => Http::response('', 404),
+        ]);
+
+        $client = $this->crear_cliente();
+        $plan   = $this->sembrar_plan('Básico');
+
+        $respuesta = $this->asignar($client, $plan->id);
+
+        $respuesta->assertStatus(200);
+        $this->assertSame('no_soportado', $respuesta->json('sincronizacion.estado'));
+        $this->assertSame('version_vieja', $respuesta->json('agentes_ia.estado'));
+        $this->assertSame(1, $this->pedidos_a_agentes_ia());
+    }
+
+    /**
+     * Un 4xx funcional del push del plan (401) también es una respuesta del cliente: se intenta activar.
+     *
+     * @return void
+     */
+    public function test_si_el_push_del_plan_da_401_se_intenta_activar_igual(): void
+    {
+        $this->admin_logueado();
+        $this->fakear_http([
+            '*admin-sync/plan-ia*'    => Http::response(['error' => 'unauthorized'], 401),
+            '*admin-sync/agentes-ia*' => Http::response(['error' => 'unauthorized'], 401),
+        ]);
+
+        $client = $this->crear_cliente();
+        $plan   = $this->sembrar_plan('Básico');
+
+        $respuesta = $this->asignar($client, $plan->id);
+
+        $this->assertSame('clave_rechazada', $respuesta->json('agentes_ia.estado'));
+        $this->assertSame(1, $this->pedidos_a_agentes_ia());
+    }
+
+    /**
+     * 🔴 El log de la activación fallida no lleva la clave ni la query de las URLs (mismo criterio que el servicio).
+     *
+     * @return void
+     */
+    public function test_el_log_de_una_excepcion_inesperada_no_lleva_la_clave_ni_la_query(): void
+    {
+        $this->admin_logueado();
+        $this->el_cliente_contesta(Http::response(['ok' => true, 'activa' => true], 200));
+
+        \Illuminate\Support\Facades\Log::spy();
+
+        $this->app->bind(\App\Services\ClientAgentesIaService::class, function () {
+            return new \App\Services\ClientAgentesIaService(new class extends \App\Services\ClientEmpresaApiUrlResolver {
+                public function resolve_base_url(Client $client, ?\App\Models\ClientVersionUpgrade $upgrade = null): string
+                {
+                    throw new \RuntimeException('falló https://api-x.test/api/admin-sync/agentes-ia?token=QUERYSECRETA con clave-del-cliente');
+                }
+            });
+        });
+
+        $client = $this->crear_cliente();
+        $plan   = $this->sembrar_plan('Básico');
+
+        $this->asignar($client, $plan->id)->assertStatus(200);
+
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('warning')->withArgs(function ($mensaje, $contexto) {
+            $error = (string) ($contexto['error'] ?? '');
+
+            return strpos($mensaje, 'activación automática') !== false
+                && $error !== ''
+                && strpos($error, 'QUERYSECRETA') === false
+                && strpos($error, 'clave-del-cliente') === false;
+        })->once();
+    }
+
+    /**
      * El "Sincronizar ahora" del plan no activa nada: reenvía el plan y punto.
      *
      * @return void
