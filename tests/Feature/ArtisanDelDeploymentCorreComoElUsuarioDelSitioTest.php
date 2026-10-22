@@ -803,7 +803,19 @@ class ArtisanDelDeploymentCorreComoElUsuarioDelSitioTest extends TestCase
         $this->assertCount(1, $chowns);
         $this->assertStringContainsString("chown -R '" . $destino . ':' . $destino . "'", $chowns[0]);
         $this->assertStringContainsString("cd '/home/" . $destino . "/empresa-api'", $chowns[0]);
-        $this->assertStringNotContainsString($otro, $this->ssh->todo(), 'Ni un comando toca al frente que atiende.');
+        // El contrato opt-in exige leer el marcador activo; ésa es la única excepción a no tocarlo.
+        $lectura_exacta = '{ ' . (new \App\Services\RuntimeProfileService())->markerReadCommand(
+            '/home/' . $otro . '/.comerciocity-runtime.json'
+        ) . "\n} < /dev/null";
+        $lecturas = 0;
+        foreach ($this->ssh->comandos as $comando) {
+            if ($comando === $lectura_exacta) {
+                $lecturas++;
+                continue;
+            }
+            $this->assertStringNotContainsString($otro, $comando, 'Ningún otro comando puede tocar el frente activo.');
+        }
+        $this->assertSame(1, $lecturas, 'Sólo una lectura exacta del marcador activo, sin escrituras.');
     }
 
     /**

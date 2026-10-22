@@ -25,6 +25,10 @@ use Illuminate\Support\Str;
  *     `Purchase`. Un lead de la web al que le llega el `ctwa_clid` de un anuncio pasa a `whatsapp`
  *     solo si todavía no se registró nada por la web: 🔴 el canal es pegajoso, un lead no se
  *     reporta en dos canales (ver {@see canal_del_lead()}).
+ *   - Y desde el 22/10/2026 (misión purchase-capi-al-promover), la COMPRA de cualquier lead que se
+ *     vuelve cliente, tenga atribución o no: un promovido sin canal manda solo su `Purchase` por la
+ *     `web` (ver {@see canal_de_la_compra()} y {@see registrar_compra()}). Los ya promovidos los
+ *     informa `leads:meta-capi-compras`, dentro de la ventana de 7 días que acepta Meta.
  *
  * Contrato con Meta, canal `whatsapp` (verificado en su documentación):
  *
@@ -88,6 +92,12 @@ class MetaConversionesService
 
     /** País de los leads (ISO 3166-1 alfa-2, en minúsculas como lo pide Meta antes del hash). */
     const PAIS = 'ar';
+
+    /**
+     * Nombre del evento que manda `leads:meta-capi-compras --probar` en lugar de `Purchase`: un evento
+     * con `test_event_code` cuenta para la medición de Meta (ver {@see enviar_prueba()}).
+     */
+    const EVENTO_DE_PRUEBA = 'CompraDePrueba';
 
     /** Moneda del `Purchase` cuando el contrato no dice otra (las licencias se pactan en dólares). */
     const MONEDA_POR_DEFECTO = 'USD';
@@ -294,6 +304,19 @@ class MetaConversionesService
             return [];
         }
 
+        /* Los eventos son acumulativos y el `Purchase` es el último: si ya está registrado en el
+           canal, una etapa anterior que falte no se reporta después con la fecha de hoy. Pasa con
+           un promovido sin atribución (solo su compra, misión purchase-capi-al-promover) que más
+           tarde quedara con canal. */
+        $ya_compro = LeadEventoMeta::query()
+            ->where('lead_id', (int) $lead->id)
+            ->where('canal', $canal)
+            ->where('evento', LeadEventoMeta::EVENTO_PURCHASE)
+            ->exists();
+        if ($ya_compro) {
+            return [];
+        }
+
         $config  = self::config_completa($canal);
         $creados = $this->crear_filas_faltantes(
             $lead,
@@ -363,6 +386,167 @@ class MetaConversionesService
     }
 
     /**
+     * Por qué canal sale el `Purchase` del lead (misión purchase-capi-al-promover, 22/10/2026).
+     *
+     * El de su embudo si tiene ({@see canal_del_lead()}: WhatsApp con `ctwa_clid`, web si vino de la
+     * landing). Y si no tiene, pero está promovido, la `web`: el dataset del píxel con sus datos de
+     * contacto en SHA-256. Hasta el 22/10 la compra de un lead sin atribución (recomendado, orgánico,
+     * `desconocido`: la mayoría) no salía nunca, y Meta no se enteraba de quién termina pagando.
+     *
+     * @param Lead $lead
+     *
+     * @return string|null null si no está promovido y no tiene canal.
+     */
+    public static function canal_de_la_compra(Lead $lead): ?string
+    {
+        $canal = self::canal_del_lead($lead);
+        if ($canal !== null) {
+            return $canal;
+        }
+
+        return self::esta_promovido($lead) ? LeadEventoMeta::CANAL_WEB : null;
+    }
+
+    /**
+     * Registra el `Purchase` del lead promovido, si todavía no lo tiene en su canal de compra, y lo
+     * encola.
+     *
+     * 🔴 **Solo el `Purchase`.** A un lead sin atribución no se le reportan `Lead` ni `Schedule`: esas
+     * etapas pasaron hace semanas y saldrían con la fecha de hoy. Para los leads con canal, el
+     * `Purchase` ya lo registra {@see registrar_alcanzados()} junto con el resto, y el observer no los
+     * manda por acá; sí lo usa el retroactivo, que trae su propia fecha, para los promovidos de antes
+     * de la medición de cualquier canal.
+     *
+     * Sin la configuración del canal, la fila queda `sin_configurar` (el conciliador la manda cuando
+     * aparece, dentro de la vigencia) y no se encola nada.
+     *
+     * @param Lead        $lead
+     * @param Carbon|null $momento   Cuándo se promovió (default: ahora).
+     * @param string|null $estado    null = pendiente (o sin_configurar); `omitido` para dejarla anotada sin mandar.
+     * @param string|null $motivo    El porqué de un `omitido`.
+     * @param bool        $despachar false para registrar sin encolar.
+     *
+     * @return LeadEventoMeta|null La fila creada, o null si no correspondía o ya estaba.
+     */
+    public function registrar_compra(Lead $lead, ?Carbon $momento = null, ?string $estado = null, ?string $motivo = null, bool $despachar = true): ?LeadEventoMeta
+    {
+        $canal = self::canal_de_la_compra($lead);
+        if ($canal === null || ! $lead->id) {
+            return null;
+        }
+
+        $config = self::config_completa($canal);
+        if ($estado === null) {
+            $estado = $config ? LeadEventoMeta::ESTADO_PENDIENTE : LeadEventoMeta::ESTADO_SIN_CONFIGURAR;
+        }
+
+        $ya_esta = LeadEventoMeta::query()
+            ->where('lead_id', (int) $lead->id)
+            ->where('canal', $canal)
+            ->where('evento', LeadEventoMeta::EVENTO_PURCHASE)
+            ->exists();
+        if ($ya_esta) {
+            return null;
+        }
+
+        $fila = $this->crear_fila($lead, $canal, LeadEventoMeta::EVENTO_PURCHASE, $estado, $momento !== null ? $momento : AppTime::now(), $motivo);
+        if ($fila === null) {
+            return null;
+        }
+
+        if ($estado === LeadEventoMeta::ESTADO_SIN_CONFIGURAR) {
+            Log::channel('daily')->warning(
+                'Conversiones Meta: falta ' . self::config_que_falta($canal) . '. El Purchase queda sin_configurar y no sale ninguna llamada.',
+                ['lead_id' => (int) $lead->id, 'canal' => $canal]
+            );
+        } elseif ($estado === LeadEventoMeta::ESTADO_PENDIENTE && $despachar) {
+            $this->despachar($fila);
+        }
+
+        return $fila;
+    }
+
+    /**
+     * Manda UN evento de prueba con el body de la compra del lead y el `test_event_code` de la pestaña
+     * «Probar eventos» de Events Manager, sin registrar nada en `lead_eventos_meta`
+     * (`leads:meta-capi-compras --probar`): mismo canal, mismos datos de coincidencia, misma moneda y
+     * valor que viajarían en su `Purchase`, con un `event_id` propio (`…-purchase-prueba`).
+     *
+     * 🔴 **Viaja como {@see EVENTO_DE_PRUEBA}, no como `Purchase`.** La doc de Meta lo dice textual: los
+     * eventos con `test_event_code` «are not dropped… are used for targeting and ads measurement». Un
+     * `Purchase` de prueba de un cliente real sería una compra con la fecha de hoy, y uno de un lead
+     * técnico, un comprador que no existe. Con un evento propio se ven el payload, la aceptación y los
+     * datos de coincidencia sin ensuciar las compras que optimiza la campaña.
+     *
+     * 🔴 El código va solo en esta llamada: cargar `META_CAPI_TEST_EVENT_CODE` en el `.env` de
+     * producción convertiría en prueba a TODOS los eventos reales mientras esté puesto.
+     *
+     * @param Lead   $lead
+     * @param string $codigo El test_event_code (TEST…).
+     *
+     * @return array<string, mixed> `status` (HTTP o 0 si no salió), `respuesta` (resumen sin token),
+     *                              `payload` (lo que viajó, con los datos ya hasheados) y `error`.
+     */
+    public function enviar_prueba(Lead $lead, string $codigo): array
+    {
+        if (trim($codigo) === '') {
+            return ['status' => 0, 'respuesta' => null, 'payload' => null, 'error' => 'El código de prueba está vacío: sin él el evento contaría como real.'];
+        }
+
+        $canal = self::canal_de_la_compra($lead);
+        if ($canal === null) {
+            return ['status' => 0, 'respuesta' => null, 'payload' => null, 'error' => 'El lead no está promovido ni tiene canal: no hay compra que probar.'];
+        }
+        if (! self::config_completa($canal)) {
+            return ['status' => 0, 'respuesta' => null, 'payload' => null, 'error' => 'Falta ' . self::config_que_falta($canal) . '.'];
+        }
+
+        $muestra = new LeadEventoMeta([
+            'lead_id'    => (int) $lead->id,
+            'canal'      => $canal,
+            'evento'     => LeadEventoMeta::EVENTO_PURCHASE,
+            'event_id'   => self::event_id_para((int) $lead->id, LeadEventoMeta::EVENTO_PURCHASE, $canal) . '-prueba',
+            'event_time' => AppTime::now(),
+        ]);
+        $payload                          = $this->armar_payload($muestra, $lead);
+        $payload['data'][0]['event_name'] = self::EVENTO_DE_PRUEBA;
+        $payload['test_event_code']       = trim($codigo);
+
+        try {
+            $respuesta = Http::withToken(self::token_del_canal($canal))
+                ->acceptJson()
+                ->asJson()
+                ->timeout((int) config('services.meta_capi.timeout', 15))
+                ->post($this->url_de_eventos($canal), $payload);
+        } catch (\Throwable $exception) {
+            return ['status' => 0, 'respuesta' => null, 'payload' => $payload, 'error' => 'No se pudo conectar con Meta: ' . $this->sin_token($exception->getMessage())];
+        }
+
+        $json = $respuesta->json();
+
+        return [
+            'status'    => $respuesta->status(),
+            'respuesta' => $this->resumen_de_respuesta(is_array($json) ? $json : []),
+            'payload'   => $payload,
+            'error'     => $respuesta->successful() ? null : $this->sin_token(
+                is_array($json) && isset($json['error']['message']) && is_string($json['error']['message']) ? $json['error']['message'] : 'sin mensaje'
+            ),
+        ];
+    }
+
+    /**
+     * ¿El lead ya es cliente?
+     *
+     * @param Lead $lead
+     *
+     * @return bool
+     */
+    private static function esta_promovido(Lead $lead): bool
+    {
+        return $lead->promoted_client_id !== null && (string) $lead->promoted_client_id !== '';
+    }
+
+    /**
      * Crea, en orden, las filas de los eventos que el lead alcanzó y no tiene registrados todavía en
      * este canal. El canal lo decide el que llama ({@see canal_del_lead()}).
      *
@@ -394,41 +578,65 @@ class MetaConversionesService
         $creados    = [];
 
         foreach ($faltantes as $evento) {
-            try {
-                $creados[] = LeadEventoMeta::create([
-                    'lead_id'      => (int) $lead->id,
-                    'canal'        => $canal,
-                    'evento'       => $evento,
-                    'estado'       => $estado,
-                    'event_id'     => self::event_id_para((int) $lead->id, $evento, $canal),
-                    'event_time'   => $momento,
-                    'intentos'     => 0,
-                    'ultimo_error' => $motivo,
-                ]);
-            } catch (QueryException $exception) {
-                if (self::es_error_de_duplicado($exception)) {
-                    /* El único (lead_id, canal, evento): otro proceso lo registró entre la lectura y
-                       el alta. Es exactamente lo que el único está para frenar; no hay nada que hacer. */
-                    Log::channel('daily')->info('Conversiones Meta: el evento ya estaba registrado.', [
-                        'lead_id' => (int) $lead->id,
-                        'canal'   => $canal,
-                        'evento'  => $evento,
-                    ]);
-                    continue;
-                }
-
-                /* Cualquier otra cosa (un valor que no entra con `strict`, la base caída) es un
-                   error de verdad y no un duplicado: se loguea como tal y se sigue con el resto. */
-                Log::channel('daily')->error('Conversiones Meta: la base rechazó el registro del evento.', [
-                    'lead_id' => (int) $lead->id,
-                    'canal'   => $canal,
-                    'evento'  => $evento,
-                    'error'   => $this->sin_token($exception->getMessage()),
-                ]);
+            $fila = $this->crear_fila($lead, $canal, $evento, $estado, $momento, $motivo);
+            if ($fila !== null) {
+                $creados[] = $fila;
             }
         }
 
         return $creados;
+    }
+
+    /**
+     * Crea UNA fila. El único (`lead_id`, `canal`, `evento`) es el que deduplica: si otro proceso la
+     * registró entre la lectura y el alta, devuelve null sin error.
+     *
+     * @param Lead        $lead
+     * @param string      $canal
+     * @param string      $evento
+     * @param string      $estado
+     * @param Carbon      $momento
+     * @param string|null $motivo
+     *
+     * @return LeadEventoMeta|null
+     */
+    private function crear_fila(Lead $lead, string $canal, string $evento, string $estado, Carbon $momento, ?string $motivo): ?LeadEventoMeta
+    {
+        try {
+            return LeadEventoMeta::create([
+                'lead_id'      => (int) $lead->id,
+                'canal'        => $canal,
+                'evento'       => $evento,
+                'estado'       => $estado,
+                'event_id'     => self::event_id_para((int) $lead->id, $evento, $canal),
+                'event_time'   => $momento,
+                'intentos'     => 0,
+                'ultimo_error' => $motivo,
+            ]);
+        } catch (QueryException $exception) {
+            if (self::es_error_de_duplicado($exception)) {
+                /* El único (lead_id, canal, evento): otro proceso lo registró entre la lectura y
+                   el alta. Es exactamente lo que el único está para frenar; no hay nada que hacer. */
+                Log::channel('daily')->info('Conversiones Meta: el evento ya estaba registrado.', [
+                    'lead_id' => (int) $lead->id,
+                    'canal'   => $canal,
+                    'evento'  => $evento,
+                ]);
+
+                return null;
+            }
+
+            /* Cualquier otra cosa (un valor que no entra con `strict`, la base caída) es un
+               error de verdad y no un duplicado: se loguea como tal y se sigue con el resto. */
+            Log::channel('daily')->error('Conversiones Meta: la base rechazó el registro del evento.', [
+                'lead_id' => (int) $lead->id,
+                'canal'   => $canal,
+                'evento'  => $evento,
+                'error'   => $this->sin_token($exception->getMessage()),
+            ]);
+
+            return null;
+        }
     }
 
     /**
@@ -478,8 +686,11 @@ class MetaConversionesService
         }
 
         /* 🔴 Un lead no se reporta en dos canales: una fila de un canal que ya no es el del lead (o
-           de un lead que se quedó sin canal) no sale. Queda `omitido`, que no reclama nadie más. */
-        $canal_del_lead = self::canal_del_lead($lead);
+           de un lead que se quedó sin canal) no sale. Queda `omitido`, que no reclama nadie más.
+           El `Purchase` mira el canal de la compra: un promovido sin atribución sale por la web. */
+        $canal_del_lead = (string) $evento->evento === LeadEventoMeta::EVENTO_PURCHASE
+            ? self::canal_de_la_compra($lead)
+            : self::canal_del_lead($lead);
         if ($canal_del_lead !== $canal) {
             $this->marcar_omitido(
                 $evento,
@@ -570,7 +781,7 @@ class MetaConversionesService
 
         if (self::canal_de_la_fila($evento) === LeadEventoMeta::CANAL_WEB) {
             $dato['action_source'] = self::ACTION_SOURCE_WEB;
-            $dato['user_data']     = $this->user_data_web($lead);
+            $dato['user_data']     = $this->user_data_web($lead, $momento);
         } else {
             $dato['action_source']     = self::ACTION_SOURCE;
             $dato['messaging_channel'] = self::MESSAGING_CHANNEL;
@@ -616,7 +827,7 @@ class MetaConversionesService
      *
      * @return array<string, array<int, string>>
      */
-    private function user_data_web(Lead $lead): array
+    private function user_data_web(Lead $lead, ?Carbon $momento = null): array
     {
         $datos    = [];
         $telefono = AudienciasMetaService::normalizar_telefono($lead->phone);
@@ -646,7 +857,74 @@ class MetaConversionesService
             $datos['ln'] = [hash('sha256', $nombre_y_apellido[1])];
         }
 
+        $fbc = self::fbc_del_lead($lead, $momento);
+        if ($fbc !== null) {
+            $datos['fbc'] = $fbc;
+        }
+
         return $datos;
+    }
+
+    /**
+     * El `fbc` del lead, armado con el `fbclid` del anuncio que trajo a la landing (misión
+     * purchase-capi-al-promover, 22/10/2026).
+     *
+     * La landing guarda los parámetros del clic en la referencia `[CC:…]` que viaja en el primer
+     * mensaje (misión atribucion-whatsapp-anuncios, 21/10), con el `fbclid` incluido. Meta pide el
+     * `fbc` como `fb.1.{milisegundos del clic}.{fbclid}`, **sin hash**, y documenta armarlo así cuando
+     * no hay cookie `_fbc`. Es el dato de coincidencia más fuerte que tenemos de la web: une el evento
+     * con el clic exacto, no con la persona.
+     *
+     * El momento es el de la referencia (cuando la landing la emitió, con la visita). Si el lead tiene
+     * varios contactos con `fbclid`, va el del más reciente: el último clic antes de la compra.
+     * Un `fbclid` con caracteres raros no se manda (Meta lo rechazaría). Con `$hasta`, solo clics
+     * anteriores al evento (un reintento no le pega a la compra un clic posterior).
+     *
+     * 🔴 Nunca tira: si la consulta falla (por ejemplo, sin las tablas de atribución), devuelve null y
+     * el evento sale sin `fbc`, como antes del 22/10. Un `fbc` no puede tumbar los eventos de la web.
+     *
+     * @param Lead        $lead
+     * @param Carbon|null $hasta El `event_time` del evento.
+     *
+     * @return string|null
+     */
+    public static function fbc_del_lead(Lead $lead, ?Carbon $hasta = null): ?string
+    {
+        if (! $lead->id) {
+            return null;
+        }
+
+        try {
+            $consulta = DB::table('lead_atribucion_contactos as c')
+                ->join('landing_whatsapp_referencias as r', 'r.id', '=', 'c.referencia_id')
+                ->where('c.lead_id', (int) $lead->id)
+                ->where('c.evidencia', 'referencia_landing')
+                ->orderByDesc('c.message_id');
+            if ($hasta !== null) {
+                $consulta->where('r.created_at', '<=', $hasta);
+            }
+            $contactos = $consulta->get(['c.datos', 'r.created_at']);
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->warning('Conversiones Meta: no se pudo leer el fbclid de la landing; el evento sale sin fbc.', [
+                'lead_id' => (int) $lead->id,
+                'error'   => $exception->getMessage(),
+            ]);
+
+            return null;
+        }
+
+        foreach ($contactos as $contacto) {
+            $datos  = json_decode((string) $contacto->datos, true);
+            $fbclid = is_array($datos) && isset($datos['fbclid']) && is_string($datos['fbclid']) ? trim($datos['fbclid']) : '';
+
+            if ($fbclid === '' || ! preg_match('/^[A-Za-z0-9_\-]{1,500}$/', $fbclid) || $contacto->created_at === null) {
+                continue;
+            }
+
+            return 'fb.1.' . (Carbon::parse($contacto->created_at)->getTimestamp() * 1000) . '.' . $fbclid;
+        }
+
+        return null;
     }
 
     /**
