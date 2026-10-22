@@ -153,7 +153,15 @@ class LandingAgendaService
         $desde  = $this->minutos_de((string) config('landing_agenda.presentacion.desde', '09:00'));
         $hasta  = $this->minutos_de((string) config('landing_agenda.presentacion.hasta', '21:00'));
         $paso   = max(1, (int) config('landing_agenda.presentacion.paso_minutos', 60));
-        $minimo = AppTime::now(DemoDirectaService::TZ)->addMinutes((int) config('landing_agenda.presentacion.minimo_minutos_desde_ahora', 60));
+        /* El piso nunca puede quedar por debajo del que exige la reserva (`validar_inicio_de_demo_pedida`:
+         * máx. entre 15 y el setup): si alguien sube `demo_setup_minutos_antes` por encima del de la
+         * config, el GET ofrecería turnos que el POST contesta `turno_tomado`, y volverían en ese mismo
+         * 409, en un bucle (chequeo del contrato, 🟡1). */
+        $minimo_minutos = max(
+            (int) config('landing_agenda.presentacion.minimo_minutos_desde_ahora', 60),
+            LeadAiService::minimo_minutos_para_turno_pedido()
+        );
+        $minimo = AppTime::now(DemoDirectaService::TZ)->addMinutes($minimo_minutos);
 
         ksort($union);
         $dias = [];

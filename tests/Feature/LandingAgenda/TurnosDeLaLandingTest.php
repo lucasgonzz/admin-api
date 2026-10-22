@@ -87,6 +87,18 @@ class TurnosDeLaLandingTest extends BaseDeLaAgendaDeLaLanding
         $this->assertContains('16:00', $horas);
     }
 
+    public function test_el_piso_del_get_nunca_es_menor_que_el_que_exige_la_reserva(): void
+    {
+        /* Setup de 90 minutos: la reserva no acepta nada antes de las 11:30; el GET tampoco lo ofrece. */
+        AdminSetting::set(LeadDemoSettings::KEY_SETUP_MINUTOS_ANTES, '90');
+
+        $hoy = $this->getJson('/api/landing/agenda/turnos')->assertStatus(200)->json('dias.0');
+        $this->assertSame('2026-10-22', $hoy['fecha']);
+        $this->assertSame('12:00', $hoy['horarios'][0]['hora'], 'Antes, con el piso de la config (60), ofrecía 11:00.');
+
+        $this->reservar($this->cuerpo(['fecha' => '2026-10-22', 'hora' => '11:00']))->assertStatus(409)->assertJsonPath('codigo', 'turno_tomado');
+    }
+
     public function test_una_sola_instancia_libre_alcanza_para_ofrecer_el_turno(): void
     {
         $this->ocupar($this->demo_1, '2026-10-23', '13:00', '15:00');
