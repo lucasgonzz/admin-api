@@ -173,6 +173,80 @@ class DemoDirectaService
     }
 
     /**
+     * ¿Esta instancia está libre para TODA la ventana pedida? Es la misma pregunta que
+     * `instancia_libre()` le hace a cada demo, para UNA demo puntual (misión
+     * demo-autogestionada-landing, 22/10/2026).
+     *
+     * La necesita la reserva de la landing (D2 del plan): ahí el turno tiene que estar en la grilla
+     * del panel para una instancia concreta Y esa instancia tiene que estar libre según este servicio
+     * (el criterio del agente). `instancia_libre()` no sirve porque devuelve la primera libre, que
+     * puede no ser una de las que tienen el slot en la grilla. El cálculo es el mismo
+     * (`ocupacion_por_demo()`), sin copia.
+     *
+     * @param Lead   $lead    Lead al que se le va a asignar (se excluye a sí mismo).
+     * @param int    $demo_id Instancia a consultar.
+     * @param Carbon $inicio  Inicio de la ventana pedida.
+     * @param Carbon $fin     Fin de la ventana pedida.
+     *
+     * @return bool
+     */
+    public function demo_libre_para_ventana(Lead $lead, int $demo_id, Carbon $inicio, Carbon $fin): bool
+    {
+        $ocupadas = $this->ocupacion_por_demo($lead, $inicio, $fin);
+
+        return empty($ocupadas[$demo_id]);
+    }
+
+    /**
+     * Los campos que deja escritos una reserva de demo directa (misión demo-autogestionada-landing,
+     * 22/10/2026, D3 del plan).
+     *
+     * 🔴 POR QUÉ vive acá y no en cada camino que agenda: hasta esta misión la lista estaba escrita a
+     * mano adentro de `LeadAiService::apply_parsed_response()` (rama demo directa). Ahora también
+     * reserva la landing, y un lead agendado desde la web tiene que quedar EXACTAMENTE igual que uno
+     * agendado por el agente: los mismos relojes reseteados, el setup en pendiente, los dos checks
+     * prendidos. Con dos listas, la primera vez que alguien agregara un campo en una sola, los leads
+     * de la web dejarían de recibir el recordatorio o el check sin que nada lo denuncie. El agente la
+     * usa a través de este método con el resultado idéntico al de antes.
+     *
+     * Lo que significa cada uno (texto movido tal cual de `LeadAiService`):
+     *   - Ventana extendida siempre (`demo_flexible`): es lo que le deja al lead varias horas para
+     *     entrar sin que los relojes del ciclo lo muevan de estado.
+     *   - Se resetean los relojes del turno anterior, si lo hubo (re-asignación después de un
+     *     cancelar_demo o de un vencimiento): el recordatorio y el check tienen que poder salir de
+     *     nuevo, y el setup tiene que volver a correr —la instancia puede ser otra, o la misma
+     *     re-sembrada para otro lead entre medio—; el formulario ya completado hace que
+     *     `leads:run-demo-setup` lo dispare en el próximo tick.
+     *   - Los dos checks de la demo directa se prenden solos al agendar (D9 del plan, 17/10/2026): el
+     *     "¿pudiste entrar?" post-video (CheckDemoIngresoPostVideo) y el "¿cómo venís?" al cumplirse la
+     *     duración (CheckDemoFin). Se prenden en ESTE UPDATE y no en el default global a propósito: los
+     *     leads viejos y los agendados a mano quedan como están.
+     *
+     * @param Demo   $demo   Instancia asignada.
+     * @param Carbon $inicio Inicio del turno (zona de la demo).
+     * @param Carbon $fin    Fin del turno (tope de la ventana extendida).
+     *
+     * @return array<string, mixed>
+     */
+    public function campos_de_reserva(Demo $demo, Carbon $inicio, Carbon $fin): array
+    {
+        return [
+            'demo_id'                       => (int) $demo->id,
+            'demo_date'                     => $inicio->format('Y-m-d'),
+            'demo_start_time'               => $inicio->format('H:i'),
+            'demo_end_time'                 => $fin->format('H:i'),
+            'demo_flexible'                 => true,
+            'status'                        => 'demo_agendada',
+            'recordatorio_demo_enviado'     => false,
+            'demo_check_ingreso_enviado'    => false,
+            'demo_check_ingreso_enviado_at' => null,
+            'demo_setup_status'             => 'pendiente',
+            'auto_check_ingreso_demo'       => true,
+            'auto_check_fin_demo'           => true,
+        ];
+    }
+
+    /**
      * Cuándo se libera la primera instancia si ahora mismo no hay ninguna libre: el menor "fin +
      * gracia" entre las ventanas que ocupan cada demo. Null si hay alguna libre (no hay nada que
      * esperar) o si no hay demos cargadas.

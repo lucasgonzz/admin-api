@@ -3351,7 +3351,7 @@ TXT;
      *
      * @return string|null
      */
-    protected function validar_inicio_de_demo_pedida(Carbon $inicio, Carbon $ahora): ?string
+    public function validar_inicio_de_demo_pedida(Carbon $inicio, Carbon $ahora): ?string
     {
         if ($inicio->lt($ahora->copy()->addMinutes(self::minimo_minutos_para_turno_pedido()))) {
             return 'muy_pronto';
@@ -4321,7 +4321,7 @@ TXT;
      *
      * @return void
      */
-    private function ajustar_token_de_ingreso_al_turno(Lead $lead, int $demo_id, string $demo_date, string $demo_end, bool $es_reagendado): void
+    public function ajustar_token_de_ingreso_al_turno(Lead $lead, int $demo_id, string $demo_date, string $demo_end, bool $es_reagendado): void
     {
         if (! empty($lead->demo_ingreso_token) && is_null($lead->demo_ingreso_token_revocado_at)) {
             try {
@@ -7293,29 +7293,15 @@ TXT;
                      * ser otra, o la misma re-sembrada para otro lead entre medio—; el formulario ya
                      * completado hace que `leads:run-demo-setup` lo dispare en el próximo tick.
                      */
-                    $campos_asignacion = [
-                        'demo_id'                       => $demo_id,
-                        'demo_date'                     => $demo_date,
-                        'demo_start_time'               => $demo_start,
-                        'demo_end_time'                 => $demo_end,
-                        /* Ventana extendida siempre: es lo que le deja al lead varias horas para
-                         * entrar sin que los relojes del ciclo lo muevan de estado. */
-                        'demo_flexible'                 => true,
-                        'status'                        => 'demo_agendada',
-                        'recordatorio_demo_enviado'     => false,
-                        'demo_check_ingreso_enviado'    => false,
-                        'demo_check_ingreso_enviado_at' => null,
-                        'demo_setup_status'             => 'pendiente',
-                        /* Los dos checks de la demo directa se prenden solos al agendar (D9 del plan,
-                         * 17/10/2026): el "¿pudiste entrar?" post-video (CheckDemoIngresoPostVideo)
-                         * y el "¿cómo venís?" al cumplirse la duración (CheckDemoFin). Hasta hoy
-                         * nacían apagados (default false del 18/7) y solo los prendía el panel, así
-                         * que no corrían para nadie. Se prenden en ESTE UPDATE y no en el default
-                         * global a propósito: los leads viejos y los agendados a mano quedan como
-                         * están. */
-                        'auto_check_ingreso_demo'       => true,
-                        'auto_check_fin_demo'           => true,
-                    ];
+                    /* La lista de campos vive en DemoDirectaService::campos_de_reserva() desde el
+                     * 22/10/2026 (misión demo-autogestionada-landing): la reserva de la landing escribe
+                     * la MISMA, y un lead agendado desde la web tiene que quedar igual que uno agendado
+                     * acá. Mismo resultado que la lista que estaba escrita en este lugar: demo_id,
+                     * demo_date, demo_start_time y demo_end_time de la ventana, demo_flexible,
+                     * status demo_agendada, relojes del turno anterior reseteados, setup en pendiente y
+                     * los dos checks de la demo directa prendidos (el porqué de cada uno, en el
+                     * docblock de ese método). */
+                    $campos_asignacion = $directa->campos_de_reserva($demo_libre, $ventana['inicio'], $libre['fin']);
                     Lead::query()->whereKey($lead->id)->update($campos_asignacion);
                     foreach ($campos_asignacion as $campo_asignacion => $valor_asignacion) {
                         $lead->{$campo_asignacion} = $valor_asignacion;
