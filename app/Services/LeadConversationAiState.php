@@ -13,18 +13,22 @@ use App\Models\LeadMessage;
 class LeadConversationAiState
 {
     /**
-     * El escudo y la ventana supervisada son aprobación humana, no una demora larga.
-     * Se usa también al ejecutar jobs viejos: el lead puede entrar al tramo después
-     * de haber encolado una respuesta que todavía no tenía requiere_verificacion.
+     * El escudo del lead es aprobación humana, no una demora larga.
+     * Se usa también al ejecutar jobs viejos: el escudo se puede haber prendido después de haber
+     * encolado una respuesta que todavía no tenía requiere_verificacion.
+     *
+     * 🔴 22/10/2026 (decisión de Lucas, lead Christian): lo ÚNICO que decide es el escudo del lead
+     * (`requiere_verificacion_mensajes`). Hasta hoy también retenía a cualquier lead parado en un
+     * estado del tramo de agenda aunque el escudo estuviera apagado, o sea que apagarlo a mano no
+     * servía. El escudo lo prende solo `Lead::booted()` cuando el lead entra al tramo; desde ahí, lo
+     * prende o apaga una persona y nada lo toca.
      */
     public static function requiere_aprobacion_humana(Lead $lead): bool
     {
         if (AgendaDemoAutomaticaPolicy::activa()) {
             return ! app(AgendaDemoAutomaticaPolicy::class)->evaluar($lead)['permitido'];
         }
-        return (bool) $lead->requiere_verificacion_mensajes
-            || (LeadWhatsappOnboardingSettings::get_auto_activar_verificacion_al_solicitar_disponibilidad()
-                && in_array((string) $lead->status, Lead::ESTADOS_VENTANA_VERIFICACION_MENSAJES, true));
+        return (bool) $lead->requiere_verificacion_mensajes;
     }
 
     /**

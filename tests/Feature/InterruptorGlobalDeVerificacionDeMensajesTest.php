@@ -317,17 +317,50 @@ class InterruptorGlobalDeVerificacionDeMensajesTest extends TestCase
     }
 
     /**
-     * (f) Interruptor en true (default): las 5 condiciones del gate siguen reteniendo, exactamente
-     * como antes de esta misión.
+     * (f) Interruptor en true (default): el gate retiene las acciones de agenda del lead que TODAVÍA
+     * está fuera del tramo (agendar y cancelar lo meten adentro en este mismo turno, que es el
+     * momento en que el latch prende el escudo).
+     *
+     * 🔴 22/10/2026 (decisión de Lucas, lead Christian): antes retenía también al lead YA adentro del
+     * tramo (el escenario «lead ya en el tramo» y las dos acciones que solo existen desde
+     * demo_agendada), por el solo hecho del estado. Eso ya no es así: ver el test de abajo.
      */
-    public function test_global_en_true_las_cinco_condiciones_del_gate_retienen(): void
+    public function test_global_en_true_el_gate_retiene_las_acciones_que_meten_al_lead_en_el_tramo(): void
     {
         AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '1');
         $service = $this->service();
 
-        foreach ($this->escenarios_del_gate() as $nombre => list($status, $parsed)) {
+        foreach (['agendar_demo', 'cancelar_demo'] as $nombre) {
+            $escenarios = $this->escenarios_del_gate();
+            list($status, $parsed) = $escenarios[$nombre];
             $lead = $this->crear_lead($status);
             $this->assertTrue($service->gate($lead, $parsed), "Escenario '$nombre': el gate debería retener con el interruptor prendido.");
+        }
+    }
+
+    /**
+     * (f2) 🔴 22/10/2026 (decisión de Lucas, lead Christian): un lead parado en CUALQUIER estado del
+     * tramo con el escudo apagado a mano NO se retiene por estar ahí, ni sus acciones de agenda,
+     * aunque el interruptor global esté prendido. El gate no es el que decide ya: solo el escudo.
+     */
+    public function test_global_en_true_el_lead_ya_en_el_tramo_con_el_escudo_apagado_no_retiene(): void
+    {
+        $service = $this->service();
+
+        foreach (Lead::ESTADOS_VENTANA_VERIFICACION_MENSAJES as $estado) {
+            /* Se crea con el interruptor apagado para que el latch no prenda el escudo al nacer: es
+             * exactamente el lead al que Lucas le apagó el escudo estando adentro. */
+            AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '0');
+            $lead = $this->crear_lead($estado);
+            $this->assertFalse((bool) $lead->requiere_verificacion_mensajes, "Montaje inválido en '$estado': el lead nació marcado.");
+            AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '1');
+
+            foreach ([[], ['agendar_demo' => true], ['cancelar_demo' => true], ['confirmar_ingreso' => true], ['marcar_no_ingreso' => true]] as $parsed) {
+                $this->assertFalse(
+                    $service->gate($lead, $parsed),
+                    "Lead en '$estado' con el escudo apagado: el gate no debe retener (" . json_encode($parsed) . ').'
+                );
+            }
         }
     }
 
@@ -370,9 +403,14 @@ class InterruptorGlobalDeVerificacionDeMensajesTest extends TestCase
         $lead_on = $this->crear_lead('demo_agendada');
         $this->assertFalse((bool) $lead_on->requiere_verificacion_mensajes, 'Montaje inválido: el lead nació marcado.');
 
+        /* 22/10/2026: el control positivo es el ESCUDO prendido, no el estado. Estar en demo_agendada
+         * con el escudo apagado ya no retiene (ver el test (f2)). */
+        $lead_on->requiere_verificacion_mensajes = true;
+        $lead_on->save();
+
         AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '1');
         $msg_on = $service->crear($lead_on, $parsed);
-        $this->assertNotEmpty($msg_on->pending_actions, 'Con el interruptor prendido, el paquete debería quedar diferido.');
+        $this->assertNotEmpty($msg_on->pending_actions, 'Con el escudo prendido, el paquete debería quedar diferido.');
         $this->assertTrue((bool) $msg_on->requiere_verificacion);
 
         AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '0');
@@ -434,7 +472,8 @@ class InterruptorGlobalDeVerificacionDeMensajesTest extends TestCase
 
     /**
      * (j) Lo que el interruptor NUNCA apaga: el flag por-lead prendido a mano, y el
-     * requiere_verificacion explícito que devuelva Claude en su propia respuesta.
+     * requiere_verificacion que dejan las GUARDAS de integridad en el paquete (el que pide la IA por
+     * su cuenta ya no llega en esa clave desde el 22/10/2026: ver VerificacionSoloPorEscudoDelLeadTest).
      */
     public function test_global_en_false_no_apaga_el_flag_por_lead_ni_el_requiere_verificacion_explicito(): void
     {
@@ -457,7 +496,7 @@ class InterruptorGlobalDeVerificacionDeMensajesTest extends TestCase
         $parsed_claude = $parsed;
         $parsed_claude['requiere_verificacion'] = true;
         $msg_claude = $service->crear($lead_claude, $parsed_claude);
-        $this->assertNotEmpty($msg_claude->pending_actions, 'El requiere_verificacion explícito de Claude tiene que retener, apagado o prendido el interruptor global.');
+        $this->assertNotEmpty($msg_claude->pending_actions, 'El requiere_verificacion de una guarda de integridad tiene que retener, apagado o prendido el interruptor global.');
         $this->assertTrue((bool) $msg_claude->requiere_verificacion);
     }
 
@@ -564,13 +603,22 @@ class InterruptorGlobalDeVerificacionDeMensajesTest extends TestCase
         $service = app(LeadFollowupService::class);
         $this->sembrar_regla_y_plantilla_de_seguimiento();
 
-        $lead_on      = $this->crear_lead_con_seguimiento_pendiente('1');
+        /* 22/10/2026 (decisión de Lucas): con el interruptor prendido retiene el ESCUDO del lead, no el
+         * estado. El lead se marca como lo dejaría el latch al entrar al tramo. */
+        $lead_on = $this->crear_lead_con_seguimiento_pendiente('1');
+        $lead_on->requiere_verificacion_mensajes = true;
+        $lead_on->save();
         $resultado_on = $service->force_followup_now($lead_on);
-        $this->assertSame('verificacion', $resultado_on['via'], 'Interruptor prendido: el seguimiento del tramo debería quedar retenido.');
+        $this->assertSame('verificacion', $resultado_on['via'], 'Interruptor prendido y escudo prendido: el seguimiento del tramo debería quedar retenido.');
         $msg_on = LeadMessage::query()->where('lead_id', $lead_on->id)->where('is_followup', true)->first();
         $this->assertNotNull($msg_on);
         $this->assertTrue((bool) $msg_on->requiere_verificacion);
         $this->assertNull($msg_on->whatsapp_message_id, 'No debería haber salido nada.');
+
+        /* 22/10/2026: interruptor prendido, lead en el tramo y escudo APAGADO a mano → sale solo. */
+        $lead_apagado      = $this->crear_lead_con_seguimiento_pendiente('1');
+        $resultado_apagado = $service->force_followup_now($lead_apagado);
+        $this->assertSame('template', $resultado_apagado['via'], 'Escudo apagado a mano: estar en el tramo no retiene el seguimiento.');
 
         $lead_off      = $this->crear_lead_con_seguimiento_pendiente('0');
         $resultado_off = $service->force_followup_now($lead_off);

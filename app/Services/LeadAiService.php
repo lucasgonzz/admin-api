@@ -946,7 +946,7 @@ TXT;
             } elseif ($estado_sugerido === 'demo_agendada') {
                 /* `demo_agendada` sin agendar_demo: el modelo confirma una demo que nadie asignó (el
                  * lead 30 del 4/8/2026). Con grilla lo frenaba la segunda llamada; acá no hay. */
-                $solo_metadatos = ['mensaje_sugerido', 'estado_sugerido', 'razonamiento', 'tipo_respuesta', 'fuentes_kb', 'requiere_verificacion', 'nota_para_setter'];
+                $solo_metadatos = ['mensaje_sugerido', 'estado_sugerido', 'razonamiento', 'tipo_respuesta', 'fuentes_kb', 'requiere_verificacion', 'requiere_verificacion_pedida_por_claude', 'nota_para_setter'];
                 $acciones_originales = array_filter(array_diff_key($respuesta_directa_original, array_flip($solo_metadatos)));
                 $estado_redundante = ($pedido_temporal['tipo'] ?? '') === 'conservar' && ! empty($pedido_temporal['reserva_vigente'])
                     && ($respuesta_directa_original['estado_sugerido'] ?? null) === $lead->status && $lead->status === 'demo_agendada'
@@ -1532,7 +1532,12 @@ TXT;
                  * (1/9/2026) es la RETENCIÓN: sin él, create_message_and_update_lead() no difiere
                  * este paquete por este motivo (aunque puede seguir reteniéndolo por otro). */
                 $parsed['estado_sugerido'] = 'solicita_disponibilidad';
-                if ($this->retencion_por_tramo_de_agenda_activa()) {
+                /* 22/10/2026: solo si el lead TODAVÍA está fuera del tramo. Retener el mensaje que mete al
+                 * lead en el tramo va con el momento en que el latch de Lead::booted() prende el escudo.
+                 * Con el lead ya adentro y el escudo apagado a mano, esto no puede volver a retener nada. */
+                if ($this->retencion_por_tramo_de_agenda_activa()
+                    && ! in_array((string) $lead->status, Lead::ESTADOS_VENTANA_VERIFICACION_MENSAJES, true)
+                ) {
                     $parsed['requiere_verificacion'] = true;
                 }
                 Log::channel('daily')->debug('LeadAiService: mensaje de disponibilidad elevado a solicita_disponibilidad (herencia de tramo).', [
@@ -6064,16 +6069,18 @@ TXT;
          *   1. El tramo de agenda lo exige, Y el interruptor global de Cuenta está prendido (ver
          *      requires_agendamiento_verification_gate() y retencion_por_tramo_de_agenda_activa();
          *      condicional desde el 1/9/2026, antes era incondicional).
-         *   2. Claude pidió verificación explícita en su propia respuesta (requiere_verificacion: true).
+         *   2. Una guarda de integridad marcó el paquete (requiere_verificacion: true). Desde el
+         *      22/10/2026 el que pide la IA por su cuenta ya no cuenta (ver parse_json_response()).
          *   3. El lead tiene requiere_verificacion_mensajes = true (toggle por-lead / auto-encendido al
          *      entrar al tramo de agenda, ver Lead::booted, prompt 406).
          *
          * Si ninguna aplica, el mensaje se envía de inmediato y aplica sus acciones en el acto,
          * como siempre (apply_parsed_response()).
          */
+        /* 🔴 22/10/2026: ver el_paquete_queda_retenido(). La condición 1 solo vale para el lead que
+         * todavía está fuera del tramo. */
         $retenido_para_verificacion = $this->requires_agendamiento_verification_gate($lead, $parsed)
-            || ! empty($parsed['requiere_verificacion'])
-            || (bool) $lead->requiere_verificacion_mensajes;
+            || $this->el_paquete_queda_retenido($lead, $parsed);
 
         if ($retenido_para_verificacion) {
             return $this->create_pending_agendamiento_message($lead, $parsed, $is_followup, $calendar_snapshot);
@@ -6134,20 +6141,29 @@ TXT;
         }
 
         /*
-         * FIX (6/7/2026, decisión de Lucas — zona manual por estado del lead): si el lead YA está
-         * en el tramo de agenda (solicita_disponibilidad en adelante), cualquier respuesta se
-         * difiere y requiere aprobación, sin importar a qué estado apunte el mensaje. Cierra el
-         * hueco donde, con el lead ya en solicita_disponibilidad, Claude sugería un estado fuera
-         * del tramo (ej. en_pausa, cerrado_perdido) y ese mensaje se auto-enviaba sin supervisión.
+         * 🔴 22/10/2026 (decisión de Lucas, lead Christian): la verificación solo la prende SOLA el
+         * latch de `Lead::booted()` en el instante en que el lead pasa de FUERA a DENTRO del tramo, y
+         * desde ahí la maneja una persona con el escudo de la conversación. Estar dentro del tramo ya
+         * NO retiene nada por sí mismo: hasta hoy este gate difería TODA respuesta de un lead en
+         * solicita_disponibilidad..demo_pendiente_de_terminar (y sus acciones de agenda), así que el
+         * escudo apagado a mano no servía de nada y el lead seguía esperando aprobación. Con el lead
+         * adentro, lo único que retiene es el escudo prendido, y ese operando vive en el llamador
+         * (create_message_and_update_lead()): acá no hay nada más que mirar.
          */
-        if (in_array((string) $lead->status, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true)) {
-            return true;
+        if (in_array((string) $lead->status, Lead::ESTADOS_VENTANA_VERIFICACION_MENSAJES, true)) {
+            return false;
         }
 
         /* Acá había, hasta el 17/10/2026, una cláusula que retenía si el `estado_sugerido` caía en el
          * tramo. Se sacó a propósito (ver el docblock): el mensaje que lleva al lead a
-         * `solicita_disponibilidad` sale solo. No la vuelvas a poner "por seguridad": lo que sí
-         * sigue retenido es toda ACCIÓN de agenda, abajo. */
+         * `solicita_disponibilidad` sale solo. No la vuelvas a poner "por seguridad".
+         *
+         * Lo que sigue es para el lead que TODAVÍA está fuera del tramo (nuevo, contactado,
+         * calificado…) y cuya acción de agenda lo va a meter adentro en este mismo turno: ese es el
+         * momento en que el latch prende el escudo, así que el paquete que lo provoca queda retenido
+         * igual que el escudo que se enciende con él. Las acciones que solo existen con el lead ya
+         * adentro (confirmar_ingreso, marcar_no_ingreso: piden demo_agendada) dejaron de gatearse
+         * acá a propósito, por lo de arriba. */
 
         /* agendar_demo siempre termina en 'demo_agendada' (slot válido) o 'solicita_disponibilidad'
          * (slot inválido / lock ocupado por otra request) — ambos ya están en la lista gateada. */
@@ -6159,19 +6175,36 @@ TXT;
             return true;
         }
 
-        $lead_status = (string) $lead->status;
-
-        /* confirmar_ingreso fuerza el estado a demo_en_curso (ver apply_parsed_response). */
-        if (! empty($parsed['confirmar_ingreso']) && $lead_status === 'demo_agendada') {
-            return true;
-        }
-
-        /* marcar_no_ingreso fuerza el estado a demo_pendiente_de_ingreso (ver apply_parsed_response). */
-        if (! empty($parsed['marcar_no_ingreso']) && $lead_status === 'demo_agendada') {
-            return true;
-        }
-
         return false;
+    }
+
+    /**
+     * ¿Este paquete queda retenido para aprobación humana?
+     *
+     * 🔴 22/10/2026 (decisión de Lucas, lead Christian). Retiene en dos casos y nada más:
+     *
+     *   - `$lead->requiere_verificacion_mensajes`: el escudo de la conversación. Lo prende solo
+     *     `Lead::booted()` al entrar al tramo, y desde ahí lo apaga o prende una persona. Apagado,
+     *     queda apagado: nada lo vuelve a prender hasta que el lead salga del tramo y entre de nuevo.
+     *   - `$parsed['requiere_verificacion']`, pero ya sin el que pide la IA por su cuenta: ese se
+     *     separa al leer la respuesta (parse_json_response(): queda en
+     *     `requiere_verificacion_pedida_por_claude` y no retiene). Lo que sobrevive en esta clave es
+     *     lo que ponen las GUARDAS DE INTEGRIDAD del archivo (respaldo documental, correo dudoso,
+     *     cancelación sin acción, horario descartado, disponibilidad caída, oferta mal formada…) y
+     *     el mensaje que mete al lead en el tramo (ver la segunda llamada de disponibilidad): son
+     *     paquetes que el SISTEMA detectó defectuosos, no una «verificación» que Lucas controle.
+     *
+     * Ya NO retiene: que la IA se muestre insegura, ni estar parado en un estado del tramo.
+     *
+     * @param Lead                 $lead
+     * @param array<string, mixed> $parsed
+     *
+     * @return bool
+     */
+    protected function el_paquete_queda_retenido(Lead $lead, array $parsed): bool
+    {
+        return (bool) $lead->requiere_verificacion_mensajes
+            || ! empty($parsed['requiere_verificacion']);
     }
 
     /**
@@ -6189,10 +6222,15 @@ TXT;
      * apply_parsed_response(). También en LeadFollowupService, para seguimientos por plantilla.
      *
      * Lo que este interruptor NO apaga, y no debe apagar nunca: el flag por-lead
-     * requiere_verificacion_mensajes (toggle del escudo en la conversación), el requiere_verificacion
-     * explícito que devuelva Claude en su propia respuesta, ni las guardas de error del archivo
-     * (respuesta sin respaldo documental, agenda fuera de secuencia, slot descartado, discrepancia
-     * de fecha).
+     * requiere_verificacion_mensajes (toggle del escudo en la conversación) ni las guardas de error
+     * del archivo (respuesta sin respaldo documental, agenda fuera de secuencia, slot descartado,
+     * discrepancia de fecha).
+     *
+     * 🔴 22/10/2026 (decisión de Lucas, lead Christian): este interruptor gobierna ÚNICAMENTE el
+     * momento en que el escudo del lead se prende solo (Lead::booted(), al entrar al tramo) y la
+     * retención del mensaje que provoca esa entrada. Ya no retiene a un lead que está adentro del
+     * tramo con el escudo apagado, y el `requiere_verificacion` que pide la IA por su cuenta ya no
+     * retiene nunca (ver el_paquete_queda_retenido()).
      *
      * No se memoiza a propósito: son a lo sumo tres SELECT por generación de mensaje, contra una
      * llamada a la API de Claude, y cachearlo en la instancia rompería los tests que apagan y
@@ -6846,7 +6884,15 @@ TXT;
         $estado          = $pipeline_status->slug;
 
         $razonamiento = isset($parsed['razonamiento']) ? (string) $parsed['razonamiento'] : null;
-        $req_verif    = ! empty($parsed['requiere_verificacion']);
+        /* 🔴 22/10/2026: un mensaje que llega acá sin ser una aprobación queda marcado «requiere
+         * verificación» solo si el escudo del lead está prendido o una guarda de integridad lo marcó
+         * (ver el_paquete_queda_retenido()). El que pide la IA por su cuenta ya no llega en esta clave
+         * (parse_json_response()): antes sí, y por eso un lead con el escudo apagado igual avisaba
+         * «Requiere verificación humana» y salía con la demora de respaldo. En una aprobación el
+         * mensaje ya estaba retenido y se conserva la marca que traía. */
+        $req_verif    = $for_approval
+            ? ! empty($parsed['requiere_verificacion'])
+            : $this->el_paquete_queda_retenido($lead, $parsed);
 
         /* Solo marcamos el mensaje si la sugerencia implica un cambio de estado del lead. */
         $suggested_lead_status = $estado !== $previous_status ? $estado : null;
@@ -8421,11 +8467,9 @@ TXT;
          * acciones de agenda que fuerzan un estado del tramo (agendar_demo, cancelar_demo) nunca llegan
          * acá sin pasar por el gate, así que el respaldo no las pierde.
          */
-        if (! $for_approval && ((bool) $lead->requiere_verificacion_mensajes
-            || (in_array($previous_status, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true)
-                && $this->retencion_por_tramo_de_agenda_activa()))) {
-            $req_verif = true;
-        }
+        /* 🔴 22/10/2026 (decisión de Lucas): el respaldo por tramo se sacó. Estar en el tramo con el
+         * escudo apagado a mano ya no marca nada: solo lo marca el escudo prendido, y eso ya lo
+         * resolvió el cálculo de `$req_verif` arriba (el_paquete_queda_retenido()). */
 
         /* Payload común a la creación (mensaje nuevo) y a la actualización in-place (aprobación
          * de un paquete diferido, ver $existing_message). calendar_snapshot: si esta llamada no
@@ -11526,11 +11570,39 @@ TXT;
             return array_key_exists('mensaje_sugerido', $c);
         });
 
-        if (! empty($candidates_with_mensaje)) {
-            return end($candidates_with_mensaje);
+        $elegido = ! empty($candidates_with_mensaje) ? end($candidates_with_mensaje) : end($candidates);
+
+        return $this->separar_la_verificacion_pedida_por_claude($elegido);
+    }
+
+    /**
+     * Separa el `requiere_verificacion` que la IA devuelve por su cuenta, para que no retenga.
+     *
+     * 🔴 22/10/2026 (decisión de Lucas, lead Christian): el escudo de verificación de la conversación
+     * es el único dueño de «este lead espera mi aprobación». Con el escudo apagado, todo lo que la IA
+     * sugiere tiene que salir solo; antes, que Claude marcara `requiere_verificacion: true` (porque no
+     * estaba segura, o porque el prompt se lo pide al escalar) alcanzaba para retener el mensaje, avisar
+     * «Requiere verificación humana» al admin y mandarlo con la demora de respaldo, aunque el escudo
+     * estuviera apagado.
+     *
+     * Se mueve a `requiere_verificacion_pedida_por_claude` (queda a la vista en pending_actions y la
+     * sigue leyendo la política opcional AgendaDemoAutomaticaPolicy) y la clave `requiere_verificacion`
+     * queda para lo que ponen las guardas de integridad del sistema, que sí retienen (ver
+     * el_paquete_queda_retenido()). No toca `requiere_intervencion_humana`: derivar a una persona es
+     * otro control, con su propio aviso y su propio apagado de las respuestas automáticas.
+     *
+     * @param array<string, mixed> $parsed Respuesta ya decodificada.
+     *
+     * @return array<string, mixed>
+     */
+    protected function separar_la_verificacion_pedida_por_claude(array $parsed): array
+    {
+        if (array_key_exists('requiere_verificacion', $parsed)) {
+            $parsed['requiere_verificacion_pedida_por_claude'] = ! empty($parsed['requiere_verificacion']);
+            unset($parsed['requiere_verificacion']);
         }
 
-        return end($candidates);
+        return $parsed;
     }
 }
 

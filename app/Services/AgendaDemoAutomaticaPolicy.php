@@ -38,7 +38,7 @@ class AgendaDemoAutomaticaPolicy
             $motivo = 'intervencion_explicita';
         } elseif ($this->cancelacion_sin_accion($lead, $parsed)) {
             $motivo = 'cancelacion_sin_accion';
-        } elseif (! empty($parsed['requiere_intervencion_humana']) || ! empty($parsed['requiere_verificacion']) || ($mensaje && $mensaje->requiere_verificacion)) {
+        } elseif (! empty($parsed['requiere_intervencion_humana']) || ! empty($parsed['requiere_verificacion']) || ! empty($parsed['requiere_verificacion_pedida_por_claude']) || ($mensaje && $mensaje->requiere_verificacion)) {
             $motivo = 'verificacion_explicita';
         } elseif (! empty($parsed['conflicto_correo']) || ! empty($parsed['agendar_demo']['conflicto_temporal']) || ! empty($parsed['agendar_demo']['inicio_ilegible'])) {
             $motivo = 'datos_incoherentes';
