@@ -66,7 +66,7 @@ class ClaudeMetaTemplatesController extends Controller
      * Crea una plantilla en Meta y la registra en `followup_templates`.
      *
      * @param Request             $request Body: name, category, language, body, ejemplos[], uso,
-     *                                     estado, dia_numero, dry_run.
+     *                                     estado, dia_numero, no_marca_error_de_entrega, dry_run.
      * @param MetaTemplateService $meta
      *
      * @return \Illuminate\Http\JsonResponse
@@ -87,6 +87,9 @@ class ClaudeMetaTemplatesController extends Controller
                 'uso'        => 'required|string|max:255',
                 'estado'     => 'nullable|string|max:40',
                 'dia_numero' => 'nullable|integer|min:1',
+                /* Campaña masiva (22/10/2026): el rechazo de Meta de esta plantilla no pinta rojo
+                   en el panel. Opcional y en false si no viene: una llamada vieja sigue igual. */
+                'no_marca_error_de_entrega' => 'nullable|boolean',
                 'dry_run'    => 'nullable|boolean',
             ], [
                 'name.required'     => 'name es obligatorio: es el nombre con el que la plantilla queda en Meta.',
@@ -156,6 +159,14 @@ class ClaudeMetaTemplatesController extends Controller
 
         $componentes = $this->armar_componentes($cuerpo, $ejemplos);
 
+        /* Si la plantilla es para una campaña masiva a leads fríos: sus rechazos de Meta
+           (`whatsapp_delivery_status = 'fallido'`) no pintan rojo ni cuentan en la tarjeta. Ver
+           Lead::apply_condicion_entrega_fallida_que_cuenta(). `filled` y no `boolean(..., false)`
+           por lo mismo que el dry_run: un `null` o `""` explícito es «no vino», y no vino es false. */
+        $no_marca_error_de_entrega = $request->filled('no_marca_error_de_entrega')
+            ? $request->boolean('no_marca_error_de_entrega')
+            : false;
+
         /* --- Freno 1: dry_run por defecto. --- */
         /* `filled` y no `boolean('dry_run', true)`: un `"dry_run": null` o `""` explícito daría
            false y CREARÍA la plantilla en Meta. Ausente o vacío es simulación; mismo patrón que el
@@ -182,6 +193,7 @@ class ClaudeMetaTemplatesController extends Controller
                     'meta_status'   => 'PENDING',
                     'uso'           => $uso,
                     'language_code' => $idioma,
+                    'no_marca_error_de_entrega' => $no_marca_error_de_entrega,
                 ],
                 'variables' => $this->placeholders($cuerpo),
             ], 200);
@@ -238,6 +250,7 @@ class ClaudeMetaTemplatesController extends Controller
             'components'       => $componentes,
             'uso'              => $uso,
             'solo_si_ingreso_confirmado' => false,
+            'no_marca_error_de_entrega'  => $no_marca_error_de_entrega,
         ]);
 
         Log::channel('daily')->info('ClaudeMetaTemplatesController: plantilla creada en Meta y registrada.', [
@@ -615,6 +628,8 @@ class ClaudeMetaTemplatesController extends Controller
             'body_template'    => $fila->body_template,
             'language_code'    => $fila->language_code,
             'activa'           => (bool) $fila->activa,
+            /* Si sus rechazos de Meta pintan rojo en el panel (false) o no (true, campaña masiva). */
+            'no_marca_error_de_entrega' => (bool) $fila->no_marca_error_de_entrega,
             'meta_status'      => $fila->meta_status,
             'meta_category'    => $fila->meta_category,
             'meta_template_id' => $fila->meta_template_id,

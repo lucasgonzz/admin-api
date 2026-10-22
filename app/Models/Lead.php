@@ -743,6 +743,13 @@ class Lead extends Model
      * entrega fallida con `$incluir_entrega_fallida = true`): acá la entrega fallida entra siempre,
      * como entraba en el badge. No unificarlos sin leer `TarjetasDeEstadoDeLeadsTest`.
      *
+     * 🔴 Desde el 22/10/2026 (misión campana-masiva-sin-rojo) la entrega fallida no entra entera:
+     * entra la que {@see self::apply_condicion_entrega_fallida_que_cuenta()} dice que cuenta, o sea
+     * sin los rechazos de Meta de una plantilla de campaña masiva (`no_marca_error_de_entrega`). El
+     * `is_error` queda exactamente igual: el flag no lo apaga. Y el «sin resolver» tampoco cambia:
+     * el saliente fallido de la campaña sigue siendo actividad real (no es evento de estado), así
+     * que un error viejo del lead queda resuelto por él, como ya pasaba.
+     *
      * @param \Illuminate\Database\Query\Builder $query Subconsulta ya apuntada a `lead_messages`
      *                                                  (sin alias), correlacionada con el lead.
      *
@@ -752,7 +759,9 @@ class Lead extends Model
     {
         $query->where(function ($error_source) {
                 $error_source->where('lead_messages.is_error', true)
-                    ->orWhere('lead_messages.whatsapp_delivery_status', 'fallido');
+                    ->orWhere(function ($entrega_fallida) {
+                        self::apply_condicion_entrega_fallida_que_cuenta($entrega_fallida);
+                    });
             })
             ->whereNotExists(function ($posterior) {
                 // Actividad real posterior: mensaje del MISMO lead, id mayor, que NO sea evento de estado.
@@ -761,6 +770,47 @@ class Lead extends Model
                     ->whereColumn('lm_post.lead_id', 'lead_messages.lead_id')
                     ->whereColumn('lm_post.id', '>', 'lead_messages.id')
                     ->where('lm_post.is_status_event', false);
+            });
+    }
+
+    /**
+     * 🔴 LA definición en SQL de "este saliente tuvo una entrega fallida que cuenta como error", y la única.
+     *
+     * Misión campana-masiva-sin-rojo (22/10/2026). Hasta ese día toda entrega fallida que avisa
+     * Kapso (`whatsapp_delivery_status = 'fallido'`) era error de envío. Ese día salió la plantilla
+     * `cc_reactivacion_agentes_ia` a 561 leads fríos, y en una campaña así un rechazo de Meta es
+     * esperable y no pide que nadie haga nada: siete rojos sobre 187 en la primera tanda le
+     * ensuciaban el panel a Lucas sin ninguna acción posible.
+     *
+     * Cuenta la entrega fallida de cualquier mensaje **salvo** que el mensaje sea de una plantilla
+     * con `followup_templates.no_marca_error_de_entrega = 1`. Va con `whereNotExists` correlacionado
+     * y no con un join porque se aplica dentro de subconsultas que ya están armadas (el badge, la
+     * lista de chats, la tarjeta) y un join ahí cambiaría lo que cuentan. Un mensaje con
+     * `followup_template_id` nulo (texto libre, respuesta de la IA) no tiene plantilla que lo
+     * exima, así que sigue contando — el `whereColumn` contra un nulo no matchea ninguna fila.
+     *
+     * ⚠️ Solo la entrega `fallido`. El `is_error` (el sistema no pudo ni mandar) lo resuelve cada
+     * llamador por su cuenta y este flag no lo apaga: que Meta rechace un mensaje de campaña es
+     * ruido, que el sistema no lo haya podido mandar es un defecto nuestro.
+     *
+     * La usan {@see self::apply_condicion_error_sin_resolver()} (el rojo de la lista de chats, el
+     * filtro `solo_atencion=1`, el badge `failed_send_count` y el orden `atencion`) y la razón B de
+     * {@see self::scopeRequiereRevision()} con `$incluir_entrega_fallida = true` (las tarjetas). Si
+     * cada uno lo escribiera a mano, la tarjeta y la grilla volverían a contradecirse.
+     *
+     * @param \Illuminate\Database\Query\Builder $query Subconsulta ya apuntada a `lead_messages`
+     *                                                  (sin alias).
+     *
+     * @return void
+     */
+    public static function apply_condicion_entrega_fallida_que_cuenta($query): void
+    {
+        $query->where('lead_messages.whatsapp_delivery_status', 'fallido')
+            ->whereNotExists(function ($plantilla_de_campana) {
+                $plantilla_de_campana->selectRaw('1')
+                    ->from('followup_templates')
+                    ->whereColumn('followup_templates.id', 'lead_messages.followup_template_id')
+                    ->where('followup_templates.no_marca_error_de_entrega', true);
             });
     }
 
@@ -921,7 +971,12 @@ class Lead extends Model
                     ->where(function ($fuente) use ($incluir_entrega_fallida) {
                         $fuente->where('lead_messages.is_error', true);
                         if ($incluir_entrega_fallida) {
-                            $fuente->orWhere('lead_messages.whatsapp_delivery_status', 'fallido');
+                            /* La misma entrega fallida que pinta el rojo de la grilla: sin los
+                               rechazos de Meta de una plantilla de campaña masiva (22/10/2026). El
+                               camino por defecto (sin este parámetro) no pasa por acá. */
+                            $fuente->orWhere(function ($entrega_fallida) {
+                                self::apply_condicion_entrega_fallida_que_cuenta($entrega_fallida);
+                            });
                         }
                     })
                     ->whereNotExists(function ($posterior) {

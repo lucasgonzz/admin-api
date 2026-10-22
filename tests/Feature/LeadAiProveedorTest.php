@@ -150,7 +150,7 @@ class LeadAiProveedorTest extends TestCase
     /**
      * El razonamiento de DeepSeek va SIEMPRE apagado en el agente de leads, aunque alguien deje una
      * config vieja `thinking_leads` o intente prenderlo: con `enabled` los tokens de razonamiento
-     * se comerían el `max_tokens` (1000 / 400) y la respuesta saldría cortada.
+     * se comerían el `max_tokens` (3000 / 400) y la respuesta saldría cortada.
      *
      * @return void
      */

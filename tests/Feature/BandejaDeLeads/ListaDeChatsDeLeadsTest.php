@@ -18,8 +18,8 @@ use Tests\TestCase;
  * Lo que se fija acá es el CONTRATO con admin-spa, que otro constructor armó contra el texto del
  * plan y no contra este código: la forma de la fila clave por clave, qué mensaje es «el último»,
  * cómo se resume (texto de una línea, etiquetas de adjunto), los cuatro veredictos de `atencion`
- * (y que el rojo le gana al amarillo), el orden fijo (fijados → rojo → amarillo → último mensaje),
- * los tres filtros (`q`, `status` simple/lista/grupo, `solo_atencion`) y el paginado `{data, meta}`.
+ * (y que el rojo le gana al amarillo), el orden fijo (fijados → último mensaje, como WhatsApp),
+ * los cuatro filtros (`q`, `status` simple/lista/grupo, `solo_atencion`, `sin_responder`) y el paginado `{data, meta}`.
  *
  * Los contadores y el color no se recalculan a mano en los tests: se arman hilos reales y se mira
  * qué dice la fila. Si la definición única de «sin responder» cambia, cambia acá también.
@@ -39,6 +39,7 @@ class ListaDeChatsDeLeadsTest extends TestCase
         'pinned_at', 'manually_marked_unread', 'no_recibe_mensajes_at',
         'atendido_hasta_message_id',
         'atencion', 'atencion_motivo',
+        'sin_responder', 'mensaje_sin_responder',
         'pending_verification_count', 'failed_send_count', 'unread_count',
         'last_message_at',
         'ultimo_mensaje',
@@ -48,6 +49,8 @@ class ListaDeChatsDeLeadsTest extends TestCase
     /** @var array<int, string> Claves de `ultimo_mensaje`, en el orden del contrato. */
     private const CLAVES_DEL_ULTIMO_MENSAJE = [
         'id', 'sender', 'status', 'whatsapp_delivery_status', 'is_error', 'kind', 'created_at', 'texto',
+        // Sumada el 22/10/2026 (misión campana-masiva-sin-rojo): extensión aditiva del contrato con admin-spa.
+        'entrega_fallida_cuenta',
     ];
 
     /** @var Admin */
@@ -510,23 +513,25 @@ class ListaDeChatsDeLeadsTest extends TestCase
             }
         }
 
-        // Y en el orden va con los «sin color», no con los amarillos: con un último mensaje más nuevo
-        // que el del alcanzable, igual queda debajo de él.
-        $ids = array_map(function ($fila) {
-            return (int) $fila['id'];
-        }, $this->chats()['data']);
-        $this->assertSame([(int) $alcanzable->id, (int) $inalcanzable->id], $ids, 'El amarillo real va arriba del inalcanzable.');
+        // El orden es solo por último mensaje: el amarillo no sube. El inalcanzable (mensaje más nuevo)
+        // va primero aunque no tenga color, y el alcanzable amarillo queda debajo.
+        $this->assertSame(
+            [(int) $inalcanzable->id, (int) $alcanzable->id],
+            array_keys($this->filas()),
+            'El más reciente va arriba, tenga color o no.'
+        );
     }
 
     /**
-     * Orden fijo: fijados (el más reciente arriba) → rojo → amarillo → último mensaje.
+     * Orden como WhatsApp (22/10/2026): fijados (el más reciente arriba) → último mensaje DESC. El
+     * rojo y el amarillo se pintan pero no reordenan.
      *
-     * Los `sent_at` están elegidos para que el orden por último mensaje sea el CONTRARIO al que
-     * se espera por color: si el color no mandara, el test fallaría.
+     * Los `sent_at` están elegidos para que el orden por color fuera el CONTRARIO al esperado: si el
+     * color mandara, el test fallaría.
      *
      * @return void
      */
-    public function test_el_orden_es_fijados_rojo_amarillo_y_ultimo_mensaje(): void
+    public function test_el_orden_es_fijados_y_ultimo_mensaje_sin_que_el_color_reordene(): void
     {
         $ahora = Carbon::now();
 
@@ -538,7 +543,7 @@ class ListaDeChatsDeLeadsTest extends TestCase
         $amarillo = $this->crear_lead('Amarillo');
         $this->crear_mensaje($amarillo, ['content' => '¿Cuánto sale?', 'sent_at' => $ahora->copy()->subDays(4)]);
 
-        // Rojo, más viejo que el nuevo sin color.
+        // Rojo, más nuevo que el amarillo.
         $rojo = $this->crear_lead('Rojo');
         $this->crear_mensaje($rojo, ['sender' => 'setter', 'content' => 'Te paso los planes', 'whatsapp_delivery_status' => 'fallido', 'sent_at' => $ahora->copy()->subDays(3)]);
 
@@ -560,11 +565,199 @@ class ListaDeChatsDeLeadsTest extends TestCase
         $this->assertSame([
             (int) $fijado_reciente->id,
             (int) $fijado_viejo->id,
+            (int) $nuevo->id,
             (int) $rojo->id,
             (int) $amarillo->id,
-            (int) $nuevo->id,
             (int) $viejo->id,
-        ], $ids, 'Fijados (más reciente arriba) → rojo → amarillo → último mensaje DESC.');
+        ], $ids, 'Fijados (más reciente arriba) → último mensaje DESC; el color no reordena.');
+
+        // Y el color se sigue pintando.
+        $filas = $this->filas();
+        $this->assertSame('rojo', $filas[(int) $rojo->id]['atencion']);
+        $this->assertSame('amarillo', $filas[(int) $amarillo->id]['atencion']);
+    }
+
+    /**
+     * Un mensaje nuevo del lead sube su chat al primer lugar (entre los no fijados).
+     *
+     * @return void
+     */
+    public function test_el_ultimo_en_hablar_queda_primero(): void
+    {
+        $a = $this->crear_lead('A');
+        $this->crear_saliente_entregado($a, ['sent_at' => now()->subHours(3)]);
+        $b = $this->crear_lead('B');
+        $this->crear_saliente_entregado($b, ['sent_at' => now()->subHours(2)]);
+
+        $this->assertSame([(int) $b->id, (int) $a->id], array_keys($this->filas()));
+
+        // A le habla a Lucas: pasa al frente (y queda amarillo, pero no es por eso que sube).
+        $this->crear_mensaje($a, ['content' => 'Hola de nuevo', 'sent_at' => now()]);
+
+        $this->assertSame([(int) $a->id, (int) $b->id], array_keys($this->filas()));
+        $this->assertSame('amarillo', $this->fila_de($a)['atencion']);
+    }
+
+    /**
+     * `sin_responder=1` deja exactamente los leads que cuenta el «N sin responder» de la tarjeta
+     * (mensaje sin responder o envío fallido, alcanzable), y las claves `sin_responder` y
+     * `mensaje_sin_responder` de cada fila dicen lo mismo.
+     *
+     * @return void
+     */
+    public function test_sin_responder_deja_exactamente_lo_que_cuenta_la_tarjeta(): void
+    {
+        $amarillo = $this->crear_lead('Amarillo');
+        $this->crear_mensaje($amarillo, ['content' => '¿Cuánto sale?']);
+
+        $rojo_error = $this->crear_lead('Rojo por error');
+        $this->crear_mensaje($rojo_error, ['sender' => 'setter', 'content' => 'Te paso los planes', 'whatsapp_delivery_status' => 'fallido']);
+
+        // Rojo por confirmación pendiente, pero con un mensaje del lead sin responder: la tarjeta lo cuenta.
+        $rojo_con_mensaje = $this->crear_lead('Rojo con mensaje sin responder');
+        $this->crear_mensaje($rojo_con_mensaje, ['content' => '¿Cuánto sale?']);
+        $this->crear_mensaje($rojo_con_mensaje, ['sender' => 'sistema', 'status' => 'sugerido', 'content' => 'Propuesta', 'requiere_verificacion' => true]);
+
+        // Rojo SOLO por confirmación pendiente, sin nada del lead sin responder: la tarjeta no lo cuenta.
+        $rojo_confirmacion = $this->crear_lead('Rojo por confirmación');
+        $this->crear_saliente_entregado($rojo_confirmacion);
+        $this->crear_mensaje($rojo_confirmacion, ['sender' => 'sistema', 'status' => 'sugerido', 'content' => 'Propuesta', 'requiere_verificacion' => true]);
+
+        $contestado = $this->crear_lead('Contestado');
+        $this->crear_mensaje($contestado, ['content' => '¿Cuánto sale?']);
+        $this->crear_saliente_entregado($contestado);
+
+        $inalcanzable = $this->crear_lead('Inalcanzable', 'calificado', ['no_recibe_mensajes_at' => now()]);
+        $this->crear_mensaje($inalcanzable, ['content' => '¿Cuánto sale?']);
+
+        $esperados = [(int) $amarillo->id, (int) $rojo_error->id, (int) $rojo_con_mensaje->id];
+        sort($esperados);
+
+        $filtradas = array_keys($this->filas('sin_responder=1'));
+        sort($filtradas);
+        $this->assertSame($esperados, $filtradas, 'Mensaje sin responder o envío fallido, alcanzable.');
+
+        // La tarjeta dice lo mismo que el filtro: mismo número, mismas filas.
+        $response = $this->actingAs($this->admin, 'sanctum')->getJson('/api/admin/lead/status-cards');
+        $response->assertStatus(200);
+        $total_tarjetas = 0;
+        foreach ($response->json('cards') as $card) {
+            if ($card['value'] === 'calificado') {
+                $total_tarjetas = (int) $card['sin_responder'];
+            }
+        }
+        $this->assertSame(count($esperados), $total_tarjetas, 'El número del botón es el de las filas.');
+
+        // Las claves de cada fila coinciden con el filtro.
+        $todas = $this->filas();
+        foreach ($todas as $id => $fila) {
+            $this->assertSame(in_array($id, $esperados, true), $fila['sin_responder'], 'sin_responder de ' . $fila['contact_name']);
+        }
+
+        // `mensaje_sin_responder`: lo que «Marcar como leído» puede limpiar.
+        $this->assertTrue($todas[(int) $amarillo->id]['mensaje_sin_responder']);
+        $this->assertTrue($todas[(int) $rojo_con_mensaje->id]['mensaje_sin_responder'], 'Rojo, pero con un mensaje del lead sin responder.');
+        $this->assertSame('rojo', $todas[(int) $rojo_con_mensaje->id]['atencion']);
+        $this->assertFalse($todas[(int) $rojo_error->id]['mensaje_sin_responder'], 'Rojo por envío fallido, sin nada del lead sin responder.');
+        $this->assertFalse($todas[(int) $rojo_confirmacion->id]['mensaje_sin_responder']);
+        $this->assertFalse($todas[(int) $contestado->id]['mensaje_sin_responder']);
+        $this->assertFalse($todas[(int) $inalcanzable->id]['mensaje_sin_responder'], 'El que no recibe mensajes no pide atención.');
+        $this->assertFalse($todas[(int) $inalcanzable->id]['sin_responder']);
+
+        // Se combina con el filtro de estado.
+        $this->assertSame([], $this->filas('sin_responder=1&status=nuevo'));
+        $otro = $this->crear_lead('Otro estado', 'nuevo');
+        $this->crear_mensaje($otro, ['content' => 'Hola']);
+        $this->assertSame([(int) $otro->id], array_keys($this->filas('sin_responder=1&status=nuevo')));
+    }
+
+    /**
+     * El filtro `sin_responder` con los grupos de las tarjetas (`demo`, `otros`), con `q`, con el
+     * paginado y con un fijado adentro; y la fila puntual (`show_json`) trae las dos claves nuevas.
+     * El número de la tarjeta de grupo tiene que ser el de las filas: es justo lo que se rompió el 2/9.
+     *
+     * @return void
+     */
+    public function test_sin_responder_con_grupos_busqueda_paginado_y_fila_puntual(): void
+    {
+        $demo_a = $this->crear_lead('Demo Ana', 'demo_agendada', ['company_name' => 'Kiosco Ana']);
+        $this->crear_mensaje($demo_a, ['content' => 'Hola', 'sent_at' => now()->subMinutes(30)]);
+        $demo_b = $this->crear_lead('Demo Beto', 'demo_en_curso', ['pinned_at' => now()]);
+        $this->crear_mensaje($demo_b, ['content' => 'Hola', 'sent_at' => now()->subMinutes(20)]);
+        $demo_ok = $this->crear_lead('Demo Contestado', 'demo_agendada');
+        $this->crear_mensaje($demo_ok, ['content' => 'Hola']);
+        $this->crear_saliente_entregado($demo_ok);
+
+        $otro = $this->crear_lead('Otro Carlos', 'nuevo');
+        $this->crear_mensaje($otro, ['content' => 'Hola']);
+
+        $calificado = $this->crear_lead('Califi Dora', 'calificado');
+        $this->crear_mensaje($calificado, ['content' => 'Hola']);
+
+        // Grupo «demo»: dos sin responder; el fijado va primero.
+        $this->assertSame(
+            [(int) $demo_b->id, (int) $demo_a->id],
+            array_keys($this->filas('sin_responder=1&status=demo')),
+            'Grupo demo: los dos sin responder, el fijado primero.'
+        );
+        // Grupo «otros»: el de estado `nuevo`.
+        $this->assertSame([(int) $otro->id], array_keys($this->filas('sin_responder=1&status=otros')));
+
+        // El número de cada tarjeta de grupo es el de las filas.
+        $response = $this->actingAs($this->admin, 'sanctum')->getJson('/api/admin/lead/status-cards');
+        $response->assertStatus(200);
+        $por_tarjeta = [];
+        foreach ($response->json('cards') as $card) {
+            $por_tarjeta[$card['value']] = (int) $card['sin_responder'];
+        }
+        $this->assertSame(2, $por_tarjeta['demo']);
+        $this->assertSame(1, $por_tarjeta['otros']);
+        $this->assertSame(count($this->filas('sin_responder=1&status=demo')), $por_tarjeta['demo']);
+        $this->assertSame(count($this->filas('sin_responder=1&status=otros')), $por_tarjeta['otros']);
+
+        // Con búsqueda de texto.
+        $this->assertSame([(int) $demo_a->id], array_keys($this->filas('sin_responder=1&status=demo&q=kiosco')));
+
+        // Paginado: el total y las páginas son los del filtro, no los de la lista entera.
+        $pagina = $this->chats('sin_responder=1&status=demo&per_page=1');
+        $this->assertSame(2, $pagina['meta']['total']);
+        $this->assertSame(2, $pagina['meta']['last_page']);
+        $this->assertCount(1, $pagina['data']);
+
+        // La fila puntual (la que refresca Pusher) trae las dos claves.
+        $response = $this->actingAs($this->admin, 'sanctum')->getJson('/api/admin/lead/chats/' . $demo_a->id);
+        $response->assertStatus(200);
+        $this->assertTrue($response->json('data.sin_responder'));
+        $this->assertTrue($response->json('data.mensaje_sin_responder'));
+        $response = $this->actingAs($this->admin, 'sanctum')->getJson('/api/admin/lead/chats/' . $demo_ok->id);
+        $this->assertFalse($response->json('data.sin_responder'));
+        $this->assertFalse($response->json('data.mensaje_sin_responder'));
+    }
+
+    /**
+     * «Marcar como leído» (POST marcar-respondido sin message_id) saca al lead del filtro `sin_responder`
+     * y le apaga el amarillo; un mensaje nuevo del lead lo vuelve a poner.
+     *
+     * @return void
+     */
+    public function test_marcar_como_leido_lo_saca_del_filtro_y_un_mensaje_nuevo_lo_vuelve_a_poner(): void
+    {
+        $lead = $this->crear_lead('Mensaje de cierre');
+        $this->crear_mensaje($lead, ['content' => 'Gracias, chau!']);
+
+        $this->assertSame([(int) $lead->id], array_keys($this->filas('sin_responder=1')));
+
+        $response = $this->actingAs($this->admin, 'sanctum')->postJson('/api/admin/lead/' . $lead->id . '/marcar-respondido');
+        $response->assertStatus(200);
+        $this->assertFalse($response->json('data.sin_responder'));
+        $this->assertFalse($response->json('data.mensaje_sin_responder'));
+        $this->assertNull($response->json('data.atencion'));
+
+        $this->assertSame([], $this->filas('sin_responder=1'));
+
+        $this->crear_mensaje($lead, ['content' => 'Ah, una pregunta más']);
+        $this->assertSame([(int) $lead->id], array_keys($this->filas('sin_responder=1')));
+        $this->assertSame('amarillo', $this->fila_de($lead)['atencion']);
     }
 
     /**

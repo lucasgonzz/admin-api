@@ -51,6 +51,16 @@ class LeadAiService
     private const MAX_TOOL_ITERATIONS = 10;
 
     /**
+     * Tope de tokens de la respuesta del agente cuando trabaja con tools (primera y segunda llamada).
+     *
+     * Con 1000 una respuesta larga llegaba cortada (`stop_reason: max_tokens`) después de que el agente
+     * leyera varios archivos del manual: lead #111, 22/10/2026. El razonamiento de DeepSeek sigue apagado
+     * (ver LeadAiProveedor), así que este tope es solo del paquete JSON. Las llamadas directas
+     * (max_tokens 400, un mensaje corto) tienen su propio tope y no usan esta constante.
+     */
+    private const MAX_TOKENS_RESPUESTA = 3000;
+
+    /**
      * Cuántas fuentes citadas se le sirven de una en el segundo intento del gate de respaldo.
      *
      * No es un límite de tamaño: es un detector de respuesta rara. Una respuesta normal cita una o
@@ -805,7 +815,7 @@ TXT;
             $system_payload,
             $system,
             $user_content,
-            1000,
+            self::MAX_TOKENS_RESPUESTA,
             $http,
             $model,
             'LeadAiService [PRIMERA LLAMADA]',
@@ -1468,7 +1478,7 @@ TXT;
             $system_payload,
             $system,
             $user_content,
-            3000,
+            self::MAX_TOKENS_RESPUESTA,
             $http,
             $model,
             'LeadAiService [SEGUNDA LLAMADA - con disponibilidad]',
@@ -9876,7 +9886,8 @@ TXT;
      *                                                          tools, nunca el modelo: es contra
      *                                                          esto que el gate verifica sus citas.
      *
-     * @throws \RuntimeException Si falla HTTP o se superan las iteraciones sin respuesta final.
+     * @throws \RuntimeException Si falla HTTP, si la respuesta se corta por max_tokens o por un
+     *                           stop_reason inesperado, o si se superan las iteraciones sin respuesta final.
      *
      * @return string Texto JSON de la respuesta final de Claude.
      */
@@ -10002,12 +10013,26 @@ TXT;
                 continue;
             }
 
-            /* stop_reason inesperado (p. ej. max_tokens): loguear y salir del loop. */
+            /* stop_reason inesperado: loguear y cortar. */
             Log::warning('LeadAiService: stop_reason inesperado en run_with_tools', [
                 'stop_reason' => $stop_reason,
                 'iteration'   => $iterations,
             ]);
-            break;
+
+            /* 🔴 La respuesta llegó cortada por el tope de tokens: no es un problema de iteraciones. Hasta
+             * el 22/10/2026 este caso hacía `break` y caía en el throw de abajo, que decía "se superaron
+             * las iteraciones" (lead #111, iteración 5 de 10) y mandaba a buscar la causa a otro lado. */
+            if ($stop_reason === 'max_tokens') {
+                throw new \RuntimeException(
+                    'LeadAiService: la respuesta se cortó por el tope de tokens (max_tokens ' . $max_tokens
+                    . ') en la iteración ' . $iterations . ' del loop de tool use.'
+                );
+            }
+
+            throw new \RuntimeException(
+                'LeadAiService: el modelo cortó con un stop_reason inesperado ("' . $stop_reason
+                . '") en la iteración ' . $iterations . ' del loop de tool use.'
+            );
         }
 
         throw new \RuntimeException(

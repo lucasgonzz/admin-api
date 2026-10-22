@@ -163,8 +163,8 @@ class LeadAiProveedor
         }
 
         /* 🔴 Siempre 'disabled', y NO sale de la config. Un thinking 'enabled' no está soportado en
-         * este agente: los tokens de razonamiento cuentan contra `max_tokens` (1000 en la primera
-         * llamada, 400 en las directas), así que la respuesta se cortaría "sin texto", y empresa lo
+         * este agente: los tokens de razonamiento cuentan contra `max_tokens` (3000 en las llamadas
+         * con tools, 400 en las directas), así que la respuesta se cortaría "sin texto", y empresa lo
          * resuelve subiendo el techo a 8000 y mandando `budget_tokens`, cosa que acá no se hace.
          * Una variable de entorno que lo prendiera sería una trampa; si algún día hace falta
          * razonar, se hace con su propio techo de tokens. */

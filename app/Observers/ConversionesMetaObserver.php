@@ -32,8 +32,16 @@ class ConversionesMetaObserver
     {
         try {
             /* El filtro barato primero, sin tocar la base: un lead sin ctwa_clid y que no vino de la
-               web no tiene canal. El canal definitivo (pegajoso) lo decide el servicio. */
+               web no tiene canal. El canal definitivo (pegajoso) lo decide el servicio.
+               Lo único que se reporta de un lead sin canal es la compra (misión
+               purchase-capi-al-promover, 22/10/2026), y SOLO en el save() que lo promueve: un
+               promovido de hace meses al que le editan el status no manda un Purchase con la fecha
+               de hoy. Los ya promovidos los informa `leads:meta-capi-compras`. */
             if (MetaConversionesService::canal_natural($lead) === null) {
+                if (self::recien_promovido($lead)) {
+                    app(MetaConversionesService::class)->registrar_compra($lead);
+                }
+
                 return;
             }
 
@@ -48,5 +56,31 @@ class ConversionesMetaObserver
                 'error'   => app(MetaConversionesService::class)->sin_token($exception->getMessage()),
             ]);
         }
+    }
+
+    /**
+     * ¿Este save() es el que lo promovió? `promoted_client_id` pasó de vacío a un cliente en un
+     * update. Un lead que nace ya promovido (no pasa en la promoción real, que es un update) no
+     * cuenta: en el alta `getChanges()` está vacío.
+     *
+     * ⚠️ No sirve `wasRecentlyCreated`: Laravel lo deja en true para toda la vida de la instancia,
+     * también en los updates que siguen al alta. Y `getChanges()` no se limpia en un save() sin
+     * cambios: por eso además se pide que el original (que en `saved` todavía es el de antes del
+     * save) esté vacío.
+     *
+     * @param Lead $lead
+     *
+     * @return bool
+     */
+    private static function recien_promovido(Lead $lead): bool
+    {
+        if (! $lead->wasChanged('promoted_client_id')) {
+            return false;
+        }
+
+        $antes = $lead->getOriginal('promoted_client_id');
+
+        return ($antes === null || (string) $antes === '')
+            && $lead->promoted_client_id !== null && (string) $lead->promoted_client_id !== '';
     }
 }

@@ -213,6 +213,9 @@ class ClaudeLeadsAnalyticsController extends Controller
                             . '(cc_x → manual_x). 🔴 Un estado que coincida con un slug real del pipeline haría que el cron '
                             . 'de cada 2 horas le mande esta plantilla sola a todos los leads de ese estado.',
                         'dia_numero' => 'Opcional, default 1.',
+                        'no_marca_error_de_entrega' => 'Opcional, booleano (1/0), default false. En 1 para una CAMPAÑA '
+                            . 'MASIVA a leads fríos: los rechazos de Meta (whatsapp_delivery_status = fallido) de esta '
+                            . 'plantilla no pintan rojo «Error de envío» ni cuentan en las tarjetas. Un is_error sigue en rojo igual.',
                         'dry_run'    => '🔴 DEFAULT true. Sin dry_run=false explícito no se crea nada en Meta ni se escribe '
                             . 'ninguna fila: devuelve el payload exacto que se mandaría, para leerlo antes de confirmar.',
                     ],
