@@ -21,7 +21,7 @@ class FollowupTemplate extends Model
      * Extraído el 22/10/2026 (misión demo-autogestionada-landing) de
      * `ClaudeLeadsOutboundController::plantilla_para_enviar()`, que lo sigue usando con sus mismos 422:
      * la confirmación por WhatsApp de la reserva desde la landing (D10) tiene que mirar exactamente lo
-     * mismo antes de mandar `cc_demo_reservada_landing`, y no tenía cómo llamar a un método protegido de
+     * mismo antes de mandar `cc_demo_reservada_landing_v2`, y no tenía cómo llamar a un método protegido de
      * un controller. El porqué de cada freno está en el docblock de ese método.
      *
      * @param string $template_name Nombre ya trimeado.

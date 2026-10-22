@@ -182,7 +182,7 @@ class ConfirmarReservaLandingJob
     }
 
     /**
-     * La confirmación por WhatsApp al lead (D10), con la plantilla `cc_demo_reservada_landing` y SOLO si
+     * La confirmación por WhatsApp al lead (D10), con la plantilla `cc_demo_reservada_landing_v2` y SOLO si
      * su fila de `followup_templates` está activa y aprobada por Meta (mismo gate que
      * `ClaudeLeadsOutboundController::plantilla_para_enviar`). Sale por el número institucional de
      * leads, el mismo de los recordatorios de la demo.

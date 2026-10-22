@@ -103,7 +103,7 @@ class ReservaDesdeLaLandingTest extends BaseDeLaAgendaDeLaLanding
         $this->assertSame(['Marina López', 'Viernes 23/10/2026', '15:00'], array_slice($avisos[0]['variables'], 0, 3));
 
         /* Sin plantilla aprobada, el WhatsApp al lead no sale y queda dicho en el hilo. */
-        $this->assertSame([], $this->enviados_con('cc_demo_reservada_landing'));
+        $this->assertSame([], $this->enviados_con('cc_demo_reservada_landing_v2'));
         $this->assertTrue(LeadMessage::query()->where('lead_id', $lead->id)->where('content', 'like', 'No salió el WhatsApp de confirmación%')->exists());
 
         /* Meta: dos eventos, enviados, con el contexto del navegador. */
@@ -130,7 +130,7 @@ class ReservaDesdeLaLandingTest extends BaseDeLaAgendaDeLaLanding
     public function test_con_la_plantilla_aprobada_sale_el_whatsapp_al_lead(): void
     {
         $plantilla = FollowupTemplate::create([
-            'template_name' => 'cc_demo_reservada_landing',
+            'template_name' => 'cc_demo_reservada_landing_v2',
             'estado'        => 'demo_agendada',
             'dia_numero'    => 0,
             'body_template' => 'Hola {{1}}! Tu demo quedó reservada para el {{2}}. Tu página: {{3}}',
@@ -142,7 +142,7 @@ class ReservaDesdeLaLandingTest extends BaseDeLaAgendaDeLaLanding
         $this->reservar($this->cuerpo())->assertStatus(201)->assertJsonPath('whatsapp_confirmacion', true);
         $lead = Lead::query()->where('phone', '+5493416665544')->firstOrFail();
 
-        $envios = $this->enviados_con('cc_demo_reservada_landing');
+        $envios = $this->enviados_con('cc_demo_reservada_landing_v2');
         $this->assertCount(1, $envios);
         $this->assertSame('+5493416665544', $envios[0]['to']);
         $this->assertSame(['Marina', 'viernes 23/10 de 15:00 a 17:00', 'https://admin.test/experiencia/5493416665544'], $envios[0]['variables']);
@@ -157,7 +157,7 @@ class ReservaDesdeLaLandingTest extends BaseDeLaAgendaDeLaLanding
     public function test_si_el_paso_del_whatsapp_tira_queda_un_error_en_el_hilo(): void
     {
         FollowupTemplate::create([
-            'template_name' => 'cc_demo_reservada_landing', 'estado' => 'demo_agendada', 'dia_numero' => 0,
+            'template_name' => 'cc_demo_reservada_landing_v2', 'estado' => 'demo_agendada', 'dia_numero' => 0,
             'body_template' => 'Hola {{1}}', 'language_code' => 'es_AR', 'activa' => true, 'meta_status' => 'APPROVED',
         ]);
         $this->app->instance(\App\Services\WhatsappSendService::class, new class extends \App\Services\WhatsappSendService {

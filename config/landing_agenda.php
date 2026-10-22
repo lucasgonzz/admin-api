@@ -63,5 +63,7 @@ return [
      * («jueves 23/10 de 15:00 a 17:00»), {{3}} URL de su página. Solo sale si la fila de
      * `followup_templates` está activa y APPROVED; si no, queda un evento en el hilo.
      */
-    'plantilla_confirmacion' => 'cc_demo_reservada_landing',
+    // `_v2`: la primera (`cc_demo_reservada_landing`, 22/10/2026) se creó en Meta con el texto mal codificado
+    // (PowerShell 5.1 leyó el script como ANSI) y no se puede editar; no se usa nunca.
+    'plantilla_confirmacion' => 'cc_demo_reservada_landing_v2',
 ];
