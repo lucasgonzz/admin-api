@@ -154,6 +154,29 @@ class ReservaDesdeLaLandingTest extends BaseDeLaAgendaDeLaLanding
         $this->assertFalse(LeadMessage::query()->where('lead_id', $lead->id)->where('content', 'like', 'No salió el WhatsApp%')->exists());
     }
 
+    public function test_si_el_paso_del_whatsapp_tira_queda_un_error_en_el_hilo(): void
+    {
+        FollowupTemplate::create([
+            'template_name' => 'cc_demo_reservada_landing', 'estado' => 'demo_agendada', 'dia_numero' => 0,
+            'body_template' => 'Hola {{1}}', 'language_code' => 'es_AR', 'activa' => true, 'meta_status' => 'APPROVED',
+        ]);
+        $this->app->instance(\App\Services\WhatsappSendService::class, new class extends \App\Services\WhatsappSendService {
+            public function send_template(string $to, string $template_name, array $variables = [], string $language_code = 'es_AR', ?string $context = null): ?string
+            {
+                throw new \RuntimeException('Kapso explotó');
+            }
+        });
+
+        $this->reservar($this->cuerpo())->assertStatus(201);
+
+        $lead = Lead::query()->where('phone', '+5493416665544')->firstOrFail();
+        $this->assertTrue(LeadMessage::query()->where('lead_id', $lead->id)->where('is_error', true)
+            ->where('content', 'like', 'No salió el WhatsApp de confirmación%Kapso explotó%')->exists());
+        Mail::assertSent(LeadDemoAccesoMail::class, function ($mail) {
+            return $mail->hasTo('marina@example.com');
+        });
+    }
+
     public function test_la_cookie_fbc_gana_sobre_el_fbclid_y_sin_url_sale_como_chat(): void
     {
         $this->reservar($this->cuerpo(['fbc' => 'fb.1.1761130000000.CookieDelPixel']))->assertStatus(201);

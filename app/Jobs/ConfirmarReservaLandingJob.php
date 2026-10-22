@@ -13,6 +13,7 @@ use App\Models\WhatsappConfig;
 use App\Services\DemoScheduledWhatsappService;
 use App\Services\LeadAiService;
 use App\Services\LeadBroadcastService;
+use App\Services\LeadConversationErrorLogger;
 use App\Services\MetaConversionesService;
 use App\Services\WhatsappSendService;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -268,6 +269,10 @@ class ConfirmarReservaLandingJob
                 'lead_id' => $lead->id,
                 'error'   => $e->getMessage(),
             ]);
+            /* Que quede en el hilo, no solo en el log (segunda vuelta, 🟡17): sin esto, nadie que mire la
+               conversación sabe que el lead no recibió la confirmación. */
+            (new LeadConversationErrorLogger())->log((int) $lead->id, 'No salió el WhatsApp de confirmación de la reserva desde la web', $e->getMessage());
+            $anotaciones[] = ['evento' => 'WhatsApp de confirmación no enviado: falló el paso', 'admins' => []];
         }
     }
 
