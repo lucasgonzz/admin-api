@@ -52,12 +52,14 @@ class LeadChatsController extends Controller
      *
      * Query: `q` (texto; nombre, empresa y teléfono por dígitos), `status` (slug o lista separada
      * por comas; acepta también los valores agrupados de las tarjetas, `demo` y `otros`),
-     * `solo_atencion` (bool: solo filas con `atencion` rojo o amarillo), `page` (default 1),
-     * `per_page` (default 50, máx 200).
+     * `solo_atencion` (bool: solo filas con `atencion` rojo o amarillo), `sin_responder` (bool: solo
+     * los leads que cuenta el «N sin responder» de las tarjetas, ver {@see self::aplicar_sin_responder()}),
+     * `page` (default 1), `per_page` (default 50, máx 200).
      *
-     * Orden fijo (decisión D5 de Lucas): fijados primero (el más reciente arriba), después rojo,
-     * después amarillo, después `COALESCE(last_message_at, created_at) DESC`. No hay selector de
-     * orden: la tabla con sus botones desapareció.
+     * Orden fijo, como WhatsApp (decisión de Lucas, 22/10/2026): fijados primero (el más reciente
+     * arriba) y después `COALESCE(last_message_at, created_at) DESC`. El rojo y el amarillo se pintan
+     * pero ya NO reordenan (hasta el 21/10 flotaban arriba de conversaciones más recientes, D5). No hay
+     * selector de orden: la tabla con sus botones desapareció.
      *
      * @param Request $request
      *
@@ -85,6 +87,10 @@ class LeadChatsController extends Controller
 
         if ($request->boolean('solo_atencion')) {
             $this->aplicar_solo_atencion($query);
+        }
+
+        if ($request->boolean('sin_responder')) {
+            $this->aplicar_sin_responder($query);
         }
 
         $this->aplicar_orden($query);
@@ -212,8 +218,8 @@ class LeadChatsController extends Controller
      *     `rechazado`. Se trae el id en el SELECT y el mensaje después, en UNA consulta para toda la
      *     página, en vez de cargar la relación `messages` (que arrastra el hilo entero de cada lead).
      *
-     * ⚠️ Los alias se referencian en el ORDER BY (MySQL lo permite para el select list) y en ningún
-     * WHERE: ahí van los `EXISTS` de {@see self::aplicar_solo_atencion()}, con los mismos predicados.
+     * ⚠️ Los alias del select list no se usan en el WHERE (MySQL no lo permite): ahí van los `EXISTS`
+     * de {@see self::aplicar_solo_atencion()}, con los mismos predicados.
      *
      * @return \Illuminate\Database\Eloquent\Builder
      */
@@ -376,16 +382,35 @@ class LeadChatsController extends Controller
     }
 
     /**
-     * El orden fijo de la bandeja (D5): fijados → rojo → amarillo → último mensaje.
+     * `sin_responder=1`: exactamente los leads que cuenta el «N sin responder» de las tarjetas
+     * ({@see \App\Services\LeadStatusCardsService}): `Lead::requiereRevision(true)`, o sea mensaje del
+     * lead sin responder o envío fallido, y el lead todavía recibe mensajes. Es el MISMO scope y no una
+     * copia del SQL, para que el número del botón y las filas de la lista no puedan separarse (el
+     * defecto que Lucas reportó el 2/9/2026). Lo usan los botoncitos «sin responder» debajo de cada
+     * tarjeta (22/10/2026).
      *
-     * No reutiliza `scopeApplyBandejaOrder` a propósito: aquel, en modo `atencion`, pone la atención
-     * POR ENCIMA del pin y suma `pendiente_revision_at` al rojo (la única superficie que le queda al
-     * Caso B del respaldo automático). Acá el pin gana —es lo que Lucas pidió para la lista estilo
-     * WhatsApp, donde fijar es justamente «esto va arriba de todo»— y el rojo es el de la fila
-     * (error de envío con el lead alcanzable, o mensaje esperando confirmación), sin más.
+     * @param \Illuminate\Database\Eloquent\Builder $query
      *
-     * Referencia los alias del SELECT (`failed_send_count`, `pending_verification_count`,
-     * `sin_responder_count`) en un `CASE` del ORDER BY, igual que hace `scopeApplyBandejaOrder`.
+     * @return void
+     */
+    private function aplicar_sin_responder($query): void
+    {
+        $query->requiereRevision(true);
+    }
+
+    /**
+     * El orden fijo de la bandeja, como WhatsApp (decisión de Lucas, 22/10/2026): fijados → último
+     * mensaje.
+     *
+     * Hasta el 21/10 era fijados → rojo → amarillo → último mensaje (D5, 17/10/2026): los chats que
+     * pedían atención flotaban arriba de conversaciones más recientes. Lucas pidió que sin tarjeta ni
+     * filtro la lista siga el hilo más reciente, y que la atención se mire por el color de la fila, por
+     * los botones «sin responder» de las tarjetas y por «Marcar como leído». Por eso acá ya no se
+     * referencian `failed_send_count`, `pending_verification_count` ni `sin_responder_count`: el color
+     * se calcula en {@see self::atencion()} y no mueve la fila.
+     *
+     * El pin sigue ganando: fijar es justamente «esto va arriba de todo», igual que en WhatsApp.
+     * `last_message_at` lo mueve cualquier mensaje que no sea evento de estado (entrante o saliente).
      *
      * @param \Illuminate\Database\Eloquent\Builder $query
      *
@@ -397,17 +422,7 @@ class LeadChatsController extends Controller
         $query->orderByRaw('CASE WHEN leads.pinned_at IS NOT NULL THEN 0 ELSE 1 END ASC');
         $query->orderByRaw('leads.pinned_at DESC');
 
-        // Después el color de la fila: rojo (0), amarillo (1), nada (2). El amarillo también descuenta a
-        // los «ya no recibe mensajes» (ver atencion()), igual que el filtro y el color.
-        $query->orderByRaw('
-            CASE
-                WHEN (failed_send_count > 0 AND leads.no_recibe_mensajes_at IS NULL) OR pending_verification_count > 0 THEN 0
-                WHEN sin_responder_count > 0 AND leads.no_recibe_mensajes_at IS NULL THEN 1
-                ELSE 2
-            END ASC
-        ');
-
-        // Desempate: último mensaje, con COALESCE para no dejar al final a los leads sin mensajes.
+        // Después el último mensaje, con COALESCE para no dejar al final a los leads sin mensajes.
         $query->orderByRaw('COALESCE(leads.last_message_at, leads.created_at) DESC');
         $query->orderByDesc('leads.id');
     }
@@ -432,10 +447,23 @@ class LeadChatsController extends Controller
 
         $catalogo = $this->catalogo_de_estados();
 
+        /* Cuáles de esta página cuenta el «N sin responder» de las tarjetas: el MISMO scope, en UNA
+           consulta para toda la página (ver aplicar_sin_responder()). */
+        $ids_pagina = $leads->pluck('id')->map(function ($id) {
+            return (int) $id;
+        })->values()->all();
+
+        $ids_sin_responder = empty($ids_pagina)
+            ? []
+            : Lead::query()->requiereRevision(true)->whereIn('leads.id', $ids_pagina)->pluck('leads.id')
+                ->map(function ($id) {
+                    return (int) $id;
+                })->flip()->all();
+
         $filas = [];
         foreach ($leads as $lead) {
             $ultimo = $lead->ultimo_mensaje_id ? ($ultimos->get((int) $lead->ultimo_mensaje_id) ?: null) : null;
-            $filas[] = $this->fila($lead, $ultimo, $catalogo);
+            $filas[] = $this->fila($lead, $ultimo, $catalogo, isset($ids_sin_responder[(int) $lead->id]));
         }
 
         return $filas;
@@ -447,10 +475,11 @@ class LeadChatsController extends Controller
      * @param Lead                                  $lead     Con los alias del query de la lista cargados.
      * @param LeadMessage|null                      $ultimo   Último mensaje visible del hilo, con adjuntos.
      * @param array<string, array<string, mixed>>   $catalogo Catálogo de estados indexado por slug.
+     * @param bool                                  $sin_responder true si el lead entra en el «N sin responder» de las tarjetas.
      *
      * @return array<string, mixed>
      */
-    private function fila(Lead $lead, ?LeadMessage $ultimo, array $catalogo): array
+    private function fila(Lead $lead, ?LeadMessage $ultimo, array $catalogo, bool $sin_responder = false): array
     {
         $atencion = $this->atencion($lead);
         $estado   = $this->estado_del_catalogo((string) $lead->status, $catalogo);
@@ -475,6 +504,13 @@ class LeadChatsController extends Controller
 
             'atencion'                  => $atencion['atencion'],
             'atencion_motivo'           => $atencion['motivo'],
+
+            /* Aditivas (22/10/2026). `sin_responder`: el lead cuenta en el botón «N sin responder» de su
+               tarjeta (mensaje sin responder o envío fallido). `mensaje_sin_responder`: tiene un mensaje
+               suyo sin responder, que es lo único que «Marcar como leído» puede limpiar; sale aunque el
+               rojo le gane al amarillo en `atencion`. */
+            'sin_responder'             => $sin_responder,
+            'mensaje_sin_responder'     => (int) $lead->sin_responder_count > 0 && $lead->no_recibe_mensajes_at === null,
 
             'pending_verification_count' => (int) $lead->pending_verification_count,
             'failed_send_count'          => (int) $lead->failed_send_count,
@@ -515,11 +551,11 @@ class LeadChatsController extends Controller
      * en `solo_atencion=1` mientras la tarjeta dice 0: la lista y las tarjetas diciendo cosas
      * distintas, que es justo el defecto del 2/9/2026 que este controlador promete no repetir. El
      * `row_warning` de la grilla vieja sí lo pintaba; se decide como el scope, no como la grilla,
-     * porque la grilla se va y la tarjeta se queda. Esta regla va en los TRES lugares donde vive el
-     * predicado (acá, el CASE de {@see self::aplicar_orden()} y {@see self::aplicar_solo_atencion()}).
+     * porque la grilla se va y la tarjeta se queda. Esta regla va en los DOS lugares donde vive el
+     * predicado (acá y en {@see self::aplicar_solo_atencion()}; el orden ya no la usa desde el 22/10/2026).
      *
-     * Son los mismos tres predicados del ORDER BY y del filtro, así que el orden, el filtro y el color
-     * no pueden contradecirse.
+     * Son los mismos predicados del filtro `solo_atencion`, así que el filtro y el color no pueden
+     * contradecirse.
      *
      * @param Lead $lead
      *
