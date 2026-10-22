@@ -99,6 +99,32 @@ class TurnosDeLaLandingTest extends BaseDeLaAgendaDeLaLanding
         $this->reservar($this->cuerpo(['fecha' => '2026-10-22', 'hora' => '11:00']))->assertStatus(409)->assertJsonPath('codigo', 'turno_tomado');
     }
 
+    public function test_los_turnos_van_con_cache_corto_que_se_invalida_al_reservar(): void
+    {
+        $this->ocupar($this->demo_2, '2026-10-23', '15:00', '17:00');
+        $this->assertContains('15:00', array_column($this->getJson('/api/landing/agenda/turnos')->json('dias.1.horarios'), 'hora'));
+
+        /* La otra instancia se ocupa por fuera de la landing: durante el caché, el GET no se entera. */
+        $this->ocupar($this->demo_1, '2026-10-23', '15:00', '17:00');
+        $this->assertContains('15:00', array_column($this->getJson('/api/landing/agenda/turnos')->json('dias.1.horarios'), 'hora'));
+
+        /* Una reserva desde la web lo invalida. */
+        $this->reservar($this->cuerpo(['hora' => '19:00']))->assertStatus(201);
+        $this->assertNotContains('15:00', array_column($this->getJson('/api/landing/agenda/turnos')->json('dias.1.horarios'), 'hora'));
+    }
+
+    public function test_el_turno_tomado_trae_los_turnos_frescos_aunque_el_get_este_en_cache(): void
+    {
+        $this->getJson('/api/landing/agenda/turnos')->assertStatus(200);
+        $this->ocupar($this->demo_1, '2026-10-23', '14:30', '16:30');
+        $this->ocupar($this->demo_2, '2026-10-23', '15:00', '17:00');
+
+        $turnos = $this->reservar($this->cuerpo())->assertStatus(409)->json('turnos');
+        $manana = collect($turnos)->firstWhere('fecha', '2026-10-23');
+        $this->assertNotContains('15:00', array_column($manana['horarios'], 'hora'));
+        $this->assertNotContains('15:00', array_column($this->getJson('/api/landing/agenda/turnos')->json('dias.1.horarios'), 'hora'), 'Y el 409 invalida el caché.');
+    }
+
     public function test_una_sola_instancia_libre_alcanza_para_ofrecer_el_turno(): void
     {
         $this->ocupar($this->demo_1, '2026-10-23', '13:00', '15:00');

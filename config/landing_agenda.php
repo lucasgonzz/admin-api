@@ -43,6 +43,9 @@ return [
         'dias' => 7,
     ],
 
+    /* Caché del cuerpo de `GET landing/agenda/turnos` (segunda vuelta): se invalida al reservar. */
+    'turnos_cache_segundos' => 30,
+
     /* Anti-spam (D13): un formulario enviado antes de esto desde que se abrió es un bot. */
     'abierto_minimo_ms' => 2500,
 

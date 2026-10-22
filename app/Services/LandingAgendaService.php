@@ -64,14 +64,58 @@ class LandingAgendaService
     const CODIGO_YA_ES_CLIENTE  = 'ya_es_cliente';
     const CODIGO_YA_HIZO_LA_DEMO = 'ya_hizo_la_demo';
 
+    /** Clave del caché del cuerpo de `GET landing/agenda/turnos`. */
+    const CLAVE_CACHE_TURNOS = 'landing-agenda:turnos';
+
     /**
      * Los turnos para el visitante: el cuerpo del 200 de `GET landing/agenda/turnos`.
      *
+     * 🔴 Con caché corto (`turnos_cache_segundos`, 30 s; segunda vuelta, 🟡13). El endpoint es público y
+     * cada llamada arma la grilla de siete días (consultas sobre leads y varias líneas en el log de
+     * disponibilidad): treinta visitantes abriendo el selector a la vez no pueden costar treinta grillas.
+     * Que el caché quede unos segundos viejo no reserva nada mal: la reserva revalida todo bajo el lock.
+     * Igual se invalida apenas se toma una reserva ({@see olvidar_turnos()}), y los `turnos` del 409
+     * `turno_tomado` se calculan siempre frescos.
+     *
      * @param int|null $exclude_lead_id Lead a excluir de la ocupación (el del teléfono, en un 409).
+     * @param bool     $fresco          true para saltear el caché (el 409).
      *
      * @return array{zona: string, duracion_minutos: int, dias: array<int, array<string, mixed>>}
      */
-    public function turnos(?int $exclude_lead_id = null): array
+    public function turnos(?int $exclude_lead_id = null, bool $fresco = false): array
+    {
+        $segundos = (int) config('landing_agenda.turnos_cache_segundos', 30);
+        if ($exclude_lead_id === null && ! $fresco && $segundos > 0) {
+            return Cache::remember(self::CLAVE_CACHE_TURNOS, $segundos, function () {
+                return $this->calcular_turnos(null);
+            });
+        }
+
+        return $this->calcular_turnos($exclude_lead_id);
+    }
+
+    /**
+     * Invalida el caché de los turnos (después de una reserva, o de un 409 que mostró que estaba viejo).
+     *
+     * @return void
+     */
+    public static function olvidar_turnos(): void
+    {
+        try {
+            Cache::forget(self::CLAVE_CACHE_TURNOS);
+        } catch (\Throwable $e) {
+            Log::warning('LandingAgenda: no se pudo invalidar el caché de los turnos.', ['error' => $e->getMessage()]);
+        }
+    }
+
+    /**
+     * El cálculo de los turnos, sin caché.
+     *
+     * @param int|null $exclude_lead_id
+     *
+     * @return array{zona: string, duracion_minutos: int, dias: array<int, array<string, mixed>>}
+     */
+    private function calcular_turnos(?int $exclude_lead_id): array
     {
         return [
             'zona'             => DemoDirectaService::TZ,
@@ -282,15 +326,21 @@ class LandingAgendaService
                 $lock->release();
                 $liberado = true;
 
+                /* Si el visitante eligió algo que ya no está, lo que tiene en pantalla (quizás del caché)
+                 * estaba viejo: se invalida y los turnos del 409 van frescos. */
+                self::olvidar_turnos();
+
                 return $this->respuesta(409, [
                     'codigo'  => self::CODIGO_TURNO_TOMADO,
                     'mensaje' => 'Ese horario se acaba de ocupar. Elegí otro de los que siguen libres.',
-                    'turnos'  => $this->turnos($lead !== null ? (int) $lead->id : null)['dias'],
+                    'turnos'  => $this->turnos($lead !== null ? (int) $lead->id : null, true)['dias'],
                 ]);
             }
 
             $reserva = $this->escribir_reserva($lead, $telefono, $datos, $eleccion['demo'], $eleccion['ventana']);
             $this->contar_reserva_global();
+            /* Esta reserva ocupó un turno: el GET deja de ofrecerlo ya, sin esperar los 30 s del caché. */
+            self::olvidar_turnos();
 
             $lock->release();
             $liberado = true;
