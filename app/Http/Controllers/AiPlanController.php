@@ -167,10 +167,17 @@ class AiPlanController extends Controller
 
         $resultado = $sync->pushear_al_cliente($client);
 
-        // Best-effort (no lanza): el plan ya quedó guardado y empujado, pase lo que pase acá.
-        $agentes_ia = ($plan_nuevo !== null && $plan_nuevo !== $plan_anterior)
-            ? $agentes->activar_por_plan($client)
-            : null;
+        // Best-effort (no lanza): el plan ya quedó guardado, pase lo que pase acá.
+        $agentes_ia = null;
+
+        if ($plan_nuevo !== null && $plan_nuevo !== $plan_anterior) {
+            // Si el push del plan ya falló por TRANSPORTE (el cliente no contestó), la activación está condenada a
+            // fallar igual y sumaría otro timeout a un pedido sincrónico: no se intenta. Un 404 (versión vieja) o un
+            // 4xx/5xx sí son una respuesta del cliente y ahí se intenta igual.
+            $agentes_ia = $sync->el_ultimo_push_fallo_por_transporte()
+                ? $agentes->no_intentada_por_falla_del_plan()
+                : $agentes->activar_por_plan($client);
+        }
 
         // El cliente quedó con las columnas `ai_plan_sync_*` nuevas: se relee para devolver el estado
         // de ESTE intento y no lo que estaba en memoria.

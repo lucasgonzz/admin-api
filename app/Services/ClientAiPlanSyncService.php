@@ -62,6 +62,14 @@ class ClientAiPlanSyncService
     protected $api_url_resolver;
 
     /**
+     * @var bool true si el ÚLTIMO `pushear_al_cliente()` falló por transporte (conexión cortada, timeout, DNS: no
+     *           hubo ninguna respuesta HTTP). Lo lee quien asigna un plan y quiere saber si vale la pena seguir
+     *           hablándole a ese cliente (misión agentes-ia-extension-unica, 22/10/2026). Un 404, un 4xx o un 5xx
+     *           NO son transporte: ahí el cliente contestó.
+     */
+    protected $ultimo_push_fallo_por_transporte = false;
+
+    /**
      * @param ClientEmpresaApiUrlResolver|null $api_url_resolver Inyectable para las pruebas.
      */
     public function __construct(?ClientEmpresaApiUrlResolver $api_url_resolver = null)
@@ -84,6 +92,8 @@ class ClientAiPlanSyncService
      */
     public function pushear_al_cliente(Client $client)
     {
+        $this->ultimo_push_fallo_por_transporte = false;
+
         $url = $this->api_url_resolver->admin_sync_url($client, self::PLAN_IA_PATH);
 
         // Corte 1: sin URL resoluble. Es configuración faltante del admin, no del cliente.
@@ -181,6 +191,8 @@ class ClientAiPlanSyncService
         }
 
         if ($response === null) {
+            $this->ultimo_push_fallo_por_transporte = true;
+
             Log::warning('ClientAiPlanSyncService: no se pudo contactar al empresa-api del cliente.', [
                 'client_id' => $client->id,
                 'url'       => $url,
@@ -213,6 +225,16 @@ class ClientAiPlanSyncService
         }
 
         return $this->registrar($client, self::ESTADO_SUCCESS, null, true);
+    }
+
+    /**
+     * Si el último push de plan falló porque no hubo respuesta del cliente (conexión, timeout, DNS).
+     *
+     * @return bool
+     */
+    public function el_ultimo_push_fallo_por_transporte()
+    {
+        return $this->ultimo_push_fallo_por_transporte;
     }
 
     /**
