@@ -102,11 +102,26 @@ class ClientAgentesIaService
         } catch (\Throwable $e) {
             Log::warning('ClientAgentesIaService: falló la activación automática al asignar el plan.', [
                 'client_id' => (int) $client->id,
-                'error'     => $this->texto_seguro($e->getMessage(), (string) $client->api_key),
+                'error'     => $this->texto_seguro(ClientCatalogoPuenteService::sin_la_query_de_las_urls($e->getMessage()), (string) $client->api_key),
             ]);
 
             return $this->sin_conexion();
         }
+    }
+
+    /**
+     * Resultado para cuando se asignó el plan pero NO se intentó activar la extensión porque el push del plan ya
+     * había fallado por transporte (el sistema del cliente no contestó): insistir sumaría otro timeout.
+     *
+     * @return array{estado: string, mensaje: string, activa: bool|null}
+     */
+    public function no_intentada_por_falla_del_plan()
+    {
+        return $this->resultado(
+            self::ESTADO_SIN_CONEXION,
+            'No se intentó activar Agentes de IA porque el sistema del cliente no respondió al enviarle el plan.'
+            . ' Cuando vuelva a estar disponible se activa con el botón de la ficha.'
+        );
     }
 
     /**
@@ -206,6 +221,15 @@ class ClientAgentesIaService
         }
 
         $activa_ahora = $json['activa'];
+
+        // Un PUT que el cliente confirma con OTRO valor del pedido no es un éxito: la extensión no quedó como se pidió.
+        if ($metodo === 'PUT' && $activa_ahora !== (bool) $activa) {
+            return $this->resultado(
+                self::ESTADO_SIN_CONEXION,
+                'El sistema del cliente no dejó Agentes de IA como se pidió (quedó '
+                . ($activa_ahora ? 'activa' : 'no activa') . '). Volvé a consultar y probá de nuevo.'
+            );
+        }
 
         if ($metodo === 'PUT') {
             $mensaje = $activa_ahora

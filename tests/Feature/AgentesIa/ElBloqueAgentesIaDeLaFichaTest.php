@@ -465,6 +465,42 @@ class ElBloqueAgentesIaDeLaFichaTest extends BaseDelCatalogoPorClaude
     }
 
     /**
+     * 🔴 Un PUT que el cliente contesta con ok:true pero con `activa` DISTINTA de lo pedido no es un éxito: la extensión
+     * no quedó como se pidió (empresa ignoró el pedido, otro dueño, etc.). No se informa como `ok`.
+     *
+     * @return void
+     */
+    public function test_un_put_confirmado_con_otro_valor_del_pedido_no_es_exito(): void
+    {
+        foreach ([[true, false], [false, true]] as $par) {
+            [$pedido, $devuelve] = $par;
+
+            $this->el_cliente_contesta(['ok' => true, 'activa' => $devuelve]);
+
+            $respuesta = $this->cambiar($pedido);
+
+            $respuesta->assertStatus(200);
+            $respuesta->assertJsonPath('estado', 'sin_conexion');
+            $this->assertNull($respuesta->json('activa'));
+            $this->assertStringContainsString('no dejó Agentes de IA como se pidió', (string) $respuesta->json('mensaje'));
+        }
+    }
+
+    /**
+     * El mismo valor en el GET no se compara contra nada: el GET solo informa.
+     *
+     * @return void
+     */
+    public function test_el_get_informa_el_valor_que_tenga_sin_compararlo(): void
+    {
+        foreach ([true, false] as $valor) {
+            $this->el_cliente_contesta(['ok' => true, 'activa' => $valor]);
+
+            $this->leer()->assertJsonPath('estado', 'ok')->assertJsonPath('activa', $valor);
+        }
+    }
+
+    /**
      * @return void
      */
     public function test_los_endpoints_exigen_autenticacion(): void
