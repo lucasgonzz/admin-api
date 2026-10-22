@@ -151,12 +151,9 @@ class LandingAgendaController extends Controller
             'event_source_url'  => isset($datos['event_source_url']) ? (string) $datos['event_source_url'] : '',
         ];
 
+        /* D9: la carta, el WhatsApp, el aviso y Meta van después de responder: el servicio despacha ese
+           trabajo apenas la reserva queda escrita (ver `LandingAgendaService::escribir_reserva`). */
         $resultado = $service->reservar($datos, $contexto_web);
-
-        /* D9: la carta, el WhatsApp, el aviso y Meta, después de responder (ver el job). */
-        if ($resultado['trabajo'] !== null) {
-            dispatch($resultado['trabajo'])->afterResponse();
-        }
 
         return response()->json($resultado['cuerpo'], $resultado['http']);
     }

@@ -45,10 +45,14 @@ class ConfirmarReservaLandingJob
     /** @var int */
     public $lead_id;
 
-    /** @var int Evento `sistema` del hilo creado por la reserva (ahí se anota lo que pasó). */
+    /**
+     * @var int|null Evento `sistema` del hilo creado por la reserva (ahí se anota lo que pasó). Lo completa
+     *               la reserva DESPUÉS de despachar el trabajo (el trabajo se despacha apenas la reserva
+     *               queda escrita, antes de cualquier paso que pueda tirar): por eso es público y nullable.
+     */
     public $evento_id;
 
-    /** @var array<int, int> Filas de `lead_eventos_meta` que nacieron en la reserva. */
+    /** @var array<int, int> Filas de `lead_eventos_meta` que nacieron en la reserva (las completa la reserva, igual). */
     public $filas_meta;
 
     /** @var string El turno en texto («jueves 23/10 de 15:00 a 17:00»). */
@@ -56,11 +60,11 @@ class ConfirmarReservaLandingJob
 
     /**
      * @param int             $lead_id
-     * @param int             $evento_id
+     * @param int|null        $evento_id
      * @param array<int, int> $filas_meta
      * @param string          $texto_turno
      */
-    public function __construct(int $lead_id, int $evento_id, array $filas_meta, string $texto_turno)
+    public function __construct(int $lead_id, ?int $evento_id, array $filas_meta, string $texto_turno)
     {
         $this->lead_id     = $lead_id;
         $this->evento_id   = $evento_id;
@@ -89,7 +93,7 @@ class ConfirmarReservaLandingJob
         /* Lo que pasó queda en el evento de la reserva, igual que el agente lo deja en su mensaje
          * (`admin_notifications`). */
         try {
-            $evento = LeadMessage::query()->find($this->evento_id);
+            $evento = $this->evento_id !== null ? LeadMessage::query()->find($this->evento_id) : null;
             if ($evento !== null && ! empty($anotaciones)) {
                 $previas = is_array($evento->admin_notifications) ? $evento->admin_notifications : [];
                 $evento->update(['admin_notifications' => array_merge($previas, $anotaciones)]);

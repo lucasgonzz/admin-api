@@ -293,16 +293,27 @@ class LandingAgendaService
         }
 
         /** @var Lead $lead */
-        $lead   = $reserva['lead'];
-        $evento = $reserva['evento'];
+        $lead    = $reserva['lead'];
+        $evento  = $reserva['evento'];
+        /** @var ConfirmarReservaLandingJob $trabajo Ya despachado para después de responder. */
+        $trabajo = $reserva['trabajo'];
 
-        LeadPipelineStatus::ensure_exists('demo_agendada');
+        /* 🔴 Desde acá, cada paso en su try/catch y con rastro en el hilo (🟠4): la reserva está escrita y
+         * el trabajo de después ya despachado; ninguno de estos puede convertirla en un 500. */
+        try {
+            LeadPipelineStatus::ensure_exists('demo_agendada');
+        } catch (\Throwable $e) {
+            $this->anotar_error((int) $lead->id, 'No se pudo asegurar el estado demo_agendada del pipeline', $e);
+        }
 
         /* D8: los eventos que nacen en esta reserva, con el contexto del navegador. Sin despachar: el
          * envío a Meta va en el trabajo de después de responder. */
         $filas = [];
         try {
             $filas = app(MetaConversionesService::class)->registrar_alcanzados($lead, null, false, $contexto_web);
+            $trabajo->filas_meta = array_map(function (LeadEventoMeta $fila) {
+                return (int) $fila->id;
+            }, $filas);
         } catch (\Throwable $e) {
             Log::channel('daily')->error('LandingAgenda: no se pudieron registrar los eventos de Meta de la reserva.', [
                 'lead_id' => $lead->id,
@@ -311,18 +322,26 @@ class LandingAgendaService
         }
 
         /* Igual que el agente al asignar una demo directa: el A/B de la bienvenida cuenta el agendado. */
-        if ($lead->welcome_variant_id) {
-            $variante = \App\Models\MessageVariant::find($lead->welcome_variant_id);
-            if ($variante) {
-                $variante->increment_scheduled();
+        try {
+            if ($lead->welcome_variant_id) {
+                $variante = \App\Models\MessageVariant::find($lead->welcome_variant_id);
+                if ($variante) {
+                    $variante->increment_scheduled();
+                }
             }
+        } catch (\Throwable $e) {
+            Log::error('LandingAgenda: no se pudo contar el agendado en el A/B de la bienvenida.', ['lead_id' => $lead->id, 'error' => $e->getMessage()]);
         }
 
         /* El save() del agente (ver el docblock): latch de verificación, embudo y observers. */
-        $lead->save();
+        try {
+            $lead->save();
+        } catch (\Throwable $e) {
+            $this->anotar_error((int) $lead->id, 'La reserva desde la web quedó escrita, pero falló el guardado final del lead (latch de verificación y observers)', $e);
+        }
 
         LeadSuggestionCreated::dispatch((int) $lead->id);
-        LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $evento->id);
+        LeadBroadcastService::emit_conversation_updated((int) $lead->id, $evento !== null ? (int) $evento->id : null);
 
         Log::info('LandingAgenda: demo reservada desde la web.', [
             'lead_id'    => $lead->id,
@@ -343,14 +362,12 @@ class LandingAgendaService
             $meta_eventos[] = ['nombre' => (string) $fila->evento, 'event_id' => (string) $fila->event_id];
         }
 
-        $trabajo = new ConfirmarReservaLandingJob(
-            (int) $lead->id,
-            (int) $evento->id,
-            array_map(function (LeadEventoMeta $fila) {
-                return (int) $fila->id;
-            }, $filas),
-            $reserva['texto']
-        );
+        $whatsapp_confirmacion = false;
+        try {
+            $whatsapp_confirmacion = FollowupTemplate::estado_para_enviar((string) config('landing_agenda.plantilla_confirmacion'))['motivo'] === null;
+        } catch (\Throwable $e) {
+            Log::error('LandingAgenda: no se pudo leer el estado de la plantilla de confirmación.', ['error' => $e->getMessage()]);
+        }
 
         return [
             'http'    => 201,
@@ -367,7 +384,7 @@ class LandingAgendaService
                 /* ¿Va a salir el WhatsApp de confirmación? Solo si la plantilla está activa y aprobada AHORA
                  * (el mismo gate que mira el trabajo de después antes de mandarla), para que la landing no le
                  * prometa al visitante un WhatsApp que no le va a llegar. */
-                'whatsapp_confirmacion' => FollowupTemplate::estado_para_enviar((string) config('landing_agenda.plantilla_confirmacion'))['motivo'] === null,
+                'whatsapp_confirmacion' => $whatsapp_confirmacion,
             ],
             'trabajo' => $trabajo,
         ];
@@ -533,7 +550,7 @@ class LandingAgendaService
      * @param Demo                 $demo
      * @param array{inicio: Carbon, fin: Carbon, cabe: bool} $ventana
      *
-     * @return array{lead: Lead, evento: LeadMessage, lead_nuevo: bool, fecha: string, desde: string, hasta: string, texto: string}
+     * @return array{lead: Lead, evento: LeadMessage|null, trabajo: ConfirmarReservaLandingJob, lead_nuevo: bool, fecha: string, desde: string, hasta: string, texto: string}
      */
     private function escribir_reserva(?Lead $lead, string $telefono, array $datos, Demo $demo, array $ventana): array
     {
@@ -558,7 +575,11 @@ class LandingAgendaService
                 'origen_calculado_at' => $ahora,
                 'status'              => 'nuevo',
             ]);
-            LeadDocNumberGenerator::assign_to_lead_if_empty($lead);
+            try {
+                LeadDocNumberGenerator::assign_to_lead_if_empty($lead);
+            } catch (\Throwable $e) {
+                Log::error('LandingAgenda: no se pudo asignar el documento de la demo al lead nuevo.', ['lead_id' => $lead->id, 'error' => $e->getMessage()]);
+            }
         }
 
         /* Un formulario público no pisa datos de un lead existente (D5): nombre, correo y rubro libre solo
@@ -602,40 +623,79 @@ class LandingAgendaService
         $hasta = $ventana['fin']->format('H:i');
         $texto = self::texto_del_turno($ventana['inicio'], $ventana['fin']);
 
+        /* 🔴 LA RESERVA YA ESTÁ ESCRITA. Desde acá nada puede dejarla sin carta, sin WhatsApp y sin aviso a
+         * los admins (segunda vuelta, 🟠4): el trabajo de después se arma y se despacha AHORA, antes de
+         * cualquier otro paso que pueda tirar, y lo que falta (el evento, los eventos de Meta) se le
+         * completa por referencia más abajo. Lo que tire después queda en el hilo como error y la
+         * respuesta es 201 igual. */
+        $trabajo = new ConfirmarReservaLandingJob((int) $lead->id, null, [], $texto);
+        dispatch($trabajo)->afterResponse();
+
         $contenido = 'Reservó su demo desde la web: ' . $texto . ' · rubro ' . $rubro_txt . '.';
         if ($correo_distinto !== null) {
             $contenido .= ' En el formulario escribió otro correo (' . $correo_distinto . '); la carta va al que ya teníamos.';
         }
 
         /* D6/D7: el evento visible en el hilo, que además es el `message_id` del contacto de atribución. */
-        $evento = LeadMessage::create([
-            'lead_id'               => $lead->id,
-            'sender'                => 'sistema',
-            'content'               => $contenido,
-            'status'                => 'enviado',
-            'is_followup'           => false,
-            'is_status_event'       => true,
-            'requiere_verificacion' => false,
-            'sent_at'               => $ahora,
-            'admin_notifications'   => [
-                ['evento' => 'Demo reservada desde la web', 'admins' => []],
-            ],
-        ]);
+        $evento = null;
+        try {
+            $evento = LeadMessage::create([
+                'lead_id'               => $lead->id,
+                'sender'                => 'sistema',
+                'content'               => $contenido,
+                'status'                => 'enviado',
+                'is_followup'           => false,
+                'is_status_event'       => true,
+                'requiere_verificacion' => false,
+                'sent_at'               => $ahora,
+                'admin_notifications'   => [
+                    ['evento' => 'Demo reservada desde la web', 'admins' => []],
+                ],
+            ]);
+            $trabajo->evento_id = (int) $evento->id;
+        } catch (\Throwable $e) {
+            $this->anotar_error((int) $lead->id, 'No se pudo dejar en el hilo la reserva desde la web (' . $texto . ')', $e);
+        }
 
-        $atribucion = app(LeadAtribucionService::class);
-        $atribucion->registrar_contacto_de_reserva($evento, isset($datos['atribucion']) && is_array($datos['atribucion']) ? $datos['atribucion'] : []);
-        /* Igual que el agente: el UPDATE no dispara observers, así que la reserva se acredita acá. */
-        $atribucion->registrar_reserva($lead);
+        /* La atribución es accesoria: no puede tumbar una reserva. Si falla, el `ReservaAtribucionObserver`
+         * del save() final vuelve a intentar `registrar_reserva()`. */
+        try {
+            $atribucion = app(LeadAtribucionService::class);
+            if ($evento !== null) {
+                $atribucion->registrar_contacto_de_reserva($evento, isset($datos['atribucion']) && is_array($datos['atribucion']) ? $datos['atribucion'] : []);
+            }
+            /* Igual que el agente: el UPDATE no dispara observers, así que la reserva se acredita acá. */
+            $atribucion->registrar_reserva($lead);
+        } catch (\Throwable $e) {
+            $this->anotar_error((int) $lead->id, 'No se pudo registrar la atribución de la reserva desde la web', $e);
+        }
 
         return [
             'lead'       => $lead,
             'evento'     => $evento,
+            'trabajo'    => $trabajo,
             'lead_nuevo' => $lead_nuevo,
             'fecha'      => $fecha,
             'desde'      => $desde,
             'hasta'      => $hasta,
             'texto'      => $texto,
         ];
+    }
+
+    /**
+     * Deja en el hilo del lead (bloque rojo de error, `LeadConversationErrorLogger`) y en el log un paso de
+     * la reserva que falló DESPUÉS de escribirla. La reserva sigue en pie y la respuesta es 201.
+     *
+     * @param int        $lead_id
+     * @param string     $contexto
+     * @param \Throwable $e
+     *
+     * @return void
+     */
+    private function anotar_error(int $lead_id, string $contexto, \Throwable $e): void
+    {
+        Log::error('LandingAgenda: ' . $contexto . '.', ['lead_id' => $lead_id, 'error' => $e->getMessage()]);
+        (new LeadConversationErrorLogger())->log($lead_id, $contexto, $e->getMessage());
     }
 
     /**
