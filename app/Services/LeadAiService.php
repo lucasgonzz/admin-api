@@ -6125,8 +6125,10 @@ TXT;
      * (agendar, cancelar, confirmar ingreso, marcar no ingreso), nunca por a dónde apunta el estado
      * sugerido: el mensaje que lo mete al tramo sale solo, y a partir del siguiente —con el lead ya
      * adentro y el escudo por lead prendido por el latch de `Lead::saving`— todo espera el ok, como
-     * hoy. La única excepción que sigue reteniendo antes del tramo es una escalación con
-     * `requiere_verificacion`/`requiere_intervencion_humana` explícitos, que viven en el llamador.
+     * hoy. (Desde el 22/10/2026 ya no es «como hoy»: con el lead adentro y el escudo apagado no se
+     * retiene; ver abajo.) La derivación a humano (`requiere_intervencion_humana`) y las guardas de
+     * integridad (`requiere_verificacion`) siguen reteniendo, y viven en el llamador, ver
+     * el_paquete_queda_retenido().
      * El respaldo hermano de apply_parsed_response() (el `$req_verif` del final) cambió igual.
      *
      * @param Lead                 $lead
@@ -6144,7 +6146,7 @@ TXT;
          * salir solo durante el tramo, incluidos los que agendan o cancelan una demo real, confirman
          * ingreso o marcan no-ingreso. Va primero y corta de una: apagado el interruptor, ninguna de
          * las condiciones de abajo tiene por qué evaluarse. Esto NO desarma la verificación por-lead
-         * ni la explícita de Claude: las dos viven en el llamador (create_message_and_update_lead(),
+         * ni las guardas/derivaciones del paquete: viven en el llamador (create_message_and_update_lead(),
          * los otros dos operandos del OR) y siguen reteniendo con el interruptor apagado.
          */
         if (! $this->retencion_por_tramo_de_agenda_activa()) {
@@ -6205,7 +6207,14 @@ TXT;
      *     el mensaje que mete al lead en el tramo (ver la segunda llamada de disponibilidad): son
      *     paquetes que el SISTEMA detectó defectuosos, no una «verificación» que Lucas controle.
      *
-     * Ya NO retiene: que la IA se muestre insegura, ni estar parado en un estado del tramo.
+     *   - `$parsed['requiere_intervencion_humana']`: la IA derivó el caso a una persona (reclamo,
+     *     tema legal, algo que no sabe resolver). El prompt le pide en ese caso un borrador para que
+     *     «el setter decida si lo usa»: no es una sugerencia para enviar sola, y retenerlo es otro
+     *     control, el de la derivación, no el escudo de verificación. Es una derivación explícita de
+     *     la IA o de una guarda, nunca una inseguridad suelta.
+     *
+     * Ya NO retiene: que la IA se muestre insegura (`requiere_verificacion` de su propia respuesta),
+     * ni estar parado en un estado del tramo.
      *
      * @param Lead                 $lead
      * @param array<string, mixed> $parsed
@@ -6215,7 +6224,8 @@ TXT;
     protected function el_paquete_queda_retenido(Lead $lead, array $parsed): bool
     {
         return (bool) $lead->requiere_verificacion_mensajes
-            || ! empty($parsed['requiere_verificacion']);
+            || ! empty($parsed['requiere_verificacion'])
+            || ! empty($parsed['requiere_intervencion_humana']);
     }
 
     /**
@@ -6283,7 +6293,7 @@ TXT;
     /**
      * Crea el LeadMessage pendiente de aprobación cuando create_message_and_update_lead() detecta
      * que el paquete (mensaje + acciones) tiene que esperar aprobación humana — ya sea por el tramo
-     * de agenda, por requiere_verificacion explícito de Claude, o por demora general de auto-envío
+     * de agenda, por una guarda de integridad o una derivación a humano, o por demora general de auto-envío
      * (ver GENERALIZACIÓN en create_message_and_update_lead(), prompt 319). No corre NINGUNA acción
      * (guardar_nombre, agendar_demo, cancelar_demo, etc.) — se guarda el $parsed crudo en
      * pending_actions y se aplica recién al aprobar, vía apply_pending_actions(), que revalida

@@ -475,7 +475,7 @@ class InterruptorGlobalDeVerificacionDeMensajesTest extends TestCase
      * requiere_verificacion que dejan las GUARDAS de integridad en el paquete (el que pide la IA por
      * su cuenta ya no llega en esa clave desde el 22/10/2026: ver VerificacionSoloPorEscudoDelLeadTest).
      */
-    public function test_global_en_false_no_apaga_el_flag_por_lead_ni_el_requiere_verificacion_explicito(): void
+    public function test_global_en_false_no_apaga_el_flag_por_lead_ni_el_requiere_verificacion_de_una_guarda(): void
     {
         AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '0');
         $service = $this->service();

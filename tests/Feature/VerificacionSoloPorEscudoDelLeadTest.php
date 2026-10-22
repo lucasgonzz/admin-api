@@ -341,6 +341,30 @@ class VerificacionSoloPorEscudoDelLeadTest extends TestCase
     }
 
     /**
+     * 🔴 La IA deriva el caso a una persona (`requiere_intervencion_humana`, junto con el
+     * `requiere_verificacion` que el prompt le pide en ese caso): el borrador es para que «el setter
+     * decida si lo usa», así que NO sale solo aunque el escudo esté apagado. Es una derivación, no
+     * una inseguridad suelta.
+     */
+    public function test_una_derivacion_a_humano_de_la_ia_queda_retenida_con_el_escudo_apagado(): void
+    {
+        $service = $this->service();
+        $lead    = $this->crear_lead_con_escudo_apagado('contactado');
+
+        $parsed = $service->parsear(json_encode([
+            'mensaje_sugerido'             => 'Entiendo tu enojo, lo vemos ahora mismo.',
+            'estado_sugerido'              => 'contactado',
+            'razonamiento'                 => 'El lead se quejó.',
+            'requiere_intervencion_humana' => true,
+            'requiere_verificacion'        => true,
+        ], JSON_UNESCAPED_UNICODE));
+        $msg = $service->crear($lead, $parsed);
+
+        $this->assertTrue((bool) $msg->requiere_verificacion);
+        $this->assertNotEmpty($msg->pending_actions, 'La derivación a humano tiene que quedar retenida.');
+    }
+
+    /**
      * El gate de agendamiento ya no retiene por estar el lead adentro del tramo; solo retiene las
      * acciones que lo meten desde afuera (el momento en que el latch prende el escudo).
      */
