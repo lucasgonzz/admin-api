@@ -105,6 +105,31 @@ class PrimerMensajeDelLeadReservadoTest extends BaseDeLaAgendaDeLaLanding
         $job->handle($agente, new LeadAiSuggestionScheduler());
     }
 
+    public function test_la_red_de_seguridad_del_cron_tambien_recoge_su_primer_mensaje(): void
+    {
+        $this->reservar($this->cuerpo())->assertStatus(201);
+        $reservado = Lead::query()->where('phone', '+5493416665544')->firstOrFail();
+        $otro      = $this->ocupar($this->demo_2, '2026-10-24', '15:00', '17:00');
+        foreach ([$reservado, $otro] as $i => $lead) {
+            LeadMessage::create([
+                'lead_id' => $lead->id, 'sender' => 'lead', 'kind' => 'text', 'content' => 'Hola',
+                'status' => 'enviado', 'is_status_event' => false, 'sent_at' => now()->subMinutes(10),
+                'created_at' => now()->subMinutes(10), 'whatsapp_message_id' => 'wamid.CRON' . $i,
+            ]);
+        }
+
+        Bus::fake([GenerateLeadAiSuggestionJob::class]);
+        (new \App\Services\BatchLeadAiRecoveryService())->dispatch_unanswered_leads();
+
+        $propiedad = new \ReflectionProperty(GenerateLeadAiSuggestionJob::class, 'lead_id');
+        $propiedad->setAccessible(true);
+        $leads = Bus::dispatchedAfterResponse(GenerateLeadAiSuggestionJob::class)->map(function ($job) use ($propiedad) {
+            return (int) $propiedad->getValue($job);
+        })->all();
+        $this->assertContains((int) $reservado->id, $leads);
+        $this->assertNotContains((int) $otro->id, $leads, 'Para los demás, el gate de siempre.');
+    }
+
     public function test_el_bloque_demo_directa_dice_que_lo_reservo_desde_la_web(): void
     {
         $this->reservar($this->cuerpo())->assertStatus(201);

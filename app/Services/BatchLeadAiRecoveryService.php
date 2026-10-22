@@ -33,7 +33,8 @@ class BatchLeadAiRecoveryService
      *
      * Criterios de elegibilidad:
      *  1. claude_auto_reply = true
-     *  2. Al menos 2 mensajes entrantes del lead (el primero es onboarding sin IA)
+     *  2. Al menos 2 mensajes entrantes del lead (el primero es onboarding sin IA), o 1 si reservó su
+     *     demo desde la landing (LeadAiSuggestionScheduler::responde_el_primer_mensaje)
      *  3. Sin sugerencia pendiente de revisión (no followup)
      *  4. Último mensaje entrante hace más de BATCH_MIN_ELAPSED_MINUTES minutos
      *  5. Tiene mensajes sin responder según LeadConversationAiState
@@ -54,9 +55,12 @@ class BatchLeadAiRecoveryService
 
         foreach ($leads as $lead) {
 
-            /* Condición 2: al menos 2 mensajes entrantes reales del lead. */
+            /* Condición 2: al menos 2 mensajes entrantes reales del lead. Salvo el que reservó su demo
+               desde la landing, con la misma condición que el scheduler y el job (22/10/2026): para ese
+               lead el onboarding no corre y el agente contesta desde el primer mensaje, así que esta red
+               de seguridad también tiene que recogerlo si el job del primer mensaje se perdió. */
             $inbound_count = LeadConversationAiState::count_lead_inbound_messages($lead->id);
-            if ($inbound_count <= 1) {
+            if ($inbound_count <= 1 && ! LeadAiSuggestionScheduler::responde_el_primer_mensaje((int) $lead->id)) {
                 $skipped++;
                 continue;
             }
