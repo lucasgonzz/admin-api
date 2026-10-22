@@ -10301,6 +10301,47 @@ BLOQUE_DEL_MANUAL;
     }
 
     /**
+     * Hasta cuándo sigue vigente el turno asignado al lead para el agente: el mayor entre el fin del
+     * turno más la gracia y el inicio más el bloqueo real. Null si el turno no se puede leer (sin fecha,
+     * o una hora que no parsea): para el agente, un turno ilegible está vencido.
+     *
+     * Mismo piso de bloqueo_real_minutos que el gate real de ingreso (11/9/2026,
+     * DemoExperienciaController::build_turno()): si el link todavía deja entrar, el agente no le puede
+     * decir al lead que su demo venció y ofrecerle una instancia nueva -- quedaría hablando de dos demos
+     * distintas para el mismo turno.
+     *
+     * Extraído tal cual de `build_demo_directa_context()` el 22/10/2026 (misión
+     * demo-autogestionada-landing, segunda vuelta): lo usa también la reserva de la landing para decidir
+     * si un lead "ya tiene demo" (409) o si su demo venció y se le puede reservar otra.
+     *
+     * @param Lead $lead
+     *
+     * @return Carbon|null
+     */
+    public static function fin_real_del_turno_asignado(Lead $lead): ?Carbon
+    {
+        if ($lead->demo_date === null) {
+            return null;
+        }
+
+        try {
+            $inicio_asignada = Carbon::parse(
+                $lead->demo_date->format('Y-m-d') . ' ' . self::time_string_to_hhmm($lead->demo_start_time),
+                DemoDirectaService::TZ
+            );
+            $fin_por_gracia  = Carbon::parse(
+                $lead->demo_date->format('Y-m-d') . ' ' . self::time_string_to_hhmm($lead->demo_end_time),
+                DemoDirectaService::TZ
+            )->addMinutes(LeadDemoSettings::get_gracia_minutos_post());
+            $fin_por_bloqueo = $inicio_asignada->copy()->addMinutes(LeadDemoSettings::get_bloqueo_real_minutos());
+
+            return $fin_por_bloqueo->gt($fin_por_gracia) ? $fin_por_bloqueo : $fin_por_gracia;
+        } catch (\Exception $e) {
+            return null;
+        }
+    }
+
+    /**
      * Línea del bloque DEMO DIRECTA para el lead que reservó su demo él mismo desde la landing (misión
      * demo-autogestionada-landing, 22/10/2026, D11 del plan). Vacía para cualquier otro lead, o si la
      * demo de esa reserva ya no está vigente.
@@ -10380,25 +10421,11 @@ BLOQUE_DEL_MANUAL;
             && (string) $lead->status !== 'solicita_disponibilidad';
         $demo_asignada_vencida = false;
         if ($tiene_demo_asignada) {
-            $fin_asignada = null;
-            try {
-                /* Mismo piso de bloqueo_real_minutos que el gate real de ingreso (11/9/2026,
-                 * DemoExperienciaController::build_turno()): si el link todavía deja entrar, el
-                 * agente no le puede decir al lead que su demo venció y ofrecerle una instancia
-                 * nueva -- quedaría hablando de dos demos distintas para el mismo turno. */
-                $inicio_asignada = Carbon::parse(
-                    $lead->demo_date->format('Y-m-d') . ' ' . self::time_string_to_hhmm($lead->demo_start_time),
-                    DemoDirectaService::TZ
-                );
-                $fin_por_gracia  = Carbon::parse(
-                    $lead->demo_date->format('Y-m-d') . ' ' . self::time_string_to_hhmm($lead->demo_end_time),
-                    DemoDirectaService::TZ
-                )->addMinutes(LeadDemoSettings::get_gracia_minutos_post());
-                $fin_por_bloqueo = $inicio_asignada->copy()->addMinutes(LeadDemoSettings::get_bloqueo_real_minutos());
-                $fin_asignada    = $fin_por_bloqueo->gt($fin_por_gracia) ? $fin_por_bloqueo : $fin_por_gracia;
-            } catch (\Exception $e) {
-                $fin_asignada = null;
-            }
+            /* El fin real del turno vive en fin_real_del_turno_asignado() desde el 22/10/2026: la reserva
+             * de la landing decide `ya_tiene_demo` con este MISMO cálculo (si la landing y el agente
+             * tuvieran dos definiciones de "demo vigente", el agente le ofrecería de nuevo la demo a un
+             * lead al que la web le dice que ya tiene una). */
+            $fin_asignada          = self::fin_real_del_turno_asignado($lead);
             $demo_asignada_vencida = $fin_asignada === null || $ahora->gt($fin_asignada);
         }
 

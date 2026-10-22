@@ -66,6 +66,50 @@ class RechazosDeLaReservaTest extends BaseDeLaAgendaDeLaLanding
         }
     }
 
+    public function test_ya_tiene_demo_si_la_de_hoy_todavia_no_vencio(): void
+    {
+        /* Hoy de 08:30 a 10:30: con la gracia (10) vence a las 10:40; son las 10:00. */
+        Lead::create([
+            'phone' => '+5493416665544', 'status' => 'demo_agendada',
+            'demo_id' => $this->demo_1->id, 'demo_date' => '2026-10-22', 'demo_start_time' => '08:30', 'demo_end_time' => '10:30',
+        ]);
+
+        $this->reservar($this->cuerpo())->assertStatus(409)->assertJsonPath('codigo', 'ya_tiene_demo');
+    }
+
+    public function test_con_la_demo_vencida_se_reserva_sobre_el_mismo_lead(): void
+    {
+        /* No-show del lunes: sigue en demo_pendiente_de_ingreso (el turno lo suelta solo una persona), pero
+         * para el agente esa demo está vencida y se le ofrece otra. La web hace lo mismo. */
+        $lead = Lead::create([
+            'phone' => '+5493416665544', 'contact_name' => 'Marina', 'status' => 'demo_pendiente_de_ingreso',
+            'demo_id' => $this->demo_1->id, 'demo_date' => '2026-10-19', 'demo_start_time' => '15:00', 'demo_end_time' => '17:00',
+            'recordatorio_demo_enviado' => true,
+        ]);
+        $leads_antes = Lead::query()->count();
+
+        $this->reservar($this->cuerpo())->assertStatus(201);
+
+        $this->assertSame($leads_antes, Lead::query()->count());
+        $lead = $lead->fresh();
+        $this->assertSame('demo_agendada', $lead->status);
+        $this->assertSame('2026-10-23', $lead->demo_date->format('Y-m-d'));
+        $this->assertSame('15:00', substr((string) $lead->demo_start_time, 0, 5));
+        $this->assertFalse((bool) $lead->recordatorio_demo_enviado, 'Como un reagendado: los relojes vuelven a cero.');
+        $this->assertNotNull($lead->demo_reservada_desde_landing_at);
+    }
+
+    public function test_una_demo_de_hoy_ya_terminada_tambien_esta_vencida(): void
+    {
+        /* Hoy de 07:00 a 09:00: vence a las 09:10 (gracia) y son las 10:00. */
+        Lead::create([
+            'phone' => '+5493416665544', 'status' => 'demo_agendada',
+            'demo_id' => $this->demo_1->id, 'demo_date' => '2026-10-22', 'demo_start_time' => '07:00', 'demo_end_time' => '09:00',
+        ]);
+
+        $this->reservar($this->cuerpo())->assertStatus(201);
+    }
+
     public function test_ya_es_cliente(): void
     {
         Lead::create(['phone' => '+5493416665544', 'status' => 'cerrado_ganado']);

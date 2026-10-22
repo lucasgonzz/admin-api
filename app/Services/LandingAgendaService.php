@@ -385,7 +385,15 @@ class LandingAgendaService
             ];
         }
 
-        if (in_array($status, DemoDirectaService::ESTADOS_QUE_OCUPAN_LA_INSTANCIA, true)) {
+        /* Solo si la demo sigue VIGENTE, con el mismo cálculo que usa el agente
+         * (`LeadAiService::fin_real_del_turno_asignado`). Un no-show de hace días sigue en
+         * `demo_pendiente_de_ingreso` (el turno lo suelta solo una persona), y para el agente esa demo
+         * está vencida y se le ofrece de nuevo: la web no puede decirle que "ya tiene una". Vencida, se
+         * reserva sobre ese mismo lead (`campos_de_reserva` resetea los relojes y el trabajo de después
+         * mueve el token, como en un reagendado). */
+        $fin_real = LeadAiService::fin_real_del_turno_asignado($lead);
+        if (in_array($status, DemoDirectaService::ESTADOS_QUE_OCUPAN_LA_INSTANCIA, true)
+            && $lead->demo_id !== null && $fin_real !== null && ! AppTime::now(DemoDirectaService::TZ)->gt($fin_real)) {
             return [
                 'codigo'  => self::CODIGO_YA_TIENE_DEMO,
                 'mensaje' => 'Ese WhatsApp ya tiene una demo reservada. Si querés cambiarla, escribinos por WhatsApp.',
