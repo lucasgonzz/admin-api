@@ -33,6 +33,8 @@ use Illuminate\Support\Facades\Http;
  */
 class DemoUpdateService
 {
+    use \App\Services\Concerns\PerfilRuntimeDelErp;
+
     /*
      * Bajar los paquetes que GitHub Actions publica en cada release en vez de compilar y empaquetar
      * en el VPS de builds (misión `instalar-sin-el-vps`, 10/9/2026). Lo mismo que usan
@@ -133,6 +135,7 @@ class DemoUpdateService
      */
     public function run(): void
     {
+        $this->runtime_preflight_done = false;
         // Marca inicio del pipeline.
         $this->demo_update->status     = 'ejecutandose';
         $this->demo_update->started_at = now();
@@ -325,6 +328,7 @@ class DemoUpdateService
      */
     private function step_upload_spa(): void
     {
+        $this->runtime_preflight('runtime');
         $local_zip          = $this->local_spa_zip_path();
         $spa_build_path     = $this->builds_spa_path();
         $vino_del_artefacto = is_file($local_zip);
@@ -423,12 +427,14 @@ class DemoUpdateService
      */
     private function step_upload_api(): void
     {
+        $this->runtime_preflight('runtime');
         $tag       = 'v' . $this->version->version;
         $zip_name  = 'api_' . $this->demo_update->uuid . '.zip';
         $local_zip = $this->local_zip_path($zip_name);
         $api_path  = $this->demo_api_path();
 
         if ($this->artefacto_bajar_api($tag, $local_zip, 'upload_api')) {
+            $this->runtime_assert_zip($local_zip);
             $this->preparar_zip_de_actualizacion_demo($local_zip);
             $this->artefacto_desplegar_zip_api(
                 $local_zip,
@@ -467,6 +473,7 @@ class DemoUpdateService
 
         // composer install en VPS: sin scripts (no hay .env en el build).
         $this->append_log('[upload_api] Corriendo composer install en VPS (--no-scripts)...');
+        $this->runtime_assert_build('upload_api');
         $this->exec_build_ssh(
             'upload_api',
             $this->build_composer_install_command($api_build_path, true)
@@ -1063,7 +1070,7 @@ class DemoUpdateService
         bool $must_succeed = true,
         bool $long_running = false
     ): string {
-        return $this->exec_ssh_session($this->ssh, $step, $command, $must_succeed, $long_running);
+        return $this->exec_ssh_session($this->ssh, $step, $this->runtime_command($command), $must_succeed, $long_running);
     }
 
     // =========================================================================
@@ -1506,6 +1513,9 @@ class DemoUpdateService
      */
     private function build_composer_install_command(string $work_dir, bool $skip_scripts): string
     {
+        if ($this->runtime_profile !== null) {
+            return $this->runtime_service()->composer($work_dir, $skip_scripts);
+        }
         $composer_bin = trim((string) config('services.deploy.composer_bin', 'composer'));
         $flags        = 'COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_MEMORY_LIMIT=-1 '
             . escapeshellarg($composer_bin)

@@ -52,6 +52,8 @@ use phpseclib3\Net\SSH2;
  */
 class InstallationService
 {
+    use \App\Services\Concerns\PerfilRuntimeDelErp;
+
     /*
      * Las etapas de aprovisionamiento del hosting (provision_check, provision_sites, provision_dns,
      * provision_db, provision_cron y provision_ssl) viven en el trait y no acá: son delegación pura
@@ -255,6 +257,7 @@ class InstallationService
      */
     public function run()
     {
+        $this->runtime_preflight_done = false;
         try {
             // Marca la instalación como "instalando" y registra el inicio.
             $this->installation->update([
@@ -289,6 +292,9 @@ class InstallationService
     private function execute_steps()
     {
         foreach ($this->steps as $step) {
+            if (strpos($step, 'provision_') !== 0 && $step !== 'compile_spa') {
+                $this->runtime_preflight('runtime');
+            }
             switch ($step) {
                 case 'compile_spa':
                     $this->step_compile_spa();
@@ -477,6 +483,7 @@ class InstallationService
      */
     private function step_upload_spa()
     {
+        $this->runtime_preflight('runtime');
         $local_zip          = $this->local_spa_zip_path();
         $spa_build_path     = $this->builds_spa_path();
         $vino_del_artefacto = is_file($local_zip);
@@ -574,6 +581,7 @@ class InstallationService
      */
     private function step_upload_api()
     {
+        $this->runtime_preflight('runtime');
         // Versión inicial a instalar.
         $tag = 'v' . $this->installation->version->version;
 
@@ -581,6 +589,7 @@ class InstallationService
         $local_zip = $this->local_zip_path('api_' . $this->installation->uuid . '.zip');
 
         if ($this->artefacto_bajar_api($tag, $local_zip, 'upload_api')) {
+            $this->runtime_assert_zip($local_zip);
             /* public/ primero: son 362 KB y, si el tag no lo tuviera, es mejor descubrirlo antes de
                subir los 35 MB del código. */
             $this->upload_public_del_tag($tag, 'upload_api', true);
@@ -613,6 +622,7 @@ class InstallationService
         $this->log('upload_api', $this->truncate_for_log($checkout_output));
 
         $this->log('upload_api', 'Corriendo composer install en VPS...');
+        $this->runtime_assert_build('upload_api');
         $this->exec_build_ssh(
             'upload_api',
             $this->build_composer_install_command($api_build_path, true)
@@ -1221,6 +1231,7 @@ class InstallationService
      */
     private function step_prepare_dirs(): void
     {
+        $this->runtime_preflight('runtime');
         $api_path = $this->get_api_path();
         $spa_dir  = $this->get_spa_hosting_dir();
 
@@ -1284,6 +1295,7 @@ class InstallationService
      */
     private function step_upload_public(): void
     {
+        $this->runtime_preflight('runtime');
         $tag = 'v' . $this->installation->version->version;
         $this->log('upload_public', "Trayendo public/ de la versión {$tag} desde GitHub");
 
@@ -1688,7 +1700,7 @@ class InstallationService
         bool $must_succeed = true,
         bool $long_running = false
     ): string {
-        return $this->exec_ssh_session($this->ssh, $step, $command, $must_succeed, $long_running);
+        return $this->exec_ssh_session($this->ssh, $step, $this->runtime_command($command), $must_succeed, $long_running);
     }
 
     /**
@@ -2361,6 +2373,9 @@ class InstallationService
      */
     private function build_composer_install_command(string $work_dir, bool $is_vps): string
     {
+        if ($this->runtime_profile !== null) {
+            return $this->runtime_service()->composer($work_dir, true);
+        }
         $composer_bin = trim((string) config('services.deploy.composer_bin', 'composer'));
         $flags        = 'COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_MEMORY_LIMIT=-1 '
             . escapeshellarg($composer_bin)

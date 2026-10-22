@@ -26,6 +26,8 @@ use phpseclib3\Net\SSH2;
  */
 class DeploymentService
 {
+    use \App\Services\Concerns\PerfilRuntimeDelErp;
+
     /**
      * Upgrade en curso.
      *
@@ -699,7 +701,7 @@ class DeploymentService
 
         return 'cd ' . $this->get_api_path() . ' && '
             . ($usuario === '' ? '' : 'sudo -H -u ' . $usuario . ' ')
-            . 'php artisan up';
+            . ($this->runtime_profile === null ? 'php' : RuntimeProfileService::PHP) . ' artisan up';
     }
 
     /**
@@ -747,6 +749,8 @@ class DeploymentService
      */
     private function execute_steps($resume_from_step = null)
     {
+        $this->runtime_preflight_done = false;
+        $this->runtime_preflight('runtime');
         list($secuencia, $desde, $en_ventana) = $this->resolver_secuencia($resume_from_step);
 
         $this->en_ventana_de_mantenimiento = $en_ventana;
@@ -2384,6 +2388,7 @@ class DeploymentService
      */
     private function step_upload_spa()
     {
+        $this->runtime_preflight('runtime');
         /* En el lugar (misión `un-solo-frente`): la API nueva se baja, se verifica y se SUBE al hosting
            ANTES de tocar el SPA vivo. Si GitHub falla acá, no se tocó nada; y entre el SPA nuevo y el
            `down` de upload_api queda solo descomprimir, no una descarga. */
@@ -2489,6 +2494,7 @@ class DeploymentService
      */
     private function step_upload_api()
     {
+        $this->runtime_preflight('runtime');
         $zip_name = 'api_' . $this->upgrade->uuid . '.zip';
 
         if ($this->es_en_el_lugar()) {
@@ -2580,6 +2586,7 @@ class DeploymentService
             $bytes = $this->release_artifacts()->download_asset($asset, $local_zip);
             $this->assert_local_zip_file($local_zip, $bytes, $step);
             $this->assert_zip_contains_root_file($local_zip, 'artisan', $step);
+            $this->runtime_assert_zip($local_zip);
             $this->log(
                 $step,
                 "Artefacto {$asset_name} bajado de GitHub ({$bytes} bytes): no se empaqueta en el VPS de builds",
@@ -2614,6 +2621,7 @@ class DeploymentService
         );
         $this->log($step, $this->truncate_for_log($checkout_output));
 
+        $this->runtime_assert_build($step);
         $this->log($step, 'Corriendo composer install en VPS (sin scripts de artisan; sin .env en build)...');
         $this->exec_build_ssh(
             $step,
@@ -4223,6 +4231,7 @@ class DeploymentService
      */
     private function como_usuario_del_sitio(string $comando): string
     {
+        $comando = $this->runtime_command($comando);
         $usuario = $this->usuario_del_sitio_en_vps();
 
         if ($usuario === '') {
@@ -4811,7 +4820,7 @@ class DeploymentService
         bool $must_succeed = true,
         bool $long_running = false
     ): string {
-        return $this->exec_ssh_session($this->ssh, $step, $command, $must_succeed, $long_running);
+        return $this->exec_ssh_session($this->ssh, $step, $this->runtime_command($command), $must_succeed, $long_running);
     }
 
     /**
@@ -5157,6 +5166,9 @@ class DeploymentService
      */
     private function build_composer_install_command(string $work_dir, bool $skip_scripts): string
     {
+        if ($this->runtime_profile !== null) {
+            return $this->runtime_service()->composer($work_dir, $skip_scripts);
+        }
         $composer_bin = trim((string) config('services.deploy.composer_bin', 'composer'));
         $flags = 'COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_MEMORY_LIMIT=-1 '
             . escapeshellarg($composer_bin)
@@ -5690,6 +5702,7 @@ class DeploymentService
      */
     private function subir_zip_de_la_api_al_hosting(string $local_zip, string $zip_name, string $step): void
     {
+        $this->runtime_assert_zip($local_zip);
         $api_path   = $this->get_api_path();
         $remote_zip = "{$api_path}/{$zip_name}";
         /* Usar la credencial correcta según hosting_type (shared_hosting o vps) */

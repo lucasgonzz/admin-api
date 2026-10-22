@@ -295,6 +295,7 @@ trait ArtefactosDeRelease
         string $comando_composer,
         string $step
     ): void {
+        $this->runtime_assert_zip($local_zip);
         $sftp = $this->open_sftp_session($credencial);
         $this->sftp_upload_file($sftp, $local_zip, $api_path . '/' . $zip_name, $step);
         $this->artefacto_log($step, 'ZIP de la API subido al servidor destino');
