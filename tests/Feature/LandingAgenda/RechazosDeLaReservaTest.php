@@ -211,9 +211,31 @@ class RechazosDeLaReservaTest extends BaseDeLaAgendaDeLaLanding
             'event_source_url' => 'https://otro-sitio.example/landing',
         ]))->assertStatus(422);
 
-        foreach (['nombre', 'email', 'fecha', 'hora', 'fbp', 'event_source_url'] as $campo) {
+        foreach (['nombre', 'email', 'fecha', 'hora'] as $campo) {
             $this->assertArrayHasKey($campo, $respuesta->json('errores'), 'Campo ' . $campo);
         }
+        /* Segunda vuelta (🟡16): los de medición no son errores del visitante; se descartan en silencio. */
+        $this->assertArrayNotHasKey('fbp', $respuesta->json('errores'));
+        $this->assertArrayNotHasKey('event_source_url', $respuesta->json('errores'));
+    }
+
+    public function test_fbp_fbc_y_url_invalidos_se_descartan_sin_tumbar_la_reserva(): void
+    {
+        $this->reservar($this->cuerpo([
+            'fbp'              => 'cualquier-cosa',
+            'fbc'              => ['no', 'es', 'texto'],
+            'event_source_url' => 'https://otro-sitio.example/landing',
+        ]))->assertStatus(201);
+
+        \Illuminate\Support\Facades\Http::assertSent(function ($request) {
+            $dato = $request->data()['data'][0] ?? [];
+
+            return ($dato['event_name'] ?? '') === 'Lead'
+                && ($dato['action_source'] ?? '') === 'chat'
+                && ! isset($dato['event_source_url'])
+                && ! isset($dato['user_data']['fbp'])
+                && strpos((string) ($dato['user_data']['fbc'] ?? ''), 'IwAR123abcXYZ') !== false;
+        });
     }
 
     /* ------------------------------------------------------------------ 503 */

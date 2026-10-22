@@ -27,6 +27,13 @@ use Illuminate\Support\Facades\Validator;
  *      formulario completo en menos de 2,5 s no lo llenó una persona): 422 GENÉRICO, sin decir qué
  *      falló, para no enseñarle al bot qué corregir.
  *   3. Validación estricta de cada campo, con los mensajes en castellano para el visitante.
+ *
+ * 🔴 SALVO `fbp`, `fbc` y `event_source_url` (segunda vuelta, 🟡16): son datos de MEDICIÓN, opcionales,
+ * que el visitante no ve ni puede corregir. Si vienen fuera de formato (`fbp`/`fbc` que no son
+ * `fb.N.N.xxx` de hasta 255, una URL inválida, de más de 500 o de un host que no es la landing), se
+ * DESCARTAN EN SILENCIO y la reserva sigue: un 422 por una cookie rota le tiraría la reserva a una
+ * persona por algo que no es suyo. La clave sigue en la lista blanca; lo que se descarta es el valor, y
+ * el evento a Meta sale sin ese dato (sin URL o sin user agent, como `chat`, igual que siempre).
  */
 class LandingAgendaController extends Controller
 {
@@ -102,9 +109,6 @@ class LandingAgendaController extends Controller
             'fecha'            => ['required', 'date_format:Y-m-d'],
             'hora'             => ['required', 'string', 'regex:/^\d{2}:\d{2}$/'],
             'atribucion'       => ['nullable', 'array'],
-            'fbp'              => ['nullable', 'string', 'max:255', 'regex:' . self::REGEX_COOKIE_FB],
-            'fbc'              => ['nullable', 'string', 'max:255', 'regex:' . self::REGEX_COOKIE_FB],
-            'event_source_url' => ['nullable', 'string', 'url', 'max:500'],
         ];
         foreach ($reglas_atribucion as $campo => $regla) {
             $reglas['atribucion.' . $campo] = $regla;
@@ -118,7 +122,6 @@ class LandingAgendaController extends Controller
             'fecha'            => 'la fecha',
             'hora'             => 'la hora',
             'atribucion'       => 'la atribución',
-            'event_source_url' => 'la página',
         ]);
 
         $validador->after(function ($v) use ($cuerpo) {
@@ -127,12 +130,6 @@ class LandingAgendaController extends Controller
             if (isset($cuerpo['whatsapp']) && is_string($cuerpo['whatsapp'])
                 && ! preg_match('/^\+549\d{10}$/', WhatsappNormalizer::normalize($cuerpo['whatsapp']))) {
                 $v->errors()->add('whatsapp', 'Revisá el WhatsApp: tiene que ser un celular de Argentina con código de área.');
-            }
-            if (isset($cuerpo['event_source_url']) && is_string($cuerpo['event_source_url']) && $cuerpo['event_source_url'] !== '') {
-                $host = strtolower((string) parse_url($cuerpo['event_source_url'], PHP_URL_HOST));
-                if (! in_array($host, array_map('strtolower', (array) config('landing_agenda.hosts_de_origen', [])), true)) {
-                    $v->errors()->add('event_source_url', 'La página de origen no es válida.');
-                }
             }
         });
 
@@ -152,9 +149,9 @@ class LandingAgendaController extends Controller
         $contexto_web = [
             'client_ip_address' => (string) $request->ip(),
             'client_user_agent' => mb_substr((string) $request->userAgent(), 0, 500),
-            'fbp'               => isset($datos['fbp']) ? (string) $datos['fbp'] : '',
-            'fbc'               => isset($datos['fbc']) ? (string) $datos['fbc'] : '',
-            'event_source_url'  => isset($datos['event_source_url']) ? (string) $datos['event_source_url'] : '',
+            'fbp'               => self::cookie_fb_valida(isset($cuerpo['fbp']) ? $cuerpo['fbp'] : null),
+            'fbc'               => self::cookie_fb_valida(isset($cuerpo['fbc']) ? $cuerpo['fbc'] : null),
+            'event_source_url'  => self::url_de_origen_valida(isset($cuerpo['event_source_url']) ? $cuerpo['event_source_url'] : null),
         ];
 
         /* D9: la carta, el WhatsApp, el aviso y Meta van después de responder: el servicio despacha ese
@@ -162,6 +159,47 @@ class LandingAgendaController extends Controller
         $resultado = $service->reservar($datos, $contexto_web);
 
         return response()->json($resultado['cuerpo'], $resultado['http']);
+    }
+
+    /**
+     * La cookie `_fbp`/`_fbc` si tiene el formato del píxel, o '' (se descarta en silencio; ver la clase).
+     *
+     * @param mixed $valor
+     *
+     * @return string
+     */
+    private static function cookie_fb_valida($valor): string
+    {
+        if (! is_string($valor)) {
+            return '';
+        }
+        $valor = trim($valor);
+
+        return $valor !== '' && strlen($valor) <= 255 && preg_match(self::REGEX_COOKIE_FB, $valor) ? $valor : '';
+    }
+
+    /**
+     * La URL de la página si es una URL válida, de hasta 500, de un host de la landing; si no, '' (se
+     * descarta en silencio; ver la clase).
+     *
+     * @param mixed $valor
+     *
+     * @return string
+     */
+    private static function url_de_origen_valida($valor): string
+    {
+        if (! is_string($valor)) {
+            return '';
+        }
+        $valor = trim($valor);
+        if ($valor === '' || strlen($valor) > 500 || filter_var($valor, FILTER_VALIDATE_URL) === false) {
+            return '';
+        }
+        $esquema = strtolower((string) parse_url($valor, PHP_URL_SCHEME));
+        $host    = strtolower((string) parse_url($valor, PHP_URL_HOST));
+        $hosts   = array_map('strtolower', (array) config('landing_agenda.hosts_de_origen', []));
+
+        return in_array($esquema, ['http', 'https'], true) && in_array($host, $hosts, true) ? $valor : '';
     }
 
     /**
@@ -207,7 +245,6 @@ class LandingAgendaController extends Controller
             'regex'       => 'Revisá :attribute.',
             'not_regex'   => 'Revisá :attribute.',
             'array'       => 'Revisá :attribute.',
-            'url'         => 'La página de origen no es válida.',
         ];
     }
 }
