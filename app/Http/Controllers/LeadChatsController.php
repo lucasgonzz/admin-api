@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Events\LeadConversationUpdated;
+use App\Models\FollowupTemplate;
 use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Models\LeadPipelineStatus;
@@ -46,6 +47,15 @@ class LeadChatsController extends Controller
      * @var array<int, string>
      */
     const KINDS_ADJUNTO = ['image', 'sticker', 'audio', 'ptt', 'voice', 'video', 'document'];
+
+    /**
+     * Ids de las plantillas con `no_marca_error_de_entrega = 1` (campaña masiva, 22/10/2026),
+     * indexados para `isset`. Null hasta la primera fila que los necesita: se cargan UNA vez por
+     * request y no una consulta por fila. Ver {@see self::plantillas_que_no_marcan_error()}.
+     *
+     * @var array<int, bool>|null
+     */
+    private $plantillas_que_no_marcan_error = null;
 
     /**
      * Lista de chats.
@@ -601,7 +611,56 @@ class LeadChatsController extends Controller
             'kind'                     => $kind !== '' ? $kind : null,
             'created_at'               => self::fecha($mensaje->created_at),
             'texto'                    => self::texto_del_ultimo_mensaje($mensaje),
+            /* Aditivo (22/10/2026, misión campana-masiva-sin-rojo): si este `fallido` es un error de
+               verdad. False para un rechazo de Meta de una plantilla de campaña masiva, que el panel
+               no pinta de rojo; false también para todo lo que no es `fallido`. Es el gemelo en PHP de
+               Lead::apply_condicion_entrega_fallida_que_cuenta(): el ícono de la fila tiene que decir
+               lo mismo que el badge y el `atencion`, que salen de ese helper. */
+            'entrega_fallida_cuenta'   => $delivery === 'fallido' && ! $this->es_de_plantilla_que_no_marca_error($mensaje),
         ];
+    }
+
+    /**
+     * Si el mensaje es de una plantilla con `no_marca_error_de_entrega = 1`.
+     *
+     * Un `followup_template_id` nulo (texto libre, respuesta de la IA) no tiene plantilla que lo
+     * exima: devuelve false, igual que el `whereNotExists` del helper de `Lead`.
+     *
+     * @param LeadMessage $mensaje
+     *
+     * @return bool
+     */
+    private function es_de_plantilla_que_no_marca_error(LeadMessage $mensaje): bool
+    {
+        if ($mensaje->followup_template_id === null) {
+            return false;
+        }
+
+        return isset($this->plantillas_que_no_marcan_error()[(int) $mensaje->followup_template_id]);
+    }
+
+    /**
+     * Los ids de las plantillas de campaña masiva, memoizados en el controlador.
+     *
+     * 🔴 Una consulta por request y no por fila: la página trae hasta 200 filas y cada una puede
+     * tener su último mensaje `fallido`. Son pocas plantillas (una por campaña), así que el
+     * conjunto entero cabe en memoria sin problema.
+     *
+     * @return array<int, bool>
+     */
+    private function plantillas_que_no_marcan_error(): array
+    {
+        if ($this->plantillas_que_no_marcan_error === null) {
+            $this->plantillas_que_no_marcan_error = FollowupTemplate::query()
+                ->where('no_marca_error_de_entrega', true)
+                ->pluck('id')
+                ->mapWithKeys(function ($id) {
+                    return [(int) $id => true];
+                })
+                ->all();
+        }
+
+        return $this->plantillas_que_no_marcan_error;
     }
 
     /**

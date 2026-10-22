@@ -324,6 +324,42 @@ class EntregaFallidaDeCampanaMasivaNoPintaRojoTest extends TestCase
     }
 
     /**
+     * El ícono de la fila (`ChatRow.vue`, `tick()`) lee `ultimo_mensaje`: el campo aditivo
+     * `entrega_fallida_cuenta` le dice si ese `fallido` es un error de verdad. False para el
+     * rechazo de una plantilla de campaña masiva, true para un fallido común y false para un
+     * mensaje entregado (ampliación tras el chequeo independiente, 22/10/2026).
+     *
+     * @return void
+     */
+    public function test_el_ultimo_mensaje_de_la_fila_dice_si_la_entrega_fallida_cuenta(): void
+    {
+        $campana = $this->crear_plantilla(true);
+        $comun   = $this->crear_plantilla(false);
+
+        $de_campana = $this->crear_lead('Fallido de campaña');
+        $this->crear_historia_contestada($de_campana);
+        $this->crear_saliente_fallido($de_campana, $campana);
+
+        $fallido_comun = $this->crear_lead('Fallido común');
+        $this->crear_historia_contestada($fallido_comun);
+        $this->crear_saliente_fallido($fallido_comun, $comun);
+
+        $entregado = $this->crear_lead('Entregado');
+        $this->crear_historia_contestada($entregado);
+
+        $filas = $this->filas();
+
+        $this->assertSame('fallido', $filas[(int) $de_campana->id]['ultimo_mensaje']['whatsapp_delivery_status']);
+        $this->assertFalse($filas[(int) $de_campana->id]['ultimo_mensaje']['entrega_fallida_cuenta'], 'El rechazo de la campaña no cuenta.');
+
+        $this->assertSame('fallido', $filas[(int) $fallido_comun->id]['ultimo_mensaje']['whatsapp_delivery_status']);
+        $this->assertTrue($filas[(int) $fallido_comun->id]['ultimo_mensaje']['entrega_fallida_cuenta'], 'El fallido común sigue contando.');
+
+        $this->assertNotSame('fallido', $filas[(int) $entregado->id]['ultimo_mensaje']['whatsapp_delivery_status']);
+        $this->assertFalse($filas[(int) $entregado->id]['ultimo_mensaje']['entrega_fallida_cuenta'], 'Un mensaje entregado no es entrega fallida.');
+    }
+
+    /**
      * `POST claude/templates/meta` acepta el campo y lo muestra en la simulación. Sin el campo (una
      * llamada vieja) la plantilla se registraría con false. No sale nada a Meta.
      *
