@@ -182,6 +182,17 @@ class RechazosDeLaReservaTest extends BaseDeLaAgendaDeLaLanding
         }
     }
 
+    public function test_nombre_con_caracteres_de_control_es_422_y_los_espacios_se_colapsan(): void
+    {
+        $respuesta = $this->reservar($this->cuerpo(['nombre' => "Marina" . chr(10) . "López"]))->assertStatus(422);
+        $this->assertArrayHasKey('nombre', $respuesta->json('errores'));
+        $respuesta = $this->reservar($this->cuerpo(['nombre' => "Marina" . chr(9) . "López"]))->assertStatus(422);
+        $this->assertArrayHasKey('nombre', $respuesta->json('errores'));
+
+        $this->reservar($this->cuerpo(['nombre' => '  Marina      López  ']))->assertStatus(201);
+        $this->assertSame('Marina López', Lead::query()->where('phone', '+5493416665544')->value('contact_name'));
+    }
+
     public function test_rubro_invalido_es_422_con_el_campo(): void
     {
         $respuesta = $this->reservar($this->cuerpo(['rubro' => 'panaderia']))->assertStatus(422);

@@ -92,7 +92,10 @@ class LandingAgendaController extends Controller
         }
 
         $reglas = [
-            'nombre'           => ['required', 'string', 'min:2', 'max:80'],
+            /* Sin caracteres de control (como la atribución en `emitir`): el nombre va como `{{1}}` de la
+               plantilla al lead y del aviso a los admins, y Meta rechaza un parámetro con salto de línea o
+               tabulación (no saldría ninguno de los dos). */
+            'nombre'           => ['required', 'string', 'min:2', 'max:80', 'not_regex:/[\x00-\x1F\x7F]/'],
             'whatsapp'         => ['required', 'string', 'max:30'],
             'email'            => ['required', 'string', 'email:filter', 'max:120'],
             'rubro'            => ['required', 'string', 'in:' . implode(',', array_keys(DemoIndustriaCatalogo::OPCIONES))],
@@ -141,6 +144,9 @@ class LandingAgendaController extends Controller
         }
 
         $datos = $validador->validated();
+        /* Los espacios de más adentro del nombre, colapsados (los de los bordes ya los saca TrimStrings):
+           Meta también rechaza un parámetro con más de cuatro espacios seguidos. */
+        $datos['nombre'] = trim((string) preg_replace('/\s+/u', ' ', (string) $datos['nombre']));
         $datos['atribucion'] = LeadAtribucionService::sin_vacios(isset($datos['atribucion']) && is_array($datos['atribucion']) ? $datos['atribucion'] : []);
 
         $contexto_web = [
