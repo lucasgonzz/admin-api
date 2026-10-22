@@ -15,6 +15,45 @@ class FollowupTemplate extends Model
     protected $guarded = [];
 
     /**
+     * ¿Se puede mandar esta plantilla? El gate de los tres frenos (fila existente, `activa` y
+     * `meta_status = APPROVED`), sin la respuesta HTTP.
+     *
+     * Extraído el 22/10/2026 (misión demo-autogestionada-landing) de
+     * `ClaudeLeadsOutboundController::plantilla_para_enviar()`, que lo sigue usando con sus mismos 422:
+     * la confirmación por WhatsApp de la reserva desde la landing (D10) tiene que mirar exactamente lo
+     * mismo antes de mandar `cc_demo_reservada_landing`, y no tenía cómo llamar a un método protegido de
+     * un controller. El porqué de cada freno está en el docblock de ese método.
+     *
+     * @param string $template_name Nombre ya trimeado.
+     *
+     * @return array{fila: FollowupTemplate|null, motivo: string|null} `motivo` null = se puede mandar.
+     *         Si no: `nombre_vacio`, `plantilla_no_registrada`, `plantilla_inactiva` o
+     *         `plantilla_no_aprobada` (en los dos últimos `fila` viene cargada, para el mensaje).
+     */
+    public static function estado_para_enviar(string $template_name): array
+    {
+        if ($template_name === '') {
+            return ['fila' => null, 'motivo' => 'nombre_vacio'];
+        }
+
+        $fila = self::query()->where('template_name', $template_name)->first();
+        if ($fila === null) {
+            return ['fila' => null, 'motivo' => 'plantilla_no_registrada'];
+        }
+
+        if ((bool) $fila->activa !== true) {
+            return ['fila' => $fila, 'motivo' => 'plantilla_inactiva'];
+        }
+
+        $meta_status = $fila->meta_status !== null ? strtoupper((string) $fila->meta_status) : '';
+        if ($meta_status !== 'APPROVED') {
+            return ['fila' => $fila, 'motivo' => 'plantilla_no_aprobada'];
+        }
+
+        return ['fila' => $fila, 'motivo' => null];
+    }
+
+    /**
      * Casts de tipos de los campos editables.
      *
      * @var array<string, string>

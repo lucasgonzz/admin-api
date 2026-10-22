@@ -331,16 +331,20 @@ class ClaudeLeadsOutboundController extends Controller
      */
     protected function plantilla_para_enviar(string $template_name): array
     {
-        if ($template_name === '') {
+        /* Los tres frenos viven en FollowupTemplate::estado_para_enviar() desde el 22/10/2026 (los usa
+           también la confirmación de la reserva desde la landing). Acá queda el 422 de cada uno, igual
+           que antes. */
+        $estado = FollowupTemplate::estado_para_enviar($template_name);
+        $fila   = $estado['fila'];
+
+        if ($estado['motivo'] === 'nombre_vacio') {
             return ['fila' => null, 'error' => response()->json([
                 'message' => 'El nombre de la plantilla no puede estar vacío.',
                 'motivo'  => 'nombre_vacio',
             ], 422)];
         }
 
-        $fila = FollowupTemplate::query()->where('template_name', $template_name)->first();
-
-        if ($fila === null) {
+        if ($estado['motivo'] === 'plantilla_no_registrada') {
             return ['fila' => null, 'error' => response()->json([
                 'message' => 'No hay ninguna plantilla registrada con el nombre "' . $template_name . '": no se envió '
                     . 'nada. GET claude/templates/meta lista las que hay con su estado y su uso. Si la plantilla ya '
@@ -350,7 +354,7 @@ class ClaudeLeadsOutboundController extends Controller
             ], 422)];
         }
 
-        if ((bool) $fila->activa !== true) {
+        if ($estado['motivo'] === 'plantilla_inactiva') {
             return ['fila' => null, 'error' => response()->json([
                 'message' => 'La plantilla "' . $template_name . '" está desactivada (activa=false): no se envió nada. '
                     . 'Estado en Meta: ' . ($fila->meta_status !== null ? $fila->meta_status : 'sin consultar')
@@ -361,7 +365,7 @@ class ClaudeLeadsOutboundController extends Controller
         }
 
         $meta_status = $fila->meta_status !== null ? strtoupper((string) $fila->meta_status) : '';
-        if ($meta_status !== 'APPROVED') {
+        if ($estado['motivo'] === 'plantilla_no_aprobada') {
             return ['fila' => null, 'error' => response()->json([
                 'message' => 'La plantilla "' . $template_name . '" no está aprobada en Meta (meta_status: '
                     . ($meta_status !== '' ? $meta_status : 'sin consultar') . '): no se envió nada, porque Meta la '
