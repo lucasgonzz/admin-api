@@ -31,12 +31,33 @@ class GateHumanoSinVencimientoTest extends TestCase
         AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '1');
     }
 
+    /**
+     * 🔴 22/10/2026 (decisión de Lucas, lead Christian): con el escudo apagado a mano, estar en el
+     * tramo ya no retiene el mensaje: el global solo decide cuándo se prende solo el escudo, no
+     * conserva ningún gate por estado. El mensaje sale en el acto.
+     *
+     * @dataProvider estados_supervisados
+     */
+    public function test_con_el_escudo_apagado_a_mano_el_mensaje_del_tramo_sale_solo(string $estado): void
+    {
+        $lead = $this->lead($estado);
+        $lead->requiere_verificacion_mensajes = false;
+        $lead->save();
+        $mensaje = $this->mensaje($lead);
+
+        app(LeadAiSuggestionAutoSendScheduler::class)->schedule_for_suggested_message($mensaje);
+
+        Queue::assertPushed(AutoSendLeadAiSuggestionJob::class, 1);
+        $this->assertFalse((bool) $mensaje->fresh()->requiere_verificacion);
+        $this->assertNull($mensaje->fresh()->ai_auto_send_at);
+    }
+
     /** @dataProvider estados_supervisados */
     public function test_el_texto_retenido_no_tiene_contador_ni_job_aunque_no_haya_acciones(string $estado): void
     {
         $lead = $this->lead($estado);
-        // Incluso si el escudo se apagó a mano, el global conserva el gate por tramo.
-        $lead->requiere_verificacion_mensajes = false;
+        // El escudo prendido (por el latch al entrar al tramo, o a mano) retiene sin contador ni job.
+        $lead->requiere_verificacion_mensajes = true;
         $lead->save();
         $mensaje = $this->mensaje($lead);
         $mensaje->ai_auto_send_at = now()->addDays(12);

@@ -46,7 +46,7 @@ class GateDeAprobacionTest extends TestCase
     }
 
     /**
-     * (1) Las tres decisiones del gate, con el interruptor prendido.
+     * (1) Las decisiones del gate, con el interruptor prendido.
      *
      * @return void
      */
@@ -70,9 +70,13 @@ class GateDeAprobacionTest extends TestCase
             $service->gate($this->crear_lead('calificado'), ['agendar_demo' => ['dia' => 'manana', 'hora' => '10:00']]),
             'agendar_demo con día y hora también.'
         );
-        $this->assertTrue(
+        /* 22/10/2026 (decisión de Lucas, lead Christian): estar en el tramo ya no retiene por sí mismo; el
+         * gate no mira el estado de un lead que está adentro. Quien lo retiene es su ESCUDO (que el
+         * latch de Lead::booted() prendió al crearlo adentro), y ese operando vive en el llamador:
+         * lo cubre el test (3). Con el escudo apagado a mano sale solo (VerificacionSoloPorEscudoDelLeadTest). */
+        $this->assertFalse(
             $service->gate($this->crear_lead('solicita_disponibilidad'), ['estado_sugerido' => 'solicita_disponibilidad']),
-            'Un lead que ya está en el tramo se retiene como hoy.'
+            'Un lead que ya está en el tramo no se retiene por el estado: lo retiene su escudo, no el gate.'
         );
     }
 
