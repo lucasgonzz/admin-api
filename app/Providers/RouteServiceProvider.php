@@ -67,7 +67,7 @@ class RouteServiceProvider extends ServiceProvider
                 ->by('landing-agenda-turnos:' . $request->ip());
         });
         RateLimiter::for('landing-agenda-reservas', function (Request $request) {
-            return Limit::perHour(max(1, (int) config('landing_agenda.reservas_por_hora', 6)))
+            return Limit::perHour(max(1, (int) config('landing_agenda.reservas_por_hora', 10)))
                 ->by('landing-agenda-reservas:' . $request->ip());
         });
         RateLimiter::for('demo-chat', function (Request $request) {

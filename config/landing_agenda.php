@@ -21,7 +21,15 @@ return [
 
     /* Throttle por IP de cada endpoint (D13). Ver `RouteServiceProvider`. */
     'turnos_por_minuto' => 30,
-    'reservas_por_hora' => 6,
+    'reservas_por_hora' => 10,
+
+    /*
+     * Tope GLOBAL de reservas efectivas desde la web, sumando todas las IP (segunda vuelta, 🟠3): con
+     * tres instancias, ~100 reservas tapan la semana entera. Al pasarse, 429 con un mensaje que manda a
+     * WhatsApp. Ver `LandingAgendaService::tope_global_alcanzado()`.
+     */
+    'reservas_globales_por_hora' => 20,
+    'reservas_globales_por_dia'  => 60,
 
     'presentacion' => [
         /* Franja de INICIO que se muestra (inclusive en los dos extremos), en hora de Argentina. */

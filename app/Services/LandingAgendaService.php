@@ -16,6 +16,7 @@ use Carbon\Carbon;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\RateLimiter;
 
 /**
  * La demo autogestionada desde la landing (misión demo-autogestionada-landing, 22/10/2026): los
@@ -248,6 +249,14 @@ class LandingAgendaService
 
         $liberado = false;
         try {
+            /* Tope GLOBAL de reservas efectivas (segunda vuelta, 🟠3). Va bajo el lock, así dos reservas
+             * simultáneas no pasan las dos con el contador en el límite. */
+            if ($this->tope_global_alcanzado()) {
+                return $this->respuesta(429, [
+                    'mensaje' => 'Ahora no podemos tomar más reservas desde la web. Escribinos por WhatsApp y te la agendamos.',
+                ]);
+            }
+
             /* SOLO el número exacto (ver BuscadorDeLeadPorTelefono): el formulario lo tipea cualquiera, y
              * una coincidencia por sufijo le escribiría el turno a la ficha de otra persona. Sin exacto,
              * nace un lead nuevo. */
@@ -273,6 +282,7 @@ class LandingAgendaService
             }
 
             $reserva = $this->escribir_reserva($lead, $telefono, $datos, $eleccion['demo'], $eleccion['ventana']);
+            $this->contar_reserva_global();
 
             $lock->release();
             $liberado = true;
@@ -361,6 +371,61 @@ class LandingAgendaService
             ],
             'trabajo' => $trabajo,
         ];
+    }
+
+    /** Claves del contador global de reservas (RateLimiter: ventana deslizante desde la primera). */
+    const CLAVE_TOPE_HORA = 'landing-agenda-reservas-global-hora';
+    const CLAVE_TOPE_DIA  = 'landing-agenda-reservas-global-dia';
+
+    /**
+     * ¿Ya se tomaron, desde la web, todas las reservas que se admiten por hora o por día?
+     *
+     * 🔴 POR QUÉ un tope global además del throttle por IP (revisión independiente, 🟠3). Sin captcha
+     * (D13), `abierto_hace_ms` y el honeypot se falsifican con un `curl`, y el throttle por IP no frena a
+     * quien tenga varias. Con tres instancias, unas cien reservas tapan todo lo que la landing ofrece en
+     * siete días: el agente de WhatsApp se quedaría sin instancias para los leads reales (comparten la
+     * ocupación), y cada reserva le manda un WhatsApp a un número cualquiera y una carta a un correo
+     * cualquiera, que bajan la calidad del número institucional ante Meta. Cuenta reservas EFECTIVAS
+     * (no intentos: un 409 o un 422 no gastan cupo), y al pasarse deja un warning en el log para que se
+     * vea en el primer día de campaña.
+     *
+     * @return bool
+     */
+    private function tope_global_alcanzado(): bool
+    {
+        $por_hora = max(1, (int) config('landing_agenda.reservas_globales_por_hora', 20));
+        $por_dia  = max(1, (int) config('landing_agenda.reservas_globales_por_dia', 60));
+
+        $hora = RateLimiter::tooManyAttempts(self::CLAVE_TOPE_HORA, $por_hora);
+        $dia  = RateLimiter::tooManyAttempts(self::CLAVE_TOPE_DIA, $por_dia);
+        if (! $hora && ! $dia) {
+            return false;
+        }
+
+        Log::channel('daily')->warning('LandingAgenda: se alcanzó el tope global de reservas desde la web; se rechaza con 429.', [
+            'tope'                  => $hora ? 'hora' : 'dia',
+            'reservas_ultima_hora'  => RateLimiter::attempts(self::CLAVE_TOPE_HORA),
+            'reservas_ultimo_dia'   => RateLimiter::attempts(self::CLAVE_TOPE_DIA),
+            'limite_por_hora'       => $por_hora,
+            'limite_por_dia'        => $por_dia,
+        ]);
+
+        return true;
+    }
+
+    /**
+     * Suma una reserva efectiva a los dos contadores globales.
+     *
+     * @return void
+     */
+    private function contar_reserva_global(): void
+    {
+        try {
+            RateLimiter::hit(self::CLAVE_TOPE_HORA, 3600);
+            RateLimiter::hit(self::CLAVE_TOPE_DIA, 86400);
+        } catch (\Throwable $e) {
+            Log::channel('daily')->error('LandingAgenda: no se pudo sumar la reserva al tope global.', ['error' => $e->getMessage()]);
+        }
     }
 
     /**
