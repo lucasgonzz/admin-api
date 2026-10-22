@@ -60,6 +60,16 @@ class RouteServiceProvider extends ServiceProvider
             return Limit::perMinute((int) config('atribucion.limite_por_minuto', 30))
                 ->by('landing-whatsapp:' . $request->ip());
         });
+        /* Demo autogestionada desde la landing (22/10/2026, D13): cubetas propias por IP. Turnos: lo pide
+           cada visitante que abre el selector. Reservas: pocas por hora, que es lo que una persona hace. */
+        RateLimiter::for('landing-agenda-turnos', function (Request $request) {
+            return Limit::perMinute(max(1, (int) config('landing_agenda.turnos_por_minuto', 30)))
+                ->by('landing-agenda-turnos:' . $request->ip());
+        });
+        RateLimiter::for('landing-agenda-reservas', function (Request $request) {
+            return Limit::perHour(max(1, (int) config('landing_agenda.reservas_por_hora', 6)))
+                ->by('landing-agenda-reservas:' . $request->ip());
+        });
         RateLimiter::for('demo-chat', function (Request $request) {
             // Todas las demos del VPS comparten IP: cada conversación necesita su propia cuota.
             // Throttle puede ejecutarse antes del middleware de identidad. El hash no revela la clave;

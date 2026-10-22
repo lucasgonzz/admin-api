@@ -79,6 +79,19 @@ Route::post('landing/whatsapp-referencias', [\App\Http\Controllers\LeadAtribucio
     ->withoutMiddleware('throttle:api')
     ->middleware('throttle:landing-whatsapp');
 
+/*
+| Demo autogestionada desde la landing (misión demo-autogestionada-landing, 22/10/2026): el formulario
+| «Elegí día y hora de tu demo» de comerciocity.com pide los turnos libres y reserva. Públicas, sin
+| credenciales, cada una con su cubeta por IP (`RouteServiceProvider`) y sin la de todo /api, por lo
+| mismo que `landing/whatsapp-referencias`. Contrato con la landing en `LandingAgendaController`.
+*/
+Route::get('landing/agenda/turnos', [\App\Http\Controllers\LandingAgendaController::class, 'turnos'])
+    ->withoutMiddleware('throttle:api')
+    ->middleware('throttle:landing-agenda-turnos');
+Route::post('landing/agenda/reservas', [\App\Http\Controllers\LandingAgendaController::class, 'reservar'])
+    ->withoutMiddleware('throttle:api')
+    ->middleware('throttle:landing-agenda-reservas');
+
 Route::post('webhook/whatsapp', [WhatsappWebhookController::class, 'receive'])
     ->withoutMiddleware('throttle:api')
     ->middleware('throttle:whatsapp-webhook');
