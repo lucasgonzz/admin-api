@@ -21,6 +21,7 @@ use App\Models\SupportMessage;
 use App\Models\SupportTicket;
 use App\Models\WhatsappConfig;
 use App\Services\AsistenteDemoLeadService;
+use App\Services\BuscadorDeLeadPorTelefono;
 use App\Services\AsistenteWhatsappService;
 use App\Services\AsistenteWhatsappSettings;
 use App\Services\EcommerceImplementationBroadcastService;
@@ -1246,20 +1247,17 @@ class WhatsappWebhookController extends Controller
     /**
      * Busca un lead existente por teléfono (el más reciente si hay varios).
      *
+     * 🔴 Delega en `BuscadorDeLeadPorTelefono` desde el 22/10/2026 (misión demo-autogestionada-landing):
+     * la reserva de la landing usa el mismo criterio, y si los dos eligieran leads distintos para un
+     * mismo número, el lead reservaría en una ficha y escribiría en otra. Mismo comportamiento que antes.
+     *
      * @param string $phone Teléfono E.164 normalizado.
      *
      * @return Lead|null
      */
     private function find_lead_by_phone(string $phone): ?Lead
     {
-        $leads = Lead::whereNotNull('phone')->orderBy('id', 'desc')->get();
-        foreach ($leads as $lead) {
-            if (WhatsappNormalizer::phones_match((string) $lead->phone, $phone)) {
-                return $lead;
-            }
-        }
-
-        return null;
+        return BuscadorDeLeadPorTelefono::buscar($phone);
     }
 
     /**
