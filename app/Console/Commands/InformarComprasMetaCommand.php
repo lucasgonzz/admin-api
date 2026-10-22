@@ -19,9 +19,10 @@ use Illuminate\Console\Command;
  * la fecha de la promoción, la moneda y el valor, y qué haría. `--enviar` registra y encola, y pide
  * confirmación (`--confirmar` la da sin preguntar, para correrlo por SSH).
  *
- * 🔴 **La ventana de Meta.** La API de conversiones rechaza un `event_time` de más de 7 días atrás,
- * sea cual sea el `action_source` (doc de parámetros del evento y de eventos offline, medido el
- * 22/10/2026; un evento viejo hace rechazar el lote entero). Por eso:
+ * 🔴 **La ventana de Meta.** La API de conversiones rechaza un `event_time` de más de 7 días atrás
+ * (doc de parámetros del evento y de eventos offline, medido el 22/10/2026; un evento viejo hace
+ * rechazar el lote entero). Los 62 días que menciona la doc son una recomendación para ventas en local
+ * físico (`action_source: physical_store`): una venta cerrada por WhatsApp no lo es. Por eso:
  *
  *   - una promoción de los últimos {@see LeadEventoMeta::DIAS_DE_VIGENCIA} días se manda con SU fecha
  *     (el `created_at` del cliente, que nace en la promoción);
@@ -45,7 +46,7 @@ class InformarComprasMetaCommand extends Command
     protected $signature = 'leads:meta-capi-compras
         {--enviar : Registra y encola (sin esto, solo simula)}
         {--confirmar : Da la confirmación de --enviar sin preguntar}
-        {--probar= : Manda UN Purchase de prueba con este test_event_code, sin registrar nada (va con --lead)}
+        {--probar= : Manda el body de la compra del lead como evento CompraDePrueba con este test_event_code, sin registrar nada (va con --lead)}
         {--lead= : El lead de la prueba}';
 
     /**
@@ -143,7 +144,7 @@ class InformarComprasMetaCommand extends Command
             if ($plan['accion'] === self::ACCION_MANDAR) {
                 $mandados += $service->registrar_compra($lead, $plan['momento']) !== null ? 1 : 0;
             } else {
-                $omitidos += $service->registrar_compra($lead, $ahora, LeadEventoMeta::ESTADO_OMITIDO, $plan['motivo_fila']) !== null ? 1 : 0;
+                $omitidos += $service->registrar_compra($lead, $plan['momento'] !== null ? $plan['momento'] : $ahora, LeadEventoMeta::ESTADO_OMITIDO, $plan['motivo_fila']) !== null ? 1 : 0;
             }
         }
 
@@ -182,7 +183,7 @@ class InformarComprasMetaCommand extends Command
             return 1;
         }
 
-        $this->info('Purchase de prueba mandado. Miralo en Events Manager → Probar eventos.');
+        $this->info('Evento de prueba «' . MetaConversionesService::EVENTO_DE_PRUEBA . '» mandado (no como Purchase: un evento con código de prueba cuenta para Meta). Miralo en Events Manager → Probar eventos.');
 
         return 0;
     }
@@ -261,7 +262,8 @@ class InformarComprasMetaCommand extends Command
         }
 
         $plan['accion'] = self::ACCION_MANDAR;
-        $plan['motivo'] = 'dentro de la ventana, con su fecha real';
+        $plan['motivo'] = 'dentro de la ventana, con su fecha real'
+            . ($plan['valor'] === 0 ? ' (ojo: valor 0, el contrato no tiene precio legible)' : '');
 
         return $plan;
     }

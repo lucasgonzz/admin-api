@@ -93,6 +93,12 @@ class MetaConversionesService
     /** País de los leads (ISO 3166-1 alfa-2, en minúsculas como lo pide Meta antes del hash). */
     const PAIS = 'ar';
 
+    /**
+     * Nombre del evento que manda `leads:meta-capi-compras --probar` en lugar de `Purchase`: un evento
+     * con `test_event_code` cuenta para la medición de Meta (ver {@see enviar_prueba()}).
+     */
+    const EVENTO_DE_PRUEBA = 'CompraDePrueba';
+
     /** Moneda del `Purchase` cuando el contrato no dice otra (las licencias se pactan en dólares). */
     const MONEDA_POR_DEFECTO = 'USD';
 
@@ -407,8 +413,9 @@ class MetaConversionesService
      *
      * 🔴 **Solo el `Purchase`.** A un lead sin atribución no se le reportan `Lead` ni `Schedule`: esas
      * etapas pasaron hace semanas y saldrían con la fecha de hoy. Para los leads con canal, el
-     * `Purchase` ya lo registra {@see registrar_alcanzados()} junto con el resto: esto no los toca
-     * salvo que se pida con `$estado` (el retroactivo, que trae su propia fecha).
+     * `Purchase` ya lo registra {@see registrar_alcanzados()} junto con el resto, y el observer no los
+     * manda por acá; sí lo usa el retroactivo, que trae su propia fecha, para los promovidos de antes
+     * de la medición de cualquier canal.
      *
      * Sin la configuración del canal, la fila queda `sin_configurar` (el conciliador la manda cuando
      * aparece, dentro de la vigencia) y no se encola nada.
@@ -460,10 +467,16 @@ class MetaConversionesService
     }
 
     /**
-     * Manda UN `Purchase` de prueba del lead con el `test_event_code` de la pestaña «Probar eventos»
-     * de Events Manager, sin registrar nada en `lead_eventos_meta` (`leads:meta-capi-compras
-     * --probar`). Es el body real (canal, datos de contacto, moneda y valor del contrato), con un
-     * `event_id` propio (`…-purchase-prueba`) para que no deduplique contra la compra de verdad.
+     * Manda UN evento de prueba con el body de la compra del lead y el `test_event_code` de la pestaña
+     * «Probar eventos» de Events Manager, sin registrar nada en `lead_eventos_meta`
+     * (`leads:meta-capi-compras --probar`): mismo canal, mismos datos de coincidencia, misma moneda y
+     * valor que viajarían en su `Purchase`, con un `event_id` propio (`…-purchase-prueba`).
+     *
+     * 🔴 **Viaja como {@see EVENTO_DE_PRUEBA}, no como `Purchase`.** La doc de Meta lo dice textual: los
+     * eventos con `test_event_code` «are not dropped… are used for targeting and ads measurement». Un
+     * `Purchase` de prueba de un cliente real sería una compra con la fecha de hoy, y uno de un lead
+     * técnico, un comprador que no existe. Con un evento propio se ven el payload, la aceptación y los
+     * datos de coincidencia sin ensuciar las compras que optimiza la campaña.
      *
      * 🔴 El código va solo en esta llamada: cargar `META_CAPI_TEST_EVENT_CODE` en el `.env` de
      * producción convertiría en prueba a TODOS los eventos reales mientras esté puesto.
@@ -476,6 +489,10 @@ class MetaConversionesService
      */
     public function enviar_prueba(Lead $lead, string $codigo): array
     {
+        if (trim($codigo) === '') {
+            return ['status' => 0, 'respuesta' => null, 'payload' => null, 'error' => 'El código de prueba está vacío: sin él el evento contaría como real.'];
+        }
+
         $canal = self::canal_de_la_compra($lead);
         if ($canal === null) {
             return ['status' => 0, 'respuesta' => null, 'payload' => null, 'error' => 'El lead no está promovido ni tiene canal: no hay compra que probar.'];
@@ -491,8 +508,9 @@ class MetaConversionesService
             'event_id'   => self::event_id_para((int) $lead->id, LeadEventoMeta::EVENTO_PURCHASE, $canal) . '-prueba',
             'event_time' => AppTime::now(),
         ]);
-        $payload                    = $this->armar_payload($muestra, $lead);
-        $payload['test_event_code'] = trim($codigo);
+        $payload                          = $this->armar_payload($muestra, $lead);
+        $payload['data'][0]['event_name'] = self::EVENTO_DE_PRUEBA;
+        $payload['test_event_code']       = trim($codigo);
 
         try {
             $respuesta = Http::withToken(self::token_del_canal($canal))
@@ -763,7 +781,7 @@ class MetaConversionesService
 
         if (self::canal_de_la_fila($evento) === LeadEventoMeta::CANAL_WEB) {
             $dato['action_source'] = self::ACTION_SOURCE_WEB;
-            $dato['user_data']     = $this->user_data_web($lead);
+            $dato['user_data']     = $this->user_data_web($lead, $momento);
         } else {
             $dato['action_source']     = self::ACTION_SOURCE;
             $dato['messaging_channel'] = self::MESSAGING_CHANNEL;
@@ -809,7 +827,7 @@ class MetaConversionesService
      *
      * @return array<string, array<int, string>>
      */
-    private function user_data_web(Lead $lead): array
+    private function user_data_web(Lead $lead, ?Carbon $momento = null): array
     {
         $datos    = [];
         $telefono = AudienciasMetaService::normalizar_telefono($lead->phone);
@@ -839,7 +857,7 @@ class MetaConversionesService
             $datos['ln'] = [hash('sha256', $nombre_y_apellido[1])];
         }
 
-        $fbc = self::fbc_del_lead($lead);
+        $fbc = self::fbc_del_lead($lead, $momento);
         if ($fbc !== null) {
             $datos['fbc'] = $fbc;
         }
@@ -859,24 +877,41 @@ class MetaConversionesService
      *
      * El momento es el de la referencia (cuando la landing la emitió, con la visita). Si el lead tiene
      * varios contactos con `fbclid`, va el del más reciente: el último clic antes de la compra.
-     * Un `fbclid` con caracteres raros no se manda (Meta lo rechazaría).
+     * Un `fbclid` con caracteres raros no se manda (Meta lo rechazaría). Con `$hasta`, solo clics
+     * anteriores al evento (un reintento no le pega a la compra un clic posterior).
      *
-     * @param Lead $lead
+     * 🔴 Nunca tira: si la consulta falla (por ejemplo, sin las tablas de atribución), devuelve null y
+     * el evento sale sin `fbc`, como antes del 22/10. Un `fbc` no puede tumbar los eventos de la web.
+     *
+     * @param Lead        $lead
+     * @param Carbon|null $hasta El `event_time` del evento.
      *
      * @return string|null
      */
-    public static function fbc_del_lead(Lead $lead): ?string
+    public static function fbc_del_lead(Lead $lead, ?Carbon $hasta = null): ?string
     {
         if (! $lead->id) {
             return null;
         }
 
-        $contactos = DB::table('lead_atribucion_contactos as c')
-            ->join('landing_whatsapp_referencias as r', 'r.id', '=', 'c.referencia_id')
-            ->where('c.lead_id', (int) $lead->id)
-            ->where('c.evidencia', 'referencia_landing')
-            ->orderByDesc('c.message_id')
-            ->get(['c.datos', 'r.created_at']);
+        try {
+            $consulta = DB::table('lead_atribucion_contactos as c')
+                ->join('landing_whatsapp_referencias as r', 'r.id', '=', 'c.referencia_id')
+                ->where('c.lead_id', (int) $lead->id)
+                ->where('c.evidencia', 'referencia_landing')
+                ->orderByDesc('c.message_id');
+            if ($hasta !== null) {
+                $consulta->where('r.created_at', '<=', $hasta);
+            }
+            $contactos = $consulta->get(['c.datos', 'r.created_at']);
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->warning('Conversiones Meta: no se pudo leer el fbclid de la landing; el evento sale sin fbc.', [
+                'lead_id' => (int) $lead->id,
+                'error'   => $exception->getMessage(),
+            ]);
+
+            return null;
+        }
 
         foreach ($contactos as $contacto) {
             $datos  = json_decode((string) $contacto->datos, true);

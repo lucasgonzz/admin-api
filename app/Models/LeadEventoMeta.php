@@ -95,10 +95,11 @@ class LeadEventoMeta extends Model
 
     /**
      * Motivo del `omitido` de una compra vieja que informa `leads:meta-capi-compras` (misión
-     * purchase-capi-al-promover, 22/10/2026): Meta rechaza un `event_time` de más de 7 días, sea
-     * cual sea el `action_source`, y no se manda con una fecha inventada.
+     * purchase-capi-al-promover, 22/10/2026): Meta rechaza un `event_time` de más de 7 días (los 62
+     * días de su doc son para ventas en local físico, `physical_store`, y una venta por WhatsApp no
+     * lo es), y no se manda con una fecha inventada.
      */
-    const MOTIVO_FUERA_DE_VENTANA = 'Promovido hace más de 7 días (o en una fecha que no se conoce): Meta no acepta el evento y no se manda con otra fecha. Va por la audiencia de clientes.';
+    const MOTIVO_FUERA_DE_VENTANA = 'Promovido hace más de 7 días (o en una fecha que no se conoce): Meta no acepta un event_time tan viejo y no se manda con otra fecha. Va por la audiencia de clientes.';
 
     /** Tope de intentos de envío (el primero más dos reintentos del conciliador). */
     const MAX_INTENTOS = 3;

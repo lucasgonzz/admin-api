@@ -342,6 +342,11 @@ class ConversionesCompraMetaTest extends TestCase
         $omitida = LeadEventoMeta::query()->where('lead_id', $viejo->id)->firstOrFail();
         $this->assertSame(LeadEventoMeta::ESTADO_OMITIDO, $omitida->estado);
         $this->assertSame(LeadEventoMeta::MOTIVO_FUERA_DE_VENTANA, $omitida->ultimo_error);
+        $this->assertSame(
+            Client::query()->find($viejo->promoted_client_id)->created_at->getTimestamp(),
+            $omitida->event_time->getTimestamp(),
+            'El omitido queda anotado con la fecha real de la promoción.'
+        );
 
         $this->assertCount(1, LeadEventoMeta::query()->where('lead_id', $ya->id)->get());
 
@@ -383,8 +388,9 @@ class ConversionesCompraMetaTest extends TestCase
     }
 
     /**
-     * `--probar`: manda el body real con el código de prueba y un event_id propio, y no registra
-     * ninguna fila (el .env no se toca).
+     * `--probar`: manda el body de la compra con el código de prueba, como `CompraDePrueba` (un evento
+     * con código de prueba cuenta para la medición de Meta: no puede ser un `Purchase`), con un
+     * event_id propio, y no registra ninguna fila (el .env no se toca). Sin código, no sale nada.
      *
      * @return void
      */
@@ -401,12 +407,53 @@ class ConversionesCompraMetaTest extends TestCase
             $data = $request->data();
 
             return $data['test_event_code'] === 'TEST4321'
-                && $data['data'][0]['event_name'] === 'Purchase'
+                && $data['data'][0]['event_name'] === 'CompraDePrueba'
                 && $data['data'][0]['event_id'] === 'cc-lead-' . $lead->id . '-web-purchase-prueba'
                 && $data['data'][0]['custom_data'] === ['currency' => 'USD', 'value' => 2200];
         });
         $this->assertSame([], $this->filas_de($lead));
         $this->assertSame('', (string) config('services.meta_capi.test_event_code'));
+
+        $this->assertSame(1, Artisan::call('leads:meta-capi-compras', ['--probar' => '   ', '--lead' => $lead->id]));
+        Http::assertSentCount(1);
+    }
+
+    /**
+     * 🔴 Un promovido sin atribución que ya reportó su compra y después queda con canal (le llega el
+     * ctwa_clid, o el origen web) no reporta `LeadSubmitted`/`Lead` ni las otras etapas con la fecha
+     * de hoy: el `Purchase` es el último evento.
+     *
+     * @return void
+     */
+    public function test_con_la_compra_reportada_no_se_reportan_etapas_anteriores_despues(): void
+    {
+        $lead = $this->crear_lead_sin_atribucion('closer_activo');
+        $lead->update(['promoted_client_id' => $this->crear_cliente()->id]);
+        $this->assertSame(['Purchase'], $this->eventos_de($lead));
+
+        $lead->update(['origen' => LeadOrigenService::ORIGEN_LANDING]);
+        $lead->update(['status' => 'cerrado_ganado']);
+        $this->assertSame(0, Artisan::call('leads:meta-capi-conciliar'));
+
+        $this->assertSame([
+            ['web', 'Purchase', 'cc-lead-' . $lead->id . '-web-purchase', LeadEventoMeta::ESTADO_PENDIENTE],
+        ], $this->filas_de($lead));
+        Queue::assertPushed(EnviarEventoMetaJob::class, 1);
+    }
+
+    /**
+     * `--enviar` sin `--confirmar` en modo no interactivo (como por SSH) cancela y no registra nada.
+     *
+     * @return void
+     */
+    public function test_enviar_sin_confirmar_en_modo_no_interactivo_cancela(): void
+    {
+        $lead = $this->crear_promovido_de_antes(2);
+
+        $this->assertSame(1, Artisan::call('leads:meta-capi-compras', ['--enviar' => true, '--no-interaction' => true]));
+        $this->assertStringContainsString('Cancelado', Artisan::output());
+        $this->assertSame([], $this->filas_de($lead));
+        Queue::assertNotPushed(EnviarEventoMetaJob::class);
     }
 
     /* ------------------------------------------------------------------------------------------
