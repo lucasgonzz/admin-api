@@ -356,6 +356,50 @@ class VerificacionSoloPorEscudoDelLeadTest extends TestCase
         $afuera = $this->crear_lead_con_escudo_apagado('calificado');
         $this->assertTrue($service->gate($afuera, ['agendar_demo' => true]));
         $this->assertFalse($service->gate($afuera, []));
+        $this->assertFalse($service->gate($afuera, ['cancelar_demo' => true]), 'cancelar_demo desde afuera no mete al lead en el tramo: no se gatea.');
+    }
+
+    /**
+     * Un lead que TODAVÍA está fuera del tramo, con el escudo apagado, y cuyo agendar_demo lo va a
+     * meter adentro: el mensaje queda retenido Y el escudo se prende en ese mismo momento (es el pase
+     * al tramo). Antes quedaba retenido con el escudo mostrándose apagado.
+     */
+    public function test_el_agendar_demo_que_mete_al_lead_en_el_tramo_prende_el_escudo(): void
+    {
+        $service = $this->service();
+        $lead    = $this->crear_lead_con_escudo_apagado('calificado');
+
+        $msg = $service->crear($lead, [
+            'mensaje_sugerido' => 'Listo, te agendo para mañana a las 10.',
+            'estado_sugerido'  => 'demo_agendada',
+            'razonamiento'     => '',
+            'agendar_demo'     => ['demo_date' => '2026-10-23', 'demo_start_time' => '10:00'],
+        ]);
+
+        $this->assertTrue((bool) $msg->requiere_verificacion);
+        $this->assertNotEmpty($msg->pending_actions);
+        $this->assertTrue((bool) $lead->fresh()->requiere_verificacion_mensajes, 'Al meter al lead en el tramo el escudo tiene que quedar prendido.');
+    }
+
+    /**
+     * Un cancelar_demo de un lead que está fuera del tramo y con el escudo apagado sale solo: no
+     * puede quedar retenido para siempre sin escudo que lo explique.
+     */
+    public function test_el_cancelar_demo_de_un_lead_fuera_del_tramo_con_el_escudo_apagado_sale_solo(): void
+    {
+        $service = $this->service();
+        $lead    = $this->crear_lead_con_escudo_apagado('calificado');
+
+        $msg = $service->crear($lead, [
+            'mensaje_sugerido' => 'Listo, cancelé la demo.',
+            'estado_sugerido'  => 'calificado',
+            'razonamiento'     => '',
+            'cancelar_demo'    => true,
+        ]);
+
+        $this->assertFalse((bool) $msg->requiere_verificacion);
+        $this->assertEmpty($msg->pending_actions);
+        $this->assertFalse((bool) $lead->fresh()->requiere_verificacion_mensajes);
     }
 
     /**

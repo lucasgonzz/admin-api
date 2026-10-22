@@ -317,9 +317,9 @@ class InterruptorGlobalDeVerificacionDeMensajesTest extends TestCase
     }
 
     /**
-     * (f) Interruptor en true (default): el gate retiene las acciones de agenda del lead que TODAVÍA
-     * está fuera del tramo (agendar y cancelar lo meten adentro en este mismo turno, que es el
-     * momento en que el latch prende el escudo).
+     * (f) Interruptor en true (default): el gate retiene el agendar_demo del lead que TODAVÍA está
+     * fuera del tramo (lo mete adentro en este mismo turno, que es el momento en que se prende el
+     * escudo). cancelar_demo desde afuera ya no se gatea: no lo mete adentro.
      *
      * 🔴 22/10/2026 (decisión de Lucas, lead Christian): antes retenía también al lead YA adentro del
      * tramo (el escenario «lead ya en el tramo» y las dos acciones que solo existen desde
@@ -330,7 +330,7 @@ class InterruptorGlobalDeVerificacionDeMensajesTest extends TestCase
         AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '1');
         $service = $this->service();
 
-        foreach (['agendar_demo', 'cancelar_demo'] as $nombre) {
+        foreach (['agendar_demo'] as $nombre) {
             $escenarios = $this->escenarios_del_gate();
             list($status, $parsed) = $escenarios[$nombre];
             $lead = $this->crear_lead($status);

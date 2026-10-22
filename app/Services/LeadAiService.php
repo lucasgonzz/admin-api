@@ -6083,6 +6083,17 @@ TXT;
             || $this->el_paquete_queda_retenido($lead, $parsed);
 
         if ($retenido_para_verificacion) {
+            /* 🔴 22/10/2026: si lo que retiene es el gate (un agendar_demo de un lead que TODAVÍA está
+             * fuera del tramo y con el escudo apagado), este es el momento en que el lead entra al
+             * tramo: el escudo se prende ahora, igual que lo haría el latch de Lead::booted(). Si no,
+             * el mensaje quedaría esperando aprobación con el escudo mostrándose apagado, y el estado
+             * (demo_agendada) recién cambia al aprobar. */
+            if (! (bool) $lead->requiere_verificacion_mensajes
+                && $this->requires_agendamiento_verification_gate($lead, $parsed)) {
+                $lead->requiere_verificacion_mensajes = true;
+                $lead->save();
+            }
+
             return $this->create_pending_agendamiento_message($lead, $parsed, $is_followup, $calendar_snapshot);
         }
 
@@ -6171,9 +6182,9 @@ TXT;
             return true;
         }
 
-        if (! empty($parsed['cancelar_demo'])) {
-            return true;
-        }
+        /* cancelar_demo ya no se gatea desde acá (22/10/2026): desde un lead fuera del tramo no lo
+         * mete adentro (el destino es `calificado`), así que no hay latch que prenda el escudo y el
+         * paquete quedaría retenido para siempre sin escudo. Desde adentro lo cubre el escudo. */
 
         return false;
     }
