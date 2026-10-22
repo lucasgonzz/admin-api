@@ -9886,7 +9886,8 @@ TXT;
      *                                                          tools, nunca el modelo: es contra
      *                                                          esto que el gate verifica sus citas.
      *
-     * @throws \RuntimeException Si falla HTTP o se superan las iteraciones sin respuesta final.
+     * @throws \RuntimeException Si falla HTTP, si la respuesta se corta por max_tokens o por un
+     *                           stop_reason inesperado, o si se superan las iteraciones sin respuesta final.
      *
      * @return string Texto JSON de la respuesta final de Claude.
      */
