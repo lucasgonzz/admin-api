@@ -639,8 +639,10 @@ class MetaConversionesService
             'intentos'     => 0,
             'ultimo_error' => $motivo,
         ];
-        /* Solo si vino: las filas de siempre se crean exactamente igual que antes. */
-        $contexto = self::contexto_web_limpio($contexto_web);
+        /* Solo si vino, y solo en el canal `web` (el único cuyo payload lo usa): las filas de siempre se
+           crean exactamente igual que antes, y una fila de WhatsApp no guarda IP ni user agent que nunca va
+           a mandar. */
+        $contexto = $canal === LeadEventoMeta::CANAL_WEB ? self::contexto_web_limpio($contexto_web) : null;
         if ($contexto !== null) {
             $atributos['contexto_web'] = $contexto;
         }
@@ -777,6 +779,9 @@ class MetaConversionesService
                 'enviado_at'   => AppTime::now(),
                 'ultimo_error' => null,
                 'respuesta'    => json_encode($resumen),
+                /* La IP y el user agent del visitante se guardan solo mientras hacen falta para mandar el
+                   evento: enviado, no se vuelven a usar. */
+                'contexto_web' => null,
             ]);
 
             return LeadEventoMeta::ESTADO_ENVIADO;
@@ -1418,6 +1423,8 @@ class MetaConversionesService
             ->update([
                 'estado'       => LeadEventoMeta::ESTADO_OMITIDO,
                 'ultimo_error' => $motivo,
+                /* Descartado: no sale nunca, el contexto del navegador ya no sirve (ver `enviar()`). */
+                'contexto_web' => null,
             ]);
 
         Log::channel('daily')->info('Conversiones Meta: el evento no sale porque el lead cambió de canal.', [
@@ -1445,6 +1452,9 @@ class MetaConversionesService
             'estado'       => LeadEventoMeta::ESTADO_ERROR,
             'ultimo_error' => $motivo,
             'respuesta'    => $resumen !== null ? json_encode($resumen) : null,
+            /* Con los intentos agotados el evento queda descartado: el contexto del navegador se borra. Con
+               intentos por delante se conserva, porque el reintento lo necesita para salir como `website`. */
+            'contexto_web' => DB::raw('CASE WHEN intentos >= ' . (int) LeadEventoMeta::MAX_INTENTOS . ' THEN NULL ELSE contexto_web END'),
         ]);
 
         Log::channel('daily')->warning('Conversiones Meta: el evento no salió.', [
