@@ -223,7 +223,9 @@ class Lead extends Model
                 return;
             }
 
-            if ($lead->isDirty(['demo_id', 'demo_date', 'demo_start_time', 'demo_end_time'])) {
+            // Solo instancia, día o inicio: extender el fin desde el panel («Cambiar hora de fin») no cambia
+            // el turno que eligió el lead, y borrar la marca le volvería a cerrar el gate del primer mensaje.
+            if ($lead->isDirty(['demo_id', 'demo_date', 'demo_start_time'])) {
                 $lead->demo_reservada_desde_landing_at = null;
             }
         });

@@ -1249,7 +1249,9 @@ class WhatsappWebhookController extends Controller
      *
      * 🔴 Delega en `BuscadorDeLeadPorTelefono` desde el 22/10/2026 (misión demo-autogestionada-landing):
      * la reserva de la landing usa el mismo criterio, y si los dos eligieran leads distintos para un
-     * mismo número, el lead reservaría en una ficha y escribiría en otra. Mismo comportamiento que antes.
+     * mismo número, el lead reservaría en una ficha y escribiría en otra. Un cambio respecto de antes:
+     * ahora gana el número EXACTO y recién si no hay se cae al sufijo de `phones_match` (antes, el más
+     * reciente por sufijo, aunque hubiera otra ficha con el número completo).
      *
      * @param string $phone Teléfono E.164 normalizado.
      *

@@ -44,6 +44,17 @@ class MarcaDeLaReservaWebTest extends BaseDeLaAgendaDeLaLanding
         $this->assertNull($lead->fresh()->demo_reservada_desde_landing_at);
     }
 
+    public function test_extender_el_fin_desde_el_panel_la_conserva(): void
+    {
+        $lead = $this->lead_reservado();
+
+        // «Cambiar hora de fin» del panel: mismo turno elegido por el lead, más tiempo.
+        $lead->demo_end_time = '23:30';
+        $lead->save();
+
+        $this->assertNotNull($lead->fresh()->demo_reservada_desde_landing_at);
+    }
+
     public function test_un_cambio_que_no_toca_el_turno_la_conserva(): void
     {
         $lead = $this->lead_reservado();
