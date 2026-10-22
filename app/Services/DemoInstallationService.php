@@ -60,6 +60,8 @@ use phpseclib3\Net\SSH2;
  */
 class DemoInstallationService
 {
+    use \App\Services\Concerns\PerfilRuntimeDelErp;
+
     /*
      * Bajar los paquetes que GitHub Actions publica en cada release en vez de compilar y empaquetar
      * en el VPS de builds (misión `instalar-sin-el-vps`, 10/9/2026). Lo mismo que usan
@@ -199,6 +201,7 @@ class DemoInstallationService
      */
     public function run(): void
     {
+        $this->runtime_preflight_done = false;
         try {
             $this->installation->update([
                 'status'     => DemoInstallation::STATUS_INSTALANDO,
@@ -258,6 +261,9 @@ class DemoInstallationService
     private function execute_steps(): void
     {
         foreach ($this->steps as $step) {
+            if (strpos($step, 'provision_') !== 0 && $step !== 'compile_spa') {
+                $this->runtime_preflight('runtime');
+            }
             switch ($step) {
                 case 'prepare_dirs':
                     $this->step_prepare_dirs();
@@ -311,6 +317,7 @@ class DemoInstallationService
      */
     private function step_prepare_dirs(): void
     {
+        $this->runtime_preflight('runtime');
         $api_path = $this->demo_api_path();
         $spa_path = $this->demo_spa_path();
 
@@ -377,6 +384,7 @@ class DemoInstallationService
      */
     private function step_upload_public(): void
     {
+        $this->runtime_preflight('runtime');
         $tag = $this->version_tag();
         $this->log('upload_public', "Trayendo public/ de la versión {$tag} desde GitHub");
 
@@ -510,6 +518,7 @@ class DemoInstallationService
      */
     private function step_upload_spa(): void
     {
+        $this->runtime_preflight('runtime');
         $local_zip          = $this->local_zip_path('dist_' . $this->installation->uuid . '.zip');
         $spa_build_path     = $this->builds_spa_path();
         $vino_del_artefacto = is_file($local_zip);
@@ -608,12 +617,14 @@ class DemoInstallationService
      */
     private function step_upload_api(): void
     {
+        $this->runtime_preflight('runtime');
         $tag       = $this->version_tag();
         $zip_name  = 'api_demo_' . $this->installation->uuid . '.zip';
         $local_zip = $this->local_zip_path('api_' . $this->installation->uuid . '.zip');
         $api_path  = $this->demo_api_path();
 
         if ($this->artefacto_bajar_api($tag, $local_zip, 'upload_api')) {
+            $this->runtime_assert_zip($local_zip);
             /* No hace falta bajar `public/` acá: en el pipeline de la demo lo puso la etapa 2, y el
                asset de la API lo excluye igual que el zip de la vía vieja, así que este `unzip -o`
                no lo pisa. */
@@ -654,6 +665,7 @@ class DemoInstallationService
         $this->log('upload_api', $this->truncate_for_log($checkout_output));
 
         $this->log('upload_api', 'Corriendo composer install en el VPS (--no-scripts)...');
+        $this->runtime_assert_build('upload_api');
         $this->exec_build_ssh(
             'upload_api',
             $this->build_composer_install_command($api_build_path, true)
@@ -1696,7 +1708,7 @@ class DemoInstallationService
         bool $must_succeed = true,
         bool $long_running = false
     ): string {
-        return $this->exec_ssh_session($this->ssh, $step, $command, $must_succeed, $long_running);
+        return $this->exec_ssh_session($this->ssh, $step, $this->runtime_command($command), $must_succeed, $long_running);
     }
 
     // =========================================================================
@@ -2185,6 +2197,9 @@ class DemoInstallationService
      */
     private function build_composer_install_command(string $work_dir, bool $is_vps): string
     {
+        if ($this->runtime_profile !== null) {
+            return $this->runtime_service()->composer($work_dir, true);
+        }
         $composer_bin = trim((string) config('services.deploy.composer_bin', 'composer'));
         $flags        = 'COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_MEMORY_LIMIT=-1 '
             . $this->escape_remote_arg($composer_bin)

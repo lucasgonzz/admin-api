@@ -99,6 +99,12 @@ class SshDelDeploymentFake extends SSH2
 
         $this->ultimo_exit = 0;
 
+        // Un VPS de los escenarios existentes no tiene un marcador opt-in salvo respuesta explícita.
+        if (strpos($command, 'python3 -c') !== false && strpos($command, 'os.O_NOFOLLOW') !== false
+            && strpos($command, '.comerciocity-runtime.json') !== false) {
+            return 'CC_RUNTIME_AUSENTE';
+        }
+
         return $this->salida_por_defecto;
     }
 
