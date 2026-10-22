@@ -198,7 +198,7 @@ class LandingAgendaService
      *   1. Lock global `demo_asignacion_directa` (el MISMO del agente, 8 s / espera 5): sin él, el agente
      *      aprobando una demo directa y esta reserva podrían elegir la misma instancia. Sin lock → 503
      *      `reintentar` (no se escribió nada).
-     *   2. Bajo el lock: el lead del teléfono con el buscador del webhook (D4) y sus 409 (D5); la
+     *   2. Bajo el lock: el lead del teléfono EXACTO (`BuscadorDeLeadPorTelefono::buscar_exacto`, D4) y sus 409 (D5); la
      *      instancia (D2); y la escritura: lead nuevo si no había, el UPDATE de `campos_de_reserva()`
      *      (D3) con los datos que faltaban, el evento del hilo, el contacto de atribución (D7) y
      *      `registrar_reserva()` — en ese orden, para que la reserva tome este contacto como el último.
@@ -248,7 +248,10 @@ class LandingAgendaService
 
         $liberado = false;
         try {
-            $lead = BuscadorDeLeadPorTelefono::buscar($telefono);
+            /* SOLO el número exacto (ver BuscadorDeLeadPorTelefono): el formulario lo tipea cualquiera, y
+             * una coincidencia por sufijo le escribiría el turno a la ficha de otra persona. Sin exacto,
+             * nace un lead nuevo. */
+            $lead = BuscadorDeLeadPorTelefono::buscar_exacto($telefono);
 
             if ($lead !== null) {
                 $bloqueo = $this->bloqueo_del_lead($lead);
