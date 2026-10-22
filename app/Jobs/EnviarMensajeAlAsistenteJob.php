@@ -734,7 +734,8 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             return;
         }
 
-        /* 401 / 403: la clave no coincide, o al dueño le falta la extensión `asistente_ia`. Las
+        /* 401 / 403: la clave no coincide, o al dueño le falta la extensión «Agentes de IA» (`agentes_ia`; en las
+         * versiones anteriores de empresa se llamaba `asistente_ia`, y el 403 sigue siendo el mismo). Las
          * dos se arreglan con una configuración, ninguna con esperar. */
         if ($status === 401 || $status === 403) {
             $this->cerrar_con_error(
@@ -744,7 +745,7 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
                 $sender,
                 $status === 401
                     ? 'El sistema del cliente rechazó la clave (401). Revisar clients.api_key contra su ADMIN_API_INBOUND_KEY.'
-                    : 'El sistema del cliente rechazó el pedido (403). Al dueño le falta la extensión asistente_ia.'
+                    : 'El sistema del cliente rechazó el pedido (403). Al dueño le falta la extensión Agentes de IA (agentes_ia; en versiones anteriores, asistente_ia). Se activa desde la ficha del cliente en el admin.'
             );
 
             return;

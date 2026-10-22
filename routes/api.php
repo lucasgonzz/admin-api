@@ -802,6 +802,10 @@ Route::prefix('admin')->group(function () {
         Route::post('client/{clientId}/candado-sesion/sync', [ClientSessionLockController::class, 'sync_json']);
         /* Boton Gestionar extensiones (mision extensiones-desde-el-admin, 15/10/2026): pide al empresa-api del cliente un acceso de un solo uso al configurador. */
         Route::post('client/{clientId}/extensiones/acceso', [\App\Http\Controllers\ClientExtensionesAccesoController::class, 'acceso_json']);
+        /* Extension unica "Agentes de IA" (mision agentes-ia-extension-unica, 22/10/2026): el GET lee si el cliente la tiene y el POST
+           (body {activa: bool}) la activa o la quita en su empresa-api. Siempre 200 con {estado, mensaje, activa}. */
+        Route::get('client/{clientId}/agentes-ia', [\App\Http\Controllers\ClientAgentesIaController::class, 'show_json']);
+        Route::post('client/{clientId}/agentes-ia', [\App\Http\Controllers\ClientAgentesIaController::class, 'update_json']);
 
         /* Consumo de tokens de IA (misión tokens-por-cliente, 17/9/2026).
            El GET lee del espejo local (`client_ai_token_usages`) y NO sale a la red: abrir una

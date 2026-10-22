@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\AiPlan;
 use App\Models\Client;
+use App\Services\ClientAgentesIaService;
 use App\Services\ClientAiPlanSyncService;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
@@ -135,13 +136,21 @@ class AiPlanController extends Controller
      * `ClientAiPlanSyncService::pushear_al_cliente`). El push se dispara sincrónico porque quien
      * asigna está mirando la pantalla y espera ver si llegó.
      *
+     * 🔴 Activación automática de «Agentes de IA» (misión `agentes-ia-extension-unica`, 22/10/2026): cuando el
+     * cliente PASA a tener un paquete (de ninguno a uno, o de uno a otro distinto), después del push del plan se
+     * le activa la extensión en su empresa-api. Es best-effort: si falla, el plan queda asignado igual y el
+     * resultado viaja en `agentes_ia` para que el SPA muestre el aviso o el motivo. Reasignar el mismo paquete no
+     * la vuelve a activar (para eso está el botón de la ficha), y quitar el paquete NO la desactiva: quitar
+     * acceso es una decisión explícita.
+     *
      * @param Request                 $request  Pedido con `ai_plan_id` (id o null).
      * @param int|string              $clientId Id del cliente.
      * @param ClientAiPlanSyncService $sync     Inyectado por el IoC de Laravel.
+     * @param ClientAgentesIaService  $agentes  Inyectado por el IoC de Laravel.
      *
      * @return \Illuminate\Http\JsonResponse
      */
-    public function assign_to_client_json(Request $request, $clientId, ClientAiPlanSyncService $sync)
+    public function assign_to_client_json(Request $request, $clientId, ClientAiPlanSyncService $sync, ClientAgentesIaService $agentes)
     {
         $client = Client::findOrFail($clientId);
 
@@ -149,10 +158,26 @@ class AiPlanController extends Controller
             'ai_plan_id' => ['present', 'nullable', 'integer', 'exists:ai_plans,id'],
         ]);
 
+        // Plan que tenía antes: decide si este cambio es "pasó a tener un plan" (activa Agentes de IA).
+        $plan_anterior = $client->ai_plan_id === null ? null : (int) $client->ai_plan_id;
+        $plan_nuevo    = $datos['ai_plan_id'] === null ? null : (int) $datos['ai_plan_id'];
+
         $client->ai_plan_id = $datos['ai_plan_id'];
         $client->save();
 
         $resultado = $sync->pushear_al_cliente($client);
+
+        // Best-effort (no lanza): el plan ya quedó guardado, pase lo que pase acá.
+        $agentes_ia = null;
+
+        if ($plan_nuevo !== null && $plan_nuevo !== $plan_anterior) {
+            // Si el push del plan ya falló por TRANSPORTE (el cliente no contestó), la activación está condenada a
+            // fallar igual y sumaría otro timeout a un pedido sincrónico: no se intenta. Un 404 (versión vieja) o un
+            // 4xx/5xx sí son una respuesta del cliente y ahí se intenta igual.
+            $agentes_ia = $sync->el_ultimo_push_fallo_por_transporte()
+                ? $agentes->no_intentada_por_falla_del_plan()
+                : $agentes->activar_por_plan($client);
+        }
 
         // El cliente quedó con las columnas `ai_plan_sync_*` nuevas: se relee para devolver el estado
         // de ESTE intento y no lo que estaba en memoria.
@@ -162,6 +187,8 @@ class AiPlanController extends Controller
             'ai_plan_id'     => $client->ai_plan_id === null ? null : (int) $client->ai_plan_id,
             'sincronizacion' => $this->estado_de_sincronizacion($client),
             'refresco'       => $resultado,
+            // null = esta asignación no intentó activar Agentes de IA (quitó el plan o dejó el mismo).
+            'agentes_ia'     => $agentes_ia,
         ]);
     }
 
