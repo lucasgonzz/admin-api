@@ -91,6 +91,105 @@ class LimiteDeIteracionesDeToolUseTest extends TestCase
     }
 
     /**
+     * Si la respuesta llega cortada por el tope de tokens a mitad del loop, el error lo dice y NO
+     * habla de iteraciones.
+     *
+     * Hasta el 22/10/2026 ese caso caía en "se superaron las iteraciones de tool use (10)" (lead #111:
+     * iteración 5 con stop_reason=max_tokens) y mandaba a buscar la causa a otro lado.
+     *
+     * @return void
+     */
+    public function test_un_corte_por_max_tokens_se_informa_como_tal_y_no_como_iteraciones()
+    {
+        $this->sembrar_protocolo_de_leads();
+        $this->sembrar_recursos(['precios', 'reglas']);
+
+        Http::fake([
+            'api.anthropic.com/*' => Http::sequence()
+                ->push($this->respuesta_tool_use('precios'))
+                ->push($this->respuesta_tool_use('reglas'))
+                ->push([
+                    'stop_reason' => 'max_tokens',
+                    'content'     => [['type' => 'text', 'text' => '{"mensaje_sugerido": "Dale, te cuento que']],
+                ]),
+            '*' => Http::response(['ok' => true], 200),
+        ]);
+
+        $lead = $this->crear_lead();
+
+        try {
+            app(LeadAiService::class)->generate_suggestion($lead, false);
+            $this->fail('Tenía que tirar RuntimeException por el corte de max_tokens.');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('tope de tokens', $e->getMessage());
+            $this->assertStringContainsString('max_tokens 3000', $e->getMessage());
+            $this->assertStringContainsString('iteración 3', $e->getMessage());
+            $this->assertStringNotContainsString('se superaron las iteraciones', $e->getMessage());
+        }
+    }
+
+    /**
+     * Un stop_reason raro que no es max_tokens tampoco se disfraza de "iteraciones": el mensaje
+     * nombra el stop_reason que llegó.
+     *
+     * @return void
+     */
+    public function test_un_stop_reason_inesperado_se_nombra_en_el_error()
+    {
+        $this->sembrar_protocolo_de_leads();
+
+        Http::fake([
+            'api.anthropic.com/*' => Http::response([
+                'stop_reason' => 'refusal',
+                'content'     => [['type' => 'text', 'text' => '']],
+            ], 200),
+            '*' => Http::response(['ok' => true], 200),
+        ]);
+
+        $lead = $this->crear_lead();
+
+        try {
+            app(LeadAiService::class)->generate_suggestion($lead, false);
+            $this->fail('Tenía que tirar RuntimeException por el stop_reason inesperado.');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('stop_reason inesperado ("refusal")', $e->getMessage());
+            $this->assertStringNotContainsString('se superaron las iteraciones', $e->getMessage());
+        }
+    }
+
+    /**
+     * La llamada con tools del agente se manda con el tope de 3000 tokens y no con los 1000 de antes.
+     *
+     * @return void
+     */
+    public function test_la_primera_llamada_se_manda_con_el_tope_de_tokens_nuevo()
+    {
+        $this->sembrar_protocolo_de_leads();
+
+        $paquete = [
+            'mensaje_sugerido' => 'Dale, te cuento...',
+            'estado_sugerido'  => 'calificado',
+            'razonamiento'     => '',
+            'tipo_respuesta'   => 'conversacional',
+            'fuentes_kb'       => [],
+        ];
+
+        Http::fake([
+            'api.anthropic.com/*' => Http::response($this->respuesta_final($paquete), 200),
+            '*' => Http::response(['ok' => true], 200),
+        ]);
+
+        app(LeadAiService::class)->generate_suggestion($this->crear_lead(), false);
+
+        Http::assertSent(function ($request) {
+            $cuerpo = $request->data();
+            return strpos((string) $request->url(), 'anthropic.com') !== false
+                && isset($cuerpo['max_tokens'])
+                && (int) $cuerpo['max_tokens'] === 3000;
+        });
+    }
+
+    /**
      * Respuesta de Claude que pausa para pedir un recurso via tool use.
      *
      * @param string $recurso Nombre del recurso pedido.

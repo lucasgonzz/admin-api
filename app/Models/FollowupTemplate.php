@@ -63,6 +63,10 @@ class FollowupTemplate extends Model
         'dia_numero'                 => 'integer',
         /* Cast booleano para el campo de bifurcación de seguimiento por ingreso a demo. */
         'solo_si_ingreso_confirmado' => 'boolean',
+        /* Campaña masiva (22/10/2026): el rechazo de Meta (`whatsapp_delivery_status = 'fallido'`)
+           de un mensaje de esta plantilla no pinta rojo ni cuenta en la tarjeta. Ver
+           Lead::apply_condicion_entrega_fallida_que_cuenta(). */
+        'no_marca_error_de_entrega'  => 'boolean',
         /* El JSON de componentes tal como se le mandó a Meta, con los ejemplos de cada variable.
            Es de donde el accessor `variables` saca una muestra real para rotular cada hueco. */
         'components'                 => 'array',
