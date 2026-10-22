@@ -10301,6 +10301,49 @@ BLOQUE_DEL_MANUAL;
     }
 
     /**
+     * Línea del bloque DEMO DIRECTA para el lead que reservó su demo él mismo desde la landing (misión
+     * demo-autogestionada-landing, 22/10/2026, D11 del plan). Vacía para cualquier otro lead, o si la
+     * demo de esa reserva ya no está vigente.
+     *
+     * La línea «Demo:» ya le dice al agente el turno asignado (instancia, inicio, fin, qué día). Esto
+     * agrega solo lo que esa línea no sabe: que el turno no lo coordinó él sino que lo eligió el lead en
+     * la web, qué le llegó (la carta, si `demo_mail_sent_at`; el WhatsApp de confirmación, si salió) y
+     * que por eso no hay que ofrecerle la demo ni pedirle el mail. Sin esto, el primer mensaje de ese lead
+     * («hola, reservé para el jueves») recibía la oferta de la demo y el pedido del correo, como si fuera
+     * un lead nuevo.
+     *
+     * @param Lead $lead
+     * @param bool $demo_vigente_asignada
+     *
+     * @return string
+     */
+    private function linea_de_la_reserva_desde_la_web(Lead $lead, bool $demo_vigente_asignada): string
+    {
+        if ($lead->demo_reservada_desde_landing_at === null || ! $demo_vigente_asignada) {
+            return '';
+        }
+
+        $recibio = [];
+        if ($lead->demo_mail_sent_at) {
+            $recibio[] = 'la carta por mail con el dia, la hora y el acceso';
+        }
+        $whatsapp_enviado = LeadMessage::query()
+            ->where('lead_id', $lead->id)
+            ->where('system_message_kind', \App\Jobs\ConfirmarReservaLandingJob::KIND_CONFIRMACION)
+            ->whereNotNull('whatsapp_message_id')
+            ->exists();
+        if ($whatsapp_enviado) {
+            $recibio[] = 'un WhatsApp de confirmacion con el link de su pagina';
+        }
+
+        return "  Reserva desde la web: este turno lo eligio EL MISMO desde el formulario de comerciocity.com ("
+            . $lead->demo_reservada_desde_landing_at->copy()->setTimezone(DemoDirectaService::TZ)->format('d/m H:i') . ")"
+            . (! empty($recibio) ? '; ya recibio ' . implode(' y ', $recibio) : '; todavia no le confirmamos nada por mail ni por WhatsApp')
+            . ". NO le ofrezcas la demo ni le pidas el mail de nuevo: confirmale su turno, pasale el link de su pagina si lo pide y\n"
+            . "    resolve lo que pregunte.\n";
+    }
+
+    /**
      * Bloque "DEMO DIRECTA" del contexto (misión demo-agendado-directo, 10/9/2026): reemplaza al de
      * la página inmersiva cuando el marcador está vivo. Lleva lo que el modelo tiene que COPIAR (los
      * dos links), lo que tiene que SABER (si hay email, si la demo ya está asignada, si hay una
@@ -10570,6 +10613,7 @@ BLOQUE_DEL_MANUAL;
             . "  Calificacion: {$linea_calificacion}\n"
             . "  Carta de acceso por mail: " . ($lead->demo_mail_sent_at ? 'ya enviada (' . $lead->demo_mail_sent_at->copy()->setTimezone(DemoDirectaService::TZ)->format('H:i') . ')' : 'todavia no enviada') . "\n"
             . "  Demo: {$estado_demo}\n"
+            . $this->linea_de_la_reserva_desde_la_web($lead, $demo_vigente_asignada)
             . $linea_link_ingreso
             . "Reglas de este turno:\n"
             . LeadOrigenService::regla_de_la_pagina_al_primer_contacto($lead)

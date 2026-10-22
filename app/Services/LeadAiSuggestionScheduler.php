@@ -26,7 +26,8 @@ class LeadAiSuggestionScheduler
     /**
      * Reinicia la espera y programa un job diferido para pedir sugerencia a Claude.
      *
-     * No hace nada en el primer mensaje entrante del lead (onboarding sin IA).
+     * No hace nada en el primer mensaje entrante del lead (onboarding sin IA), salvo que el lead haya
+     * reservado su demo desde la landing (ver {@see responde_el_primer_mensaje()}).
      *
      * @param int $lead_id ID del lead que recibió el inbound.
      *
@@ -39,7 +40,7 @@ class LeadAiSuggestionScheduler
             ->where('sender', 'lead')
             ->count();
 
-        if ($lead_inbound_count <= 1) {
+        if ($lead_inbound_count <= 1 && ! self::responde_el_primer_mensaje($lead_id)) {
             return;
         }
 
@@ -98,6 +99,27 @@ class LeadAiSuggestionScheduler
             'inbound_count'          => $lead_inbound_count,
             'hubo_envios_en_curso'   => $hubo_envios_en_curso,
         ]);
+    }
+
+    /**
+     * ¿El agente contesta el PRIMER mensaje de este lead? Solo si reservó su demo desde la landing
+     * (misión demo-autogestionada-landing, 22/10/2026, D11 del plan).
+     *
+     * 🔴 POR QUÉ el gate «la IA espera al segundo mensaje» no aplica a este lead. El gate existe porque al
+     * primer mensaje de un lead nuevo lo contesta el onboarding (bienvenida + presentación), y el agente
+     * entra recién cuando el lead responde. El lead que reservó desde la web ya está en `demo_agendada`
+     * cuando escribe por primera vez: el onboarding no corre (`should_run_onboarding()` exige `nuevo`), y
+     * con el gate su primer mensaje —casi siempre una duda sobre la demo que acaba de reservar— quedaba
+     * sin respuesta automática hasta que escribiera otra vez. Lo usan este scheduler y
+     * `GenerateLeadAiSuggestionJob`, que repite el gate antes de llamar al modelo.
+     *
+     * @param int $lead_id
+     *
+     * @return bool
+     */
+    public static function responde_el_primer_mensaje(int $lead_id): bool
+    {
+        return Lead::query()->whereKey($lead_id)->whereNotNull('demo_reservada_desde_landing_at')->exists();
     }
 
     /**

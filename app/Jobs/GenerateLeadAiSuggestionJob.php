@@ -76,7 +76,9 @@ class GenerateLeadAiSuggestionJob implements ShouldQueue
             ->where('sender', 'lead')
             ->count();
 
-        if ($lead_inbound_count <= 1) {
+        /* El mismo gate del scheduler, con la misma excepción: el lead que reservó su demo desde la
+           landing recibe respuesta desde su primer mensaje (D11, 22/10/2026). */
+        if ($lead_inbound_count <= 1 && ! LeadAiSuggestionScheduler::responde_el_primer_mensaje((int) $lead->id)) {
             return;
         }
 

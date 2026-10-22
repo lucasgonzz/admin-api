@@ -292,6 +292,9 @@ class Lead extends Model
         'demo_ingreso_token_revocado_at' => 'datetime',
         'followup_mail_sent_at'        => 'datetime',
         'demo_mail_sent_at'            => 'datetime',
+        // Cuándo reservó su demo él mismo desde el formulario de la landing (22/10/2026). Abre el gate
+        // del primer mensaje del agente y le avisa al agente que no le ofrezca la demo ni le pida el mail.
+        'demo_reservada_desde_landing_at' => 'datetime',
 
         'use_deposits'                 => 'boolean',
         'use_price_lists'              => 'boolean',
