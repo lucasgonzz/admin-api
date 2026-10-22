@@ -12,6 +12,46 @@ use Illuminate\Support\Facades\DB;
 /** Evidencia operativa propia: los parámetros de URL no certifican una atribución de Meta. */
 class LeadAtribucionService
 {
+    /** Evidencia del contacto que deja una reserva hecha desde el formulario de la landing (22/10/2026). */
+    const EVIDENCIA_RESERVA_LANDING = 'reserva_landing';
+
+    /**
+     * La lista blanca de los datos de atribución que manda la landing, con sus reglas.
+     *
+     * Movida tal cual de `LeadAtribucionController::emitir` el 22/10/2026 (misión
+     * demo-autogestionada-landing): la reserva desde la landing manda el mismo bloque `atribucion`, y
+     * tiene que aceptar exactamente lo mismo —ni una clave más (nunca PII ni un lead elegido por el
+     * navegador), ni otra regla—.
+     *
+     * @return array<string, array<int, string>>
+     */
+    public static function reglas_de_los_datos(): array
+    {
+        $reglas = [];
+        foreach (['campaign_id', 'adset_id', 'ad_id'] as $campo) {
+            $reglas[$campo] = ['sometimes', 'nullable', 'string', 'max:30', 'regex:/^[0-9]+$/'];
+        }
+        foreach (['campaign_name', 'adset_name', 'ad_name', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'fbclid'] as $campo) {
+            $reglas[$campo] = ['sometimes', 'nullable', 'string', 'max:500', 'not_regex:/[{}\x00-\x1F]/'];
+        }
+
+        return $reglas;
+    }
+
+    /**
+     * Saca los valores nulos o vacíos de los datos ya validados (lo que hacía `emitir` en línea).
+     *
+     * @param array<string, mixed> $datos
+     *
+     * @return array<string, mixed>
+     */
+    public static function sin_vacios(array $datos): array
+    {
+        return array_filter($datos, function ($valor) {
+            return $valor !== null && $valor !== '';
+        });
+    }
+
     public function emitir(array $datos): array
     {
         $reference = bin2hex(random_bytes(16));
@@ -87,16 +127,71 @@ class LeadAtribucionService
         }, 3);
     }
 
+    /**
+     * El contacto de atribución de una reserva hecha desde el formulario de la landing (misión
+     * demo-autogestionada-landing, 22/10/2026, D7 del plan).
+     *
+     * El `message_id` es el evento `sistema` que la reserva deja en el hilo (la tabla lo exige NOT NULL
+     * UNIQUE y no hay mensaje del lead: nunca escribió). Los datos son el bloque `atribucion` del
+     * formulario, ya validado con {@see reglas_de_los_datos()}: los mismos campos que una referencia
+     * `[CC:…]`, con el `fbclid` incluido (lo usa {@see MetaConversionesService::fbc_del_lead()}).
+     *
+     * `adquisicion` si el lead no tenía ningún contacto (es como llegó), `recontacto` si ya tenía.
+     * Después, `registrar_reserva()` lo toma como el último contacto del lead.
+     *
+     * @param LeadMessage          $evento Evento `sistema` de la reserva.
+     * @param array<string, mixed> $datos  Atribución validada (puede venir vacía).
+     *
+     * @return void
+     */
+    public function registrar_contacto_de_reserva(LeadMessage $evento, array $datos): void
+    {
+        DB::transaction(function () use ($evento, $datos) {
+            $lead = Lead::query()->whereKey($evento->lead_id)->lockForUpdate()->first();
+            if ($lead === null) {
+                return;
+            }
+            if (DB::table('lead_atribucion_contactos')->where('message_id', $evento->id)->exists()) {
+                return;
+            }
+            $habia_contactos = DB::table('lead_atribucion_contactos')->where('lead_id', $evento->lead_id)->exists();
+            DB::table('lead_atribucion_contactos')->insert([
+                'lead_id' => $evento->lead_id,
+                'message_id' => $evento->id,
+                'referencia_id' => null,
+                'referral_id' => null,
+                'tipo' => $habia_contactos ? 'recontacto' : 'adquisicion',
+                'evidencia' => self::EVIDENCIA_RESERVA_LANDING,
+                'datos' => json_encode(self::sin_vacios($datos)),
+                'contacto_at' => $evento->sent_at ?: $evento->created_at,
+                'created_at' => AppTime::now(),
+            ]);
+        }, 3);
+    }
+
     private function guardar_contacto(LeadMessage $mensaje, string $evidencia, array $datos, ?int $referencia_id, ?int $referral_id): void
     {
         $existente = DB::table('lead_atribucion_contactos')->where('message_id', $mensaje->id)->first();
         $primero = LeadOrigenService::primer_mensaje_entrante((int) $mensaje->lead_id);
+        $tipo = $primero !== null && (int) $primero->id === (int) $mensaje->id ? 'adquisicion' : 'recontacto';
+        /* 🔴 Una sola adquisición por lead (22/10/2026). Hasta la reserva desde la landing la adquisición
+           era siempre el primer mensaje entrante, y había una sola por construcción. Ahora un lead puede
+           haber llegado por el formulario (contacto `reserva_landing` de adquisición, sin mensaje suyo)
+           y escribir después con una referencia: ese primer mensaje ya no es cómo llegó, es un
+           recontacto. Con dos adquisiciones, el LEFT JOIN de `metricas()` contaría al lead dos veces. */
+        if ($tipo === 'adquisicion' && DB::table('lead_atribucion_contactos')
+            ->where('lead_id', $mensaje->lead_id)
+            ->where('tipo', 'adquisicion')
+            ->where('message_id', '!=', $mensaje->id)
+            ->exists()) {
+            $tipo = 'recontacto';
+        }
         $fila = [
             'lead_id' => $mensaje->lead_id,
             'message_id' => $mensaje->id,
             'referencia_id' => $referencia_id,
             'referral_id' => $referral_id,
-            'tipo' => $primero !== null && (int) $primero->id === (int) $mensaje->id ? 'adquisicion' : 'recontacto',
+            'tipo' => $tipo,
             'evidencia' => $evidencia,
             'datos' => json_encode($datos),
             'contacto_at' => $mensaje->sent_at ?: $mensaje->created_at,

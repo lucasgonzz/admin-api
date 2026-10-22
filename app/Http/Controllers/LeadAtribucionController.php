@@ -12,19 +12,14 @@ class LeadAtribucionController extends Controller
 {
     public function emitir(Request $request, LeadAtribucionService $service)
     {
-        $reglas = [];
-        foreach (['campaign_id', 'adset_id', 'ad_id'] as $campo) {
-            $reglas[$campo] = ['sometimes', 'nullable', 'string', 'max:30', 'regex:/^[0-9]+$/'];
-        }
-        foreach (['campaign_name', 'adset_name', 'ad_name', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'fbclid'] as $campo) {
-            $reglas[$campo] = ['sometimes', 'nullable', 'string', 'max:500', 'not_regex:/[{}\x00-\x1F]/'];
-        }
+        // La lista blanca y sus reglas viven en el servicio: la reserva de la landing usa las mismas.
+        $reglas = LeadAtribucionService::reglas_de_los_datos();
         // Lista blanca también al nivel superior: nunca se acepta PII ni un lead elegido por el navegador.
         if (array_diff(array_keys($request->all()), array_keys($reglas))) {
             throw ValidationException::withMessages(['payload' => ['Hay campos no admitidos.']]);
         }
         $datos = $request->validate($reglas);
-        return response()->json($service->emitir(array_filter($datos, function ($valor) { return $valor !== null && $valor !== ''; })), 201);
+        return response()->json($service->emitir(LeadAtribucionService::sin_vacios($datos)), 201);
     }
 
     public function detalle($id, LeadAtribucionService $service)
