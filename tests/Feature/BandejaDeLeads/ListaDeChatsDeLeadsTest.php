@@ -49,6 +49,8 @@ class ListaDeChatsDeLeadsTest extends TestCase
     /** @var array<int, string> Claves de `ultimo_mensaje`, en el orden del contrato. */
     private const CLAVES_DEL_ULTIMO_MENSAJE = [
         'id', 'sender', 'status', 'whatsapp_delivery_status', 'is_error', 'kind', 'created_at', 'texto',
+        // Sumada el 22/10/2026 (misión campana-masiva-sin-rojo): extensión aditiva del contrato con admin-spa.
+        'entrega_fallida_cuenta',
     ];
 
     /** @var Admin */
