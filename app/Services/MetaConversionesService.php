@@ -56,6 +56,14 @@ use Illuminate\Support\Str;
  * con `website` Meta exige `client_user_agent` y `event_source_url`, que no tenemos. Todo `user_data`
  * viaja en SHA-256, normalizado como pide Meta (ver {@see user_data_web()}).
  *
+ * 🔴 Salvo los eventos que nacen en una reserva hecha desde el formulario de la landing (misión
+ * demo-autogestionada-landing, 22/10/2026): esos SÍ pasaron en el sitio, y la fila guarda el
+ * `contexto_web` del navegador (IP, user agent, `_fbp`, `_fbc`, URL de la página). Con user agent y URL
+ * presentes salen con `action_source: website`, `event_source_url` y esos datos SIN hash en `user_data`
+ * —que es lo que Meta necesita para deduplicarlos contra el `Lead`/`Schedule` que dispara el píxel con
+ * el mismo `event_id`—. Sin contexto (o sin alguno de esos dos), todo sale como siempre, byte a byte
+ * (ver {@see contexto_web_de_la_fila()}).
+ *
  * 🔴 **Los eventos son acumulativos.** La demo directa lleva a un lead de `nuevo` a `demo_agendada`
  * en un solo paso (la frase del botón ES un sí): si `LeadSubmitted` saliera solo con `calificado`
  * literal, los leads de anuncio que agendan de una nunca lo mandarían. Cada evento sale al alcanzar
@@ -89,6 +97,16 @@ class MetaConversionesService
      * sitio. Con `website` Meta exige `client_user_agent` y `event_source_url`, que no tenemos.
      */
     const ACTION_SOURCE_WEB = 'chat';
+
+    /**
+     * `action_source` de un evento del canal `web` que pasó EN el sitio (la reserva desde el formulario
+     * de la landing) y trae el contexto del navegador: `client_user_agent` y `event_source_url`, los dos
+     * que Meta exige con este valor.
+     */
+    const ACTION_SOURCE_WEBSITE = 'website';
+
+    /** Claves que se guardan del contexto del navegador (`lead_eventos_meta.contexto_web`). */
+    const CLAVES_CONTEXTO_WEB = ['client_ip_address', 'client_user_agent', 'fbp', 'fbc', 'event_source_url'];
 
     /** País de los leads (ISO 3166-1 alfa-2, en minúsculas como lo pide Meta antes del hash). */
     const PAIS = 'ar';
@@ -291,13 +309,19 @@ class MetaConversionesService
      * por el dataset del píxel. Cualquier otro no registra nada. Con la configuración del canal
      * incompleta, los eventos quedan `sin_configurar` (con un warning en el log) y no se encola nada.
      *
-     * @param Lead        $lead
-     * @param Carbon|null $momento   Cuándo alcanzó la etapa (default: ahora).
-     * @param bool        $despachar false para registrar sin encolar.
+     * `$contexto_web` (misión demo-autogestionada-landing, 22/10/2026): el contexto del navegador cuando
+     * la etapa se alcanzó EN el sitio (la reserva desde la landing). Queda en cada fila que nace en esta
+     * llamada y cambia cómo sale a Meta (ver {@see armar_payload()}). Null —todos los demás llamadores—:
+     * nada cambia.
+     *
+     * @param Lead                       $lead
+     * @param Carbon|null                $momento      Cuándo alcanzó la etapa (default: ahora).
+     * @param bool                       $despachar    false para registrar sin encolar.
+     * @param array<string, string>|null $contexto_web IP, user agent, fbp, fbc y URL de la página.
      *
      * @return array<int, LeadEventoMeta> Las filas que se crearon en esta llamada.
      */
-    public function registrar_alcanzados(Lead $lead, ?Carbon $momento = null, bool $despachar = true): array
+    public function registrar_alcanzados(Lead $lead, ?Carbon $momento = null, bool $despachar = true, ?array $contexto_web = null): array
     {
         $canal = self::canal_del_lead($lead);
         if ($canal === null) {
@@ -323,7 +347,8 @@ class MetaConversionesService
             $canal,
             $config ? LeadEventoMeta::ESTADO_PENDIENTE : LeadEventoMeta::ESTADO_SIN_CONFIGURAR,
             $momento !== null ? $momento : AppTime::now(),
-            null
+            null,
+            $contexto_web
         );
 
         if (empty($creados)) {
@@ -555,10 +580,11 @@ class MetaConversionesService
      * @param string      $estado  Estado con el que nacen las filas.
      * @param Carbon      $momento `event_time` de las filas.
      * @param string|null $motivo  Texto para `ultimo_error` (el porqué de un `omitido`).
+     * @param array<string, string>|null $contexto_web Ver {@see registrar_alcanzados()}.
      *
      * @return array<int, LeadEventoMeta>
      */
-    private function crear_filas_faltantes(Lead $lead, string $canal, string $estado, Carbon $momento, ?string $motivo): array
+    private function crear_filas_faltantes(Lead $lead, string $canal, string $estado, Carbon $momento, ?string $motivo, ?array $contexto_web = null): array
     {
         if (! $lead->id) {
             return [];
@@ -578,7 +604,7 @@ class MetaConversionesService
         $creados    = [];
 
         foreach ($faltantes as $evento) {
-            $fila = $this->crear_fila($lead, $canal, $evento, $estado, $momento, $motivo);
+            $fila = $this->crear_fila($lead, $canal, $evento, $estado, $momento, $motivo, $contexto_web);
             if ($fila !== null) {
                 $creados[] = $fila;
             }
@@ -597,22 +623,30 @@ class MetaConversionesService
      * @param string      $estado
      * @param Carbon      $momento
      * @param string|null $motivo
+     * @param array<string, string>|null $contexto_web Ver {@see registrar_alcanzados()}.
      *
      * @return LeadEventoMeta|null
      */
-    private function crear_fila(Lead $lead, string $canal, string $evento, string $estado, Carbon $momento, ?string $motivo): ?LeadEventoMeta
+    private function crear_fila(Lead $lead, string $canal, string $evento, string $estado, Carbon $momento, ?string $motivo, ?array $contexto_web = null): ?LeadEventoMeta
     {
+        $atributos = [
+            'lead_id'      => (int) $lead->id,
+            'canal'        => $canal,
+            'evento'       => $evento,
+            'estado'       => $estado,
+            'event_id'     => self::event_id_para((int) $lead->id, $evento, $canal),
+            'event_time'   => $momento,
+            'intentos'     => 0,
+            'ultimo_error' => $motivo,
+        ];
+        /* Solo si vino: las filas de siempre se crean exactamente igual que antes. */
+        $contexto = self::contexto_web_limpio($contexto_web);
+        if ($contexto !== null) {
+            $atributos['contexto_web'] = $contexto;
+        }
+
         try {
-            return LeadEventoMeta::create([
-                'lead_id'      => (int) $lead->id,
-                'canal'        => $canal,
-                'evento'       => $evento,
-                'estado'       => $estado,
-                'event_id'     => self::event_id_para((int) $lead->id, $evento, $canal),
-                'event_time'   => $momento,
-                'intentos'     => 0,
-                'ultimo_error' => $motivo,
-            ]);
+            return LeadEventoMeta::create($atributos);
         } catch (QueryException $exception) {
             if (self::es_error_de_duplicado($exception)) {
                 /* El único (lead_id, canal, evento): otro proceso lo registró entre la lectura y
@@ -780,8 +814,16 @@ class MetaConversionesService
         ];
 
         if (self::canal_de_la_fila($evento) === LeadEventoMeta::CANAL_WEB) {
-            $dato['action_source'] = self::ACTION_SOURCE_WEB;
-            $dato['user_data']     = $this->user_data_web($lead, $momento);
+            /* Con el contexto del navegador (reserva desde la landing) sale como evento del sitio; sin él,
+               exactamente como siempre (mismas claves, mismo orden). */
+            $contexto = self::contexto_web_de_la_fila($evento);
+            if ($contexto !== null) {
+                $dato['action_source']    = self::ACTION_SOURCE_WEBSITE;
+                $dato['event_source_url'] = $contexto['event_source_url'];
+            } else {
+                $dato['action_source'] = self::ACTION_SOURCE_WEB;
+            }
+            $dato['user_data'] = $this->user_data_web($lead, $momento, $contexto);
         } else {
             $dato['action_source']     = self::ACTION_SOURCE;
             $dato['messaging_channel'] = self::MESSAGING_CHANNEL;
@@ -822,12 +864,18 @@ class MetaConversionesService
      *     eventos del mismo lead.
      *   - `fn` / `ln`: solo si el nombre del contacto se puede partir en nombre y apellido (dos
      *     palabras o más): la primera y la última. Con una sola palabra no va ninguno.
+     *   - Con `$contexto` (evento que pasó en el sitio, misión demo-autogestionada-landing):
+     *     `client_ip_address`, `client_user_agent` y `fbp`, SIN hash (así los pide Meta), y el `fbc` de la
+     *     cookie `_fbc` gana sobre el armado con el `fbclid` (es el que el píxel mandó con el mismo
+     *     evento). El `fbc` va UNA sola vez y siempre como última clave, como antes.
      *
-     * @param Lead $lead
+     * @param Lead                       $lead
+     * @param Carbon|null                $momento
+     * @param array<string, string>|null $contexto Ya filtrado por {@see contexto_web_de_la_fila()}.
      *
-     * @return array<string, array<int, string>>
+     * @return array<string, mixed>
      */
-    private function user_data_web(Lead $lead, ?Carbon $momento = null): array
+    private function user_data_web(Lead $lead, ?Carbon $momento = null, ?array $contexto = null): array
     {
         $datos    = [];
         $telefono = AudienciasMetaService::normalizar_telefono($lead->phone);
@@ -857,12 +905,69 @@ class MetaConversionesService
             $datos['ln'] = [hash('sha256', $nombre_y_apellido[1])];
         }
 
-        $fbc = self::fbc_del_lead($lead, $momento);
+        $fbc = null;
+        if ($contexto !== null) {
+            foreach (['client_ip_address', 'client_user_agent', 'fbp'] as $clave) {
+                if (isset($contexto[$clave]) && $contexto[$clave] !== '') {
+                    $datos[$clave] = $contexto[$clave];
+                }
+            }
+            if (isset($contexto['fbc']) && $contexto['fbc'] !== '') {
+                $fbc = $contexto['fbc'];
+            }
+        }
+        if ($fbc === null) {
+            $fbc = self::fbc_del_lead($lead, $momento);
+        }
         if ($fbc !== null) {
             $datos['fbc'] = $fbc;
         }
 
         return $datos;
+    }
+
+    /**
+     * El contexto del navegador de una fila, si alcanza para mandarla como evento del sitio, o null.
+     *
+     * 🔴 Con `action_source = website` Meta exige `client_user_agent` y `event_source_url`: si a la fila
+     * le falta cualquiera de los dos, se manda como siempre (`chat`), sin usar ninguno de sus datos. Mejor
+     * un evento de chat completo que uno de website que Meta rechaza.
+     *
+     * @param LeadEventoMeta $evento
+     *
+     * @return array<string, string>|null
+     */
+    private static function contexto_web_de_la_fila(LeadEventoMeta $evento): ?array
+    {
+        $contexto = self::contexto_web_limpio(is_array($evento->contexto_web) ? $evento->contexto_web : null);
+        if ($contexto === null || ! isset($contexto['client_user_agent'], $contexto['event_source_url'])) {
+            return null;
+        }
+
+        return $contexto;
+    }
+
+    /**
+     * Solo las claves conocidas, como texto y sin vacíos; null si no queda nada.
+     *
+     * @param array<string, mixed>|null $contexto
+     *
+     * @return array<string, string>|null
+     */
+    private static function contexto_web_limpio(?array $contexto): ?array
+    {
+        if ($contexto === null) {
+            return null;
+        }
+
+        $limpio = [];
+        foreach (self::CLAVES_CONTEXTO_WEB as $clave) {
+            if (isset($contexto[$clave]) && is_scalar($contexto[$clave]) && trim((string) $contexto[$clave]) !== '') {
+                $limpio[$clave] = trim((string) $contexto[$clave]);
+            }
+        }
+
+        return empty($limpio) ? null : $limpio;
     }
 
     /**
@@ -880,6 +985,11 @@ class MetaConversionesService
      * Un `fbclid` con caracteres raros no se manda (Meta lo rechazaría). Con `$hasta`, solo clics
      * anteriores al evento (un reintento no le pega a la compra un clic posterior).
      *
+     * Desde la misión demo-autogestionada-landing (22/10/2026) también mira los contactos
+     * `reserva_landing` (la reserva hecha desde el formulario de la web, que trae el mismo bloque de
+     * atribución con su `fbclid`). Esos no tienen referencia: el momento es el del contacto (la reserva,
+     * en la misma visita del clic). Los `referencia_landing` siguen exigiendo su referencia, como antes.
+     *
      * 🔴 Nunca tira: si la consulta falla (por ejemplo, sin las tablas de atribución), devuelve null y
      * el evento sale sin `fbc`, como antes del 22/10. Un `fbc` no puede tumbar los eventos de la web.
      *
@@ -896,14 +1006,20 @@ class MetaConversionesService
 
         try {
             $consulta = DB::table('lead_atribucion_contactos as c')
-                ->join('landing_whatsapp_referencias as r', 'r.id', '=', 'c.referencia_id')
+                ->leftJoin('landing_whatsapp_referencias as r', 'r.id', '=', 'c.referencia_id')
                 ->where('c.lead_id', (int) $lead->id)
-                ->where('c.evidencia', 'referencia_landing')
+                ->where(function ($query) {
+                    /* `referencia_landing` con su referencia (lo que antes hacía el JOIN), o una reserva
+                       desde el formulario, que no tiene referencia. */
+                    $query->where(function ($con_referencia) {
+                        $con_referencia->where('c.evidencia', 'referencia_landing')->whereNotNull('r.id');
+                    })->orWhere('c.evidencia', LeadAtribucionService::EVIDENCIA_RESERVA_LANDING);
+                })
                 ->orderByDesc('c.message_id');
             if ($hasta !== null) {
-                $consulta->where('r.created_at', '<=', $hasta);
+                $consulta->whereRaw('COALESCE(r.created_at, c.contacto_at) <= ?', [$hasta]);
             }
-            $contactos = $consulta->get(['c.datos', 'r.created_at']);
+            $contactos = $consulta->get(['c.datos', DB::raw('COALESCE(r.created_at, c.contacto_at) as created_at')]);
         } catch (\Throwable $exception) {
             Log::channel('daily')->warning('Conversiones Meta: no se pudo leer el fbclid de la landing; el evento sale sin fbc.', [
                 'lead_id' => (int) $lead->id,

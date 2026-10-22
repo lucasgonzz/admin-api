@@ -140,6 +140,9 @@ class LeadEventoMeta extends Model
         'event_time' => 'datetime',
         'enviado_at' => 'datetime',
         'respuesta'  => 'array',
+        /* Contexto del navegador de un evento que pasó en el sitio (reserva desde la landing, 22/10/2026):
+           IP, user agent, fbp, fbc y URL. Null en todos los demás. */
+        'contexto_web' => 'array',
     ];
 
     /**
