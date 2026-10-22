@@ -205,6 +205,29 @@ class Lead extends Model
             }
         });
 
+        /* La marca «reservó su demo desde la landing» (`demo_reservada_desde_landing_at`, misión
+           demo-autogestionada-landing, 22/10/2026) vale para ESE turno. Si la agenda cambia por otro
+           camino —el agente que reagenda o cancela, el panel, `PATCH claude/leads/{id}`, el «no voy a poder
+           entrar» que suelta el turno—, la marca se borra: si no, el bloque DEMO DIRECTA le seguiría
+           diciendo al agente que «este turno lo eligió él desde la web» sobre un turno que coordinó otro.
+
+           Va acá y no en `LeadRescheduleFlagsService` porque esos tres caminos y el del agente terminan
+           todos en un `save()` con los campos del turno sucios (el agente, en el único save de
+           `apply_parsed_response`, después de su UPDATE por clave), y este es el único punto que los ve a
+           todos. La reserva de la landing escribe el turno Y la marca nueva en el mismo save, así que la
+           marca no se toca cuando ella misma viene sucia. Un UPDATE por query builder que mueva el turno sin
+           pasar por un save() no la limpia: la línea del agente igual exige la demo vigente. */
+        static::saving(function (Lead $lead) {
+            if (! $lead->exists || $lead->demo_reservada_desde_landing_at === null
+                || $lead->isDirty('demo_reservada_desde_landing_at')) {
+                return;
+            }
+
+            if ($lead->isDirty(['demo_id', 'demo_date', 'demo_start_time', 'demo_end_time'])) {
+                $lead->demo_reservada_desde_landing_at = null;
+            }
+        });
+
         /* Embudo "Leads" de Pipelines (misión embudo-lead-pipelines, 13/10/2026): cuando el lead
            confirma interés después de la demo (`closer_activo`) nace su oportunidad en el tablero
            de Tomás, y queda donde diga el estado de sus videollamadas.
