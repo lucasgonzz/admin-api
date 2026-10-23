@@ -244,8 +244,8 @@ class ContratoConModalidadTest extends BaseDeCobranzas
     }
 
     /**
-     * 6.1 Comunidad y adaptaciones: sale en las tres variantes del contrato; en Licencia y sin
-     * modalidad dice "de por vida", en Suscripción dura mientras la suscripción esté activa.
+     * 6.1 Comunidad y adaptaciones: sale en las tres variantes del contrato; la comunidad es accesible
+     * por igual con Licencia o con Suscripción y dura lo que la licencia de uso.
      *
      * @return void
      */
@@ -260,12 +260,7 @@ class ContratoConModalidadTest extends BaseDeCobranzas
             $this->assertStringContainsString('adaptaciones o modificaciones del sistema para las necesidades de su negocio', $plano, $mensaje);
             $this->assertStringContainsString('nuevos módulos que el PRESTADOR considere ajenos a la gestión del negocio', $plano, $mensaje);
 
-            if ($modalidad === 'suscripcion') {
-                $this->assertStringContainsString('Mientras la suscripción esté activa, el CLIENTE integra la comunidad ComercioCity', $plano, $mensaje);
-                $this->assertStringNotContainsString('integra de por vida la comunidad', $plano, $mensaje);
-            } else {
-                $this->assertStringContainsString('El CLIENTE integra de por vida la comunidad ComercioCity', $plano, $mensaje);
-            }
+            $this->assertStringContainsString('Cualquiera sea la modalidad de contratación, el CLIENTE integra la comunidad ComercioCity durante la vigencia de su licencia de uso', $plano, $mensaje);
         }
     }
 
