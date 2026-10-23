@@ -412,6 +412,28 @@
         sin costo adicional al abono mensual. El soporte tiene por objeto resolver consultas de uso, configuración y operación cotidiana de la plataforma.
     </p>
 @endif
+    {{-- 6.1 — Comunidad ComercioCity y adaptaciones (Lucas, 23/10/2026). Va en las dos modalidades y en el
+         contrato sin modalidad; solo cambia hasta cuándo dura (Licencia: de por vida; Suscripción: mientras
+         la suscripción esté activa). La política que se comunica a leads y clientes vive en
+         manual_sistema/general/comunidad-y-acompanamiento.md: si cambia allá, se revisa acá. --}}
+    <div class="clausula-particular">
+        <p class="clausula-titulo">6.1 — Comunidad ComercioCity y adaptaciones a medida</p>
+        <p>
+@if($modalidad === 'suscripcion')
+            Mientras la suscripción esté activa, el CLIENTE integra la comunidad ComercioCity y podrá solicitar al PRESTADOR, en cualquier momento,
+@else
+            El CLIENTE integra de por vida la comunidad ComercioCity y podrá solicitar al PRESTADOR, en cualquier momento,
+@endif
+            adaptaciones o modificaciones del sistema para las necesidades de su negocio. El PRESTADOR se compromete a incorporarlas, sin costo
+            adicional a la mensualidad, siempre que sean razonables y respondan a la gestión del negocio del CLIENTE. Quedan fuera de este compromiso
+            los pedidos que, a criterio razonable del PRESTADOR, (a) resulten desproporcionados o requieran recursos de desarrollo excesivos, o (b)
+            consistan en el desarrollo de nuevos módulos que el PRESTADOR considere ajenos a la gestión del negocio; esos pedidos se evalúan por
+            separado y el PRESTADOR le informará su decisión al CLIENTE. El PRESTADOR prioriza los pedidos según las necesidades del conjunto de la
+            comunidad, y las adaptaciones que realice integran la plataforma ComercioCity y quedan alcanzadas por lo dispuesto en las condiciones
+            generales sobre propiedad intelectual, pudiendo ponerse a disposición de otros clientes sin que ello implique compartir información del
+            CLIENTE. Este compromiso no incluye sistemas o servicios de terceros.
+        </p>
+    </div>
 
     {{-- Sección 7 — Condiciones generales.
          La rescisión cambia con la Suscripción (misión precios-dos-modalidades, 13/10/2026): rige

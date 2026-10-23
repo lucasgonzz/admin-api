@@ -244,6 +244,32 @@ class ContratoConModalidadTest extends BaseDeCobranzas
     }
 
     /**
+     * 6.1 Comunidad y adaptaciones: sale en las tres variantes del contrato; en Licencia y sin
+     * modalidad dice "de por vida", en Suscripción dura mientras la suscripción esté activa.
+     *
+     * @return void
+     */
+    public function test_la_clausula_de_comunidad_y_adaptaciones_sale_en_todas_las_variantes(): void
+    {
+        foreach (['licencia', null, 'suscripcion'] as $modalidad) {
+            $html = $this->html($this->lead_con_contrato(['contract_modalidad' => $modalidad]));
+            $plano = $this->normalizado($html);
+            $mensaje = 'Modalidad: ' . var_export($modalidad, true);
+
+            $this->assertStringContainsString('6.1 — Comunidad ComercioCity y adaptaciones a medida', $html, $mensaje);
+            $this->assertStringContainsString('adaptaciones o modificaciones del sistema para las necesidades de su negocio', $plano, $mensaje);
+            $this->assertStringContainsString('nuevos módulos que el PRESTADOR considere ajenos a la gestión del negocio', $plano, $mensaje);
+
+            if ($modalidad === 'suscripcion') {
+                $this->assertStringContainsString('Mientras la suscripción esté activa, el CLIENTE integra la comunidad ComercioCity', $plano, $mensaje);
+                $this->assertStringNotContainsString('integra de por vida la comunidad', $plano, $mensaje);
+            } else {
+                $this->assertStringContainsString('El CLIENTE integra de por vida la comunidad ComercioCity', $plano, $mensaje);
+            }
+        }
+    }
+
+    /**
      * 2b. Suscripción: encabezado, objeto, pago inicial, plazo mínimo (12 por defecto, el que diga
      * el contrato si lo dice), IPC con los meses del contrato y la rescisión que termina la licencia.
      *
