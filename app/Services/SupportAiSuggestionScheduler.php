@@ -32,6 +32,13 @@ class SupportAiSuggestionScheduler
      */
     public function schedule_after_client_inbound(int $ticket_id): void
     {
+        $ticket = SupportTicket::find($ticket_id);
+        if ($ticket !== null && SupportCodexSettings::manages($ticket)) {
+            // También invalida un job del proveedor anterior que ya estaba en plena consulta.
+            $this->clear_stale_pending_suggestion($ticket_id);
+            $this->bump_schedule_token($ticket_id);
+            return;
+        }
         // Demora configurable antes de contactar a Claude (debounce tras el último mensaje).
         $delay_seconds = SupportAiSettings::get_suggestion_delay_seconds();
 

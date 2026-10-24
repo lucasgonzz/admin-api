@@ -1,0 +1,423 @@
+<?php
+
+namespace Tests\Feature;
+
+use App\Events\SupportMessageReceived;
+use App\Events\SupportTicketUpdated;
+use App\Models\AdminSetting;
+use App\Models\Client;
+use App\Models\ClientEmployee;
+use App\Models\SupportCodexCase;
+use App\Models\SupportCodexOperation;
+use App\Models\SupportMessage;
+use App\Models\SupportMessageAttachment;
+use App\Models\SupportTicket;
+use App\Services\SupportAiSuggestionService;
+use App\Services\SupportCodexService;
+use App\Services\SupportCodexSettings;
+use App\Services\SupportWhatsappOpenerService;
+use Carbon\Carbon;
+use Illuminate\Foundation\Testing\DatabaseTransactions;
+use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Storage;
+use Tests\TestCase;
+
+/** HTTP real, base del slot y envío sustituido: prueba reservas, duplicados y cierre seguro. */
+class SoporteAutomaticoEnCodexTest extends TestCase
+{
+    use DatabaseTransactions;
+
+    private $headers = ['X-Claude-Task-Key' => 'soporte-codex-test', 'Accept' => 'application/json'];
+    private $base = '/api/claude/support-codex';
+    private $deliveries;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        config(['services.claude_task_ingest.key' => 'soporte-codex-test']);
+        Carbon::setTestNow(Carbon::parse('2026-10-24 13:00:00'));
+        Http::fake(['https://api-cliente.test/*' => Http::response([
+            'query_type' => 'stock', 'data' => [['name' => 'Coca', 'stock' => 3]],
+        ])]);
+        Event::fake([SupportMessageReceived::class, SupportTicketUpdated::class]);
+        AdminSetting::set(SupportCodexSettings::KEY_ENABLED, '1');
+        AdminSetting::set(SupportCodexSettings::KEY_ACTIVATED_AT, '2026-10-24 12:00:00');
+        $this->deliveries = new class extends SupportWhatsappOpenerService {
+            public $bodies = [];
+            public $success = true;
+            public function __construct()
+            {
+                // El espía no necesita transportes ni resolutores de URL.
+            }
+            public function deliver_follow_up(SupportTicket $ticket, SupportMessage $message, string $admin_name): array
+            {
+                $this->bodies[] = $message->body;
+                if ($this->success) {
+                    $message->whatsapp_message_id = 'wamid.codex.' . count($this->bodies);
+                    $message->save();
+                }
+                return ['delivery' => $this->success ? 'sent' : 'failed'];
+            }
+        };
+        $this->app->instance(SupportWhatsappOpenerService::class, $this->deliveries);
+    }
+
+    protected function tearDown(): void
+    {
+        Carbon::setTestNow();
+        parent::tearDown();
+    }
+
+    private function ticket(): SupportTicket
+    {
+        $client = Client::create([
+            'name' => 'Cliente Codex', 'company_name' => 'Comercio Codex',
+            'phone' => '+5493417770000', 'is_active' => true,
+            'api_url' => 'https://api-cliente.test', 'api_key' => 'secreto-que-no-sale',
+        ]);
+        $ticket = SupportTicket::create([
+            'client_id' => $client->id, 'client_user_id' => 0, 'status' => 'open',
+            'source' => 'whatsapp', 'whatsapp_phone' => $client->phone,
+            'opened_at' => now(), 'last_client_message_at' => now(),
+        ]);
+        $this->inbound($ticket, 'No puedo vender.');
+        return $ticket;
+    }
+
+    private function inbound(SupportTicket $ticket, string $body): SupportMessage
+    {
+        $message = SupportMessage::create([
+            'support_ticket_id' => $ticket->id, 'sender_type' => 'user', 'body' => $body,
+            'kind' => 'text', 'delivered_at' => now(),
+        ]);
+        $ticket->last_client_message_at = now();
+        $ticket->save();
+        return $message;
+    }
+
+    private function claim(SupportTicket $ticket): array
+    {
+        $last = SupportMessage::where('support_ticket_id', $ticket->id)->orderByDesc('id')->first();
+        return $this->postJson($this->base . '/tickets/' . $ticket->id . '/claim', [
+            'worker_id' => 'pc-lucas', 'expected_message_id' => $last->id,
+        ], $this->headers)->assertOk()->json();
+    }
+
+    private function reply(SupportTicket $ticket, array $claim, array $extra = [])
+    {
+        return $this->postJson($this->base . '/tickets/' . $ticket->id . '/reply', array_merge([
+            'lease_token' => $claim['lease_token'],
+            'expected_message_id' => $claim['ticket']['expected_message_id'],
+            'operation_id' => 'op-' . $ticket->id . '-' . $claim['ticket']['expected_message_id'],
+            'action' => 'responder', 'body' => 'Probá abrir Ventas.',
+            'thread_id' => 'thread-ticket-' . $ticket->id,
+        ], $extra), $this->headers);
+    }
+
+    public function test_sin_clave_no_hay_lectura_ni_activacion(): void
+    {
+        $this->getJson($this->base . '/pending')->assertStatus(401);
+        $this->putJson($this->base . '/settings', ['enabled' => true])->assertStatus(401);
+    }
+
+    public function test_activacion_no_toma_el_backlog_y_no_filtra_secretos(): void
+    {
+        $ticket = $this->ticket();
+        $ticket->last_client_message_at = now()->subDays(1);
+        $ticket->save();
+        $this->getJson($this->base . '/pending', $this->headers)->assertOk()->assertJsonCount(0, 'tickets');
+        $this->inbound($ticket, 'Volví a probar y no puedo.');
+        $result = $this->getJson($this->base . '/pending', $this->headers)->assertOk()->assertJsonCount(1, 'tickets');
+        $result = $this->getJson($this->base . '/tickets/' . $ticket->id, $this->headers)->assertOk();
+        $this->assertStringNotContainsString('secreto-que-no-sale', $result->getContent());
+        $this->assertArrayNotHasKey('api_key', $result->json('ticket.client'));
+    }
+
+    public function test_una_reserva_excluye_otro_worker_y_se_puede_renovar(): void
+    {
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        $path = $this->base . '/tickets/' . $ticket->id . '/claim';
+        $this->postJson($path, ['worker_id' => 'otra-pc', 'expected_message_id' => $claim['ticket']['expected_message_id']], $this->headers)->assertStatus(423);
+        $this->postJson($path, [
+            'worker_id' => 'pc-lucas', 'expected_message_id' => $claim['ticket']['expected_message_id'],
+            'lease_token' => $claim['lease_token'], 'thread_id' => 'thread-uno',
+        ], $this->headers)->assertOk()->assertJsonPath('ticket.thread_id', 'thread-uno');
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
+    }
+
+    public function test_primera_activacion_no_toma_mensajes_previos_del_mismo_segundo(): void
+    {
+        $ticket = $this->ticket();
+        AdminSetting::where('key', SupportCodexSettings::KEY_ACTIVATED_AT)->delete();
+        $this->putJson($this->base . '/settings', ['enabled' => true], $this->headers)->assertOk();
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
+        $this->inbound($ticket, 'Nuevo mensaje después de activar, en el mismo segundo.');
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(1, 'tickets');
+    }
+
+    public function test_replay_no_duplica_el_mensaje_y_el_saludo_es_de_martin(): void
+    {
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim)->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->reply($ticket, $claim)->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->assertCount(1, $this->deliveries->bodies);
+        $this->assertStringContainsString('Martín, el asistente técnico', $this->deliveries->bodies[0]);
+        $this->reply($ticket, $claim, ['body' => 'Otra respuesta'])->assertStatus(409);
+        $this->assertCount(1, $this->deliveries->bodies);
+    }
+
+    public function test_mensaje_nuevo_descarta_la_respuesta_vieja(): void
+    {
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        $this->inbound($ticket, 'Pará, era otro comprobante.');
+        $this->reply($ticket, $claim)->assertStatus(409);
+        $this->assertCount(0, $this->deliveries->bodies);
+    }
+
+    public function test_atencion_humana_invalida_reserva_y_no_hay_competencia_de_ia_api(): void
+    {
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        app(SupportCodexService::class)->pause_for_human($ticket);
+        $this->reply($ticket, $claim)->assertStatus(423);
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
+        $generated = app(SupportAiSuggestionService::class)->generate($ticket);
+        $this->assertSame('', $generated['suggested_message']);
+        Http::assertNothingSent();
+    }
+
+    public function test_gracias_ambiguos_no_cierran_pero_confirmacion_si_y_recibe_de_nada(): void
+    {
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim, [
+            'action' => 'solicitar_confirmacion', 'body' => '¿Me confirmás si ahora podés vender?',
+        ])->assertOk();
+        $message = $this->inbound($ticket, 'No, sigue igual, gracias.');
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim, ['action' => 'cerrar', 'confirmation_message_id' => $message->id])->assertStatus(422);
+        $this->assertSame('open', $ticket->fresh()->status);
+        // Una respuesta rechazada no consume la reserva: se libera antes de otro turno.
+        $this->postJson($this->base . '/tickets/' . $ticket->id . '/release', [
+            'lease_token' => $claim['lease_token'],
+        ], $this->headers)->assertOk();
+        $message = $this->inbound($ticket, 'Sí, ya quedó resuelto, muchas gracias.');
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim, [
+            'action' => 'cerrar', 'confirmation_message_id' => $message->id, 'body' => 'Queda cerrado el caso.',
+        ])->assertOk()->assertJsonPath('ticket.status', 'closed');
+        $this->assertStringContainsString('De nada', end($this->deliveries->bodies));
+    }
+
+    public function test_envio_no_confirmado_no_se_reintenta_ni_cierra(): void
+    {
+        $ticket = $this->ticket();
+        $this->deliveries->success = false;
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim)->assertOk()->assertJsonPath('operation.status', 'unknown');
+        $this->reply($ticket, $claim)->assertOk()->assertJsonPath('operation.status', 'unknown');
+        $this->assertCount(1, $this->deliveries->bodies);
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
+        $this->assertSame('open', $ticket->fresh()->status);
+    }
+
+    public function test_operacion_interrumpida_antes_del_commit_no_reenvia(): void
+    {
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim)->assertOk();
+        $operation = SupportCodexOperation::where('support_ticket_id', $ticket->id)->first();
+        $operation->status = 'sending';
+        $operation->save();
+        $this->reply($ticket, $claim)->assertOk()->assertJsonPath('operation.status', 'unknown');
+        $this->assertCount(1, $this->deliveries->bodies);
+    }
+
+    public function test_seguimiento_unico_pide_confirmacion_y_silencio_no_cierra(): void
+    {
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim, ['action' => 'solicitar_confirmacion', 'body' => '¿Quedó resuelto?'])->assertOk();
+        Carbon::setTestNow(now()->addHours(4)->addMinute());
+        $this->getJson($this->base . '/pending', $this->headers)->assertOk()->assertJsonPath('tickets.0.reason', 'follow_up');
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim, ['action' => 'solicitar_confirmacion', 'body' => '¿Pudiste comprobar si quedó resuelto?'])->assertOk();
+        Carbon::setTestNow(now()->addHours(5));
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->assertCount(2, $this->deliveries->bodies);
+    }
+
+    public function test_mision_se_guarda_y_no_anuncia_una_correccion_sin_ejecutar(): void
+    {
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim, [
+            'action' => 'escalar', 'body' => 'Dejé el caso preparado para Lucas.',
+            'mission' => '/cruzada Corregir la venta que falla con comprobante X.',
+        ])->assertOk()->assertJsonPath('ticket.state', 'mission_pending');
+        $this->inbound($ticket, '¿Ya está?');
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim, ['action' => 'solicitar_confirmacion'])->assertStatus(409);
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->assertCount(1, $this->deliveries->bodies);
+    }
+
+    public function test_no_envia_texto_libre_al_vencer_ventana(): void
+    {
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        Carbon::setTestNow(now()->addHours(25));
+        // Renueva una reserva que venció mientras estaba apagada la PC.
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim)->assertStatus(422);
+        $this->assertCount(0, $this->deliveries->bodies);
+    }
+
+    public function test_diagnostico_se_ata_al_cliente_del_ticket_y_no_llama_ia(): void
+    {
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        $this->postJson($this->base . '/tickets/' . $ticket->id . '/diagnostic', [
+            'lease_token' => $claim['lease_token'], 'query' => 'stock Coca',
+            'client_id' => 999, 'url' => 'https://otro.example',
+        ], $this->headers)->assertOk()->assertJsonPath('data.data.0.stock', 3);
+        Http::assertSent(function ($request) {
+            return $request->url() === 'https://api-cliente.test/api/admin-sync/sistema-query'
+                && $request->hasHeader('X-Admin-Api-Key', 'secreto-que-no-sale');
+        });
+        Http::assertSentCount(1);
+    }
+
+    public function test_adjunto_no_se_puede_leer_desde_otro_ticket(): void
+    {
+        Storage::fake('public');
+        $ticket = $this->ticket();
+        $other = $this->ticket();
+        $message = SupportMessage::where('support_ticket_id', $ticket->id)->first();
+        Storage::disk('public')->put('soporte/prueba.ogg', 'audio-de-prueba');
+        $attachment = SupportMessageAttachment::create([
+            'support_message_id' => $message->id, 'disk' => 'public',
+            'path' => 'soporte/prueba.ogg', 'mime' => 'audio/ogg', 'size' => 15,
+        ]);
+        $this->get($this->base . '/tickets/' . $other->id . '/attachments/' . $attachment->id, $this->headers)->assertStatus(404);
+        $this->get($this->base . '/tickets/' . $ticket->id . '/attachments/' . $attachment->id, $this->headers)->assertOk();
+    }
+
+    public function test_agradecer_o_prometer_probar_no_confirma_resolucion(): void
+    {
+        foreach (['Gracias', 'Perfecto, lo pruebo mañana, gracias', 'Si funciona después te aviso'] as $body) {
+            $ticket = $this->ticket();
+            $claim = $this->claim($ticket);
+            $this->reply($ticket, $claim, ['action' => 'solicitar_confirmacion', 'body' => '¿Quedó resuelto?'])->assertOk();
+            $message = $this->inbound($ticket, $body);
+            $claim = $this->claim($ticket);
+            $this->reply($ticket, $claim, ['action' => 'cerrar', 'confirmation_message_id' => $message->id])->assertStatus(422);
+            $this->assertSame('open', $ticket->fresh()->status);
+        }
+    }
+
+    public function test_resume_no_procesa_backlog_y_mision_verificada_pide_prueba(): void
+    {
+        $ticket = $this->ticket();
+        app(SupportCodexService::class)->pause_for_human($ticket);
+        $last = SupportMessage::where('support_ticket_id', $ticket->id)->latest('id')->first();
+        $path = $this->base . '/tickets/' . $ticket->id . '/resume';
+        $this->postJson($path, ['expected_message_id' => $last->id, 'reason' => 'Lucas retoma la atención automática.'], $this->headers)->assertOk();
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
+        $this->postJson($path, [
+            'expected_message_id' => $last->id,
+            'reason' => 'Misión implementada y verificada en producción.', 'request_confirmation' => true,
+        ], $this->headers)->assertOk()->assertJsonPath('ticket.reason', 'mission_completed');
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim, ['action' => 'solicitar_confirmacion', 'body' => '¿Podés probar ahora y confirmar si quedó resuelto?'])->assertOk();
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
+    }
+
+    public function test_un_empleado_sin_permiso_no_consulta_datos_del_negocio(): void
+    {
+        $ticket = $this->ticket();
+        $employee = ClientEmployee::create([
+            'client_id' => $ticket->client_id, 'name' => 'Empleado de prueba',
+            'phone' => '+5493417770001', 'can_query_system' => false,
+        ]);
+        $ticket->client_employee_id = $employee->id;
+        $ticket->save();
+        $claim = $this->claim($ticket);
+        $this->assertFalse($claim['ticket']['can_query_system']);
+        $this->assertSame('employee', $claim['ticket']['contact_role']);
+        $this->postJson($this->base . '/tickets/' . $ticket->id . '/diagnostic', [
+            'lease_token' => $claim['lease_token'], 'query' => 'ventas y caja del negocio',
+        ], $this->headers)->assertStatus(403);
+        Http::assertNothingSent();
+    }
+
+    public function test_conciliar_exige_evidencia_no_reenvia_y_no_cierra(): void
+    {
+        foreach (['sent', 'not_sent'] as $outcome) {
+            $ticket = $this->ticket();
+            $this->deliveries->success = false;
+            $claim = $this->claim($ticket);
+            $result = $this->reply($ticket, $claim)->assertOk();
+            $operation_id = $result->json('operation.id');
+            $path = $this->base . '/operations/' . $operation_id . '/reconcile';
+            $data = [
+                'outcome' => $outcome, 'reason' => 'Lucas revisó manualmente el historial en Kapso.',
+                'confirmed_by' => 'Lucas González',
+            ];
+            if ($outcome === 'sent') {
+                $this->postJson($path, $data, $this->headers)->assertStatus(422);
+                $data['whatsapp_message_id'] = 'wamid.confirmado-manualmente';
+                $data['evidence'] = 'Historial de Kapso verificado por Lucas a las 13:00.';
+            }
+            $before = count($this->deliveries->bodies);
+            $this->postJson($path, $data, $this->headers)->assertOk()
+                ->assertJsonPath('operation.status', $outcome)
+                ->assertJsonPath('operation.reconciliation.by', 'Lucas González')
+                ->assertJsonPath('ticket.state', 'manual_review');
+            $this->assertCount($before, $this->deliveries->bodies);
+            $this->assertSame('open', $ticket->fresh()->status);
+            $this->postJson($path, $data, $this->headers)->assertStatus(409);
+        }
+    }
+
+    public function test_cambiar_a_codex_durante_la_api_impide_cierre_y_envio_viejo(): void
+    {
+        $ticket = $this->ticket();
+        AdminSetting::set(SupportCodexSettings::KEY_ENABLED, '0');
+        $scheduler = app(\App\Services\SupportAiSuggestionScheduler::class);
+        \Illuminate\Support\Facades\Cache::put('support_ai_suggestion_schedule_token:' . $ticket->id, 1, 7200);
+        $mock = \Mockery::mock(SupportAiSuggestionService::class);
+        $mock->shouldReceive('generate')->once()->andReturnUsing(function () use ($ticket) {
+            AdminSetting::set(SupportCodexSettings::KEY_ENABLED, '1');
+            $this->inbound($ticket, 'Sigo necesitando ayuda.');
+            // Incluso sin incrementar el token: la guarda de proveedor después de la API manda.
+            return ['should_close' => true, 'should_escalate' => true, 'suggested_message' => 'Ya está resuelto.'];
+        });
+        $job = new \App\Jobs\SendSupportAiSuggestion($ticket->id, 1);
+        $job->handle(
+            $mock, app(\App\Services\SupportAiSuggestionDeliveryService::class), $scheduler,
+            app(\App\Services\SupportAiSuggestionDraftService::class)
+        );
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->assertNull($ticket->fresh()->escalated_at);
+        $this->assertCount(0, $this->deliveries->bodies);
+    }
+
+    public function test_un_saludo_conciliado_como_enviado_no_se_repite(): void
+    {
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim)->assertOk();
+        SupportCodexOperation::where('support_ticket_id', $ticket->id)->update(['status' => 'reconciled_sent']);
+        $this->inbound($ticket, '¿Y cómo sigo?');
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim, ['body' => 'Ahora abrí el comprobante.'])->assertOk();
+        $this->assertSame('Ahora abrí el comprobante.', end($this->deliveries->bodies));
+    }
+}

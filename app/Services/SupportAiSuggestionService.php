@@ -49,6 +49,12 @@ class SupportAiSuggestionService
      */
     public function generate(SupportTicket $ticket): array
     {
+        if (SupportCodexSettings::manages($ticket)) {
+            return [
+                'suggested_message' => '', 'reasoning' => 'Este ticket lo atiende Martín desde Codex.',
+                'should_close' => false, 'should_escalate' => false, 'escalation_reason' => null,
+            ];
+        }
         // Ticket sin título: Claude debe proponer un nombre corto además del mensaje.
         $ticket_needs_title = trim((string) ($ticket->name ?? '')) === '';
 

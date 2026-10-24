@@ -304,6 +304,19 @@ Route::prefix('recursos')
 Route::middleware('claude.task.key')
     ->prefix('claude')
     ->group(function () {
+        // Atención desde la suscripción de Codex: endpoints aditivos, nunca un modelo genérico.
+        Route::get('support-codex/settings', 'Api\ClaudeSupportCodexController@settings');
+        Route::put('support-codex/settings', 'Api\ClaudeSupportCodexController@update_settings');
+        Route::get('support-codex/pending', 'Api\ClaudeSupportCodexController@pending');
+        Route::get('support-codex/operations/{operation_id}', 'Api\ClaudeSupportCodexController@operation');
+        Route::post('support-codex/operations/{operation_id}/reconcile', 'Api\ClaudeSupportCodexController@reconcile');
+        Route::post('support-codex/tickets/{id}/claim', 'Api\ClaudeSupportCodexController@claim');
+        Route::get('support-codex/tickets/{id}', 'Api\ClaudeSupportCodexController@show');
+        Route::post('support-codex/tickets/{id}/reply', 'Api\ClaudeSupportCodexController@reply');
+        Route::post('support-codex/tickets/{id}/release', 'Api\ClaudeSupportCodexController@release');
+        Route::post('support-codex/tickets/{id}/resume', 'Api\ClaudeSupportCodexController@resume');
+        Route::post('support-codex/tickets/{id}/diagnostic', 'Api\ClaudeSupportCodexController@diagnostic');
+        Route::get('support-codex/tickets/{id}/attachments/{attachment_id}', 'Api\ClaudeSupportCodexController@attachment');
         Route::get('admins', 'Api\ClaudeTaskIngestController@admins_json');
         Route::post('task', 'Api\ClaudeTaskIngestController@store_json');
         Route::get('draft-version', 'Api\ClaudeVersionItemsIngestController@draft_version_json');

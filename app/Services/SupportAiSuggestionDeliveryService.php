@@ -43,6 +43,9 @@ class SupportAiSuggestionDeliveryService
      */
     public function deliver_text_reply(SupportTicket $ticket, string $body): ?SupportMessage
     {
+        if (SupportCodexSettings::manages($ticket)) {
+            return null;
+        }
         $text_body = trim($body);
         if ($text_body === '' || $ticket->status !== 'open') {
             return null;
@@ -87,6 +90,9 @@ class SupportAiSuggestionDeliveryService
      */
     public function deliver_draft_message(SupportMessage $message, SupportTicket $ticket): ?SupportMessage
     {
+        if (SupportCodexSettings::manages($ticket)) {
+            return null;
+        }
         $text_body = trim((string) ($message->body ?? ''));
         if ($text_body === '' || $ticket->status !== 'open') {
             return null;

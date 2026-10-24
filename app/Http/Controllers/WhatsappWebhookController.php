@@ -226,7 +226,7 @@ class WhatsappWebhookController extends Controller
                         'client_id'                   => $client->id,
                         'ecommerce_implementation_id' => $ecommerce_implementation->id,
                     ]);
-                } elseif ((bool) $client->asistente_whatsapp_activo && $client_employee === null) {
+                } elseif (! \App\Services\SupportCodexSettings::enabled() && (bool) $client->asistente_whatsapp_activo && $client_employee === null) {
                     /*
                      * El canal del asistente por WhatsApp (misión asistente-por-whatsapp, 16/9/2026).
                      *
@@ -1585,7 +1585,7 @@ class WhatsappWebhookController extends Controller
         // Solo aplica a clientes activos (este método ya está dentro de esa rama); los leads
         // se enrutan por handle_lead_message y nunca llegan acá.
         $body = (string) ($parsed['body'] ?? '');
-        if (SistemaQueryService::is_sistema_query($body)) {
+        if (! \App\Services\SupportCodexSettings::enabled() && SistemaQueryService::is_sistema_query($body)) {
             $config = WhatsappConfig::getActive();
 
             if (SistemaQueryService::client_employee_can_query($client, $client_employee)) {
@@ -1635,7 +1635,7 @@ class WhatsappWebhookController extends Controller
          * pero fuera del camino": fuera del camino del DUEÑO con el asistente prendido, que es quien
          * ya no pasa por acá. Para el resto sigue andando igual que ayer.
          */
-        if (! AsistenteWhatsappSettings::tickets_habilitados()) {
+        if (! AsistenteWhatsappSettings::tickets_habilitados() && ! \App\Services\SupportCodexSettings::enabled()) {
             Log::channel('daily')->info('WhatsApp webhook: soporte desconectado, no se abre ticket.', [
                 'from'               => $parsed['from'],
                 'type'               => $parsed['type'],
@@ -1689,7 +1689,8 @@ class WhatsappWebhookController extends Controller
                 $ticket_query->whereNull('client_employee_id');
             }
 
-            $ticket = $ticket_query->first();
+            // Serializa el entrante con la entrega de Codex sobre este mismo ticket.
+            $ticket = $ticket_query->lockForUpdate()->first();
 
             if ($ticket === null) {
                 $assigned_admin_id = $assignment_service->resolve_assigned_admin_id($client);

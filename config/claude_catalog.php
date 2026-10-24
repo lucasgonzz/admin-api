@@ -93,6 +93,98 @@ return [
      */
     'endpoints' => [
 
+        'GET api/claude/support-codex/settings' => [
+            'para_que' => 'Estado del puente de soporte local con Codex y fecha de corte de mensajes anteriores.',
+            'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => [],
+        ],
+        'PUT api/claude/support-codex/settings' => [
+            'para_que' => 'Activa o pausa el circuito de soporte desde la suscripción de Codex. La primera activación fija el corte sin tomar backlog.',
+            'escribe' => true, 'peligrosidad' => 'baja',
+            'frenos' => ['Requiere enabled explícito; no toca leads ni el número del asistente.'],
+            'parametros' => [
+                ['nombre' => 'enabled', 'obligatorio' => true, 'validacion' => 'required|boolean', 'que_es' => 'Activa o pausa el puente.'],
+            ],
+        ],
+        'GET api/claude/support-codex/pending' => [
+            'para_que' => 'Lista hasta 50 tickets con mensajes nuevos o confirmación pendiente vencida, sin reservas ocupadas ni envíos ambiguos.',
+            'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => [],
+        ],
+        'GET api/claude/support-codex/tickets/{id}' => [
+            'para_que' => 'Contexto del ticket: cliente, últimos 100 mensajes reales, adjuntos, misión preparada y ventana WhatsApp; sin claves.',
+            'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => [],
+        ],
+        'GET api/claude/support-codex/tickets/{id}/attachments/{attachment_id}' => [
+            'para_que' => 'Descarga autenticada de un adjunto que pertenece a ese ticket, para imágenes o transcripción local de audios.',
+            'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => [],
+        ],
+        'GET api/claude/support-codex/operations/{operation_id}' => [
+            'para_que' => 'Recupera resultado durable de un envío; una entrega ambigua nunca habilita un reintento automático.',
+            'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => [],
+        ],
+        'POST api/claude/support-codex/operations/{operation_id}/reconcile' => [
+            'para_que' => 'Concilia manualmente una entrega incierta tras verificarla, sin reenviar ni cerrar automáticamente el ticket.',
+            'escribe' => true, 'peligrosidad' => 'baja',
+            'frenos' => ['Decisión expresa de Lucas, motivo y evidencia/ID WhatsApp para confirmar envío; ninguna reserva vigente.'],
+            'parametros' => [
+                ['nombre' => 'outcome', 'obligatorio' => true, 'validacion' => 'required|in:sent,not_sent', 'que_es' => 'Resultado verificado manualmente.'],
+                ['nombre' => 'reason', 'obligatorio' => true, 'validacion' => 'required|string|min:10|max:2000', 'que_es' => 'Motivo auditado de la conciliación.'],
+                ['nombre' => 'confirmed_by', 'obligatorio' => true, 'validacion' => 'required|in:Lucas González', 'que_es' => 'Decisión explícita de Lucas, no del cliente ni del agente.'],
+                ['nombre' => 'whatsapp_message_id', 'obligatorio' => false, 'validacion' => 'required_if:outcome,sent|nullable|string|max:255', 'que_es' => 'ID del envío confirmado, obligatorio para sent.'],
+                ['nombre' => 'evidence', 'obligatorio' => false, 'validacion' => 'required_if:outcome,sent|nullable|string|min:15|max:3000', 'que_es' => 'Evidencia de la verificación, obligatoria para sent.'],
+            ],
+        ],
+        'POST api/claude/support-codex/tickets/{id}/claim' => [
+            'para_que' => 'Reserva por 15 minutos un ticket para un worker, o renueva su reserva vinculando la conversación de Codex.',
+            'escribe' => true, 'peligrosidad' => 'baja',
+            'frenos' => ['Bloqueo de fila, último mensaje esperado, token secreto y fecha de vencimiento.'],
+            'parametros' => [
+                ['nombre' => 'worker_id', 'obligatorio' => true, 'validacion' => 'required|string|max:150', 'que_es' => 'Identidad del monitor local.'],
+                ['nombre' => 'expected_message_id', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'Último mensaje real esperado.'],
+                ['nombre' => 'lease_token', 'obligatorio' => false, 'validacion' => 'sometimes|string|min:32|max:128', 'que_es' => 'Token anterior, solo para renovar.'],
+                ['nombre' => 'thread_id', 'obligatorio' => false, 'validacion' => 'sometimes|string|max:150', 'que_es' => 'Conversación persistente en Codex.'],
+            ],
+        ],
+        'POST api/claude/support-codex/tickets/{id}/reply' => [
+            'para_que' => 'Envía una respuesta de Martín, pide confirmación, guarda una misión para Lucas o cierra después de confirmación clara del cliente.',
+            'escribe' => true, 'peligrosidad' => 'baja',
+            'frenos' => ['Reserva vigente, mensaje actual, clave idempotente durable, ventana WhatsApp y cierre solo con confirmación. No ejecuta misiones.'],
+            'parametros' => [
+                ['nombre' => 'lease_token', 'obligatorio' => true, 'validacion' => 'required|string|min:32|max:128', 'que_es' => 'Reserva de este ticket.'],
+                ['nombre' => 'expected_message_id', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'Último mensaje sobre el que se responde.'],
+                ['nombre' => 'operation_id', 'obligatorio' => true, 'validacion' => 'required|string|max:120|regex:/^[a-zA-Z0-9_-]+$/', 'que_es' => 'Clave idempotente que no se reutiliza para otro contenido.'],
+                ['nombre' => 'action', 'obligatorio' => true, 'validacion' => 'required|in:responder,solicitar_confirmacion,cerrar,escalar', 'que_es' => 'Transición del caso.'],
+                ['nombre' => 'body', 'obligatorio' => true, 'validacion' => 'required|string|max:3500', 'que_es' => 'Texto al cliente.'],
+                ['nombre' => 'mission', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|max:30000', 'que_es' => 'Misión preparada; obligatoria para escalar, nunca ejecutada acá.'],
+                ['nombre' => 'thread_id', 'obligatorio' => false, 'validacion' => 'sometimes|string|max:150', 'que_es' => 'Conversación persistente en Codex.'],
+                ['nombre' => 'confirmation_message_id', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|integer|min:1', 'que_es' => 'Mensaje del cliente con confirmación clara, obligatorio al cerrar.'],
+            ],
+        ],
+        'POST api/claude/support-codex/tickets/{id}/release' => [
+            'para_que' => 'Libera una reserva y opcionalmente pausa el caso para revisión humana.',
+            'escribe' => true, 'peligrosidad' => 'baja',
+            'frenos' => ['Exige el token vigente del ticket; no borra la conversación.'],
+            'parametros' => [
+                ['nombre' => 'lease_token', 'obligatorio' => true, 'validacion' => 'required|string|min:32|max:128', 'que_es' => 'Reserva actual.'],
+                ['nombre' => 'thread_id', 'obligatorio' => false, 'validacion' => 'sometimes|string|max:150', 'que_es' => 'Vincula la conversación sin enviar mensaje.'],
+                ['nombre' => 'reason', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|max:500', 'que_es' => 'Motivo visible de la pausa.'],
+                ['nombre' => 'manual_review', 'obligatorio' => false, 'validacion' => 'sometimes|boolean', 'que_es' => 'True mantiene el caso fuera de la cola automática.'],
+            ],
+        ],
+        'POST api/claude/support-codex/tickets/{id}/resume' => [
+            'para_que' => 'Acción expresa de Lucas para retomar el caso sin responder backlog, o pedir prueba después de terminar una misión.',
+            'escribe' => true, 'peligrosidad' => 'baja',
+            'frenos' => ['Exige mensaje actual, ninguna reserva ocupada ni envío ambiguo. No manda un mensaje por sí solo.'],
+            'parametros' => [
+                ['nombre' => 'expected_message_id', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'Último mensaje observado.'],
+                ['nombre' => 'reason', 'obligatorio' => true, 'validacion' => 'required|string|max:500', 'que_es' => 'Motivo de la decisión explícita.'],
+                ['nombre' => 'request_confirmation', 'obligatorio' => false, 'validacion' => 'sometimes|boolean', 'que_es' => 'Pide prueba al cliente dentro de la ventana.'],
+            ],
+        ],
+        'POST api/claude/support-codex/tickets/{id}/diagnostic' => [
+            'para_que' => 'Consulta de solo lectura por keywords al ERP del cliente del ticket; sin IA API ni secretos en la respuesta.',
+            'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => ['Reserva vigente y cliente/URL resueltos exclusivamente del ticket.'],
+        ],
+
         /* ---------------------------------------------------------- Auto-descripción */
 
         'GET api/claude/catalog' => [

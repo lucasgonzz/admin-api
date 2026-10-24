@@ -89,6 +89,10 @@ class SendSupportAiSuggestion implements ShouldQueue
             return;
         }
 
+        if (\App\Services\SupportCodexSettings::manages($ticket)) {
+            return;
+        }
+
         if ($ticket->status !== 'open') {
             return;
         }
@@ -127,6 +131,12 @@ class SendSupportAiSuggestion implements ShouldQueue
          * mensaje sale igual, con el candado prendido en la pantalla. El token del debounce ya
          * se revalida acá arriba justo por esto; los flags necesitaban lo mismo. */
         $ticket->refresh();
+
+        // El cambio de proveedor puede ocurrir mientras está esperando la API. No alcanza
+        // con frenar el envío: también hay que impedir el cierre/escalado de esa respuesta vieja.
+        if (\App\Services\SupportCodexSettings::manages($ticket)) {
+            return;
+        }
 
         if (! (bool) $ticket->claude_auto_reply) {
             Log::channel('daily')->info('SendSupportAiSuggestion: descartada (apagaron el agente durante la generación).', [

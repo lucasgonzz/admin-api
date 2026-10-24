@@ -32,6 +32,9 @@ class SupportMessageController extends BaseController
             return response()->json(['error' => 'ticket closed'], 422);
         }
 
+        // Si Lucas toma la conversación, Martín deja de responder en segundo plano.
+        app(\App\Services\SupportCodexService::class)->pause_for_human($ticket);
+
         // Respuesta manual del operador: cancela envío automático de sugerencia IA pendiente.
         (new SupportAiSuggestionDraftService())->clear_ticket_pending_state($ticket);
 
