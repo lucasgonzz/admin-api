@@ -200,10 +200,6 @@ class SupportCodexService
             // sending ya existe fuera de la transacción: una caída deja un intento ambiguo.
             $input['_follow_up'] = $this->is_follow_up($case, (int) $input['expected_message_id']);
             $body = trim($input['body']);
-            if (! SupportCodexOperation::where('support_ticket_id', $id)->whereIn('status', ['sent', 'reconciled_sent'])->exists()
-                && ! (mb_stripos($body, 'Martín') !== false && mb_stripos($body, 'asistente técnico') !== false)) {
-                $body = 'Hola, soy Martín, el asistente técnico de ComercioCity. ' . $body;
-            }
             if ($input['action'] === 'cerrar' && mb_stripos($body, 'de nada') === false) {
                 $body = 'De nada, ¡me alegra que haya quedado resuelto! ' . $body;
             }

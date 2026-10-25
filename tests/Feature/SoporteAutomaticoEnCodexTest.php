@@ -157,14 +157,16 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(1, 'tickets');
     }
 
-    public function test_replay_no_duplica_el_mensaje_y_el_saludo_es_de_martin(): void
+    public function test_primer_envio_conserva_saludo_contextual_y_enlace_sin_duplicar_replay(): void
     {
         $ticket = $this->ticket();
         $claim = $this->claim($ticket);
-        $this->reply($ticket, $claim)->assertOk()->assertJsonPath('operation.status', 'sent');
-        $this->reply($ticket, $claim)->assertOk()->assertJsonPath('operation.status', 'sent');
+        $body = 'Buenas tardes. Podés consultar el paso a paso acá: https://comerciocity.com/recursos/ventas';
+        $this->reply($ticket, $claim, ['body' => $body])->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->reply($ticket, $claim, ['body' => $body])->assertOk()->assertJsonPath('operation.status', 'sent');
         $this->assertCount(1, $this->deliveries->bodies);
-        $this->assertStringContainsString('Martín, el asistente técnico', $this->deliveries->bodies[0]);
+        $this->assertSame($body, $this->deliveries->bodies[0]);
+        $this->assertDatabaseHas('support_messages', ['support_ticket_id' => $ticket->id, 'body' => $body]);
         $this->reply($ticket, $claim, ['body' => 'Otra respuesta'])->assertStatus(409);
         $this->assertCount(1, $this->deliveries->bodies);
     }
