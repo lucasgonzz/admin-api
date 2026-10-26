@@ -49,7 +49,8 @@ class ClientContratoController extends Controller
     {
         $client = Client::findOrFail($clientId);
 
-        $validated = $request->validate([
+        \App\Services\ContractPreciosService::preparar_request($request, $client);
+        $validated = $request->validate(array_merge(\App\Services\ContractPreciosService::reglas(), [
             'contract_client_name'               => ['nullable', 'string', 'max:255'],
             'contract_client_razon_social'       => ['nullable', 'string', 'max:255'],
             'contract_client_cuit'               => ['nullable', 'string', 'max:255'],
@@ -77,7 +78,7 @@ class ClientContratoController extends Controller
             'contract_sistemas'                  => ['nullable', 'array'],
             'contract_sistemas.*'                => ['string', 'in:gestion,ecommerce,agentes'],
             'contract_permanencia_meses'         => ['nullable', 'integer', 'min:1', 'max:60'],
-        ]);
+        ]));
 
         /* Los montos viajan como string (así los guarda el lead: "1.500", "USD 100") y los
          * enteros como número; el `??` no sirve porque un null explícito tiene que borrar. Solo

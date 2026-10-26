@@ -54,6 +54,10 @@ class LeadCotizacionController extends Controller
     {
         $lead = Lead::findOrFail($id);
 
+        if (is_array($lead->contract_precios_sistemas)) {
+            return response()->json(['message' => 'Este contrato tiene precios por sistema y descuento acordados. El cotizador anterior no puede reemplazar esos importes.'], 422);
+        }
+
         $validated = $request->validate([
             /* Cotización del dólar, cargada a mano. No hay fuente automática y es a propósito: el
                precio que se acuerda con el lead no siempre es el dólar del día. */

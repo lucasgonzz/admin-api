@@ -61,6 +61,11 @@ class ClientContratoService
         'contract_fecha_primer_pago_mensual',
         'contract_clausulas_particulares',
         'contract_modalidad',
+        'contract_precios_sistemas',
+        'contract_descuento_conjunto',
+        'contract_pago_anual',
+        'contract_descuento_anual',
+        'contract_mes_gratis',
         'contract_sistemas',
         'contract_permanencia_meses',
     ];
@@ -91,7 +96,7 @@ class ClientContratoService
         foreach (self::CAMPOS_CONTRATO as $campo) {
             $valor = $lead->{$campo};
 
-            if ($valor === null || $valor === '' || $valor === []) {
+            if ($valor === null || $valor === '' || $valor === [] || (in_array($campo, ['contract_mes_gratis', 'contract_pago_anual'], true) && $valor === false)) {
                 continue;
             }
 

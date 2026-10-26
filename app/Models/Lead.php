@@ -456,6 +456,11 @@ class Lead extends Model
         // no lleva cast: es texto ('licencia' | 'suscripcion' | null). Los sistemas contratados son
         // un JSON de keys de CotizadorSettings::SISTEMAS, y el plazo mínimo de la Suscripción va a
         // int porque el PDF lo escribe en letras con LeadContractPdfService::meses_en_letras().
+        'contract_precios_sistemas'          => 'array',
+        'contract_descuento_conjunto'        => 'float',
+        'contract_pago_anual'                => 'boolean',
+        'contract_descuento_anual'            => 'float',
+        'contract_mes_gratis'                => 'boolean',
         'contract_sistemas'                  => 'array',
         'contract_permanencia_meses'         => 'integer',
 
