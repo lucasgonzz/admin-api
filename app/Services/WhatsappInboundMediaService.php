@@ -213,7 +213,9 @@ class WhatsappInboundMediaService
             return false;
         }
 
-        $mime = isset($media['mime']) ? trim((string) $media['mime']) : '';
+        // Mime sin parámetros (`audio/ogg; codecs=opus` → `audio/ogg`): es el que se guarda y el que
+        // después sirve la ruta firmada como Content-Type.
+        $mime = $this->normalize_mime(isset($media['mime']) ? (string) $media['mime'] : '');
         $extension = $this->resolve_extension($mime, $media['filename'] ?? null, 'bin');
         $stored_name = 'wa_' . substr(md5((string) $message->whatsapp_message_id), 0, 12) . '.' . $extension;
         $directory = 'support_messages/' . $ticket_id;
@@ -610,11 +612,39 @@ class WhatsappInboundMediaService
     }
 
     /**
+     * Normaliza un mime: lo pasa a minúsculas, le saca los espacios y le quita los parámetros.
+     *
+     * Meta manda las notas de voz como `audio/ogg; codecs=opus` (con parámetro). Comparar ese string
+     * entero contra un mapa de mimes no matchea nunca, y era la causa de que las notas de voz de
+     * soporte se guardaran como `wa_xxx.bin`. Con esto `audio/ogg; codecs=opus` queda `audio/ogg`.
+     *
+     * @param string|null $mime Mime crudo (puede traer parámetros o venir vacío).
+     *
+     * @return string Mime sin parámetros, en minúsculas; cadena vacía si no había.
+     */
+    public function normalize_mime(?string $mime): string
+    {
+        // Mime en minúsculas y sin espacios en los bordes.
+        $normalized = strtolower(trim((string) $mime));
+
+        // Los parámetros (`; codecs=opus`, `; charset=utf-8`) van después del primer punto y coma.
+        $semicolon_position = strpos($normalized, ';');
+        if ($semicolon_position !== false) {
+            $normalized = trim(substr($normalized, 0, $semicolon_position));
+        }
+
+        return $normalized;
+    }
+
+    /**
      * Deduce extensión de archivo a partir de mime o nombre.
      *
-     * @param string      $mime
-     * @param string|null $filename
-     * @param string      $fallback
+     * Orden: extensión del nombre (si es razonable) → mapa de mimes (ya sin parámetros) → familia del
+     * mime (`audio/*` → ogg, `video/*` → mp4) cuando el llamador no pidió un fallback propio → fallback.
+     *
+     * @param string      $mime     Mime crudo del adjunto (puede traer parámetros).
+     * @param string|null $filename Nombre original del archivo, si vino.
+     * @param string      $fallback Extensión a usar si nada matchea (los llamadores pasan `bin`).
      *
      * @return string
      */
@@ -624,29 +654,64 @@ class WhatsappInboundMediaService
             $parts = explode('.', $filename);
             if (count($parts) > 1) {
                 $ext = strtolower((string) end($parts));
-                if ($ext !== '') {
+                // Solo se confía en una extensión corta y alfanumérica, y que no sea la `.bin` genérica:
+                // el nombre viene de un tercero (o se adivinó de la URL) y termina en el disco público.
+                if ($ext !== '' && $ext !== 'bin' && preg_match('/^[a-z0-9]{1,5}$/', $ext)) {
                     return $ext;
                 }
             }
         }
 
+        // Mime sin parámetros: `audio/ogg; codecs=opus` → `audio/ogg`.
+        $clean_mime = $this->normalize_mime($mime);
+
+        // Mapa de mimes conocidos → extensión.
         $mime_map = [
-            'image/jpeg'  => 'jpg',
-            'image/jpg'   => 'jpg',
-            'image/png'   => 'png',
-            'image/webp'  => 'webp',
-            'image/gif'   => 'gif',
-            'audio/ogg'   => 'ogg',
-            'audio/opus'  => 'ogg',
-            'audio/mpeg'  => 'mp3',
-            'audio/mp4'   => 'm4a',
-            'audio/aac'   => 'aac',
-            'audio/amr'   => 'amr',
-            'audio/webm'  => 'webm',
+            'image/jpeg'         => 'jpg',
+            'image/jpg'          => 'jpg',
+            'image/png'          => 'png',
+            'image/webp'         => 'webp',
+            'image/gif'          => 'gif',
+            'audio/ogg'          => 'ogg',
+            'audio/opus'         => 'ogg',
+            'audio/mpeg'         => 'mp3',
+            'audio/mp3'          => 'mp3',
+            'audio/mp4'          => 'm4a',
+            'audio/x-m4a'        => 'm4a',
+            'audio/m4a'          => 'm4a',
+            'audio/aac'          => 'aac',
+            'audio/amr'          => 'amr',
+            'audio/webm'         => 'webm',
+            'audio/wav'          => 'wav',
+            'audio/x-wav'        => 'wav',
+            'video/mp4'          => 'mp4',
+            'video/3gpp'         => '3gp',
+            'video/quicktime'    => 'mov',
+            'video/webm'         => 'webm',
+            'application/pdf'    => 'pdf',
+            'application/msword' => 'doc',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document'   => 'docx',
+            'application/vnd.ms-excel'                                                  => 'xls',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'         => 'xlsx',
+            'application/vnd.ms-powerpoint'                                             => 'ppt',
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation' => 'pptx',
+            'text/plain'         => 'txt',
+            'text/csv'           => 'csv',
+            'application/zip'    => 'zip',
         ];
 
-        if (isset($mime_map[strtolower($mime)])) {
-            return $mime_map[strtolower($mime)];
+        if (isset($mime_map[$clean_mime])) {
+            return $mime_map[$clean_mime];
+        }
+
+        // Familia del mime, solo si el llamador no pidió un fallback propio (`bin` es el genérico).
+        if ($fallback === 'bin') {
+            if (strpos($clean_mime, 'audio/') === 0) {
+                return 'ogg';
+            }
+            if (strpos($clean_mime, 'video/') === 0) {
+                return 'mp4';
+            }
         }
 
         return $fallback;
