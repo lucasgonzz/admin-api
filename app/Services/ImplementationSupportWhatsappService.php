@@ -133,15 +133,26 @@ class ImplementationSupportWhatsappService
 
     /**
      * Lo que pasaría si se mandara ahora: qué ticket se usaría, cómo está la ventana, si sale como texto
-     * libre o por plantilla, lo que recibiría el cliente y qué lo impide.
+     * libre o por plantilla, lo que recibiría el cliente, adónde caería su respuesta y qué lo impide.
      *
      * Es lo que devuelve el dry-run y lo que mira el real antes de mandar, así los dos deciden con la misma
-     * cuenta. Los impedimentos son dos, y ninguno manda nada:
-     *  - `texto_largo_para_plantilla`: la ventana está cerrada y el texto, ya aplanado como lo deja la
+     * cuenta. Los impedimentos (en este orden; ninguno manda nada):
+     *  - `texto_largo_para_plantilla` (422): la ventana está cerrada y el texto, ya aplanado como lo deja la
      *    plantilla, pasa de `TEMPLATE_VARIABLE_MAX_LENGTH`. La plantilla lo cortaría con «…» y el cliente
      *    recibiría medio mensaje (por eso el opener lo corta en silencio y acá se frena antes).
-     *  - `martin_atendiendo`: el ticket que se reusaría tiene un caso de Codex con reserva vigente. Mandar
-     *    en el medio le cambiaría la conversación debajo a Martín mientras redacta.
+     *  - `respuesta_al_hilo` (422): el hito saldría por el ticket, pero lo que conteste el cliente NO caería
+     *    ahí (ver `adonde_iria_la_respuesta()`): caería al hilo de la implementación o de la tienda —que en
+     *    modo manual no atiende nadie— o al asistente. La conversación quedaría partida, que es justo lo que
+     *    este envío viene a evitar.
+     *  - `martin_atendiendo` (423): el ticket que se reusaría tiene un caso de Codex con reserva vigente.
+     *    Mandar en el medio le cambiaría la conversación debajo a Martín mientras redacta.
+     *  - `martin_pendiente` (423): el ticket tiene algo esperando a Martín (`inbound`, `follow_up` o
+     *    `mission_completed`, de `SupportCodexService::motivo_pendiente()`). Un mensaje del equipo pasaría a
+     *    ser el último del hilo y el entrante del cliente dejaría de estar pendiente: Martín no lo contestaría
+     *    nunca. El hito espera a que Martín conteste.
+     *
+     * Y un aviso que NO frena: `martin_en_pausa`, cuando el caso del ticket está en `manual_review`. El hito
+     * sale, pero lo que conteste el cliente lo tiene que atender Lucas: Martín no lo va a tomar.
      *
      * 🔴 El ticket se busca con `SupportWhatsappOpenerService::find_reusable_ticket()`, el MISMO criterio con
      * el que `open()` decide reusar: si acá se mirara otro ticket, el freno de Martín miraría el equivocado.
@@ -172,8 +183,12 @@ class ImplementationSupportWhatsappService
 
         $texto_largo = ! $abierta && $largo > SupportWhatsappOpenerService::TEMPLATE_VARIABLE_MAX_LENGTH;
 
-        $caso   = $ticket === null ? null : SupportCodexCase::where('support_ticket_id', $ticket->id)->first();
-        $martin = $caso !== null && $caso->lease_expires_at !== null && $caso->lease_expires_at->isFuture();
+        $respuesta_ira_a = $this->adonde_iria_la_respuesta($client, $empleado_id);
+
+        $caso      = $ticket === null ? null : SupportCodexCase::where('support_ticket_id', $ticket->id)->first();
+        $martin    = $caso !== null && $caso->lease_expires_at !== null && $caso->lease_expires_at->isFuture();
+        $pendiente = $ticket === null ? null : app(SupportCodexService::class)->motivo_pendiente($ticket, $caso);
+        $en_pausa  = $caso !== null && $caso->state === 'manual_review';
 
         $remitente = trim((string) $admin->name) !== '' ? trim((string) $admin->name) : 'Soporte';
         $contacto_nombre = (string) $contacto['label'];
@@ -182,8 +197,19 @@ class ImplementationSupportWhatsappService
         if ($texto_largo) {
             $impedimentos[] = 'texto_largo_para_plantilla';
         }
+        if ($respuesta_ira_a !== 'ticket') {
+            $impedimentos[] = 'respuesta_al_hilo';
+        }
         if ($martin) {
             $impedimentos[] = 'martin_atendiendo';
+        }
+        if ($pendiente !== null) {
+            $impedimentos[] = 'martin_pendiente';
+        }
+
+        $avisos = [];
+        if ($en_pausa) {
+            $avisos[] = 'martin_en_pausa';
         }
 
         return [
@@ -196,15 +222,67 @@ class ImplementationSupportWhatsappService
             'largo_para_plantilla'   => $largo,
             'tope_para_plantilla'    => SupportWhatsappOpenerService::TEMPLATE_VARIABLE_MAX_LENGTH,
             'partes'                 => $abierta ? count($partes) : 1,
+            'respuesta_ira_a'        => $respuesta_ira_a,
             'martin_atendiendo'      => $martin,
             'reserva_de_martin_hasta' => $martin ? $caso->lease_expires_at->toIso8601String() : null,
+            'martin_pendiente'       => $pendiente,
             'contacto_nombre'        => $contacto_nombre,
             'contacto_rol'           => $empleado_id !== null ? 'employee' : 'owner',
             'remitente'              => $remitente,
             /* Lo que recibiría el cliente: con plantilla, el envoltorio de saludo y firma que arma el opener. */
             'vista_previa'           => $abierta ? $unido : $this->opener->build_opening_body($contacto_nombre, $remitente, $unido),
             'impedimentos'           => $impedimentos,
+            'avisos'                 => $avisos,
         ];
+    }
+
+    /**
+     * Adónde caería HOY lo que el contacto conteste al número del admin: `ticket` (soporte, donde está el hito),
+     * `hilo_de_la_implementacion`, `hilo_de_la_tienda` o `asistente`.
+     *
+     * 🔴 Es la MISMA decisión que toma `WhatsappWebhookController` con un entrante de un contacto de cliente, en
+     * el mismo orden (si cambia allá, cambia acá):
+     *   1. Soporte de Codex prendido y la implementación del sistema en curso en modo manual, o (sin la del
+     *      sistema en curso) la de la tienda en curso de la etapa 2 en adelante → `ticket`.
+     *   2. La del sistema en curso (circuito apagado, o en modo auto) → `hilo_de_la_implementacion`.
+     *   3. La de la tienda en curso → `hilo_de_la_tienda`.
+     *   4. Circuito apagado, el cliente con el asistente por WhatsApp prendido y el contacto es el dueño →
+     *      `asistente`.
+     *   5. Si no → `ticket` (soporte de siempre).
+     * Se leen las relaciones del cliente (`implementation`, `ecommerce_implementation`) y no la implementación de
+     * la URL, porque son las que mira el webhook.
+     *
+     * @param Client   $client      El cliente.
+     * @param int|null $empleado_id El empleado, si el contacto es un empleado.
+     *
+     * @return string
+     */
+    public function adonde_iria_la_respuesta(Client $client, $empleado_id)
+    {
+        $codex     = SupportCodexSettings::enabled();
+        $sistema   = $client->implementation()->first();
+        $tienda    = $client->ecommerce_implementation()->first();
+        $s_curso   = $sistema !== null && $sistema->status === 'in_progress';
+        $t_curso   = $tienda !== null && $tienda->status === 'in_progress';
+
+        if (($codex && $s_curso && ! $sistema->is_automated())
+            || ($codex && ! $s_curso && $t_curso && (int) $tienda->current_stage >= 2)) {
+            return 'ticket';
+        }
+
+        if ($s_curso) {
+            return 'hilo_de_la_implementacion';
+        }
+
+        if ($t_curso) {
+            return 'hilo_de_la_tienda';
+        }
+
+        if (! $codex && (bool) $client->asistente_whatsapp_activo && $empleado_id === null) {
+            return 'asistente';
+        }
+
+        return 'ticket';
     }
 
     /**

@@ -4,6 +4,7 @@ namespace Tests\Feature\ClaudeImplementaciones;
 
 use App\Http\Controllers\Api\ClaudeImplementationOpsController;
 use App\Models\Admin;
+use App\Models\AdminSetting;
 use App\Models\Client;
 use App\Models\ClientEmployee;
 use App\Models\Implementation;
@@ -11,6 +12,7 @@ use App\Models\ImplementationMessage;
 use App\Models\SupportCodexCase;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
+use App\Services\SupportCodexSettings;
 use App\Services\WhatsappSendService;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
@@ -48,8 +50,9 @@ class WhatsappDeHitoPorSoporteTest extends BaseDeImplementaciones
     private $admin;
 
     /**
-     * Sin red hacia los clientes, el espía del envío y un admin remitente fijado por config (la base del slot
-     * no tiene admins sembrados).
+     * Sin red hacia los clientes, el espía del envío, un admin remitente fijado por config (la base del slot
+     * no tiene admins sembrados) y el soporte de Codex PRENDIDO: es la condición para que la respuesta del cliente
+     * en implementación manual caiga en el ticket (si no, el endpoint frena con `respuesta_al_hilo`).
      *
      * @return void
      */
@@ -58,6 +61,9 @@ class WhatsappDeHitoPorSoporteTest extends BaseDeImplementaciones
         parent::setUp();
 
         Http::fake();
+
+        AdminSetting::set(SupportCodexSettings::KEY_ENABLED, '1');
+        AdminSetting::flush_memo();
 
         $this->admin = $this->crear_admin();
         config(['services.claude_task_ingest.default_creator_admin_id' => $this->admin->id]);
@@ -223,7 +229,9 @@ class WhatsappDeHitoPorSoporteTest extends BaseDeImplementaciones
             ->assertJsonPath('reusaria_ticket', false)
             ->assertJsonPath('etapa', 3)
             ->assertJsonPath('destino.rol', 'owner')
-            ->assertJsonPath('impedimentos', []);
+            ->assertJsonPath('respuesta_ira_a', 'ticket')
+            ->assertJsonPath('impedimentos', [])
+            ->assertJsonPath('avisos', []);
 
         $this->assertStringContainsString('Hola, te paso el link del formulario.', (string) $respuesta->json('vista_previa'));
         $this->assertStringContainsString('del equipo de soporte de ComercioCity', (string) $respuesta->json('vista_previa'));
@@ -260,6 +268,8 @@ class WhatsappDeHitoPorSoporteTest extends BaseDeImplementaciones
             ->assertJsonPath('ventana_abierta', true)
             ->assertJsonPath('reusado', false)
             ->assertJsonPath('error', null)
+            ->assertJsonPath('respuesta_ira_a', 'ticket')
+            ->assertJsonPath('avisos', [])
             ->assertJsonPath('etapa', 3);
 
         $this->assertCount(1, $this->espia->textos);
@@ -422,6 +432,150 @@ class WhatsappDeHitoPorSoporteTest extends BaseDeImplementaciones
             ->assertJsonPath('ticket_id', $ticket->id)
             ->assertJsonPath('reusado', true);
         $this->assertSame('ready', $caso->fresh()->state);
+    }
+
+    /**
+     * Un ticket con un entrante del cliente que Martín todavía no contestó (`inbound`) frena el hito con 423
+     * `martin_pendiente`: el mensaje del equipo lo taparía y Martín no lo atendería nunca. No se manda nada ni se
+     * toca el caso.
+     *
+     * @return void
+     */
+    public function test_con_un_entrante_esperando_a_martin_es_423_martin_pendiente(): void
+    {
+        [$client, $implementation] = $this->escenario();
+
+        $ticket = SupportTicket::create([
+            'client_id'              => $client->id,
+            'client_user_id'         => 0,
+            'status'                 => 'open',
+            'source'                 => 'whatsapp',
+            'whatsapp_phone'         => (string) $client->phone,
+            'opened_at'              => now(),
+            'last_client_message_at' => now(),
+            'claude_auto_reply'      => true,
+        ]);
+        SupportMessage::create([
+            'support_ticket_id' => $ticket->id,
+            'sender_type'       => 'user',
+            'kind'              => 'text',
+            'body'              => '¿Cuándo me pasan el acceso?',
+            'delivered_at'      => now(),
+        ]);
+
+        $simulacro = $this->postJson(sprintf(self::RUTA, $implementation->id), ['texto' => 'Hola', 'accion' => 'progreso'], $this->headers());
+        $simulacro->assertStatus(200)
+            ->assertJsonPath('listo', false)
+            ->assertJsonPath('martin_pendiente', 'inbound')
+            ->assertJsonPath('impedimentos', ['martin_pendiente']);
+
+        $real = $this->postJson(sprintf(self::RUTA, $implementation->id), $this->real($client), $this->headers());
+        $real->assertStatus(423)
+            ->assertJsonPath('motivo', 'martin_pendiente')
+            ->assertJsonPath('reason', 'inbound')
+            ->assertJsonPath('ticket_id', $ticket->id);
+
+        $this->assertCount(0, $this->espia->textos);
+        $this->assertCount(0, $this->espia->plantillas);
+        $this->assertSame(1, SupportMessage::where('support_ticket_id', $ticket->id)->count());
+        $this->assertSame(0, SupportCodexCase::where('support_ticket_id', $ticket->id)->count());
+        $this->assertSame([], $this->acciones_por_whatsapp($implementation, 3));
+    }
+
+    /**
+     * Con el caso de Martín en `manual_review` el hito SALE (no hay nada que Martín vaya a tomar), pero el dry-run
+     * y el real avisan `martin_en_pausa`: lo que conteste el cliente lo tiene que atender Lucas.
+     *
+     * @return void
+     */
+    public function test_con_el_caso_en_revision_manual_sale_con_el_aviso_martin_en_pausa(): void
+    {
+        [$client, $implementation] = $this->escenario();
+
+        $ticket = SupportTicket::create([
+            'client_id'              => $client->id,
+            'client_user_id'         => 0,
+            'status'                 => 'open',
+            'source'                 => 'whatsapp',
+            'whatsapp_phone'         => (string) $client->phone,
+            'opened_at'              => now(),
+            'last_client_message_at' => now(),
+            'claude_auto_reply'      => true,
+        ]);
+        SupportMessage::create([
+            'support_ticket_id' => $ticket->id,
+            'sender_type'       => 'user',
+            'kind'              => 'text',
+            'body'              => 'Quedo atento',
+            'delivered_at'      => now(),
+        ]);
+        $caso = SupportCodexCase::create(['support_ticket_id' => $ticket->id, 'state' => 'manual_review', 'review_reason' => 'Lucas retomó la atención desde el admin.']);
+
+        $this->postJson(sprintf(self::RUTA, $implementation->id), ['texto' => 'Hola', 'accion' => 'progreso'], $this->headers())
+            ->assertStatus(200)
+            ->assertJsonPath('listo', true)
+            ->assertJsonPath('avisos', ['martin_en_pausa']);
+
+        $real = $this->postJson(sprintf(self::RUTA, $implementation->id), $this->real($client), $this->headers());
+        $real->assertStatus(200)
+            ->assertJsonPath('estado', 'sent')
+            ->assertJsonPath('ticket_id', $ticket->id)
+            ->assertJsonPath('avisos', ['martin_en_pausa']);
+
+        $this->assertSame('manual_review', $caso->fresh()->state);
+    }
+
+    /**
+     * `respuesta_ira_a` sigue la decisión del webhook: con el soporte de Codex apagado, o con la implementación
+     * del sistema en modo auto, lo que conteste el cliente cae al hilo de la implementación y el hito es 422
+     * `respuesta_al_hilo` sin mandar nada. Con la implementación ya cerrada (y el circuito apagado), la respuesta
+     * va a soporte como siempre: sale.
+     *
+     * @return void
+     */
+    public function test_si_la_respuesta_caeria_al_hilo_es_422_respuesta_al_hilo(): void
+    {
+        [$client, $implementation] = $this->escenario();
+
+        AdminSetting::set(SupportCodexSettings::KEY_ENABLED, '0');
+        AdminSetting::flush_memo();
+
+        $this->postJson(sprintf(self::RUTA, $implementation->id), ['texto' => 'Hola', 'accion' => 'progreso'], $this->headers())
+            ->assertStatus(200)
+            ->assertJsonPath('respuesta_ira_a', 'hilo_de_la_implementacion')
+            ->assertJsonPath('listo', false)
+            ->assertJsonPath('impedimentos', ['respuesta_al_hilo']);
+
+        $this->postJson(sprintf(self::RUTA, $implementation->id), $this->real($client), $this->headers())
+            ->assertStatus(422)
+            ->assertJsonPath('motivo', 'respuesta_al_hilo')
+            ->assertJsonPath('respuesta_ira_a', 'hilo_de_la_implementacion');
+
+        /* Circuito prendido pero la implementación en modo auto: también al hilo. */
+        AdminSetting::set(SupportCodexSettings::KEY_ENABLED, '1');
+        AdminSetting::flush_memo();
+        $implementation->automation_mode = 'auto';
+        $implementation->save();
+
+        $this->postJson(sprintf(self::RUTA, $implementation->id), $this->real($client), $this->headers())
+            ->assertStatus(422)
+            ->assertJsonPath('motivo', 'respuesta_al_hilo');
+
+        $this->assertCount(0, $this->espia->textos);
+        $this->assertCount(0, $this->espia->plantillas);
+        $this->assertSame([], $this->data_de_la_etapa($implementation, 3));
+
+        /* Implementación cerrada y circuito apagado: el webhook la manda a soporte. */
+        AdminSetting::set(SupportCodexSettings::KEY_ENABLED, '0');
+        AdminSetting::flush_memo();
+        $implementation->status = 'completed';
+        $implementation->completed_at = now();
+        $implementation->save();
+
+        $this->postJson(sprintf(self::RUTA, $implementation->id), $this->real($client), $this->headers())
+            ->assertStatus(200)
+            ->assertJsonPath('respuesta_ira_a', 'ticket')
+            ->assertJsonPath('estado', 'sent');
     }
 
     /**

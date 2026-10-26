@@ -91,7 +91,7 @@ Respuesta: `{lease_token,lease_expires_at,ticket:<contexto>}`. La reserva dura 1
 - **Datos personales.** No viajan los teléfonos de las fichas (ni el del dueño ni el del responsable de la migración), las casillas de mail ni las respuestas del formulario. En cada `body` de la conversación del dueño se enmascaran, en este orden: cualquier URL que contenga el token del formulario o empiece con la URL base del formulario (`implementation_form_url`) → `[link del formulario]`; lo que sigue a «contraseña» o «clave» (saltando `:`/`=` y un conector como «es», «era», «nueva») hasta el fin de esa palabra → `[oculta]`; y toda secuencia de 8 o más dígitos, aun con un espacio, guión o punto entre dígitos (teléfonos, CUIT, DNI, con su `+`) → `[número]`. Una fecha escrita con guiones (`2026-10-26`) también cae en la última regla.
 - Si no se pudo leer, el bloque llega como `{"sistema":null,"tienda":null,"error":"..."}` en vez de `null`, para que no se lea como «no tiene implementación».
 
-`previous_tickets` (lista, desde el 26/10/2026) resume los tickets ANTERIORES del mismo cliente para que el monitor sepa que existen sin pedirlos: hasta 5, el más nuevo primero (por id), sin el ticket actual, en cualquier estado y de cualquier canal. `mensajes` es la cantidad de mensajes reales (sin borradores). Si el contacto del ticket es un empleado, solo viajan los tickets de ESE empleado; si es el dueño, todos los del cliente (los de sus empleados incluidos). Un ticket sin cliente trae `[]`. Un consumidor que no la conozca la puede ignorar; la clave ausente (admin anterior) equivale a `[]`.
+`previous_tickets` (lista, desde el 26/10/2026) resume los tickets ANTERIORES del mismo cliente para que el monitor sepa que existen sin pedirlos: los de id MENOR que el actual (uno más nuevo no es anterior), hasta 5, el más nuevo primero (por id), en cualquier estado y de cualquier canal. `mensajes` es la cantidad de mensajes reales (sin borradores). Si el contacto del ticket es un empleado, solo viajan los tickets de ESE empleado; si es el dueño, todos los del cliente (los de sus empleados incluidos). Un ticket sin cliente trae `[]`. Un consumidor que no la conozca la puede ignorar; la clave ausente (admin anterior) equivale a `[]`.
 
 ### Tickets anteriores: `GET tickets/{id}/history`
 
@@ -111,6 +111,7 @@ Solo lectura, sin reserva (no cambia nada del caso). El cliente sale del ticket,
 ```
 
 - `messages`: los últimos 30 mensajes reales de cada ticket, en orden cronológico, sin borradores.
+- **Contraseñas.** En `messages` del contexto y de `history`, el `body` de los mensajes del equipo (`sender_type: admin`) llega con lo que sigue a «contraseña» o «clave» reemplazado por `[oculta]` (la misma regla que la conversación de `implementation`; la de los números NO se aplica acá). Los del cliente llegan tal cual.
 - `download_path` apunta a la ruta de adjuntos del ticket ANTERIOR (`tickets/{anterior}/attachments/{aid}`), que valida la pertenencia del adjunto a ese ticket; pedido con el id del ticket actual es 404.
 - 404 si el ticket no existe. Contra un admin anterior al 26/10/2026 la ruta no existe (404): el monitor lo informa como «historial no disponible», sin romper.
 
@@ -148,12 +149,19 @@ El interruptor por ticket (`POST /api/admin/support-ticket/{id}/toggle-claude-au
 
 El contexto incluye `can_query_system`. Un empleado sin ese permiso recibe 403 en diagnostic; no obtiene datos del negocio por haber escrito al soporte. Esta restricción también debe respetarse al consultar producción desde herramientas locales. El diagnóstico técnico interno no autoriza divulgar ventas/caja/clientes a un contacto sin permiso.
 
+## Nota en la implementación: `POST tickets/{id}/implementation-note` (desde el 26/10/2026)
+
+`{lease_token, texto (1..1000), etapa? (1..7, default la actual)}`. Martín deja asentado algo de la implementación del SISTEMA en curso del cliente del ticket. Solo agrega a `data.actions[]` de la etapa `{action:"nota", stage, at, canal:"whatsapp", origen:"martin", texto, support_ticket_id}`; no cambia estados ni etapas y no manda nada. Respuesta `{registrada, implementation_id, etapa, at}`: 201 con `registrada:true`; 200 con `registrada:false` si el mismo texto del mismo ticket ya estaba en esa etapa (no se duplica). Errores: 423 reserva inválida, 409 `sin_implementacion_abierta`, 422 validación o `sin_etapa`, 404 ticket inexistente. El cliente y la implementación salen del ticket, nunca del body.
+
 ## Hitos de la implementación por el ticket (desde el 26/10/2026)
 
 `/implementar` manda los hitos de la implementación (presentación, link del formulario, pedido de archivos, entrega...) con `POST /api/claude/implementations/{id}/whatsapp`, por el ticket de soporte del contacto (lo describe `GET claude/catalog`). Para el monitor importa esto:
 
 - El mensaje queda en el ticket como `sender_type: admin` (el remitente es el admin con el que firma `claude/*`), así que aparece en `messages` y en `history` como cualquier respuesta de Lucas.
 - Si Martín tiene la reserva vigente del ticket que se reusaría, el envío es 423 `martin_atendiendo` y no se manda nada.
+- Si el ticket tiene algo esperando a Martín (`pending_reason` no nulo: `inbound`, `follow_up` o `mission_completed`), el envío es 423 `martin_pendiente`: el hito no tapa un entrante sin contestar.
+- Con el caso en `manual_review` el hito sale con el aviso `martin_en_pausa`: lo que conteste el cliente lo atiende Lucas.
+- El hito solo sale si la respuesta del cliente va a caer en el ticket (`respuesta_ira_a: ticket`, la misma decisión que el webhook); si no, 422 `respuesta_al_hilo`.
 - El envío NO pasa el caso a `manual_review` (no es «Lucas tomó la atención»): cuando el cliente conteste, el ticket vuelve a `pending` con `reason: inbound` como siempre. Si llegara a mandarse entre un `claim` y su `reply`, la respuesta de Martín da 409 (`stale_message`) y el monitor relee.
 
 ## Errores

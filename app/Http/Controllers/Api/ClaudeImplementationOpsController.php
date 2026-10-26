@@ -4217,8 +4217,12 @@ class ClaudeImplementationOpsController extends Controller
      *      reenviar (`repetida: true`); con otro contenido, 409 `operation_id_reusado`; si la primera sigue
      *      mandando (o su proceso murió en el medio), 409 `envio_en_curso`.
      *   7. Ventana cerrada y texto de más de 600 caracteres: 422 `texto_largo_para_plantilla` (la plantilla
-     *      lo cortaría). Martín atendiendo el ticket (reserva vigente): 423 `martin_atendiendo`. En ninguno
-     *      de los dos se manda nada, y el caso de Martín NO pasa a `manual_review`.
+     *      lo cortaría). La respuesta del cliente no caería en el ticket (`respuesta_ira_a` distinto de
+     *      `ticket`: circuito de Codex apagado, implementación en modo auto, tienda en la etapa 1...): 422
+     *      `respuesta_al_hilo`. Martín atendiendo el ticket (reserva vigente): 423 `martin_atendiendo`. Un
+     *      entrante esperando a Martín (`inbound`, `follow_up`, `mission_completed`): 423 `martin_pendiente`.
+     *      En ninguno se manda nada, y el caso de Martín NO pasa a `manual_review`. Con el caso en
+     *      `manual_review` sale igual, con el aviso `martin_en_pausa` (la respuesta la atiende Lucas).
      *
      * Un envío que falla (Kapso, Meta) NO tira: vuelve 200 con `enviado: false`, `estado: failed` y el motivo.
      * 🔴 Un `failed` no se reintenta solo con la misma clave (devuelve el `failed` guardado): reintentar es una
@@ -4328,8 +4332,17 @@ class ClaudeImplementationOpsController extends Controller
                 $nota .= 'La ventana está cerrada y el texto pasa de ' . $plan['tope_para_plantilla']
                     . ' caracteres: el real daría 422; acortalo o esperá a que el cliente escriba. ';
             }
+            if (in_array('respuesta_al_hilo', $plan['impedimentos'], true)) {
+                $nota .= 'Lo que conteste el cliente caería en ' . $plan['respuesta_ira_a'] . ' y no en el ticket: el real daría 422. ';
+            }
             if (in_array('martin_atendiendo', $plan['impedimentos'], true)) {
                 $nota .= 'Martín está atendiendo ese ticket: el real daría 423; probá cuando termine. ';
+            }
+            if (in_array('martin_pendiente', $plan['impedimentos'], true)) {
+                $nota .= 'Hay un mensaje del cliente esperando a Martín (' . $plan['martin_pendiente'] . '): el real daría 423 hasta que conteste. ';
+            }
+            if (in_array('martin_en_pausa', $plan['avisos'], true)) {
+                $nota .= 'Martín tiene el ticket en pausa (revisión manual): lo que conteste el cliente lo atiende Lucas. ';
             }
             $nota .= 'Repetí con dry_run=false, una operation_id nueva y confirm_client_name para mandarlo.';
 
@@ -4375,6 +4388,19 @@ class ClaudeImplementationOpsController extends Controller
             );
         }
 
+        if (in_array('respuesta_al_hilo', $plan['impedimentos'], true)) {
+            return $this->error_422(
+                'El hito saldría por el ticket de soporte, pero lo que conteste el cliente caería en ' . $plan['respuesta_ira_a']
+                    . ' y no en el ticket: la conversación quedaría partida. No se mandó nada.',
+                [
+                    'motivo'          => 'respuesta_al_hilo',
+                    'respuesta_ira_a' => $plan['respuesta_ira_a'],
+                    'ayuda'           => 'La respuesta cae en el ticket con el soporte de Codex prendido y la implementación del sistema en modo manual '
+                        . '(o la tienda de la etapa 2 en adelante). Si no, este hito va por WhatsApp Web y se registra con POST .../actions.',
+                ]
+            );
+        }
+
         if (in_array('martin_atendiendo', $plan['impedimentos'], true)) {
             return response()->json([
                 'error'         => 'Martín está atendiendo ese ticket ahora (reserva vigente hasta ' . $plan['reserva_de_martin_hasta'] . '). No se mandó nada.',
@@ -4382,6 +4408,17 @@ class ClaudeImplementationOpsController extends Controller
                 'ticket_id'     => $plan['ticket'] === null ? null : (int) $plan['ticket']->id,
                 'reserva_hasta' => $plan['reserva_de_martin_hasta'],
                 'ayuda'         => 'Probá de nuevo cuando termine (la reserva dura ' . SupportCodexService::LEASE_MINUTES . ' minutos). El caso de Martín no se tocó.',
+            ], 423);
+        }
+
+        if (in_array('martin_pendiente', $plan['impedimentos'], true)) {
+            return response()->json([
+                'error'     => 'El cliente escribió y Martín todavía no le contestó (' . $plan['martin_pendiente'] . '): el hito taparía ese mensaje y '
+                    . 'Martín no lo atendería nunca. No se mandó nada.',
+                'motivo'    => 'martin_pendiente',
+                'reason'    => $plan['martin_pendiente'],
+                'ticket_id' => $plan['ticket'] === null ? null : (int) $plan['ticket']->id,
+                'ayuda'     => 'Esperá a que Martín conteste (o leé el ticket: puede que el cliente esté preguntando justo esto) y repetí con la misma operation_id.',
             ], 423);
         }
 
@@ -4400,6 +4437,9 @@ class ClaudeImplementationOpsController extends Controller
         }
 
         $resultado = $servicio->enviar($client, $contacto, $texto, $admin);
+        /* Adónde cae la respuesta y los avisos se guardan con la operación: un reintento los devuelve iguales. */
+        $resultado['respuesta_ira_a'] = $plan['respuesta_ira_a'];
+        $resultado['avisos']          = $plan['avisos'];
         $operacion = $servicio->registrar($implementation, $etapa, $operation_id, $accion, $texto, $telefono, $resultado);
 
         return response()->json($this->respuesta_de_la_operacion($operacion, $operation_id, $accion, $etapa, false), 200);
@@ -4435,12 +4475,15 @@ class ClaudeImplementationOpsController extends Controller
             'uso_plantilla'        => $plan['uso_plantilla'],
             'plantilla'            => $plan['plantilla'],
             'partes'               => $plan['partes'],
+            'respuesta_ira_a'      => $plan['respuesta_ira_a'],
             'largo_para_plantilla' => $plan['largo_para_plantilla'],
             'tope_para_plantilla'  => $plan['tope_para_plantilla'],
             'remitente'            => $plan['remitente'],
             'vista_previa'         => $plan['vista_previa'],
             'martin_atendiendo'    => $plan['martin_atendiendo'],
+            'martin_pendiente'     => $plan['martin_pendiente'],
             'impedimentos'         => $plan['impedimentos'],
+            'avisos'               => $plan['avisos'],
         ];
     }
 
@@ -4517,6 +4560,8 @@ class ClaudeImplementationOpsController extends Controller
             'whatsapp_message_id' => $leer('whatsapp_message_id'),
             'reusado'             => $leer('reusado'),
             'error'               => $leer('error'),
+            'respuesta_ira_a'     => $leer('respuesta_ira_a'),
+            'avisos'              => is_array($leer('avisos')) ? $leer('avisos') : [],
             'at'                  => $leer('terminada_at'),
         ];
 
