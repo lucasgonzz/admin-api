@@ -37,7 +37,6 @@ use App\Services\LeadWhatsappInboundAudioService;
 use App\Services\LeadWhatsappOnboardingService;
 use App\Services\LeadWhatsappReactionService;
 use App\Services\SistemaQueryService;
-use App\Services\SupportTicketAssignmentService;
 use App\Services\WhatsappInboundMediaService;
 use App\Services\WhatsappSendService;
 use Carbon\Carbon;
@@ -73,14 +72,11 @@ class WhatsappWebhookController extends Controller
     /**
      * Recibe y procesa un evento de webhook de Kapso.
      *
-     * @param Request                        $request
-     * @param SupportTicketAssignmentService $assignment_service
+     * @param Request $request
      * @return JsonResponse
      */
-    public function receive(
-        Request $request,
-        SupportTicketAssignmentService $assignment_service
-    ): JsonResponse {
+    public function receive(Request $request): JsonResponse
+    {
         /*
          * 🔴 EL BODY SE DECODIFICA ANTES DE VALIDAR LA FIRMA, y ese orden es obligado desde
          * el 13/10/2026 (misión whatsapp-dos-numeros).
@@ -237,7 +233,7 @@ class WhatsappWebhookController extends Controller
                     && (int) $ecommerce_implementation->current_stage >= 2;
 
                 if ($sistema_a_soporte || $tienda_a_soporte) {
-                    $this->handle_support_message($parsed, $client, $client_employee, $assignment_service);
+                    $this->handle_support_message($parsed, $client, $client_employee);
                     Log::channel('daily')->info('WhatsApp webhook: cliente en implementación enrutado a soporte (Codex).', [
                         'from'                        => $parsed['from'],
                         'type'                        => $parsed['type'],
@@ -330,7 +326,7 @@ class WhatsappWebhookController extends Controller
                         ]);
                     }
                 } else {
-                    $this->handle_support_message($parsed, $client, $client_employee, $assignment_service);
+                    $this->handle_support_message($parsed, $client, $client_employee);
                     Log::channel('daily')->info('WhatsApp webhook: mensaje enrutado a soporte.', [
                         'from'               => $parsed['from'],
                         'type'               => $parsed['type'],
@@ -1723,18 +1719,19 @@ class WhatsappWebhookController extends Controller
     /**
      * Crea o actualiza ticket de soporte WhatsApp y persiste el mensaje entrante.
      *
+     * El ticket nace SIN operador (`assigned_admin_id = null`): desde el 26/10/2026 los tickets
+     * de soporte no pertenecen a nadie; contesta el agente o la persona que escribe a mano.
+     *
      * @param array<string, mixed>           $parsed
      * @param Client                         $client
      * @param ClientEmployee|null              $client_employee
-     * @param SupportTicketAssignmentService $assignment_service
      *
      * @return void
      */
     private function handle_support_message(
         array $parsed,
         Client $client,
-        ?ClientEmployee $client_employee,
-        SupportTicketAssignmentService $assignment_service
+        ?ClientEmployee $client_employee
     ): void {
         // NUEVO — interceptar el canal "sistema:" antes de crear ticket de soporte.
         // Solo aplica a clientes activos (este método ya está dentro de esa rama); los leads
@@ -1826,7 +1823,6 @@ class WhatsappWebhookController extends Controller
             $parsed,
             $client,
             $client_employee,
-            $assignment_service,
             &$ticket_for_ai_dispatch,
             &$inbound_message_id
         ) {
@@ -1848,7 +1844,6 @@ class WhatsappWebhookController extends Controller
             $ticket = $ticket_query->lockForUpdate()->first();
 
             if ($ticket === null) {
-                $assigned_admin_id = $assignment_service->resolve_assigned_admin_id($client);
                 $contact_name = $this->resolve_support_contact_name($client, $client_employee, $parsed);
 
                 $ticket = SupportTicket::create([
@@ -1856,7 +1851,8 @@ class WhatsappWebhookController extends Controller
                     'client_employee_id'  => $client_employee ? $client_employee->id : null,
                     'client_user_id'      => 0,
                     'client_user_name'    => $contact_name !== '' ? $contact_name : null,
-                    'assigned_admin_id'   => $assigned_admin_id,
+                    // Sin operador asignado a propósito: los tickets ya no pertenecen a nadie.
+                    'assigned_admin_id'   => null,
                     // Sin título inicial: Claude lo sugiere en la primera Sugerencia IA.
                     'name'                => null,
                     'status'              => 'open',

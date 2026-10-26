@@ -9,15 +9,17 @@ use App\Models\SupportMessage;
 use App\Models\SupportMessageAttachment;
 use App\Models\SupportTicket;
 use App\Models\SupportTypingState;
-use App\Services\SupportTicketAssignmentService;
 use Illuminate\Http\Request;
 
 class InboundSupportMessageController extends Controller
 {
     /**
      * Recibe mensaje desde empresa-api y lo persiste en admin-api.
+     *
+     * Si el ticket es nuevo nace SIN operador (`assigned_admin_id = null`): desde el 26/10/2026 los
+     * tickets de soporte no pertenecen a nadie.
      */
-    public function store(Request $request, SupportTicketAssignmentService $assignment_service)
+    public function store(Request $request)
     {
         // Cliente resuelto por middleware admin.inbound.key.
         $client = $request->attributes->get('sync_client');
@@ -36,15 +38,14 @@ class InboundSupportMessageController extends Controller
         // Busca ticket por uuid compartido o crea uno nuevo abierto.
         $ticket = SupportTicket::where('uuid', $request->input('ticket_uuid'))->first();
         if (is_null($ticket)) {
-            // Admin inicial sugerido para primer contacto de soporte.
-            $assigned_admin_id = $assignment_service->resolve_assigned_admin_id($client);
             $ticket = SupportTicket::create([
                 'uuid' => $request->input('ticket_uuid'),
                 'client_id' => $client->id,
                 'client_user_id' => (int) $request->input('client_user_id'),
                 'client_user_name' => $request->input('sender_user_name'),
                 'client_user_email' => $request->input('sender_user_email'),
-                'assigned_admin_id' => $assigned_admin_id,
+                // Sin operador asignado a propósito: los tickets ya no pertenecen a nadie.
+                'assigned_admin_id' => null,
                 'name' => $request->input('ticket_name'),
                 'status' => $request->input('ticket_status', 'open'),
                 'opened_at' => now(),

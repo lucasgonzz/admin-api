@@ -240,7 +240,10 @@ class SoporteBadgesDeTicketsAbiertosTest extends TestCase
             ->json();
 
         $this->verificar_badges($antes, $despues, $a, $b);
-        // El listado de "mine" sigue trayendo los tickets del operador (abiertos y cerrados).
-        $this->assertCount(3, $despues['models']);
+        // Desde el 26/10/2026 el listado ignora `assigned_filter` (los tickets no pertenecen a un
+        // operador): "mine" trae TODOS los tickets, abiertos y cerrados, de cualquier operador o
+        // sin asignar. El escenario agrega 8 (3 de A, 3 de B y 2 sin asignar). Antes este assert
+        // pedía los 3 de A, porque el filtro recortaba la lista por operador.
+        $this->assertCount(count($antes['models']) + 8, $despues['models']);
     }
 }

@@ -492,15 +492,16 @@ class AperturaDeTicketPorWhatsappTest extends TestCase
     }
 
     /**
-     * El ticket queda asignado al operador que lo abre, no al dueño por defecto de soporte.
+     * El ticket nace SIN operador (desde el 26/10/2026 los tickets no pertenecen a nadie), pero
+     * quién lo abrió queda registrado en el primer mensaje (`sender_admin_id`).
      *
-     * Si quedara asignado al dueño por defecto, la bandeja del operador —que filtra por
-     * "mine"— lo sacaría de la lista apenas lo crea, y no podría seguir la conversación que
-     * acaba de abrir. El alta del canal ERP ya asigna al operador; esto lo iguala.
+     * Antes de esa fecha este test pedía que el ticket quedara asignado al operador que lo abre,
+     * para que su bandeja (que filtraba por "mine") no lo sacara de la lista. Ya no hay filtro por
+     * operador: la bandeja lista todos los tickets, así que ese supuesto dejó de existir.
      *
      * @return void
      */
-    public function test_el_ticket_queda_asignado_al_operador_que_lo_abre()
+    public function test_el_ticket_nace_sin_operador_y_el_primer_mensaje_registra_quien_lo_abrio()
     {
         $otro                           = $this->crear_admin('dueno-de-soporte@test.local');
         $otro->is_default_support_owner = true;
@@ -519,11 +520,14 @@ class AperturaDeTicketPorWhatsappTest extends TestCase
 
         $ticket = SupportTicket::where('client_id', $client->id)->first();
         $this->assertNotNull($ticket);
-        $this->assertSame(
-            (int) $admin->id,
-            (int) $ticket->assigned_admin_id,
-            'El ticket no quedó en la bandeja del operador que lo abrió.'
+        $this->assertNull(
+            $ticket->assigned_admin_id,
+            'El ticket de WhatsApp abierto desde el panel no debe quedar asignado a nadie.'
         );
+
+        $primer_mensaje = SupportMessage::where('support_ticket_id', $ticket->id)->orderBy('id')->first();
+        $this->assertNotNull($primer_mensaje);
+        $this->assertSame((int) $admin->id, (int) $primer_mensaje->sender_admin_id, 'Quién abrió el ticket queda registrado por mensaje.');
     }
 
     /**

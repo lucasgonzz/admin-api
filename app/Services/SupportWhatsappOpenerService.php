@@ -260,10 +260,10 @@ class SupportWhatsappOpenerService
                     'client_employee_id' => $client_employee_id,
                     'client_user_id'     => 0,
                     'client_user_name'   => $contact_name !== '' ? $contact_name : null,
-                    // Al operador que la abre, igual que el alta del canal ERP. Asignarla al
-                    // dueño por defecto (criterio de los tickets ENTRANTES) la sacaría de su
-                    // bandeja apenas la crea: el filtro por defecto es "mine".
-                    'assigned_admin_id'  => (int) $admin->id,
+                    // Sin operador asignado a propósito (desde el 26/10/2026 los tickets no
+                    // pertenecen a nadie). Quién la abrió queda registrado por mensaje, en
+                    // `sender_admin_id` del primer mensaje que sale.
+                    'assigned_admin_id'  => null,
                     'name'               => trim($ticket_name) !== '' ? trim($ticket_name) : null,
                     'status'             => 'open',
                     'source'             => 'whatsapp',

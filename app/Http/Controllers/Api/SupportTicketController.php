@@ -24,20 +24,26 @@ use Illuminate\Support\Facades\Auth;
 class SupportTicketController extends BaseController
 {
     /**
-     * Lista tickets para la bandeja admin con filtros básicos.
+     * Lista TODOS los tickets de la bandeja admin.
+     *
+     * Desde el 26/10/2026 los tickets no pertenecen a ningún operador: la bandeja es una sola y la
+     * ven todos. Por compatibilidad con el admin-spa viejo se siguen ACEPTANDO `assigned_filter` y
+     * `filter` (y se ignoran), así que un SPA que todavía los manda no se rompe: simplemente ve todo.
+     *
+     * Devuelve además de la lista:
+     * - `unread_total`: entero con todos los mensajes del cliente sin leer (el contador único).
+     * - `unread_totals` (`mine`/`others`), `open_totals` e `inbox_nav`: se mantienen intactos para
+     *   el SPA viejo; con tickets sin dueño `others` lleva casi todo y `mine` casi nada.
      */
     public function index(Request $request)
     {
-        // Admin autenticado que consulta la bandeja.
+        // Admin autenticado que consulta la bandeja (solo para los totales legacy mine/others).
         $admin_id = (int) Auth::id();
-        // Filtro por destinatario/asignación: nuevo `assigned_filter` o legacy `filter`.
-        $assigned_filter = $this->resolve_assigned_filter_param($request, $admin_id);
 
         // Relaciones de bandeja: preview del último mensaje sin cargar toda la conversación (evita payload enorme).
+        // Sin filtro por asignado: `assigned_filter` / `filter` ya no recortan la lista.
         $query = $this->ticketQueryForInbox()
             ->orderBy('updated_at', 'desc');
-
-        $this->apply_assigned_filter_to_ticket_query($query, $assigned_filter, $admin_id);
 
         // Responde lista completa, totales legacy (nav global) y filas para botones por operador.
         $models = $query->get();
@@ -46,6 +52,8 @@ class SupportTicketController extends BaseController
         return response()->json(
             [
                 'models' => $models,
+                // Contador único de no leídos: todos los mensajes del cliente sin leer.
+                'unread_total' => $this->unread_total_for_inbox(),
                 'unread_totals' => $this->unread_totals_for_admin_inbox($admin_id),
                 // Tickets abiertos (status open) para los badges de la bandeja y de la barra.
                 'open_totals' => $this->open_totals_for_admin_inbox($admin_id, $open_map),
@@ -56,8 +64,9 @@ class SupportTicketController extends BaseController
     }
 
     /**
-     * Agregado de no leídos (mensajes user sin read_at) para badges "Míos" y "Otros" sin listar tickets.
+     * Agregado de no leídos (mensajes user sin read_at) para los badges sin listar tickets.
      * Suma `open_totals` y `open_count` por fila: los badges muestran tickets abiertos, no mensajes.
+     * Suma también `unread_total`, el contador único de no leídos (todos los tickets).
      */
     public function unread_badges()
     {
@@ -66,6 +75,7 @@ class SupportTicketController extends BaseController
         $open_map = $this->open_counts_grouped_by_assigned_admin();
         return response()->json(
             [
+                'unread_total' => $this->unread_total_for_inbox(),
                 'unread_totals' => $this->unread_totals_for_admin_inbox($admin_id),
                 // Tickets abiertos (status open) para los badges de la bandeja y de la barra.
                 'open_totals' => $this->open_totals_for_admin_inbox($admin_id, $open_map),
@@ -76,32 +86,18 @@ class SupportTicketController extends BaseController
     }
 
     /**
-     * Interpreta el filtro de bandeja: prioriza `assigned_filter`; si falta, usa `filter` legacy (mine/others/all).
+     * Total de mensajes del cliente (sender_type = user) sin leer, en todos los tickets.
      *
-     * Valores admitidos en `assigned_filter`: all, mine, unassigned, others (legacy), o id numérico de admin.
+     * Es el número único de no leídos de la bandeja y del menú: ya no se reparte por operador.
      *
-     * @param Request $request Request HTTP entrante
-     * @param int $admin_id Id del operador autenticado
-     * @return string Valor normalizado de filtro
+     * @return int
      */
-    protected function resolve_assigned_filter_param(Request $request, int $admin_id): string
+    protected function unread_total_for_inbox(): int
     {
-        $raw = $request->input('assigned_filter');
-        if ($raw !== null && $raw !== '') {
-            return (string) $raw;
-        }
-        $legacy = $request->input('filter', 'mine');
-        if ($legacy === 'mine') {
-            return 'mine';
-        }
-        if ($legacy === 'others') {
-            return 'others';
-        }
-        if ($legacy === 'all') {
-            return 'all';
-        }
-
-        return 'mine';
+        return (int) SupportMessage::query()
+            ->where('sender_type', 'user')
+            ->whereNull('read_at')
+            ->count();
     }
 
     /**
@@ -126,47 +122,6 @@ class SupportTicketController extends BaseController
                de /inicio filtran la lista por estas dos claves, con el MISMO criterio con el que se
                contaron las tarjetas. Ver SupportTicket::scopeWithIndicadoresDeInicio(). */
             ->withIndicadoresDeInicio();
-    }
-
-    /**
-     * Restringe el listado de tickets según el menú lateral (todos, míos, sin asignar, u operador concreto).
-     *
-     * @param \Illuminate\Database\Eloquent\Builder $query Query base de SupportTicket
-     * @param string $assigned_filter Valor normalizado (all, mine, unassigned, others, o id numérico)
-     * @param int $admin_id Operador autenticado (para mine y others)
-     * @return void
-     */
-    protected function apply_assigned_filter_to_ticket_query($query, string $assigned_filter, int $admin_id): void
-    {
-        if ($assigned_filter === 'mine') {
-            $query->where('assigned_admin_id', $admin_id);
-
-            return;
-        }
-        if ($assigned_filter === 'others') {
-            $query->where(function ($sub_query) use ($admin_id) {
-                $sub_query->where('assigned_admin_id', '<>', $admin_id)
-                    ->orWhereNull('assigned_admin_id');
-            });
-
-            return;
-        }
-        if ($assigned_filter === 'unassigned') {
-            $query->whereNull('assigned_admin_id');
-
-            return;
-        }
-        if ($assigned_filter === 'all') {
-            return;
-        }
-        if (ctype_digit($assigned_filter)) {
-            $query->where('assigned_admin_id', (int) $assigned_filter);
-
-            return;
-        }
-
-        // Valor desconocido: no listar toda la bandeja por error; alineado con "mine".
-        $query->where('assigned_admin_id', $admin_id);
     }
 
     /**
@@ -364,7 +319,9 @@ class SupportTicketController extends BaseController
             'client_user_id' => (int) $request->input('client_user_id'),
             'client_user_name' => $request->input('client_user_name'),
             'client_user_email' => $request->input('client_user_email'),
-            'assigned_admin_id' => (int) $request->input('assigned_admin_id', Auth::id()),
+            // Sin operador asignado a propósito (desde el 26/10/2026 los tickets no pertenecen a nadie).
+            // El campo `assigned_admin_id` del request, si un SPA viejo todavía lo manda, se ignora.
+            'assigned_admin_id' => null,
             'name' => $request->input('name'),
             'status' => 'open',
             'opened_at' => now(),

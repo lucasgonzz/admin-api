@@ -157,7 +157,7 @@ class SupportTicket extends Model
      * tocá el otro.
      *
      * Es GLOBAL, no per-admin: no lleva ningún `Auth::id()` adentro. La bandeja filtra por
-     * asignado aparte (`SupportTicketController::apply_assigned_filter_to_ticket_query()`), y si el
+     * asignado aparte (hasta el 26/10/2026; hoy la bandeja lista todos los tickets), y si el
      * criterio dependiera de quién está logueado, el número de la tarjeta del panel de inicio y las
      * filas del listado se separarían — misma lección que
      * `test_el_scope_no_depende_del_admin_autenticado` del test de leads.

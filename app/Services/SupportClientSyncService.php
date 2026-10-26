@@ -204,7 +204,10 @@ class SupportClientSyncService
                 ->post(rtrim($client->api_url, '/') . '/api/admin-sync/support/typing', [
                     'ticket_uuid' => $ticket->uuid,
                     'actor_type' => 'admin',
-                    'actor_id' => $ticket->assigned_admin_id,
+                    // Quien está escribiendo: el operador autenticado. Antes salía de
+                    // `assigned_admin_id`, que desde el 26/10/2026 viaja en null (los tickets no
+                    // tienen operador); se conserva el valor legacy solo como respaldo.
+                    'actor_id' => \Illuminate\Support\Facades\Auth::id() ?: $ticket->assigned_admin_id,
                 ]);
 
             return $response->successful();
