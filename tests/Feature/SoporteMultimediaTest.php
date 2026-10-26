@@ -1192,4 +1192,316 @@ class SoporteMultimediaTest extends TestCase
             $this->assertStringStartsWith('attachment', (string) $respuesta->headers->get('Content-Disposition'), 'Mime "' . $mime . '" salió inline.');
         }
     }
+
+    // ------------------------------------------------------------------------------------------------
+    // 8. Copia reproducible: atomicidad, lock, marca negativa y tope de tiempo
+    // ------------------------------------------------------------------------------------------------
+
+    /**
+     * Registra un "ffmpeg" de mentira que no ejecuta nada: cuenta las conversiones y escribe bytes de juguete.
+     *
+     * @param string        $modo        `ok` escribe una copia; `fallar` devuelve un error sin escribir nada.
+     * @param callable|null $al_convertir Se llama con la ruta de salida justo antes de "convertir".
+     *
+     * @return object El localizador registrado (con `llamadas` y `modo` públicos).
+     */
+    private function registrar_ffmpeg_de_mentira(string $modo = 'ok', ?callable $al_convertir = null)
+    {
+        $falso = new class($modo, $al_convertir) extends FfmpegLocator {
+            /** @var int Conversiones pedidas. */
+            public $llamadas = 0;
+
+            /** @var string `ok` o `fallar`. */
+            public $modo;
+
+            /** @var callable|null Gancho previo a la conversión. */
+            private $gancho;
+
+            public function __construct(string $modo, ?callable $gancho)
+            {
+                $this->modo   = $modo;
+                $this->gancho = $gancho;
+            }
+
+            public function path(): ?string
+            {
+                return 'ffmpeg-de-mentira';
+            }
+
+            public function convert_audio(string $ffmpeg_path, string $input_path, string $output_path, string $codec_arguments, int $timeout_seconds = 30): ?string
+            {
+                $this->llamadas++;
+                if ($this->gancho !== null) {
+                    call_user_func($this->gancho, $output_path);
+                }
+                if ($this->modo === 'fallar') {
+                    return 'ffmpeg de mentira falló';
+                }
+                file_put_contents($output_path, 'M4A-ENTERO-DE-MENTIRA');
+
+                return null;
+            }
+        };
+
+        $this->app->instance(FfmpegLocator::class, $falso);
+
+        return $falso;
+    }
+
+    /**
+     * Ruta absoluta de un archivo de la carpeta `playback` de un adjunto (final, .lock, .fail).
+     *
+     * @param SupportTicket            $ticket  Ticket dueño.
+     * @param SupportMessageAttachment $adjunto Adjunto.
+     * @param string                   $sufijo  Sufijo después de `<id>.m4a` (vacío para la copia final).
+     *
+     * @return string
+     */
+    private function ruta_de_playback(SupportTicket $ticket, SupportMessageAttachment $adjunto, string $sufijo = ''): string
+    {
+        $ruta = Storage::disk('public')->path('support_messages/' . $ticket->id . '/playback/' . $adjunto->id . '.m4a') . $sufijo;
+
+        // Mismo separador que arma el servicio (en Windows el path() del disco mezcla / y \).
+        return str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $ruta);
+    }
+
+    /**
+     * Normaliza los separadores de una ruta al del sistema (en Windows el disco falso mezcla / y \).
+     *
+     * @param string|null $ruta Ruta a normalizar.
+     *
+     * @return string|null
+     */
+    private function con_separador_del_so(?string $ruta): ?string
+    {
+        return $ruta === null ? null : str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $ruta);
+    }
+
+    /**
+     * La copia se escribe en un temporal de la MISMA carpeta y se publica con rename: nadie ve una copia parcial.
+     *
+     * @return void
+     */
+    public function test_la_copia_se_escribe_en_un_temporal_y_se_publica_con_rename()
+    {
+        $ticket  = $this->crear_ticket('whatsapp', '+5493417793001');
+        $adjunto = $this->crear_adjunto($ticket, 'wa_voz.ogg', $this->bytes_ogg_opus(), 'audio/ogg');
+        $final   = $this->ruta_de_playback($ticket, $adjunto);
+        $vistos  = [];
+
+        $this->registrar_ffmpeg_de_mentira('ok', function ($salida) use ($final, &$vistos) {
+            // Mientras ffmpeg "escribe", la copia final NO existe y el temporal vive junto a ella.
+            $vistos['final_existia'] = file_exists($final);
+            $vistos['misma_carpeta'] = $this->con_separador_del_so(dirname($salida)) === dirname($final);
+            $vistos['es_temporal']   = substr($salida, -9) === '.part.m4a';
+        });
+
+        $ruta = (new \App\Services\SupportAttachmentPlaybackService())->playable_absolute_path($adjunto->fresh(), Storage::disk('public')->path($adjunto->path));
+
+        $this->assertSame($final, $this->con_separador_del_so($ruta));
+        $this->assertFalse($vistos['final_existia'], 'La copia final ya existía mientras ffmpeg escribía.');
+        $this->assertTrue($vistos['misma_carpeta'], 'El temporal no está en la carpeta de destino (rename no sería atómico).');
+        $this->assertTrue($vistos['es_temporal']);
+        $this->assertSame('M4A-ENTERO-DE-MENTIRA', file_get_contents($final));
+        $this->assertSame([basename($final)], array_map('basename', glob(dirname($final) . DIRECTORY_SEPARATOR . '*')), 'Quedaron temporales o locks.');
+    }
+
+    /**
+     * Con otro proceso transcodificando (lock tomado), este sirve el original sin esperar ni correr ffmpeg.
+     *
+     * @return void
+     */
+    public function test_con_el_lock_tomado_no_se_transcodifica_y_se_sirve_el_original()
+    {
+        $falso   = $this->registrar_ffmpeg_de_mentira();
+        $ticket  = $this->crear_ticket('whatsapp', '+5493417793002');
+        $bytes   = $this->bytes_ogg_opus();
+        $adjunto = $this->crear_adjunto($ticket, 'wa_voz.ogg', $bytes, 'audio/ogg');
+        $lock    = $this->ruta_de_playback($ticket, $adjunto, '.lock');
+
+        // "Otro proceso" con el lock tomado.
+        if (! is_dir(dirname($lock))) {
+            mkdir(dirname($lock), 0775, true);
+        }
+        $otro = fopen($lock, 'c');
+        $this->assertTrue(flock($otro, LOCK_EX | LOCK_NB));
+
+        try {
+            $inicio    = microtime(true);
+            $respuesta = $this->get($adjunto->fresh()->playback_url);
+            $duracion  = microtime(true) - $inicio;
+        } finally {
+            flock($otro, LOCK_UN);
+            fclose($otro);
+        }
+
+        $respuesta->assertStatus(200);
+        $this->assertSame('audio/ogg', $respuesta->headers->get('Content-Type'), 'No se sirvió el original.');
+        $this->assertSame((string) strlen($bytes), $respuesta->headers->get('Content-Length'));
+        $this->assertSame(0, $falso->llamadas, 'Se transcodificó con el lock tomado por otro proceso.');
+        $this->assertLessThan(5, $duracion, 'El pedido esperó al otro proceso en vez de servir el original.');
+        $this->assertFileDoesNotExist($this->ruta_de_playback($ticket, $adjunto));
+    }
+
+    /**
+     * Si ffmpeg falla se deja una marca `.fail`: los pedidos siguientes no reintentan hasta que venza.
+     *
+     * @return void
+     */
+    public function test_si_ffmpeg_falla_la_marca_negativa_evita_reintentar_hasta_que_vence()
+    {
+        $falso   = $this->registrar_ffmpeg_de_mentira('fallar');
+        $ticket  = $this->crear_ticket('whatsapp', '+5493417793003');
+        $adjunto = $this->crear_adjunto($ticket, 'wa_voz.ogg', $this->bytes_ogg_opus(), 'audio/ogg');
+        $original = Storage::disk('public')->path($adjunto->path);
+        $servicio = new \App\Services\SupportAttachmentPlaybackService();
+
+        $this->assertNull($servicio->playable_absolute_path($adjunto->fresh(), $original));
+        $this->assertSame(1, $falso->llamadas);
+        $marca = $this->ruta_de_playback($ticket, $adjunto, '.fail');
+        $this->assertFileExists($marca, 'No se dejó la marca negativa.');
+
+        // Otro Range, un instante después: no se reintenta.
+        $this->assertNull($servicio->playable_absolute_path($adjunto->fresh(), $original));
+        $this->assertSame(1, $falso->llamadas, 'Se reintentó con la marca vigente.');
+
+        // La marca vence por mtime: se reintenta (y ahora anda).
+        touch($marca, time() - 1000);
+        $falso->modo = 'ok';
+        $ruta = $servicio->playable_absolute_path($adjunto->fresh(), $original);
+        $this->assertSame(2, $falso->llamadas);
+        $this->assertSame($this->ruta_de_playback($ticket, $adjunto), $this->con_separador_del_so($ruta));
+        $this->assertFileDoesNotExist($marca, 'La marca vencida no se limpió.');
+    }
+
+    /**
+     * Una copia cacheada de 0 bytes está rota: se regenera en vez de servirse vacía.
+     *
+     * @return void
+     */
+    public function test_una_copia_cacheada_de_cero_bytes_se_regenera()
+    {
+        $falso   = $this->registrar_ffmpeg_de_mentira();
+        $ticket  = $this->crear_ticket('whatsapp', '+5493417793004');
+        $adjunto = $this->crear_adjunto($ticket, 'wa_voz.ogg', $this->bytes_ogg_opus(), 'audio/ogg');
+        $final   = $this->ruta_de_playback($ticket, $adjunto);
+        mkdir(dirname($final), 0775, true);
+        file_put_contents($final, '');
+
+        $respuesta = $this->get($adjunto->fresh()->playback_url);
+
+        $respuesta->assertStatus(200);
+        $this->assertSame(1, $falso->llamadas, 'No se regeneró la copia vacía.');
+        $this->assertSame('M4A-ENTERO-DE-MENTIRA', file_get_contents($final));
+        $this->assertSame('audio/mp4', $respuesta->headers->get('Content-Type'));
+    }
+
+    /**
+     * La copia vive siempre en el disco `public`, aunque la fila diga otro disco.
+     *
+     * @return void
+     */
+    public function test_el_servicio_de_reproduccion_ignora_el_disco_de_la_fila()
+    {
+        $this->registrar_ffmpeg_de_mentira();
+        $ticket  = $this->crear_ticket('whatsapp', '+5493417793005');
+        $adjunto = $this->crear_adjunto($ticket, 'wa_voz.ogg', $this->bytes_ogg_opus(), 'audio/ogg');
+        $adjunto->disk = 'local';
+        $adjunto->save();
+
+        $ruta = (new \App\Services\SupportAttachmentPlaybackService())->playable_absolute_path($adjunto->fresh(), Storage::disk('public')->path($adjunto->path));
+
+        $this->assertSame($this->ruta_de_playback($ticket, $adjunto), $this->con_separador_del_so($ruta));
+        Storage::disk('public')->assertExists('support_messages/' . $ticket->id . '/playback/' . $adjunto->id . '.m4a');
+    }
+
+    /**
+     * Un `FfmpegLocator` que se cuelga se mata al vencer el tope y falla con gracia (sin dejar la salida).
+     *
+     * El proceso es PHP durmiendo 20 segundos, sustituido por ffmpeg a través de `build_arguments()`.
+     *
+     * @return void
+     */
+    public function test_convert_audio_mata_el_proceso_al_vencer_el_tope()
+    {
+        $colgado = new class extends FfmpegLocator {
+            protected function build_arguments(string $ffmpeg_path, string $input_path, string $output_path, string $codec_arguments): array
+            {
+                return [PHP_BINARY, '-r', 'sleep(20);'];
+            }
+        };
+        $salida = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'sm_timeout_' . uniqid('', true) . '.m4a';
+        file_put_contents($salida, 'parcial');
+
+        $inicio = microtime(true);
+        $error  = $colgado->convert_audio('ffmpeg', 'entrada', $salida, '-c:a aac', 1);
+        $tardo  = microtime(true) - $inicio;
+
+        $this->assertNotNull($error);
+        $this->assertStringContainsString('tardó más de 1 segundos', $error);
+        $this->assertLessThan(10, $tardo, 'No se mató al proceso colgado.');
+        $this->assertFileDoesNotExist($salida, 'Quedó la salida parcial.');
+    }
+
+    /**
+     * `convert_audio` devuelve null si el proceso termina bien y deja la salida, y un motivo si sale con error.
+     *
+     * @return void
+     */
+    public function test_convert_audio_distingue_exito_y_fallo_del_proceso()
+    {
+        $bien = new class extends FfmpegLocator {
+            protected function build_arguments(string $ffmpeg_path, string $input_path, string $output_path, string $codec_arguments): array
+            {
+                return [PHP_BINARY, '-r', 'file_put_contents($argv[1], "audio");', '--', $output_path];
+            }
+        };
+        $mal = new class extends FfmpegLocator {
+            protected function build_arguments(string $ffmpeg_path, string $input_path, string $output_path, string $codec_arguments): array
+            {
+                return [PHP_BINARY, '-r', 'exit(3);'];
+            }
+        };
+        $salida = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'sm_proc_' . uniqid('', true) . '.m4a';
+
+        try {
+            $this->assertNull($bien->convert_audio('ffmpeg', 'entrada', $salida, '-c:a aac', 20));
+            $this->assertSame('audio', file_get_contents($salida));
+        } finally {
+            @unlink($salida);
+        }
+
+        $error = $mal->convert_audio('ffmpeg', 'entrada', $salida, '-c:a aac', 20);
+        $this->assertStringContainsString('código 3', (string) $error);
+    }
+
+    /**
+     * La búsqueda de ffmpeg se hace una sola vez por proceso.
+     *
+     * @return void
+     */
+    public function test_la_ruta_de_ffmpeg_se_cachea()
+    {
+        FfmpegLocator::forget_cached_path();
+
+        $buscador = new class extends FfmpegLocator {
+            /** @var int Veces que se buscó de verdad. */
+            public $busquedas = 0;
+
+            protected function lookup_path(): ?string
+            {
+                $this->busquedas++;
+
+                return '/usr/bin/ffmpeg';
+            }
+        };
+
+        try {
+            $this->assertSame('/usr/bin/ffmpeg', $buscador->path());
+            $this->assertSame('/usr/bin/ffmpeg', $buscador->path());
+            $this->assertSame(1, $buscador->busquedas, 'Se buscó ffmpeg más de una vez.');
+        } finally {
+            FfmpegLocator::forget_cached_path();
+        }
+    }
 }
