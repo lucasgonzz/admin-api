@@ -208,7 +208,46 @@ class WhatsappWebhookController extends Controller
                 $implementation           = $client->implementation;
                 $ecommerce_implementation = $client->ecommerce_implementation;
 
-                if ($implementation !== null && $implementation->status === 'in_progress') {
+                /*
+                 * 🔴 CON EL SOPORTE DE CODEX PRENDIDO, UN CLIENTE EN IMPLEMENTACIÓN LO ATIENDE MARTÍN
+                 * (misión soporte-con-contexto-de-implementacion, 26/10/2026).
+                 *
+                 * Hasta acá, todo cliente con una implementación `in_progress` iba al hilo de la
+                 * implementación. En la del sistema en modo manual (todas, hoy) ese mensaje no lo
+                 * contestaba nadie: quedaba guardado esperando que Lucas lo viera. En la de la tienda,
+                 * de la etapa 2 en adelante, salía un acuse fijo. Con el circuito de Codex prendido, esos
+                 * dos casos van a soporte: abren (o siguen) el ticket y Martín los atiende con la
+                 * implementación en su contexto (`SupportImplementationContextService`).
+                 *
+                 * Siguen yendo a su hilo, como siempre, los dos flujos GUIONADOS, que esperan una
+                 * respuesta concreta y se colgarían si el mensaje se fuera a otro lado:
+                 *   - la implementación del sistema en modo `auto` (`Implementation::is_automated()`);
+                 *   - la de la tienda en la etapa 1 (las preguntas de configuración y el dominio).
+                 *
+                 * La prioridad de siempre se mantiene: si la del sistema está en curso, decide la del
+                 * sistema y la de la tienda no se mira. Con el circuito apagado, nada de esto cambia
+                 * ningún camino: las dos variables de abajo quedan en false.
+                 */
+                $codex_prendido    = \App\Services\SupportCodexSettings::enabled();
+                $sistema_en_curso  = $implementation !== null && $implementation->status === 'in_progress';
+                $tienda_en_curso   = $ecommerce_implementation !== null && $ecommerce_implementation->status === 'in_progress';
+                $sistema_a_soporte = $codex_prendido && $sistema_en_curso && ! $implementation->is_automated();
+                $tienda_a_soporte  = $codex_prendido && ! $sistema_en_curso && $tienda_en_curso
+                    && (int) $ecommerce_implementation->current_stage >= 2;
+
+                if ($sistema_a_soporte || $tienda_a_soporte) {
+                    $this->handle_support_message($parsed, $client, $client_employee, $assignment_service);
+                    Log::channel('daily')->info('WhatsApp webhook: cliente en implementación enrutado a soporte (Codex).', [
+                        'from'                        => $parsed['from'],
+                        'type'                        => $parsed['type'],
+                        'route'                       => 'cliente-en-implementacion',
+                        'implementacion'              => $sistema_a_soporte ? 'sistema' : 'tienda',
+                        'client_id'                   => $client->id,
+                        'client_employee_id'          => $client_employee ? $client_employee->id : null,
+                        'implementation_id'           => $sistema_a_soporte ? $implementation->id : null,
+                        'ecommerce_implementation_id' => $tienda_a_soporte ? $ecommerce_implementation->id : null,
+                    ]);
+                } elseif ($sistema_en_curso) {
                     $this->handle_implementation_message($parsed, $client, $implementation);
                     Log::channel('daily')->info('WhatsApp webhook: mensaje enrutado a implementación.', [
                         'from'              => $parsed['from'],
@@ -217,7 +256,7 @@ class WhatsappWebhookController extends Controller
                         'client_id'         => $client->id,
                         'implementation_id' => $implementation->id,
                     ]);
-                } elseif ($ecommerce_implementation !== null && $ecommerce_implementation->status === 'in_progress') {
+                } elseif ($tienda_en_curso) {
                     $this->handle_ecommerce_implementation_message($parsed, $client, $ecommerce_implementation);
                     Log::channel('daily')->info('WhatsApp webhook: mensaje enrutado a implementación de ecommerce.', [
                         'from'                        => $parsed['from'],
