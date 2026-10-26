@@ -4,6 +4,8 @@ namespace App\Services;
 
 use App\Events\SupportMessageReceived;
 use App\Events\SupportTicketUpdated;
+use App\Models\Implementation;
+use App\Models\ImplementationStage;
 use App\Models\SupportCodexCase;
 use App\Models\SupportCodexOperation;
 use App\Models\SupportMessage;
@@ -147,7 +149,7 @@ class SupportCodexService
                 return [
                     'id' => (int) $message->id,
                     'sender_type' => $message->sender_type,
-                    'body' => $message->body,
+                    'body' => $this->cuerpo_para_el_monitor($message),
                     'kind' => $message->kind,
                     'created_at' => $message->created_at ? $message->created_at->toIso8601String() : null,
                     'attachments' => $message->attachments->map(function ($attachment) use ($ticket) {
@@ -238,7 +240,7 @@ class SupportCodexService
                         return [
                             'id' => (int) $mensaje->id,
                             'sender_type' => $mensaje->sender_type,
-                            'body' => $mensaje->body,
+                            'body' => $this->cuerpo_para_el_monitor($mensaje),
                             'kind' => $mensaje->kind,
                             'created_at' => $mensaje->created_at ? $mensaje->created_at->toIso8601String() : null,
                             'attachments' => $mensaje->attachments->map(function ($adjunto) use ($anterior) {
@@ -257,9 +259,10 @@ class SupportCodexService
     }
 
     /**
-     * La consulta de los tickets anteriores de un ticket: los del mismo `client_id`, sin el actual, el más nuevo
-     * primero (por id: es el orden de creación), hasta `TICKETS_ANTERIORES`, en cualquier estado y de cualquier
-     * canal.
+     * La consulta de los tickets anteriores de un ticket: los del mismo `client_id` con id MENOR que el actual (los
+     * que se abrieron antes; uno más nuevo no es «anterior» y un ticket viejo que se relee no tiene por qué ver lo
+     * que vino después), el más nuevo primero (por id: es el orden de creación), hasta `TICKETS_ANTERIORES`, en
+     * cualquier estado y de cualquier canal.
      *
      * 🔴 EMPLEADOS. Si el contacto del ticket es un empleado (`client_employee_id`), solo los tickets de ESE
      * empleado: lo que el dueño u otro empleado hablaron con soporte no es de él. Si es el dueño, todos los del
@@ -278,13 +281,135 @@ class SupportCodexService
             return null;
         }
 
-        $consulta = SupportTicket::where('client_id', (int) $ticket->client_id)->where('id', '!=', (int) $ticket->id);
+        $consulta = SupportTicket::where('client_id', (int) $ticket->client_id)->where('id', '<', (int) $ticket->id);
 
         if ($ticket->client_employee_id) {
             $consulta->where('client_employee_id', (int) $ticket->client_employee_id);
         }
 
         return $consulta->orderByDesc('id')->limit(self::TICKETS_ANTERIORES);
+    }
+
+    /**
+     * El cuerpo de un mensaje tal como lo lee el monitor: a los del EQUIPO (`sender_type: admin`) se les oculta lo
+     * que sigue a «contraseña» / «clave» (`[oculta]`), con la misma regla que el contexto de la implementación
+     * (`SupportImplementationContextService::ocultar_claves()`). Los del cliente van tal cual.
+     *
+     * 🔴 Solo esa regla, no la de los números: en un ticket de soporte un número largo es un código de barras, un
+     * comprobante o un precio, y taparlo dejaría a Martín sin con qué trabajar. La contraseña, en cambio, la puso
+     * el equipo al entregar el acceso y Martín no la necesita para nada.
+     *
+     * @param SupportMessage $mensaje El mensaje.
+     *
+     * @return string|null
+     */
+    private function cuerpo_para_el_monitor(SupportMessage $mensaje)
+    {
+        if ($mensaje->sender_type !== 'admin') {
+            return $mensaje->body;
+        }
+
+        return SupportImplementationContextService::ocultar_claves($mensaje->body);
+    }
+
+    /**
+     * Si hay algo esperando a Martín en el ticket (`inbound`, `follow_up` o `mission_completed`), o null.
+     *
+     * Envoltorio público mínimo de `pending_reason()` (misión `hitos-de-implementacion-por-soporte`, 26/10/2026):
+     * el envío de los hitos de la implementación lo mira para no tapar con un mensaje del equipo un entrante que
+     * Martín todavía no contestó. No cambia nada.
+     *
+     * @param SupportTicket          $ticket El ticket.
+     * @param SupportCodexCase|null  $case   Su caso, si ya lo tiene cargado (si no, se busca).
+     *
+     * @return string|null
+     */
+    public function motivo_pendiente(SupportTicket $ticket, SupportCodexCase $case = null): ?string
+    {
+        $case = $case ?: SupportCodexCase::where('support_ticket_id', $ticket->id)->first();
+
+        return $this->pending_reason($ticket, $case);
+    }
+
+    /**
+     * Martín deja asentada una nota en la implementación del cliente del ticket (`POST tickets/{id}/implementation-note`,
+     * misión `hitos-de-implementacion-por-soporte`, 26/10/2026): «el cliente mandó la lista de precios», «quedó en
+     * mandar las fotos el lunes».
+     *
+     * Solo AGREGA a `data.actions[]` de la etapa `{action: 'nota', stage, at, canal: 'whatsapp', origen: 'martin',
+     * texto, support_ticket_id}`: no cambia el estado de ninguna etapa ni de la implementación, y no manda nada.
+     *
+     * Frenos: la reserva vigente del ticket (423 `invalid_lease`); una implementación del SISTEMA `in_progress` del
+     * cliente del ticket (409 `sin_implementacion_abierta`; el cliente sale del ticket, nunca de un parámetro); la
+     * etapa cargada (422 `sin_etapa`). Idempotente: el mismo texto de Martín, del mismo ticket, en la misma etapa,
+     * devuelve la entrada que ya estaba con `registrada: false`. Todo en una transacción con el ticket, el caso y la
+     * etapa bloqueados.
+     *
+     * @param int                  $id    Id del ticket.
+     * @param array<string, mixed> $input lease_token, texto, etapa (opcional).
+     *
+     * @return array{registrada: bool, implementation_id: int, etapa: int, at: string}
+     */
+    public function implementation_note(int $id, array $input): array
+    {
+        return DB::transaction(function () use ($id, $input) {
+            $ticket = SupportTicket::lockForUpdate()->findOrFail($id);
+            $case = SupportCodexCase::where('support_ticket_id', $id)->lockForUpdate()->first();
+            $this->assert_lease($case, (string) $input['lease_token']);
+
+            $implementation = empty($ticket->client_id) ? null : Implementation::where('client_id', (int) $ticket->client_id)
+                ->where('status', 'in_progress')->orderByDesc('id')->first();
+            if ($implementation === null) {
+                $this->fail(409, 'sin_implementacion_abierta', 'El cliente de este ticket no tiene una implementación del sistema en curso.');
+            }
+
+            $etapa = isset($input['etapa']) && $input['etapa'] !== null ? (int) $input['etapa'] : (int) $implementation->current_stage;
+            $registro = ImplementationStage::where('implementation_id', $implementation->id)
+                ->where('stage_number', $etapa)->lockForUpdate()->first();
+            if ($registro === null) {
+                $this->fail(422, 'sin_etapa', 'La implementación no tiene esa etapa cargada.');
+            }
+
+            $texto = trim((string) $input['texto']);
+            $datos = is_array($registro->data) ? $registro->data : [];
+            $entradas = isset($datos['actions']) && is_array($datos['actions']) ? $datos['actions'] : [];
+
+            foreach ($entradas as $existente) {
+                if (is_array($existente)
+                    && ($existente['origen'] ?? null) === 'martin'
+                    && ($existente['action'] ?? null) === 'nota'
+                    && (int) ($existente['support_ticket_id'] ?? 0) === (int) $ticket->id
+                    && (string) ($existente['texto'] ?? '') === $texto) {
+                    return [
+                        'registrada' => false,
+                        'implementation_id' => (int) $implementation->id,
+                        'etapa' => $etapa,
+                        'at' => (string) ($existente['at'] ?? ''),
+                    ];
+                }
+            }
+
+            $entrada = [
+                'action' => 'nota',
+                'stage' => $etapa,
+                'at' => now()->toISOString(),
+                'canal' => 'whatsapp',
+                'origen' => 'martin',
+                'texto' => $texto,
+                'support_ticket_id' => (int) $ticket->id,
+            ];
+            $entradas[] = $entrada;
+            $datos['actions'] = $entradas;
+            $registro->data = $datos;
+            $registro->save();
+
+            return [
+                'registrada' => true,
+                'implementation_id' => (int) $implementation->id,
+                'etapa' => $etapa,
+                'at' => $entrada['at'],
+            ];
+        });
     }
 
     public function reply(int $id, array $input): array

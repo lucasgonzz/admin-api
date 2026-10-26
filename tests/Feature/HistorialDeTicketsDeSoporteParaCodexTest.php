@@ -4,6 +4,9 @@ namespace Tests\Feature;
 
 use App\Models\Client;
 use App\Models\ClientEmployee;
+use App\Models\Implementation;
+use App\Models\ImplementationStage;
+use App\Models\SupportCodexCase;
 use App\Models\SupportMessage;
 use App\Models\SupportMessageAttachment;
 use App\Models\SupportTicket;
@@ -11,6 +14,7 @@ use Carbon\Carbon;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Tests\TestCase;
 
 /**
@@ -138,6 +142,9 @@ class HistorialDeTicketsDeSoporteParaCodexTest extends TestCase
         $actual = $this->ticket($client, 'open', 0);
         $this->mensaje($actual, '¿En qué quedó lo del catálogo?');
 
+        /* Uno abierto DESPUÉS del actual (otro empleado no, el mismo dueño): no es anterior y no viaja. */
+        $posterior = $this->ticket($client, 'closed', 0);
+
         $respuesta = $this->getJson($this->base . '/tickets/' . $actual->id . '/history', $this->headers)->assertOk();
 
         $ids = array_column($respuesta->json('tickets'), 'id');
@@ -149,6 +156,7 @@ class HistorialDeTicketsDeSoporteParaCodexTest extends TestCase
             $ids
         );
         $this->assertNotContains((int) $actual->id, $ids);
+        $this->assertNotContains((int) $posterior->id, $ids);
 
         $primero = $respuesta->json('tickets.0');
         $this->assertSame('closed', $primero['status']);
@@ -227,6 +235,160 @@ class HistorialDeTicketsDeSoporteParaCodexTest extends TestCase
 
         $this->get($path, $this->headers)->assertOk();
         $this->get($this->base . '/tickets/' . $actual->id . '/attachments/' . $adjunto->id, $this->headers)->assertStatus(404);
+    }
+
+    /**
+     * En los mensajes del EQUIPO (contexto e historial) se oculta lo que sigue a «contraseña» / «clave»; los del
+     * cliente y los números quedan tal cual.
+     *
+     * @return void
+     */
+    public function test_la_contrasena_del_equipo_se_oculta_en_el_contexto_y_el_historial(): void
+    {
+        $client   = $this->cliente();
+        $anterior = $this->ticket($client, 'closed', 3);
+        $this->mensaje($anterior, 'Tu usuario es 20304050 y la contraseña es 1234', 'admin');
+
+        $actual = $this->ticket($client, 'open', 0);
+        $this->mensaje($actual, 'Mi clave es 9999 y no entra', 'user');
+        $this->mensaje($actual, 'Probá con la clave: Perro123', 'admin');
+
+        $contexto = $this->getJson($this->base . '/tickets/' . $actual->id, $this->headers)->assertOk();
+        $cuerpos  = array_column($contexto->json('ticket.messages'), 'body');
+        $this->assertSame(['Mi clave es 9999 y no entra', 'Probá con la clave: [oculta]'], $cuerpos);
+
+        $historial = $this->getJson($this->base . '/tickets/' . $actual->id . '/history', $this->headers)->assertOk();
+        $this->assertSame('Tu usuario es 20304050 y la contraseña es [oculta]', $historial->json('tickets.0.messages.0.body'));
+        $this->assertStringNotContainsString('1234', $this->json_de($historial));
+    }
+
+    /**
+     * Una reserva vigente de Martín sobre el ticket (sin pasar por `claim`, que exige el circuito encendido).
+     *
+     * @param SupportTicket $ticket El ticket.
+     *
+     * @return string El token.
+     */
+    private function reservar(SupportTicket $ticket): string
+    {
+        $token = Str::random(64);
+        SupportCodexCase::create([
+            'support_ticket_id' => $ticket->id, 'state' => 'ready', 'worker_id' => 'pc-lucas',
+            'lease_hash' => hash('sha256', $token), 'lease_expires_at' => now()->addMinutes(10),
+        ]);
+
+        return $token;
+    }
+
+    /**
+     * Una implementación del sistema del cliente, con sus siete etapas, en la etapa `$actual`.
+     *
+     * @param Client $client El cliente.
+     * @param int    $actual La etapa actual.
+     * @param string $status El estado.
+     *
+     * @return Implementation
+     */
+    private function implementacion(Client $client, int $actual = 3, string $status = 'in_progress'): Implementation
+    {
+        $implementation = Implementation::create([
+            'client_id' => $client->id, 'status' => $status, 'current_stage' => $actual,
+            'started_at' => now(), 'automation_mode' => 'manual', 'form_token' => (string) Str::uuid(),
+        ]);
+        for ($numero = 1; $numero <= Implementation::ULTIMA_ETAPA; $numero++) {
+            ImplementationStage::create([
+                'implementation_id' => $implementation->id, 'stage_number' => $numero,
+                'status' => $numero < $actual ? 'completed' : ($numero === $actual ? 'in_progress' : 'pending'),
+            ]);
+        }
+
+        return $implementation;
+    }
+
+    /**
+     * Las acciones de una etapa.
+     *
+     * @param Implementation $implementation La implementación.
+     * @param int            $etapa          La etapa.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function acciones(Implementation $implementation, int $etapa): array
+    {
+        $data = ImplementationStage::where('implementation_id', $implementation->id)->where('stage_number', $etapa)->first()->data;
+
+        return is_array($data) && isset($data['actions']) ? $data['actions'] : [];
+    }
+
+    /**
+     * La nota de Martín: sin reserva 423; con reserva se agrega a la etapa actual sin tocar estados; repetida no
+     * se duplica; con etapa explícita va a esa; sin implementación del sistema en curso, 409.
+     *
+     * @return void
+     */
+    public function test_la_nota_de_martin_en_la_implementacion(): void
+    {
+        $client         = $this->cliente();
+        $implementation = $this->implementacion($client, 3);
+        $ticket         = $this->ticket($client, 'open', 0);
+        $ruta           = $this->base . '/tickets/' . $ticket->id . '/implementation-note';
+
+        $this->postJson($ruta, ['lease_token' => Str::random(64), 'texto' => 'Mandó la lista de precios'], $this->headers)->assertStatus(423);
+        $this->assertSame([], $this->acciones($implementation, 3));
+
+        $token = $this->reservar($ticket);
+
+        $primera = $this->postJson($ruta, ['lease_token' => $token, 'texto' => 'Mandó la lista de precios'], $this->headers);
+        $primera->assertStatus(201)
+            ->assertJsonPath('registrada', true)
+            ->assertJsonPath('etapa', 3)
+            ->assertJsonPath('implementation_id', $implementation->id);
+
+        $acciones = $this->acciones($implementation, 3);
+        $this->assertCount(1, $acciones);
+        $this->assertSame('nota', $acciones[0]['action']);
+        $this->assertSame('whatsapp', $acciones[0]['canal']);
+        $this->assertSame('martin', $acciones[0]['origen']);
+        $this->assertSame('Mandó la lista de precios', $acciones[0]['texto']);
+        $this->assertSame((int) $ticket->id, $acciones[0]['support_ticket_id']);
+        $this->assertSame($primera->json('at'), $acciones[0]['at']);
+
+        $repetida = $this->postJson($ruta, ['lease_token' => $token, 'texto' => 'Mandó la lista de precios'], $this->headers);
+        $repetida->assertStatus(200)->assertJsonPath('registrada', false)->assertJsonPath('at', $primera->json('at'));
+        $this->assertCount(1, $this->acciones($implementation, 3));
+
+        $this->postJson($ruta, ['lease_token' => $token, 'texto' => 'Queda en mandar las fotos', 'etapa' => 6], $this->headers)
+            ->assertStatus(201)
+            ->assertJsonPath('etapa', 6);
+        $this->assertCount(1, $this->acciones($implementation, 6));
+
+        $this->postJson($ruta, ['lease_token' => $token, 'texto' => 'x', 'etapa' => 8], $this->headers)->assertStatus(422);
+        $this->postJson($ruta, ['lease_token' => $token, 'texto' => str_repeat('a', 1001)], $this->headers)->assertStatus(422);
+
+        /* No cambió ningún estado. */
+        $this->assertSame('in_progress', $implementation->fresh()->status);
+        $this->assertSame(3, (int) $implementation->fresh()->current_stage);
+        $this->assertSame('pending', ImplementationStage::where('implementation_id', $implementation->id)->where('stage_number', 6)->first()->status);
+
+        /* Sin implementación del sistema en curso: 409. */
+        $otro        = $this->cliente('Sin Implementación');
+        $this->implementacion($otro, 7, 'completed');
+        $otro_ticket = $this->ticket($otro, 'open', 0);
+        $otro_token  = $this->reservar($otro_ticket);
+        $this->postJson($this->base . '/tickets/' . $otro_ticket->id . '/implementation-note', ['lease_token' => $otro_token, 'texto' => 'Algo'], $this->headers)
+            ->assertStatus(409);
+    }
+
+    /**
+     * El cuerpo de la respuesta como texto, sin escapar los acentos.
+     *
+     * @param \Illuminate\Testing\TestResponse $respuesta La respuesta.
+     *
+     * @return string
+     */
+    private function json_de($respuesta): string
+    {
+        return (string) json_encode($respuesta->json(), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     }
 
     /**

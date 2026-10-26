@@ -67,6 +67,29 @@ class ClaudeSupportCodexController extends Controller
         return response()->json($service->history(SupportTicket::findOrFail($id)));
     }
 
+    /**
+     * Martín deja asentada una nota en la implementación del cliente del ticket (solo agrega a `data.actions[]` de
+     * la etapa; no cambia estados ni manda nada). Exige la reserva vigente del ticket. El cliente y la
+     * implementación salen del ticket, nunca del body. Frenos y forma en `SupportCodexService::implementation_note()`.
+     *
+     * @param Request             $request Body: lease_token, texto (1..1000), etapa (1..7, opcional: la actual).
+     * @param int|string          $id      Id del ticket.
+     * @param SupportCodexService $service El servicio del puente.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function implementation_note(Request $request, $id, SupportCodexService $service)
+    {
+        $data = $request->validate([
+            'lease_token' => 'required|string|min:32|max:128',
+            'texto' => 'required|string|min:1|max:1000',
+            'etapa' => 'sometimes|nullable|integer|between:1,' . \App\Models\Implementation::ULTIMA_ETAPA,
+        ]);
+        $resultado = $service->implementation_note((int) $id, $data);
+
+        return response()->json($resultado, $resultado['registrada'] ? 201 : 200);
+    }
+
     public function reply(Request $request, $id, SupportCodexService $service)
     {
         $data = $request->validate([

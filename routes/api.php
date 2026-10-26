@@ -317,6 +317,10 @@ Route::middleware('claude.task.key')
            hitos-de-implementacion-por-soporte, 26/10/2026). */
         Route::get('support-codex/tickets/{id}/history', 'Api\ClaudeSupportCodexController@history')
             ->whereNumber('id');
+        /* Martín deja asentada una nota en la implementación del cliente del ticket: solo agrega a data.actions[]
+           de la etapa, con reserva vigente (misión hitos-de-implementacion-por-soporte, 26/10/2026). */
+        Route::post('support-codex/tickets/{id}/implementation-note', 'Api\ClaudeSupportCodexController@implementation_note')
+            ->whereNumber('id');
         Route::post('support-codex/tickets/{id}/reply', 'Api\ClaudeSupportCodexController@reply');
         Route::post('support-codex/tickets/{id}/release', 'Api\ClaudeSupportCodexController@release');
         Route::post('support-codex/tickets/{id}/resume', 'Api\ClaudeSupportCodexController@resume');

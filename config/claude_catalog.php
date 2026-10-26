@@ -110,12 +110,26 @@ return [
             'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => [],
         ],
         'GET api/claude/support-codex/tickets/{id}' => [
-            'para_que' => 'Contexto del ticket: cliente, últimos 100 mensajes reales, adjuntos, misión preparada, ventana WhatsApp, la implementación del cliente y previous_tickets (resumen de hasta 5 tickets anteriores: id, status, opened_at, closed_at, mensajes; el detalle con GET .../history); sin claves.',
+            'para_que' => 'Contexto del ticket: cliente, últimos 100 mensajes reales, adjuntos, misión preparada, ventana WhatsApp, la implementación del cliente y previous_tickets (resumen de hasta 5 tickets anteriores, de id menor que el actual: id, status, opened_at, closed_at, mensajes; el detalle con GET .../history); en los mensajes del equipo lo que sigue a «contraseña»/«clave» llega como [oculta]; sin claves.',
             'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => [],
         ],
         'GET api/claude/support-codex/tickets/{id}/history' => [
-            'para_que' => 'Los tickets ANTERIORES del cliente del ticket (hasta 5, el más nuevo primero, sin el actual, en cualquier estado) con su contacto y sus últimos 30 mensajes reales (orden cronológico, sin borradores) y adjuntos, para saber dónde quedó una conversación ya cerrada. Si el contacto del ticket es un empleado, solo los tickets de ese empleado; si es el dueño, todos. El download_path de cada adjunto apunta a la ruta de adjuntos de SU ticket. Solo lectura, sin reserva; el cliente sale del ticket, nunca de un parámetro.',
+            'para_que' => 'Los tickets ANTERIORES del cliente del ticket (id menor que el actual; hasta 5, el más nuevo primero, en cualquier estado) con su contacto y sus últimos 30 mensajes reales (orden cronológico, sin borradores) y adjuntos, para saber dónde quedó una conversación ya cerrada. Si el contacto del ticket es un empleado, solo los tickets de ese empleado; si es el dueño, todos. El download_path de cada adjunto apunta a la ruta de adjuntos de SU ticket. En los mensajes del equipo (sender_type admin) lo que sigue a «contraseña»/«clave» llega como [oculta]. Solo lectura, sin reserva; el cliente sale del ticket, nunca de un parámetro.',
             'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => [],
+        ],
+        'POST api/claude/support-codex/tickets/{id}/implementation-note' => [
+            'para_que' => 'Martín deja asentada una nota en la implementación del SISTEMA en curso del cliente del ticket («mandó la lista de precios», «queda en mandar las fotos el lunes»): solo AGREGA a data.actions[] de la etapa {action:"nota", stage, at, canal:"whatsapp", origen:"martin", texto, support_ticket_id}. No cambia estados ni etapas ni manda nada. Responde {registrada, implementation_id, etapa, at}: 201 con registrada=true, o 200 con registrada=false si ya estaba.',
+            'escribe' => true, 'peligrosidad' => 'baja',
+            'frenos' => [
+                'Reserva vigente del ticket (lease_token): si no, 423 invalid_lease.',
+                'El cliente y la implementación salen del ticket, nunca del body. Sin implementación del sistema in_progress: 409 sin_implementacion_abierta. Etapa sin fila: 422 sin_etapa.',
+                'Idempotente: el mismo texto de Martín, del mismo ticket, en la misma etapa, no se duplica (200, registrada=false, con el at de la que ya estaba).',
+            ],
+            'parametros' => [
+                ['nombre' => 'lease_token', 'obligatorio' => true, 'validacion' => 'required|string|min:32|max:128', 'que_es' => 'Reserva vigente de este ticket.'],
+                ['nombre' => 'texto', 'obligatorio' => true, 'validacion' => 'required|string|min:1|max:1000', 'que_es' => 'La nota.'],
+                ['nombre' => 'etapa', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|integer|between:1,7', 'que_es' => 'La etapa donde se anota. Por defecto la actual de la implementación.'],
+            ],
         ],
         'GET api/claude/support-codex/tickets/{id}/attachments/{attachment_id}' => [
             'para_que' => 'Descarga autenticada de un adjunto que pertenece a ese ticket, para imágenes o transcripción local de audios.',

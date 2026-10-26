@@ -767,15 +767,38 @@ class SupportImplementationContextService
             return $url;
         }, $texto);
 
-        $texto = preg_replace(
-            '~\b(contrase[ñn]as?|claves?)((?:\s*[:=]\s*|\s+)(?:(?:es|era|ser[ií]a|nueva|actual)\s*[:=]?\s+)?)[^\s]+~iu',
-            '$1$2' . self::MASCARA_DE_CLAVE,
-            $texto
-        );
+        $texto = self::ocultar_claves($texto);
 
         $texto = preg_replace('~\+?\d(?:[\s.\-]?\d){7,}~u', self::MASCARA_DE_NUMERO, $texto);
 
         return $texto;
+    }
+
+    /**
+     * SOLO la regla 2 de `enmascarar()`: lo que sigue a «contraseña» / «clave» → `[oculta]`, hasta el fin de la
+     * palabra siguiente, salteando un separador (`:` o `=`) y un conector («es», «era», «sería», «nueva»,
+     * «actual»).
+     *
+     * 🔴 Pública y estática desde el 26/10/2026 (misión `hitos-de-implementacion-por-soporte`): el puente de
+     * soporte de Codex (`SupportCodexService`) la aplica a los mensajes del EQUIPO en la conversación del ticket y
+     * en el historial —«la contraseña es 1234» en la entrega del acceso—, y tiene que ser la MISMA regla, no una
+     * copia. Ahí NO se aplica la de los números: un ticket de soporte habla de precios, códigos y comprobantes.
+     *
+     * @param string|null $texto El texto.
+     *
+     * @return string|null
+     */
+    public static function ocultar_claves($texto)
+    {
+        if ($texto === null) {
+            return null;
+        }
+
+        return preg_replace(
+            '~\b(contrase[ñn]as?|claves?)((?:\s*[:=]\s*|\s+)(?:(?:es|era|ser[ií]a|nueva|actual)\s*[:=]?\s+)?)[^\s]+~iu',
+            '$1$2' . self::MASCARA_DE_CLAVE,
+            (string) $texto
+        );
     }
 
     /**
