@@ -89,6 +89,13 @@ class SupportCodexService
                 $this->fail(409, 'stale_message', 'La conversación cambió; volvé a leerla.');
             }
             $token = $renewing ? $token : Str::random(64);
+            if ($case->state === 'manual_review') {
+                // pending_reason solo admite acá una pausa por respuesta humana y un entrante
+                // posterior. El turno viejo sigue inválido; esta atención usa una reserva nueva.
+                $case->state = trim((string) $case->mission) !== '' ? 'mission_pending' : 'ready';
+                $case->review_reason = null;
+                $case->confirmation_due_at = null;
+            }
             $case->worker_id = $input['worker_id'];
             $case->lease_hash = hash('sha256', $token);
             $case->lease_expires_at = now()->addMinutes(self::LEASE_MINUTES);
@@ -579,8 +586,14 @@ class SupportCodexService
         DB::transaction(function () use ($ticket) {
             SupportTicket::where('id', $ticket->id)->lockForUpdate()->first();
             $case = SupportCodexCase::firstOrCreate(['support_ticket_id' => $ticket->id]);
-            $case->state = 'manual_review';
-            $case->review_reason = 'Lucas retomó la atención desde el admin.';
+            // Una respuesta manual no convierte una revisión por error o conciliación en una
+            // pausa recuperable. Solo cedemos este turno; el próximo entrante puede volver a Martín.
+            if ($case->state !== 'manual_review' || $this->is_human_reply_pause($case)) {
+                $case->state = 'manual_review';
+                $case->review_reason = 'Lucas retomó la atención desde el admin.';
+                $last = $this->last_real_message($ticket->id);
+                $case->expected_message_id = $last ? (int) $last->id : null;
+            }
             $case->lease_hash = null;
             $case->lease_expires_at = null;
             $case->save();
@@ -638,7 +651,7 @@ class SupportCodexService
             || ($check_unfinished && $this->has_unfinished_operation($ticket->id))) {
             $this->fail(409, 'manual_review', 'La atención está pausada y requiere revisión.');
         }
-        if ($input['action'] === 'solicitar_confirmacion' && $case->state === 'mission_pending') {
+        if (in_array($input['action'], ['solicitar_confirmacion', 'cerrar'], true) && $case->state === 'mission_pending') {
             $this->fail(409, 'mission_pending', 'No se puede anunciar resuelta una misión que todavía no se ejecutó.');
         }
         return $case;
@@ -772,7 +785,7 @@ class SupportCodexService
 
     private function pending_reason(SupportTicket $ticket, ?SupportCodexCase $case): ?string
     {
-        if ($ticket->status !== 'open' || ($case !== null && in_array($case->state, ['manual_review', 'closed'], true))
+        if ($ticket->status !== 'open' || ($case !== null && $case->state === 'closed')
             || $this->has_unfinished_operation($ticket->id)) {
             return null;
         }
@@ -782,6 +795,13 @@ class SupportCodexService
         }
         if (! (bool) $ticket->claude_auto_reply) {
             return null;
+        }
+        if ($case !== null && $case->state === 'manual_review') {
+            // Panchito (26/10): un mensaje de Lucas no debe apagar para siempre un agente
+            // que sigue encendido. Las revisiones técnicas conservan su bloqueo explícito.
+            return $this->is_human_reply_pause($case) && $last->sender_type === 'user'
+                && (int) $last->id > max((int) $case->expected_message_id, (int) $case->handled_message_id)
+                ? 'inbound' : null;
         }
         if ($case !== null && $case->state === 'ready_to_confirm'
             && (int) $last->id === (int) $case->handled_message_id
@@ -797,6 +817,12 @@ class SupportCodexService
             return 'follow_up';
         }
         return null;
+    }
+
+    private function is_human_reply_pause(SupportCodexCase $case): bool
+    {
+        return $case->state === 'manual_review'
+            && $case->review_reason === 'Lucas retomó la atención desde el admin.';
     }
 
     private function is_follow_up(SupportCodexCase $case, int $expected): bool

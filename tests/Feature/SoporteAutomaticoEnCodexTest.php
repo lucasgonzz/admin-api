@@ -58,7 +58,8 @@ class SoporteAutomaticoEnCodexTest extends TestCase
                     $message->whatsapp_message_id = 'wamid.codex.' . count($this->bodies);
                     $message->save();
                 }
-                return ['delivery' => $this->success ? 'sent' : 'failed'];
+                return ['delivery' => $this->success ? 'sent' : 'failed', 'message_id' => $message->whatsapp_message_id,
+                    'used_template' => false, 'error' => $this->success ? null : 'Fallo simulado'];
             }
         };
         $this->app->instance(SupportWhatsappOpenerService::class, $this->deliveries);
@@ -138,6 +139,135 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         $claim = $this->claim($ticket);
         $this->assertSame($last->id, $claim['ticket']['expected_message_id']);
         $this->assertCount(0, $this->deliveries->bodies);
+    }
+
+    private function human_reply(SupportTicket $ticket): SupportMessage
+    {
+        $admin = Admin::firstOrCreate(['email' => 'respuesta-' . $ticket->id . '@test.local'], ['name' => 'Lucas', 'password' => bcrypt('prueba')]);
+        $result = $this->actingAs($admin, 'sanctum')->postJson('/api/admin/support-ticket/' . $ticket->id . '/message', [
+            'body' => 'Entren siempre desde la dirección del sistema.', 'kind' => 'text',
+        ])->assertStatus(201);
+        return SupportMessage::findOrFail($result->json('model.id'));
+    }
+
+    public function test_audio_nuevo_tras_respuesta_humana_retoma_sin_interruptor_y_descarta_turno_viejo(): void
+    {
+        $ticket = $this->ticket();
+        $old = $this->claim($ticket);
+        $human = $this->human_reply($ticket);
+        $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->first();
+        $case->thread_id = 'thread-ticket-' . $ticket->id;
+        $case->save();
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
+        $this->reply($ticket, $old)->assertStatus(423);
+        $last = $this->inbound($ticket, 'Sí, ahí lo arreglamos. Era la antena de Internet.');
+        $last->kind = 'audio';
+        $last->save();
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(1, 'tickets')
+            ->assertJsonPath('tickets.0.expected_message_id', $last->id)->assertJsonPath('tickets.0.reason', 'inbound');
+        $new = $this->claim($ticket);
+        $this->assertNotSame($old['lease_token'], $new['lease_token']);
+        $this->assertSame('ready', $new['ticket']['state']);
+        $this->assertSame('thread-ticket-' . $ticket->id, $new['ticket']['thread_id']);
+        $this->reply($ticket, $old)->assertStatus(423);
+        $this->reply($ticket, $new, ['body' => 'Gracias por avisar.'])->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->assertSame(['Entren siempre desde la dirección del sistema.', 'Gracias por avisar.'], $this->deliveries->bodies);
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
+        $this->assertGreaterThan($human->id, $last->id);
+    }
+
+    public function test_pausa_humana_no_reprocesa_entrante_anterior_a_la_pausa_ni_borrador(): void
+    {
+        $ticket = $this->ticket();
+        app(SupportCodexService::class)->pause_for_human($ticket);
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
+        SupportMessage::create(['support_ticket_id' => $ticket->id, 'sender_type' => 'admin', 'kind' => 'text', 'body' => 'Borrador', 'is_ai_suggestion_draft' => true]);
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
+    }
+
+    public function test_respuesta_humana_y_entrante_no_eluden_apagado_revision_ni_operacion_inconclusa(): void
+    {
+        foreach (['apagado', 'revision', 'conciliado', 'unknown', 'sending'] as $scenario) {
+            $ticket = $this->ticket();
+            if (in_array($scenario, ['revision', 'conciliado'], true)) {
+                SupportCodexCase::create(['support_ticket_id' => $ticket->id, 'state' => 'manual_review', 'review_reason' => 'Revisar: ' . $scenario]);
+            }
+            $this->human_reply($ticket);
+            $last = $this->inbound($ticket, 'Ya arreglamos Internet.');
+            if ($scenario === 'apagado') {
+                $this->toggle_agent($ticket);
+            } elseif (in_array($scenario, ['unknown', 'sending'], true)) {
+                SupportCodexOperation::create(['operation_id' => 'bloqueo-' . $ticket->id, 'support_ticket_id' => $ticket->id, 'expected_message_id' => $last->id, 'action' => 'responder', 'request_hash' => str_repeat('b', 64), 'status' => $scenario]);
+            }
+            $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
+            $this->postJson($this->base . '/tickets/' . $ticket->id . '/claim', ['worker_id' => 'pc-lucas', 'expected_message_id' => $last->id], $this->headers)->assertStatus(409);
+            if (in_array($scenario, ['revision', 'conciliado'], true)) {
+                $this->assertDatabaseHas('support_codex_cases', ['support_ticket_id' => $ticket->id, 'review_reason' => 'Revisar: ' . $scenario]);
+            }
+        }
+        $this->assertSame(array_fill(0, 5, 'Entren siempre desde la dirección del sistema.'), $this->deliveries->bodies);
+    }
+
+    public function test_segunda_respuesta_humana_renueva_frontera_y_no_reprocesa_el_entrante_intermedio(): void
+    {
+        $ticket = $this->ticket();
+        $this->human_reply($ticket);
+        $this->inbound($ticket, 'Lo pruebo ahora.');
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(1, 'tickets');
+        $this->human_reply($ticket);
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
+        $last = $this->inbound($ticket, 'Ahora ya funciona.');
+        // claim vuelve a validar aunque el monitor no haya consultado pending antes.
+        $claim = $this->claim($ticket);
+        $this->assertSame($last->id, $claim['ticket']['expected_message_id']);
+        $this->assertSame('ready', $claim['ticket']['state']);
+        $this->assertCount(2, $this->deliveries->bodies);
+    }
+
+    public function test_pausa_humana_guardada_por_version_anterior_recupera_solo_el_entrante_nuevo(): void
+    {
+        $ticket = $this->ticket();
+        $old = $this->claim($ticket);
+        // La versión anterior dejaba este motivo y el expected del último claim, sin
+        // actualizar la frontera al responder Lucas. Debe migrar por comportamiento.
+        SupportCodexCase::where('support_ticket_id', $ticket->id)->update([
+            'state' => 'manual_review', 'review_reason' => 'Lucas retomó la atención desde el admin.',
+            'lease_hash' => null, 'lease_expires_at' => null,
+        ]);
+        SupportMessage::create(['support_ticket_id' => $ticket->id, 'sender_type' => 'admin', 'kind' => 'text', 'body' => 'Revisen Internet.', 'delivered_at' => now()]);
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
+        $last = $this->inbound($ticket, 'Ya arreglamos la antena.');
+        $new = $this->claim($ticket);
+        $this->assertNotSame($old['lease_token'], $new['lease_token']);
+        $this->assertSame('ready', $new['ticket']['state']);
+        $this->assertSame($last->id, $new['ticket']['expected_message_id']);
+        $this->reply($ticket, $old)->assertStatus(423);
+    }
+
+    public function test_entrante_tras_respuesta_humana_conserva_mision_y_no_anuncia_resolucion(): void
+    {
+        $ticket = $this->ticket();
+        $first = $this->claim($ticket);
+        $this->reply($ticket, $first, ['action' => 'escalar', 'mission' => '/cruzada Arreglar visor'])->assertOk();
+        $this->human_reply($ticket);
+        $last = $this->inbound($ticket, '¿Y cómo cambio las columnas?');
+        $claim = $this->claim($ticket);
+        $this->assertSame('mission_pending', $claim['ticket']['state']);
+        $this->assertSame('/cruzada Arreglar visor', $claim['ticket']['mission']);
+        $this->reply($ticket, $claim, ['action' => 'solicitar_confirmacion'])->assertStatus(409);
+        $this->reply($ticket, $claim, ['body' => 'Activá el salto de línea. El visor sigue pendiente.'])->assertOk()
+            ->assertJsonPath('ticket.state', 'mission_pending');
+        $this->assertNotNull($ticket->fresh()->escalated_at);
+        $this->assertSame($last->id, SupportCodexCase::where('support_ticket_id', $ticket->id)->first()->handled_message_id);
+        $confirmation = $this->inbound($ticket, 'Ahora ya funciona.');
+        $next = $this->claim($ticket);
+        $before = count($this->deliveries->bodies);
+        $this->reply($ticket, $next, ['action' => 'cerrar', 'confirmation_message_id' => $confirmation->id])
+            ->assertStatus(409);
+        $this->assertCount($before, $this->deliveries->bodies);
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->assertNotNull($ticket->fresh()->escalated_at);
+        $this->assertDatabaseHas('support_codex_cases', ['support_ticket_id' => $ticket->id, 'state' => 'mission_pending', 'mission' => '/cruzada Arreglar visor']);
     }
 
     public function test_encender_sin_caso_previo_recupera_entrante_en_ambos_ordenes(): void

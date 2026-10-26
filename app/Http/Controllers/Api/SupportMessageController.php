@@ -19,6 +19,7 @@ use App\Services\SupportWhatsappOpenerService;
 use App\Services\WhatsappInboundMediaService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 
@@ -60,27 +61,28 @@ class SupportMessageController extends BaseController
             $kind = $prepared_attachment['kind'];
         }
 
-        // Si Lucas toma la conversación, Martín deja de responder en segundo plano.
-        app(\App\Services\SupportCodexService::class)->pause_for_human($ticket);
-
-        // Respuesta manual del operador: cancela envío automático de sugerencia IA pendiente.
-        (new SupportAiSuggestionDraftService())->clear_ticket_pending_state($ticket);
-
         // Cuerpo textual del mensaje.
         $body = $request->input('body');
         if (is_string($body)) {
             $body = trim($body);
         }
 
-        // Crea mensaje del operador actual.
-        $message = SupportMessage::create([
-            'support_ticket_id' => $ticket->id,
-            'sender_type' => 'admin',
-            'sender_admin_id' => (int) Auth::id(),
-            'kind' => $kind,
-            'body' => $body,
-            'delivered_at' => now(),
-        ]);
+        $message = DB::transaction(function () use ($ticket, $kind, $body) {
+            $locked_ticket = SupportTicket::where('id', $ticket->id)->lockForUpdate()->firstOrFail();
+            abort_if($locked_ticket->status !== 'open', 422, 'ticket closed');
+            // El claim usa este mismo lock: nunca puede retomar en el hueco entre la
+            // invalidación del turno viejo y la creación de la respuesta de Lucas.
+            app(\App\Services\SupportCodexService::class)->pause_for_human($locked_ticket);
+            (new SupportAiSuggestionDraftService())->clear_ticket_pending_state($locked_ticket);
+            return SupportMessage::create([
+                'support_ticket_id' => $locked_ticket->id,
+                'sender_type' => 'admin',
+                'sender_admin_id' => (int) Auth::id(),
+                'kind' => $kind,
+                'body' => $body,
+                'delivered_at' => now(),
+            ]);
+        });
 
         // Persiste adjunto si llegó archivo desde formulario.
         if ($prepared_attachment !== null) {
