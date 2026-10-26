@@ -64,11 +64,9 @@ class SupportAttachmentPlaybackService
      */
     public function playable_absolute_path(SupportMessageAttachment $attachment, string $original_path): ?string
     {
-        // Disco del adjunto (el mismo para el original y la copia).
-        $disk_name = trim((string) ($attachment->disk ?? 'public'));
-        if ($disk_name === '') {
-            $disk_name = 'public';
-        }
+        // Disco: SIEMPRE `public`. La columna `attachments.disk` la puede escribir el cliente (metadata remota)
+        // y no se le hace caso (ver SupportAttachmentFileResolver).
+        $disk_name = 'public';
 
         // Ticket dueño del adjunto: define la carpeta de la copia.
         $message = $attachment->message;

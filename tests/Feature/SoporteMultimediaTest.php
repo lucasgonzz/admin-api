@@ -1035,4 +1035,161 @@ class SoporteMultimediaTest extends TestCase
         $this->registrar_ffmpeg(null);
         $this->get($url)->assertStatus(200);
     }
+
+    // ------------------------------------------------------------------------------------------------
+    // 7. Seguridad de la ruta de archivos: el disco y la ruta no se toman de la base
+    // ------------------------------------------------------------------------------------------------
+
+    /**
+     * Crea un adjunto con `disk` y `path` arbitrarios, como los que puede escribir la metadata remota del ERP.
+     *
+     * @param SupportTicket $ticket Ticket dueño.
+     * @param string        $disk   Valor de la columna `disk`.
+     * @param string        $path   Valor de la columna `path`.
+     * @param string|null   $mime   Valor de la columna `mime`.
+     *
+     * @return SupportMessageAttachment
+     */
+    private function crear_adjunto_con_disco_y_ruta(SupportTicket $ticket, string $disk, string $path, ?string $mime = 'text/plain'): SupportMessageAttachment
+    {
+        $mensaje = SupportMessage::create([
+            'support_ticket_id' => $ticket->id,
+            'sender_type'       => 'user',
+            'kind'              => 'text',
+            'delivered_at'      => now(),
+        ]);
+
+        return SupportMessageAttachment::create([
+            'support_message_id' => $mensaje->id,
+            'disk'               => $disk,
+            'path'               => $path,
+            'mime'               => $mime,
+            'size'               => 10,
+        ]);
+    }
+
+    /**
+     * Un adjunto con `disk = local` NO sirve archivos de `storage/app` (privado): el disco es siempre `public`.
+     *
+     * Reproducido por el verificador: `disk='local'`, `path='x.txt'` devolvía 200 con contenido privado.
+     *
+     * @return void
+     */
+    public function test_el_disco_de_la_fila_se_ignora_y_no_se_sirve_storage_privado()
+    {
+        Storage::fake('local');
+        Storage::disk('local')->put('x.txt', 'contrato privado');
+        $ticket  = $this->crear_ticket('whatsapp', '+5493417792001');
+        $adjunto = $this->crear_adjunto_con_disco_y_ruta($ticket, 'local', 'x.txt');
+
+        $this->get($adjunto->fresh()->public_url)->assertStatus(404);
+    }
+
+    /**
+     * Si el mismo path existe en `public`, se sirve el de `public` aunque la fila diga otro disco (o uno inexistente).
+     *
+     * @return void
+     */
+    public function test_un_disco_raro_en_la_fila_no_rompe_y_se_sirve_el_de_public()
+    {
+        $ticket = $this->crear_ticket('whatsapp', '+5493417792002');
+        Storage::disk('public')->put('support_messages/' . $ticket->id . '/wa_foto.jpg', "\xFF\xD8\xFF\xE0" . str_repeat("\x00", 20));
+
+        foreach (['s3', 'disco-que-no-existe', ''] as $disco) {
+            $adjunto = $this->crear_adjunto_con_disco_y_ruta($ticket, $disco, 'support_messages/' . $ticket->id . '/wa_foto.jpg', 'image/jpeg');
+            $this->get($adjunto->fresh()->public_url)->assertStatus(200);
+        }
+    }
+
+    /**
+     * Rutas con `..`, absolutas, de un directorio o inexistentes dan 404 y no 500.
+     *
+     * El archivo secreto existe de verdad (en otro disco falso, hermano del `public`), así que un 200 sería una fuga.
+     *
+     * @return void
+     */
+    public function test_rutas_con_traversal_absolutas_o_de_directorio_dan_404()
+    {
+        Storage::fake('local');
+        Storage::disk('local')->put('secreto.txt', 'privado');
+        $ticket = $this->crear_ticket('whatsapp', '+5493417792003');
+        Storage::disk('public')->put('support_messages/' . $ticket->id . '/ok.jpg', 'jpg');
+
+        $rutas = [
+            '../local/secreto.txt',
+            'support_messages/../../local/secreto.txt',
+            Storage::disk('local')->path('secreto.txt'),
+            '/etc/passwd',
+            'C:\\Windows\\win.ini',
+            'support_messages/' . $ticket->id,
+            'support_messages',
+            '.',
+            '..',
+            'no/existe.bin',
+        ];
+
+        foreach ($rutas as $ruta) {
+            $adjunto = $this->crear_adjunto_con_disco_y_ruta($ticket, 'public', $ruta);
+            $respuesta = $this->get($adjunto->fresh()->public_url);
+            $this->assertSame(404, $respuesta->getStatusCode(), 'La ruta "' . $ruta . '" no dio 404.');
+        }
+    }
+
+    /**
+     * El resolvedor no lanza con bytes nulos o rutas vacías: devuelve null.
+     *
+     * @return void
+     */
+    public function test_el_resolvedor_devuelve_null_ante_rutas_invalidas()
+    {
+        $resolvedor = new \App\Services\SupportAttachmentFileResolver();
+
+        $this->assertNull($resolvedor->resolve(''));
+        $this->assertNull($resolvedor->resolve("a\0b.txt"));
+        $this->assertNull($resolvedor->resolve('../../.env'));
+
+        Storage::disk('public')->put('dentro.txt', 'x');
+        $this->assertSame(realpath(Storage::disk('public')->path('dentro.txt')), $resolvedor->resolve('dentro.txt'));
+        $this->assertSame(realpath(Storage::disk('public')->path('dentro.txt')), $resolvedor->resolve('/dentro.txt'));
+    }
+
+    /**
+     * La respuesta es `private`, lleva CSP y nosniff.
+     *
+     * @return void
+     */
+    public function test_la_respuesta_es_private_con_csp_y_nosniff()
+    {
+        $ticket  = $this->crear_ticket('whatsapp', '+5493417792004');
+        $adjunto = $this->crear_adjunto($ticket, 'wa_foto.jpg', "\xFF\xD8\xFF\xE0" . str_repeat("\x00", 20), 'image/jpeg');
+
+        $respuesta = $this->get($adjunto->fresh()->public_url);
+
+        $respuesta->assertStatus(200);
+        $cache = (string) $respuesta->headers->get('Cache-Control');
+        $this->assertStringContainsString('private', $cache);
+        $this->assertStringNotContainsString('public', $cache);
+        $this->assertStringContainsString('max-age=172800', $cache);
+        $this->assertSame("sandbox; default-src 'none'", $respuesta->headers->get('Content-Security-Policy'));
+        $this->assertSame('nosniff', $respuesta->headers->get('X-Content-Type-Options'));
+    }
+
+    /**
+     * Un mime guardado con forma inválida (inyección de cabeceras, basura) no se refleja: octet-stream y descarga.
+     *
+     * @return void
+     */
+    public function test_un_mime_invalido_se_trata_como_binario_y_se_descarga()
+    {
+        $ticket = $this->crear_ticket('whatsapp', '+5493417792005');
+
+        foreach (['text/html<script>', 'image', 'audio/ ogg', '/ogg', 'x y/z'] as $mime) {
+            $adjunto = $this->crear_adjunto($ticket, 'wa_raro_' . md5($mime) . '.bin', 'abc', $mime);
+            $respuesta = $this->get($adjunto->fresh()->public_url);
+
+            $respuesta->assertStatus(200);
+            $this->assertSame('application/octet-stream', $respuesta->headers->get('Content-Type'), 'Mime "' . $mime . '" se reflejó.');
+            $this->assertStringStartsWith('attachment', (string) $respuesta->headers->get('Content-Disposition'), 'Mime "' . $mime . '" salió inline.');
+        }
+    }
 }
