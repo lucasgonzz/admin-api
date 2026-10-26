@@ -90,7 +90,22 @@ class SupportMessage extends Model
         'ai_auto_send_at'         => 'datetime',
         /* Sello de que el texto lo escribió el agente; sobrevive a la aprobación humana. */
         'ai_generated_at'         => 'datetime',
+        /* Ticks de WhatsApp (webhook de estados de Kapso): llegó al teléfono / lo leyó el cliente. */
+        'whatsapp_delivered_at'   => 'datetime',
+        'whatsapp_seen_at'        => 'datetime',
+        /* Reacción del operador a un mensaje del cliente. */
+        'admin_reaction_at'       => 'datetime',
     ];
+
+    /**
+     * Reacciones rápidas que el panel permite mandar al cliente (misma paleta que leads).
+     *
+     * Cada una está en su forma canónica, tal como la manda WhatsApp (el corazón lleva el selector
+     * de variación U+FE0F). Lo que sale a Meta es siempre esta forma, nunca lo que mande el SPA.
+     *
+     * @var array<int, string>
+     */
+    public const REACCIONES_DEL_PANEL = LeadMessage::REACCIONES_DEL_PANEL;
 
     /**
      * Scope estándar para fullModel y respuestas de API.
