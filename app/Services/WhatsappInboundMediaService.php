@@ -637,34 +637,17 @@ class WhatsappInboundMediaService
     }
 
     /**
-     * Deduce extensión de archivo a partir de mime o nombre.
+     * Extensión que corresponde a un mime conocido (imágenes, audio, video y documentos habituales).
      *
-     * Orden: extensión del nombre (si es razonable) → mapa de mimes (ya sin parámetros) → familia del
-     * mime (`audio/*` → ogg, `video/*` → mp4) cuando el llamador no pidió un fallback propio → fallback.
+     * Es la única tabla mime → extensión de los adjuntos de soporte: la usan tanto la entrada (lo que
+     * manda el cliente) como la salida (lo que sube el operador).
      *
-     * @param string      $mime     Mime crudo del adjunto (puede traer parámetros).
-     * @param string|null $filename Nombre original del archivo, si vino.
-     * @param string      $fallback Extensión a usar si nada matchea (los llamadores pasan `bin`).
+     * @param string $mime Mime ya normalizado (sin parámetros, en minúsculas).
      *
-     * @return string
+     * @return string|null La extensión, o null si el mime no está en la tabla.
      */
-    private function resolve_extension(string $mime, ?string $filename, string $fallback): string
+    public function extension_from_mime(string $mime): ?string
     {
-        if ($filename !== null && $filename !== '') {
-            $parts = explode('.', $filename);
-            if (count($parts) > 1) {
-                $ext = strtolower((string) end($parts));
-                // Solo se confía en una extensión corta y alfanumérica, y que no sea la `.bin` genérica:
-                // el nombre viene de un tercero (o se adivinó de la URL) y termina en el disco público.
-                if ($ext !== '' && $ext !== 'bin' && preg_match('/^[a-z0-9]{1,5}$/', $ext)) {
-                    return $ext;
-                }
-            }
-        }
-
-        // Mime sin parámetros: `audio/ogg; codecs=opus` → `audio/ogg`.
-        $clean_mime = $this->normalize_mime($mime);
-
         // Mapa de mimes conocidos → extensión.
         $mime_map = [
             'image/jpeg'         => 'jpg',
@@ -700,8 +683,45 @@ class WhatsappInboundMediaService
             'application/zip'    => 'zip',
         ];
 
-        if (isset($mime_map[$clean_mime])) {
-            return $mime_map[$clean_mime];
+        return isset($mime_map[$mime]) ? $mime_map[$mime] : null;
+    }
+
+    /**
+     * Deduce extensión de archivo a partir de mime o nombre.
+     *
+     * Orden: extensión del nombre (si es razonable) → mapa de mimes (ya sin parámetros) → familia del
+     * mime (`audio/*` → ogg, `video/*` → mp4) cuando el llamador no pidió un fallback propio → fallback.
+     *
+     * @param string      $mime     Mime crudo del adjunto (puede traer parámetros).
+     * @param string|null $filename Nombre original del archivo, si vino.
+     * @param string      $fallback Extensión a usar si nada matchea (los llamadores pasan `bin`).
+     *
+     * @return string
+     */
+    private function resolve_extension(string $mime, ?string $filename, string $fallback): string
+    {
+        if ($filename !== null && $filename !== '') {
+            $parts = explode('.', $filename);
+            if (count($parts) > 1) {
+                $ext = strtolower((string) end($parts));
+                // Solo se confía en una extensión corta y alfanumérica, y que no sea la `.bin` genérica:
+                // el nombre viene de un tercero (o se adivinó de la URL) y termina en el disco público.
+                // Las extensiones ejecutables o renderizables por el navegador (php, html, svg, js…) se
+                // descartan: con ellas el archivo se serviría o correría desde el propio dominio.
+                $is_dangerous = (bool) preg_match('/^(php\d?|phtml|pht|phar|html?|xhtml|shtml|svg|js|mjs|htaccess)$/', $ext);
+                if ($ext !== '' && $ext !== 'bin' && ! $is_dangerous && preg_match('/^[a-z0-9]{1,5}$/', $ext)) {
+                    return $ext;
+                }
+            }
+        }
+
+        // Mime sin parámetros: `audio/ogg; codecs=opus` → `audio/ogg`.
+        $clean_mime = $this->normalize_mime($mime);
+
+        // Extensión del mapa de mimes conocidos.
+        $mapped_extension = $this->extension_from_mime($clean_mime);
+        if ($mapped_extension !== null) {
+            return $mapped_extension;
         }
 
         // Familia del mime, solo si el llamador no pidió un fallback propio (`bin` es el genérico).

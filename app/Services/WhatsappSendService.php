@@ -996,13 +996,24 @@ class WhatsappSendService
     /**
      * Sube un adjunto de audio y lo envía por WhatsApp (nota de voz o audio según formato).
      *
+     * 🔴 El formato se decide mirando los BYTES del archivo (ver {@see AudioContainerSniffer}), no la
+     * extensión ni el mime guardado: declararle a Meta `audio/ogg` sobre algo que no es Ogg/Opus es el
+     * error 131053 (el upload parece andar y el mensaje nunca llega). Lo que WhatsApp no acepta (WebM,
+     * Ogg/Vorbis, WAV, FLAC) se convierte a Ogg/Opus con ffmpeg; si no hay ffmpeg, o falla, el envío
+     * devuelve null y deja el motivo legible en `$last_send_error` (el opener de soporte lo muestra).
+     * El archivo temporal de la conversión se borra siempre.
+     *
      * @param string $to
      * @param object $attachment SupportMessageAttachment con disk/path/mime.
      *
-     * @return string|null
+     * @return string|null whatsapp_message_id de Meta, o null si falló (motivo en `$last_send_error`).
      */
     public function send_audio_attachment(string $to, $attachment): ?string
     {
+        // El motivo y el status de un fallo anterior no deben contaminar este envío.
+        $this->last_send_error = null;
+        $this->last_send_status_code = null;
+
         $context = $this->resolve_send_context();
         if ($context === null) {
             return null;
@@ -1014,51 +1025,178 @@ class WhatsappSendService
             Log::channel('daily')->warning('WhatsappSendService: adjunto de audio no encontrado.', [
                 'path' => $relative_path,
             ]);
+            $this->last_send_error = 'El archivo de audio ya no está en el servidor.';
 
             return null;
         }
 
         $absolute_path = Storage::disk($disk)->path($relative_path);
-        $stored_mime = strtolower((string) ($attachment->mime ?? ''));
-        $extension = strtolower(pathinfo($absolute_path, PATHINFO_EXTENSION));
 
-        // Si el audio es MP4/M4A, intentar convertirlo a OGG/Opus via ffmpeg.
-        // Esto resuelve el error 131053 de Meta ("audio/mp4 processed as application/octet-stream"):
-        // Chrome graba en fragmented MP4 (fMP4) que Meta acepta como upload pero descarta al procesar.
-        // ffmpeg convierte el fMP4 a OGG/Opus que Meta acepta y entrega correctamente.
-        // Si ffmpeg no está disponible (ej: shared hosting), se continúa con el archivo original.
+        // Decide formato, mime, nombre y si va como nota de voz; puede traer un temporal de la conversión.
+        $prepared = $this->prepare_audio_for_whatsapp(
+            $absolute_path,
+            strtolower((string) ($attachment->mime ?? '')),
+            strtolower(pathinfo($absolute_path, PATHINFO_EXTENSION))
+        );
+
+        try {
+            if ($prepared['error'] !== null) {
+                // No es un incidente del servidor sino un audio que no se puede mandar: no se avisa a los admins.
+                $this->last_send_error = $prepared['error'];
+
+                return null;
+            }
+
+            $media_id = $this->upload_media(
+                $context['phone_number_id'],
+                $context['api_key'],
+                $prepared['path'],
+                $prepared['mime'],
+                $prepared['filename']
+            );
+
+            if ($media_id === null) {
+                if ($this->last_send_error === null) {
+                    $this->last_send_error = 'No se pudo subir el audio a WhatsApp.';
+                }
+
+                return null;
+            }
+
+            $message_id = $this->send_audio_by_media_id(
+                $to,
+                $context['phone_number_id'],
+                $context['api_key'],
+                $media_id,
+                $prepared['voice']
+            );
+
+            if ($message_id === null && $this->last_send_error === null) {
+                $this->last_send_error = 'No se pudo enviar el audio por WhatsApp.';
+            }
+
+            return $message_id;
+        } finally {
+            // El temporal de la conversión nunca se queda en el disco, salga bien o mal el envío.
+            if ($prepared['temp_path'] !== null && is_file($prepared['temp_path'])) {
+                @unlink($prepared['temp_path']);
+            }
+        }
+    }
+
+    /**
+     * Decide qué se le sube a Meta para un audio: el archivo tal cual o su conversión a Ogg/Opus.
+     *
+     * Reglas, según el contenedor REAL (bytes mágicos):
+     *  - Ogg/Opus, MP3, AAC y AMR: salen tal cual (Ogg/Opus como nota de voz).
+     *  - MP4/M4A: se convierte a Ogg/Opus si hay ffmpeg (el fMP4 del navegador se sube bien y Meta lo
+     *    descarta al procesar, error 131053); sin ffmpeg sale como `audio/mp4`, que es lo que se hacía.
+     *  - WebM, Ogg/Vorbis (u otro Ogg), WAV y FLAC: WhatsApp no los acepta, así que se convierten; sin
+     *    ffmpeg no hay envío posible y se devuelve el motivo.
+     *  - Contenedor no reconocido: se cae al criterio histórico por mime/extensión (no se rechaza, para
+     *    no romper al audio de leads que ya andaba), y se deja un warning en el log.
+     *
+     * @param string $absolute_path Ruta absoluta del audio guardado.
+     * @param string $stored_mime   Mime guardado en el adjunto (minúsculas, puede venir vacío).
+     * @param string $extension     Extensión del archivo guardado (minúsculas).
+     *
+     * @return array{error: string|null, path: string, mime: string, filename: string, voice: bool, temp_path: string|null}
+     *         `temp_path` es el archivo temporal creado por la conversión (a borrar por quien llama), o null.
+     */
+    private function prepare_audio_for_whatsapp(string $absolute_path, string $stored_mime, string $extension): array
+    {
+        // Contenedor real del archivo, por los bytes.
+        $container = AudioContainerSniffer::sniff_file($absolute_path);
+
+        // Resultado por defecto: el archivo original sin tocar.
+        $prepared = [
+            'error'     => null,
+            'path'      => $absolute_path,
+            'mime'      => 'audio/ogg',
+            'filename'  => 'audio_' . time() . '.ogg',
+            'voice'     => false,
+            'temp_path' => null,
+        ];
+
+        // Formato que WhatsApp acepta tal cual: se declara el mime que corresponde al contenedor real.
+        if (AudioContainerSniffer::is_whatsapp_native($container)) {
+            $prepared['mime'] = AudioContainerSniffer::mime_for((string) $container);
+            $prepared['filename'] = 'audio_' . time() . '.' . AudioContainerSniffer::extension_for((string) $container);
+            // Solo Ogg/Opus es nota de voz.
+            $prepared['voice'] = $container === AudioContainerSniffer::OGG_OPUS;
+
+            return $prepared;
+        }
+
+        // Contenedor no reconocido: criterio histórico por mime y extensión.
+        if ($container === null) {
+            Log::channel('daily')->warning('WhatsappSendService: contenedor de audio no reconocido, se usa el mime/extension guardados.', [
+                'path' => $absolute_path,
+                'mime' => $stored_mime,
+            ]);
+
+            return $this->prepare_audio_legacy($absolute_path, $stored_mime, $extension, $prepared);
+        }
+
+        // WebM, Ogg/Vorbis, WAV, FLAC (siempre) y MP4 (si se puede): conversión a Ogg/Opus con ffmpeg.
+        $converted = $this->convert_audio_to_ogg_opus($absolute_path);
+        if ($converted !== null) {
+            $prepared['path'] = $converted;
+            $prepared['temp_path'] = $converted;
+            $prepared['mime'] = 'audio/ogg';
+            $prepared['filename'] = 'audio_' . time() . '.ogg';
+            $prepared['voice'] = true;
+
+            return $prepared;
+        }
+
+        // Sin conversión: el MP4 sale como siempre; lo demás no se puede mandar.
+        if (AudioContainerSniffer::prefers_conversion($container)) {
+            $prepared['mime'] = 'audio/mp4';
+            $prepared['filename'] = 'audio_' . time() . '.m4a';
+
+            return $prepared;
+        }
+
+        $prepared['error'] = 'El audio está en formato ' . AudioContainerSniffer::label_for($container)
+            . ', que WhatsApp no acepta, y no se pudo convertir (ffmpeg no está disponible o falló). '
+            . 'Grabalo de nuevo o adjuntá un audio OGG/Opus, MP3 o M4A.';
+
+        return $prepared;
+    }
+
+    /**
+     * Criterio histórico (por mime y extensión) para un audio cuyo contenedor no se reconoció.
+     *
+     * Es lo que hacía send_audio_attachment() antes de mirar los bytes; se conserva para no romper
+     * envíos que ya andaban con formatos raros.
+     *
+     * @param string               $absolute_path Ruta absoluta del audio.
+     * @param string               $stored_mime   Mime guardado.
+     * @param string               $extension     Extensión guardada.
+     * @param array<string, mixed> $prepared      Resultado base a completar.
+     *
+     * @return array{error: string|null, path: string, mime: string, filename: string, voice: bool, temp_path: string|null}
+     */
+    private function prepare_audio_legacy(string $absolute_path, string $stored_mime, string $extension, array $prepared): array
+    {
+        // Si el audio dice ser MP4/M4A, se intenta convertirlo a Ogg/Opus (error 131053 de Meta con el fMP4).
         if (strpos($stored_mime, 'mp4') !== false || $extension === 'm4a' || $extension === 'mp4') {
-            $converted = $this->maybe_convert_mp4_to_ogg($absolute_path);
+            $converted = $this->convert_audio_to_ogg_opus($absolute_path);
             if ($converted !== null) {
-                $absolute_path = $converted;
+                $prepared['path'] = $converted;
+                $prepared['temp_path'] = $converted;
                 $stored_mime = 'audio/ogg';
                 $extension = 'ogg';
             }
         }
 
         $whatsapp_mime = $this->resolve_whatsapp_audio_mime($stored_mime, $extension);
-        $upload_filename = $this->resolve_whatsapp_audio_upload_filename($extension, $whatsapp_mime);
-        $voice_note = $this->should_send_as_whatsapp_voice_note($whatsapp_mime, $extension);
+        $prepared['mime'] = $whatsapp_mime;
+        $prepared['filename'] = $this->resolve_whatsapp_audio_upload_filename($extension, $whatsapp_mime);
+        $prepared['voice'] = $this->should_send_as_whatsapp_voice_note($whatsapp_mime, $extension);
 
-        $media_id = $this->upload_media(
-            $context['phone_number_id'],
-            $context['api_key'],
-            $absolute_path,
-            $whatsapp_mime,
-            $upload_filename
-        );
-
-        if ($media_id === null) {
-            return null;
-        }
-
-        return $this->send_audio_by_media_id(
-            $to,
-            $context['phone_number_id'],
-            $context['api_key'],
-            $media_id,
-            $voice_note
-        );
+        return $prepared;
     }
 
     /**
@@ -1331,6 +1469,8 @@ class WhatsappSendService
 
             $message_id = $this->extract_message_id_from_response($response, $normalized_to);
             if ($message_id === null) {
+                // Status real del rechazo (permite distinguir fallos transitorios de definitivos).
+                $this->last_send_status_code = (int) $response->status();
                 $this->notify_admins_of_failure("Envío de audio a {$to}", 'Kapso/Meta no devolvió message_id.', false);
             }
 
@@ -1424,65 +1564,41 @@ class WhatsappSendService
 
 
     /**
-     * Intenta convertir un archivo de audio MP4/fMP4 a OGG/Opus usando ffmpeg.
+     * Convierte un audio (MP4/M4A, WebM, Ogg/Vorbis, WAV…) a Ogg/Opus con ffmpeg.
      *
-     * Chrome y Safari generan fragmented MP4 (fMP4) que Meta acepta como upload pero
-     * descarta silenciosamente al procesar (error 131053: "audio/mp4 processed as
-     * application/octet-stream"). Convertir a OGG/Opus soluciona el problema.
+     * Es lo que WhatsApp acepta como nota de voz. Si ffmpeg no está disponible (shared hosting sin
+     * exec, o simplemente no instalado) o falla, devuelve null y el llamador decide qué hacer sin
+     * romper el flujo. La detección de ffmpeg vive en {@see FfmpegLocator} (sobrescribible en tests).
      *
-     * Si ffmpeg no está disponible (ej: shared hosting sin acceso a exec) devuelve null
-     * y el pipeline continúa con el archivo original sin romper el flujo.
+     * @param string $absolute_path Ruta absoluta del archivo de origen.
      *
-     * @param string $absolute_path Ruta absoluta del archivo MP4/M4A de origen.
-     *
-     * @return string|null Ruta del archivo OGG temporal creado, o null si no fue posible convertir.
+     * @return string|null Ruta del `.ogg` temporal creado (a borrar por quien llama), o null si no se pudo convertir.
      */
-    private function maybe_convert_mp4_to_ogg(string $absolute_path): ?string
+    private function convert_audio_to_ogg_opus(string $absolute_path): ?string
     {
-        // Verificar que exec() esté habilitado y que ffmpeg esté disponible.
-        if (! function_exists('exec')) {
-            return null;
-        }
+        // Localizador de ffmpeg (registrable en el contenedor).
+        $locator = app(FfmpegLocator::class);
 
-        $ffmpeg_path = trim((string) shell_exec('which ffmpeg 2>/dev/null'));
-        if ($ffmpeg_path === '') {
-            Log::channel('daily')->info('WhatsappSendService: ffmpeg no disponible, se omite conversión MP4→OGG.', [
+        $ffmpeg_path = $locator->path();
+        if ($ffmpeg_path === null) {
+            Log::channel('daily')->info('WhatsappSendService: ffmpeg no disponible, se omite la conversión a OGG/Opus.', [
                 'path' => $absolute_path,
             ]);
 
             return null;
         }
 
-        $output_path = sys_get_temp_dir() . '/wa_audio_' . uniqid('', true) . '.ogg';
+        // Temporal de salida; si la conversión falla FfmpegLocator ya lo borra.
+        $output_path = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'wa_audio_' . uniqid('', true) . '.ogg';
 
-        // Convertir a OGG/Opus (-acodec libopus) con calidad estándar para WhatsApp.
-        // -y sobreescribe si ya existe, -loglevel error suprime output no crítico.
-        $command = escapeshellcmd($ffmpeg_path)
-            . ' -y -i ' . escapeshellarg($absolute_path)
-            . ' -acodec libopus -b:a 32k -ar 16000 -ac 1'
-            . ' -loglevel error '
-            . escapeshellarg($output_path)
-            . ' 2>&1';
-
-        exec($command, $output_lines, $exit_code);
-
-        if ($exit_code !== 0 || ! file_exists($output_path) || filesize($output_path) === 0) {
-            Log::channel('daily')->warning('WhatsappSendService: ffmpeg no pudo convertir MP4→OGG.', [
-                'path'      => $absolute_path,
-                'exit_code' => $exit_code,
-                'output'    => implode(' ', $output_lines),
-            ]);
-
-            if (file_exists($output_path)) {
-                @unlink($output_path);
-            }
-
+        // Ogg/Opus mono a 16 kHz y 32 kbps: calidad de nota de voz.
+        $error = $locator->convert_audio($ffmpeg_path, $absolute_path, $output_path, '-c:a libopus -b:a 32k -ar 16000 -ac 1');
+        if ($error !== null) {
             return null;
         }
 
-        Log::channel('daily')->info('WhatsappSendService: MP4 convertido a OGG via ffmpeg.', [
+        Log::channel('daily')->info('WhatsappSendService: audio convertido a OGG/Opus via ffmpeg.', [
             'original' => $absolute_path,
-            'output'   => $output_path,
             'size'     => filesize($output_path),
         ]);
 

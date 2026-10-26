@@ -13,6 +13,7 @@ use App\Services\SupportAiSuggestionDeliveryService;
 use App\Services\SupportAiSuggestionDraftService;
 use App\Services\SupportAttachmentPlaybackService;
 use App\Services\SupportClientSyncService;
+use App\Services\SupportOutboundMediaService;
 use App\Services\SupportWhatsappOpenerService;
 use App\Services\WhatsappInboundMediaService;
 use Illuminate\Http\Request;
@@ -36,14 +37,35 @@ class SupportMessageController extends BaseController
             return response()->json(['error' => 'ticket closed'], 422);
         }
 
+        // Tipo de contenido recibido desde frontend (en WhatsApp se corrige abajo con el que sale de los bytes).
+        $kind = $request->input('kind', 'text');
+
+        // Adjunto ya analizado (kind real, mime y extensión coherentes), o null si no hay archivo.
+        $prepared_attachment = null;
+
+        // Se valida el archivo ANTES de crear nada y antes de pausar al agente: un audio que WhatsApp no va
+        // a aceptar se rechaza acá con un mensaje claro, en vez de dejar un mensaje "enviado" que Meta descarta.
+        if ($request->hasFile('attachment')) {
+            $prepared_attachment = app(SupportOutboundMediaService::class)->prepare(
+                $request->file('attachment'),
+                (string) $kind,
+                $ticket->source === 'whatsapp'
+            );
+
+            if ($prepared_attachment['error'] !== null) {
+                return response()->json(['error' => $prepared_attachment['error']], 422);
+            }
+
+            // El kind real sale del contenido (el SPA puede mandar `text` con un audio adentro).
+            $kind = $prepared_attachment['kind'];
+        }
+
         // Si Lucas toma la conversación, Martín deja de responder en segundo plano.
         app(\App\Services\SupportCodexService::class)->pause_for_human($ticket);
 
         // Respuesta manual del operador: cancela envío automático de sugerencia IA pendiente.
         (new SupportAiSuggestionDraftService())->clear_ticket_pending_state($ticket);
 
-        // Tipo de contenido recibido desde frontend.
-        $kind = $request->input('kind', 'text');
         // Cuerpo textual del mensaje.
         $body = $request->input('body');
         if (is_string($body)) {
@@ -61,19 +83,22 @@ class SupportMessageController extends BaseController
         ]);
 
         // Persiste adjunto si llegó archivo desde formulario.
-        if ($request->hasFile('attachment')) {
+        if ($prepared_attachment !== null) {
             // Archivo enviado por operador.
             $attachment_file = $request->file('attachment');
             // Carpeta lógica por ticket.
             $directory = 'support_messages/' . $ticket->id;
+            // Nombre propio con la extensión que corresponde a lo que el archivo ES (no a lo que dijo el navegador).
+            $stored_name = 'out_' . now()->format('Ymd_His') . '_' . substr(md5(uniqid('', true)), 0, 8)
+                . '.' . $prepared_attachment['extension'];
             // Guardado en disco público para acceso controlado.
-            $stored_path = $attachment_file->store($directory, 'public');
+            $stored_path = Storage::disk('public')->putFileAs($directory, $attachment_file, $stored_name);
 
             SupportMessageAttachment::create([
                 'support_message_id' => $message->id,
                 'disk' => 'public',
                 'path' => $stored_path,
-                'mime' => $attachment_file->getMimeType(),
+                'mime' => $prepared_attachment['mime'],
                 'size' => $attachment_file->getSize(),
             ]);
         }
