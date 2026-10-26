@@ -32,8 +32,10 @@ use App\Services\ImplementationBroadcastService;
 use App\Services\ImplementationFormMapper;
 use App\Services\ImplementationSettings;
 use App\Services\ImplementationStartService;
+use App\Services\ImplementationSupportWhatsappService;
 use App\Services\PromoteLeadToClientService;
 use App\Services\SubdomainSuggestionService;
+use App\Services\SupportCodexService;
 use App\Services\UserSetupCandadoService;
 use Carbon\Carbon;
 use Illuminate\Contracts\Cache\LockTimeoutException;
@@ -85,8 +87,11 @@ use Illuminate\Support\Str;
  *    re-aplicarlo, se hace desde el panel, con una persona mirando.
  *  - Disparar `handle_stage_advance` al avanzar de etapa. En este camino la instalación la crea
  *    `install`, no la entrada a la etapa 2.
- *  - Mandar un WhatsApp. Los mensajes a clientes salen por WhatsApp Web, desde la skill y con el
- *    ok de Lucas; acá solo se REGISTRAN (`actions`).
+ *  - Mandar un WhatsApp por WhatsApp Web. Lo que sale desde el teléfono de Lucas solo se REGISTRA
+ *    (`actions`). Desde el 26/10/2026 (misión `hitos-de-implementacion-por-soporte`) los hitos salen
+ *    por el TICKET DE SOPORTE del contacto con `whatsapp` (sección 8), con el ok de Lucas en el
+ *    dry-run: así la conversación queda donde la lee Martín. El envío en sí vive en
+ *    `ImplementationSupportWhatsappService` y en `SupportWhatsappOpenerService`, no acá.
  */
 class ClaudeImplementationOpsController extends Controller
 {
@@ -304,6 +309,25 @@ class ClaudeImplementationOpsController extends Controller
      * cada hito lo arma el servicio (el texto, la casilla y el remitente no se eligen desde afuera).
      */
     const PARAMETROS_DEL_MAIL = ['hito', 'datos', 'email', 'reenviar', 'dry_run', 'confirm_client_name'];
+
+    /**
+     * Lista blanca de `POST claude/implementations/{id}/whatsapp` (misión `hitos-de-implementacion-por-soporte`,
+     * 26/10/2026). Cualquier otra clave es 422: un `plantilla`, un `forzar` o un `ticket_id` suelen ser alguien
+     * esperando elegir lo que acá decide el opener de soporte (texto libre o plantilla según la ventana, y el
+     * ticket que corresponde al contacto).
+     */
+    const PARAMETROS_DEL_WHATSAPP = ['texto', 'accion', 'etapa', 'telefono', 'operation_id', 'dry_run', 'confirm_client_name'];
+
+    /**
+     * Las acciones que se pueden mandar por el ticket de soporte: las de `ACCIONES` menos `nota`, que es una
+     * anotación interna y no un mensaje al cliente (para eso está `actions` con `accion=nota`).
+     *
+     * @var array<int, string>
+     */
+    const ACCIONES_DEL_WHATSAPP = ['presentacion', 'form_link', 'progreso', 'pedir_archivos', 'entrega', 'acceso', 'imagenes', 'categorias', 'descripciones', 'listo'];
+
+    /** Patrón de `operation_id`: el mismo alfabeto que la clave idempotente de `support-codex/.../reply`. */
+    const PATRON_DE_OPERATION_ID = '/^[A-Za-z0-9_-]+$/';
 
     /** Lista blanca de la lectura del estado por id. */
     const PARAMETROS_DE_LA_LECTURA = ['include'];
@@ -4155,6 +4179,347 @@ class ClaudeImplementationOpsController extends Controller
             'para_enmascarado' => ImplementacionMailHelper::enmascarar((string) $fila->email),
             'error'            => $this->recortar($fila->error),
         ];
+    }
+
+    /* ==============================================================================================
+     | 8) POST claude/implementations/{id}/whatsapp — el WHATSAPP de un hito, por el ticket de soporte
+     |============================================================================================= */
+
+    /**
+     * Manda (o simula) el WhatsApp de un hito de la implementación por el TICKET DE SOPORTE del contacto, por
+     * el número de Kapso del admin (misión `hitos-de-implementacion-por-soporte`, 26/10/2026).
+     *
+     * 🔴 POR QUÉ. Hasta acá los hitos salían por WhatsApp Web desde el teléfono de Lucas y solo se registraban
+     * (`actions`): lo que el cliente contestaba entraba al ticket de soporte y lo que se le había dicho no, así
+     * que Martín leía media conversación. Por acá sale por el ticket —el mismo envío del botón «Nueva
+     * conversación por WhatsApp» de la bandeja— y la conversación entera queda ahí.
+     *
+     * 🔴 ESTE ENDPOINT SOLO PONE LOS FRENOS Y ARMA LA RESPUESTA. El envío (reusar o abrir el ticket, texto
+     * libre o plantilla según la ventana) es `SupportWhatsappOpenerService::open()`, y los frenos previos, la
+     * idempotencia y el registro en la etapa viven en `ImplementationSupportWhatsappService`.
+     *
+     * Frenos, en este orden:
+     *   1. Lista blanca de parámetros y tipos (422).
+     *   2. La implementación y su cliente (404); el cliente activo (422 `cliente_inactivo`: el webhook no
+     *      reconoce a uno dado de baja y su respuesta caería en leads); la etapa cargada (422 `sin_etapa`).
+     *   3. El contacto: `telefono` tiene que ser un contacto del cliente (422 `telefono_ajeno`); sin
+     *      `telefono`, el del dueño (422 `sin_contacto` si no tiene uno válido).
+     *   4. `dry_run` (default TRUE): devuelve qué ticket se usaría, la ventana, si sale por plantilla, lo que
+     *      recibiría el cliente (`vista_previa`) y los impedimentos. No manda ni escribe nada.
+     *   5. Con `dry_run=false`: `operation_id` obligatorio y `confirm_client_name` exacto (`clients.name`).
+     *   6. Idempotencia: la misma `operation_id` con el mismo contenido devuelve el resultado guardado sin
+     *      reenviar (`repetida: true`); con otro contenido, 409 `operation_id_reusado`; si la primera sigue
+     *      mandando (o su proceso murió en el medio), 409 `envio_en_curso`.
+     *   7. Ventana cerrada y texto de más de 600 caracteres: 422 `texto_largo_para_plantilla` (la plantilla
+     *      lo cortaría). Martín atendiendo el ticket (reserva vigente): 423 `martin_atendiendo`. En ninguno
+     *      de los dos se manda nada, y el caso de Martín NO pasa a `manual_review`.
+     *
+     * Un envío que falla (Kapso, Meta) NO tira: vuelve 200 con `enviado: false`, `estado: failed` y el motivo.
+     * 🔴 Un `failed` no se reintenta solo con la misma clave (devuelve el `failed` guardado): reintentar es una
+     * decisión, con una `operation_id` nueva.
+     *
+     * @param Request    $request Body: texto, accion, etapa?, telefono?, operation_id?, dry_run?, confirm_client_name?.
+     * @param int|string $id      Id de la implementación (segmento de la URL).
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function whatsapp_json(Request $request, $id)
+    {
+        /* --- Freno 1: lista blanca y tipos. --- */
+        $rechazo = $this->rechazar_parametros_de_mas($request, self::PARAMETROS_DEL_WHATSAPP, 'POST claude/implementations/{id}/whatsapp');
+        if ($rechazo !== null) {
+            return $rechazo;
+        }
+
+        $invalido = $this->validar_o_422($request, [
+            'texto'               => 'required|string|max:4000',
+            'accion'              => 'required|string|in:' . implode(',', self::ACCIONES_DEL_WHATSAPP),
+            'etapa'               => 'nullable|integer|between:1,' . Implementation::ETAPA_HEREDADA,
+            'telefono'            => 'nullable|string|max:30',
+            'operation_id'        => 'required_if:dry_run,false|nullable|string|min:8|max:80|regex:' . self::PATRON_DE_OPERATION_ID,
+            'dry_run'             => 'nullable|boolean',
+            'confirm_client_name' => 'required_if:dry_run,false|nullable|string|max:190',
+        ]);
+        if ($invalido !== null) {
+            return $invalido;
+        }
+
+        $texto = trim((string) $request->input('texto'));
+        if ($texto === '') {
+            return $this->error_422('El texto no puede estar vacío. No se mandó nada.', ['motivo' => 'texto_vacio']);
+        }
+
+        /* --- Freno 2: la implementación, el cliente y la etapa. --- */
+        $implementation = Implementation::find((int) $id);
+        if ($implementation === null) {
+            return $this->error_404('no existe la implementación ' . (int) $id);
+        }
+
+        $client = Client::find((int) $implementation->client_id);
+        if ($client === null) {
+            return $this->error_404('la implementación ' . (int) $id . ' apunta a un cliente que no existe');
+        }
+
+        if (! $client->is_active) {
+            return $this->error_422(
+                'El cliente ' . (int) $client->id . ' está dado de baja: el webhook no lo reconoce y su respuesta caería en el pipeline de leads. No se mandó nada.',
+                ['motivo' => 'cliente_inactivo', 'client_id' => (int) $client->id]
+            );
+        }
+
+        $accion       = (string) $request->input('accion');
+        $operation_id = $this->texto_o_null($request->input('operation_id'));
+        $dry_run      = $this->resolver_dry_run($request);
+        $etapa        = $this->entero_o_null($request->input('etapa'));
+        $etapa        = $etapa === null ? (int) $implementation->current_stage : $etapa;
+
+        $tiene_la_etapa = ImplementationStage::where('implementation_id', $implementation->id)->where('stage_number', $etapa)->exists();
+        if (! $tiene_la_etapa) {
+            return $this->error_422(
+                'La implementación ' . (int) $implementation->id . ' no tiene la etapa ' . $etapa . ' cargada. No se mandó nada.',
+                ['motivo' => 'sin_etapa', 'implementation_id' => (int) $implementation->id, 'etapa' => $etapa]
+            );
+        }
+
+        /* --- Freno 3: el contacto y el remitente. --- */
+        $servicio = app(ImplementationSupportWhatsappService::class);
+        $resuelto = $servicio->resolver_contacto($client, $this->texto_o_null($request->input('telefono')));
+        $contacto = $resuelto['contacto'];
+
+        if ($contacto === null) {
+            return $this->error_422(
+                $resuelto['motivo'] === 'telefono_ajeno'
+                    ? 'Ese teléfono no es un contacto del cliente (ni el dueño, ni un empleado, ni el lead promovido). No se mandó nada.'
+                    : 'El cliente no tiene un teléfono válido en la ficha y no mandaste `telefono`. No se mandó nada.',
+                [
+                    'motivo' => $resuelto['motivo'],
+                    'ayuda'  => 'Cargá el número en la ficha del cliente (o como empleado) en el admin: si no, el webhook no reconoce la respuesta '
+                        . 'y cae en el pipeline de leads.',
+                ]
+            );
+        }
+
+        $telefono = (string) $contacto['phone'];
+
+        /* Sin sesión de Sanctum: el remitente es el admin con el que `claude/*` firma lo que hace. */
+        $admin = $this->resolver_creador();
+        if ($admin === null) {
+            return $this->error_422(
+                'No hay ningún admin en la base para figurar como remitente del mensaje. No se mandó nada.',
+                ['motivo' => 'sin_admin']
+            );
+        }
+
+        $huella = $servicio->huella($texto, $accion, $etapa, $telefono);
+
+        /* --- Freno 4: el simulacro. --- */
+        if ($dry_run) {
+            $plan   = $servicio->plan($client, $contacto, $texto, $admin);
+            $previa = $operation_id === null ? null : $servicio->buscar_operacion($implementation, $operation_id);
+
+            $nota = 'Simulacro: no se mandó ni se escribió nada. ';
+            if (in_array('texto_largo_para_plantilla', $plan['impedimentos'], true)) {
+                $nota .= 'La ventana está cerrada y el texto pasa de ' . $plan['tope_para_plantilla']
+                    . ' caracteres: el real daría 422; acortalo o esperá a que el cliente escriba. ';
+            }
+            if (in_array('martin_atendiendo', $plan['impedimentos'], true)) {
+                $nota .= 'Martín está atendiendo ese ticket: el real daría 423; probá cuando termine. ';
+            }
+            $nota .= 'Repetí con dry_run=false, una operation_id nueva y confirm_client_name para mandarlo.';
+
+            return response()->json(array_merge($this->bloque_del_plan_del_whatsapp($plan, $accion, $etapa, $telefono), [
+                'dry_run'          => true,
+                'listo'            => count($plan['impedimentos']) === 0,
+                'operacion_previa' => $previa === null ? null : [
+                    'etapa'           => $previa['etapa'],
+                    'mismo_contenido' => isset($previa['operacion']['huella']) && $previa['operacion']['huella'] === $huella,
+                    'estado'          => isset($previa['operacion']['estado']) ? (string) $previa['operacion']['estado'] : null,
+                ],
+                'nota'             => $nota,
+            ]), 200);
+        }
+
+        /* --- Freno 5: confirmación por nombre. --- */
+        $rechazo = $this->rechazar_si_el_nombre_del_cliente_no_confirma($request, $client, 'No se mandó nada.');
+        if ($rechazo !== null) {
+            return $rechazo;
+        }
+
+        /* --- Freno 6: idempotencia (lectura). Un reintento de algo que ya terminó no vuelve a mirar la ventana
+           ni la reserva de Martín: devuelve lo que pasó. --- */
+        $previa = $servicio->buscar_operacion($implementation, $operation_id);
+        if ($previa !== null) {
+            return $this->respuesta_de_una_operacion_previa($previa, $huella, $operation_id);
+        }
+
+        /* --- Freno 7: la ventana y Martín. --- */
+        $plan = $servicio->plan($client, $contacto, $texto, $admin);
+
+        if (in_array('texto_largo_para_plantilla', $plan['impedimentos'], true)) {
+            return $this->error_422(
+                'La ventana de 24 h está cerrada y el texto tiene ' . $plan['largo_para_plantilla'] . ' caracteres: por plantilla el tope es '
+                    . $plan['tope_para_plantilla'] . ' y le llegaría cortado. No se mandó nada.',
+                [
+                    'motivo'          => 'texto_largo_para_plantilla',
+                    'ventana_abierta' => false,
+                    'largo'           => $plan['largo_para_plantilla'],
+                    'tope'            => $plan['tope_para_plantilla'],
+                    'ayuda'           => 'Acortalo (un primer mensaje corto que invite a contestar) o esperá a que el cliente escriba y mandalo con la ventana abierta.',
+                ]
+            );
+        }
+
+        if (in_array('martin_atendiendo', $plan['impedimentos'], true)) {
+            return response()->json([
+                'error'         => 'Martín está atendiendo ese ticket ahora (reserva vigente hasta ' . $plan['reserva_de_martin_hasta'] . '). No se mandó nada.',
+                'motivo'        => 'martin_atendiendo',
+                'ticket_id'     => $plan['ticket'] === null ? null : (int) $plan['ticket']->id,
+                'reserva_hasta' => $plan['reserva_de_martin_hasta'],
+                'ayuda'         => 'Probá de nuevo cuando termine (la reserva dura ' . SupportCodexService::LEASE_MINUTES . ' minutos). El caso de Martín no se tocó.',
+            ], 423);
+        }
+
+        /* --- La reserva (con la búsqueda repetida bajo lock), el envío y el registro. --- */
+        $reserva = $servicio->reservar($implementation, $etapa, $operation_id, $huella, $accion);
+
+        if ($reserva['sin_etapa']) {
+            return $this->error_422(
+                'La implementación ' . (int) $implementation->id . ' no tiene la etapa ' . $etapa . ' cargada. No se mandó nada.',
+                ['motivo' => 'sin_etapa', 'implementation_id' => (int) $implementation->id, 'etapa' => $etapa]
+            );
+        }
+
+        if (! $reserva['reservada']) {
+            return $this->respuesta_de_una_operacion_previa($reserva['existente'], $huella, $operation_id);
+        }
+
+        $resultado = $servicio->enviar($client, $contacto, $texto, $admin);
+        $operacion = $servicio->registrar($implementation, $etapa, $operation_id, $accion, $texto, $telefono, $resultado);
+
+        return response()->json($this->respuesta_de_la_operacion($operacion, $operation_id, $accion, $etapa, false), 200);
+    }
+
+    /**
+     * Lo que el dry-run muestra del plan del envío (sin el ticket como modelo ni la ventana cruda).
+     *
+     * El teléfono va ENMASCARADO: la respuesta la lee una sesión que la pega en una conversación, y para saber
+     * a quién va alcanza con el final y el nombre del contacto.
+     *
+     * @param array<string, mixed> $plan     Lo que devolvió `ImplementationSupportWhatsappService::plan()`.
+     * @param string               $accion   La acción.
+     * @param int                  $etapa    La etapa donde se registraría.
+     * @param string               $telefono El teléfono E.164.
+     *
+     * @return array<string, mixed>
+     */
+    protected function bloque_del_plan_del_whatsapp(array $plan, $accion, $etapa, $telefono)
+    {
+        return [
+            'accion'               => $accion,
+            'etapa'                => (int) $etapa,
+            'destino'              => [
+                'telefono' => $this->enmascarar_un_numero($telefono),
+                'contacto' => $plan['contacto_nombre'],
+                'rol'      => $plan['contacto_rol'],
+            ],
+            'ticket_id'            => $plan['ticket'] === null ? null : (int) $plan['ticket']->id,
+            'reusaria_ticket'      => $plan['reusaria_ticket'],
+            'ventana_abierta'      => $plan['ventana_abierta'],
+            'ventana_vence_at'     => isset($plan['ventana']['expires_at']) ? $plan['ventana']['expires_at'] : null,
+            'uso_plantilla'        => $plan['uso_plantilla'],
+            'plantilla'            => $plan['plantilla'],
+            'partes'               => $plan['partes'],
+            'largo_para_plantilla' => $plan['largo_para_plantilla'],
+            'tope_para_plantilla'  => $plan['tope_para_plantilla'],
+            'remitente'            => $plan['remitente'],
+            'vista_previa'         => $plan['vista_previa'],
+            'martin_atendiendo'    => $plan['martin_atendiendo'],
+            'impedimentos'         => $plan['impedimentos'],
+        ];
+    }
+
+    /**
+     * La respuesta ante una `operation_id` que ya existe: el resultado guardado si es el mismo contenido y ya
+     * terminó; 409 si es otro contenido o si todavía está mandando.
+     *
+     * @param array{etapa: int, operacion: array<string, mixed>} $previa       La operación encontrada.
+     * @param string                                              $huella       La huella del pedido de ahora.
+     * @param string                                              $operation_id La clave.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    protected function respuesta_de_una_operacion_previa(array $previa, $huella, $operation_id)
+    {
+        $operacion = $previa['operacion'];
+
+        if (! isset($operacion['huella']) || $operacion['huella'] !== $huella) {
+            return response()->json([
+                'error'        => 'La operation_id ' . $operation_id . ' ya se usó para OTRO mensaje (otro texto, acción, etapa o destinatario). No se mandó nada.',
+                'motivo'       => 'operation_id_reusado',
+                'operation_id' => (string) $operation_id,
+                'ayuda'        => 'Cada mensaje lleva su propia operation_id: generá una nueva.',
+            ], 409);
+        }
+
+        $estado = isset($operacion['estado']) ? (string) $operacion['estado'] : null;
+
+        if ($estado === ImplementationSupportWhatsappService::ESTADO_ENVIANDO) {
+            return response()->json([
+                'error'        => 'La operación ' . $operation_id . ' se está mandando (o su proceso se cortó en el medio): todavía no se sabe si salió. No se mandó nada.',
+                'motivo'       => 'envio_en_curso',
+                'operation_id' => (string) $operation_id,
+                'reservada_at' => isset($operacion['reservada_at']) ? (string) $operacion['reservada_at'] : null,
+                'ayuda'        => 'Esperá unos segundos y repetí con la misma operation_id. Si sigue así varios minutos, mirá el ticket del contacto en la bandeja '
+                    . 'antes de mandar nada con otra clave.',
+            ], 409);
+        }
+
+        $accion = isset($operacion['accion']) ? (string) $operacion['accion'] : null;
+
+        return response()->json($this->respuesta_de_la_operacion($operacion, $operation_id, $accion, (int) $previa['etapa'], true), 200);
+    }
+
+    /**
+     * El cuerpo de la respuesta de un envío real (nuevo o repetido), con las claves del contrato.
+     *
+     * @param array<string, mixed> $operacion    La operación guardada.
+     * @param string               $operation_id La clave.
+     * @param string|null          $accion       La acción.
+     * @param int                  $etapa        La etapa donde quedó.
+     * @param bool                 $repetida     true = es el resultado guardado de una llamada anterior.
+     *
+     * @return array<string, mixed>
+     */
+    protected function respuesta_de_la_operacion(array $operacion, $operation_id, $accion, $etapa, $repetida)
+    {
+        $leer = function ($clave) use ($operacion) {
+            return array_key_exists($clave, $operacion) ? $operacion[$clave] : null;
+        };
+
+        $respuesta = [
+            'dry_run'             => false,
+            'repetida'            => (bool) $repetida,
+            'operation_id'        => (string) $operation_id,
+            'accion'              => $accion,
+            'etapa'               => (int) $etapa,
+            'enviado'             => (bool) $leer('enviado'),
+            'estado'              => $leer('estado'),
+            'uso_plantilla'       => $leer('uso_plantilla'),
+            'ventana_abierta'     => $leer('ventana_abierta'),
+            'ticket_id'           => $leer('ticket_id'),
+            'message_id'          => $leer('message_id'),
+            'whatsapp_message_id' => $leer('whatsapp_message_id'),
+            'reusado'             => $leer('reusado'),
+            'error'               => $leer('error'),
+            'at'                  => $leer('terminada_at'),
+        ];
+
+        if (array_key_exists('partes_enviadas', $operacion)) {
+            $respuesta['partes_enviadas'] = $operacion['partes_enviadas'];
+            $respuesta['partes_totales']  = $leer('partes_totales');
+        }
+
+        return $respuesta;
     }
 
     /* ==============================================================================================

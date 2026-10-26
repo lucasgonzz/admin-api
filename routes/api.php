@@ -713,6 +713,16 @@ Route::middleware('claude.task.key')
         Route::post('implementations/{id}/mail', 'Api\ClaudeImplementationOpsController@mail_json')
             ->whereNumber('id');
 
+        /* El WHATSAPP de cada hito, por el TICKET DE SOPORTE del contacto (número de Kapso del admin), no por
+           WhatsApp Web (misión hitos-de-implementacion-por-soporte, 26/10/2026): así la conversación entera
+           queda donde la lee Martín. Envía con SupportWhatsappOpenerService::open() (reusa o abre el ticket;
+           texto libre con la ventana abierta, plantilla cc_soporte_apertura si está cerrada) y registra la
+           acción en data.actions[] de la etapa. Frenos: lista blanca, dry_run por defecto, confirm_client_name,
+           operation_id idempotente (409 con otro contenido), 422 con texto largo y ventana cerrada, 423 si
+           Martín tiene la reserva del ticket. Lógica en ImplementationSupportWhatsappService. */
+        Route::post('implementations/{id}/whatsapp', 'Api\ClaudeImplementationOpsController@whatsapp_json')
+            ->whereNumber('id');
+
         /* Centro de recursos para clientes (misión centro-de-recursos-clientes, 13/10/2026). La carga del catálogo la
            manda `publicar_centro.py` después de subir los videos a R2: upsert por `codigo` y, con desactivar_faltantes,
            los que no vinieron quedan inactivos (nunca se borran: tienen avance). Borra la caché del catálogo público.

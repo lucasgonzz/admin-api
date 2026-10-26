@@ -747,9 +747,14 @@ class SupportWhatsappOpenerService
      * @param int|null $client_employee_id Empleado, si el contacto es un empleado.
      * @param bool     $lock               Si hay que bloquear la fila hasta cerrar la transacción.
      *
+     * 🔴 Es pública desde el 26/10/2026 (misión `hitos-de-implementacion-por-soporte`): el envío de los
+     * hitos de la implementación (`ImplementationSupportWhatsappService::plan()`) tiene que saber, ANTES
+     * de mandar, qué ticket va a reusar `open()` para frenar si Martín lo está atendiendo. Se expone esta
+     * misma consulta en vez de copiarla: dos criterios de reuso terminarían mirando tickets distintos.
+     *
      * @return SupportTicket|null
      */
-    private function find_reusable_ticket(Client $client, string $normalized_phone, $client_employee_id, bool $lock = false)
+    public function find_reusable_ticket(Client $client, string $normalized_phone, $client_employee_id, bool $lock = false)
     {
         $query = SupportTicket::where('client_id', $client->id)
             ->where('source', 'whatsapp')
