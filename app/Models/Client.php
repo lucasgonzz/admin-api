@@ -108,6 +108,8 @@ class Client extends Model
          * y no lleva cast. */
         'contract_precios_sistemas'          => 'array',
         'contract_descuento_conjunto'        => 'float',
+        'contract_pago_anual'                => 'boolean',
+        'contract_descuento_anual'            => 'float',
         'contract_mes_gratis'                => 'boolean',
         'contract_sistemas'                  => 'array',
         'contract_permanencia_meses'         => 'integer',

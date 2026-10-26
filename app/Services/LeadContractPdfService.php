@@ -161,13 +161,26 @@ class LeadContractPdfService
             ? ContractPreciosService::resumen($lead->contract_precios_sistemas, is_array($sistemas_raw) ? $sistemas_raw : [], (float) ($lead->contract_descuento_conjunto ?? 300))
             : null;
 
-        if ($desglose !== null) {
-            $total_mensual = self::calculate_monthly_total((string) $desglose['mensualidad'], $usuarios_extra, $lead->contract_precio_usuario_extra, $perfiles_ecommerce, $lead->contract_precio_perfil_ecommerce);
+        $pago_anual = (bool) $lead->contract_pago_anual;
+        $base_numerica = $desglose !== null ? $desglose['mensualidad'] : ClientContratoService::monto_desde_texto($lead->contract_mensualidad_base);
+        $precio_extra_numerico = ClientContratoService::monto_desde_texto($lead->contract_precio_usuario_extra);
+        $total_usuarios_extra = round($usuarios_extra * $precio_extra_numerico, 2);
+        $total_perfiles = round($perfiles_ecommerce * ClientContratoService::monto_desde_texto($lead->contract_precio_perfil_ecommerce), 2);
+        $adicionales_mensuales = round($total_usuarios_extra + $total_perfiles, 2);
+        if ($desglose !== null || $pago_anual) {
+            $total_mensual = round($base_numerica + $adicionales_mensuales, 2);
         }
+        $anual = $pago_anual ? ContractPreciosService::resumen_anual((float) $base_numerica, (float) ($lead->contract_descuento_anual ?? 20)) : null;
 
         return array_merge(self::build_signature_data($lead, $incluir_firma), [
             'desglose_precios' => $desglose,
             'mes_gratis' => (bool) $lead->contract_mes_gratis,
+            'pago_anual' => $pago_anual,
+            'abono_anual' => $anual,
+            'total_usuarios_extra' => $total_usuarios_extra,
+            'total_perfiles' => $total_perfiles,
+            'adicionales_mensuales' => $adicionales_mensuales,
+            'precio_usuario_extra_formateado' => $lead->contract_precio_usuario_extra === null || $lead->contract_precio_usuario_extra === '' ? null : self::format_amount_for_display($precio_extra_numerico),
             'cc_nombre_fantasia'   => 'ComercioCity',
             'cc_razon_social'      => 'Lucas González',
             'cc_cuit'              => '20-42354898-4',
@@ -186,7 +199,7 @@ class LeadContractPdfService
             'clausulas'            => $clausulas_filas,
 
             'mensualidad_moneda'          => $mensualidad_moneda,
-            'mensualidad_base'            => $desglose !== null ? self::format_amount_for_display($desglose['mensualidad']) : $lead->contract_mensualidad_base,
+            'mensualidad_base'            => $desglose !== null || $pago_anual ? self::format_amount_for_display($base_numerica) : $lead->contract_mensualidad_base,
             'usuarios_incluidos'          => $lead->contract_usuarios_incluidos ?? 1,
             'usuarios_extra'              => $usuarios_extra,
             'precio_usuario_extra'        => $lead->contract_precio_usuario_extra,

@@ -140,7 +140,7 @@
             font-style: italic;
             color: #444444;
         }
-@if($desglose_precios !== null)
+@if($desglose_precios !== null || $pago_anual)
         h2.section-title, .etapa-title { page-break-after: avoid; }
 @endif
     </style>
@@ -325,51 +325,67 @@
     </p>
 
     {{-- Sección 5 — Mensualidad --}}
-    <h2 class="section-title">5. Servicio mensual continuo</h2>
+    <h2 class="section-title">{{ $pago_anual ? '5. Abono anual y adicionales mensuales' : '5. Servicio mensual continuo' }}</h2>
+@if($pago_anual)
+    <table class="data-table" style="page-break-inside: avoid;">
+        <thead><tr><th>Abono base por doce meses</th><th>Importe</th></tr></thead>
+        <tbody>
+            <tr><td>Base mensual de referencia de los sistemas contratados</td><td>{{ $mensualidad_moneda }} {{ number_format($abono_anual['base_mensual'], 2, ',', '.') }}</td></tr>
+            <tr><td>Doce (12) meses de abono base, antes del descuento</td><td>{{ $mensualidad_moneda }} {{ number_format($abono_anual['bruto'], 2, ',', '.') }}</td></tr>
+            <tr><td>Descuento por pago anual anticipado: {{ number_format($abono_anual['porcentaje'], 2, ',', '.') }}%</td><td>- {{ $mensualidad_moneda }} {{ number_format($abono_anual['descuento'], 2, ',', '.') }}</td></tr>
+            <tr class="total-row"><td>TOTAL ANUAL ANTICIPADO DEL ABONO BASE</td><td>{{ $mensualidad_moneda }} {{ number_format($abono_anual['total'], 2, ',', '.') }}</td></tr>
+        </tbody>
+    </table>
+    <p>El pago anual anticipado cubre doce (12) meses del abono base de los sistemas contratados. Durante esos doce meses no se vuelve a cobrar mensualmente ese abono base ni se aplica IPC sobre el importe ya pagado. Los valores mensuales que se muestran a continuación son de referencia para la base cubierta; los adicionales se cobran por separado.</p>
+@endif
     <table class="data-table">
         <thead>
             <tr>
                 <th style="width:28%;">Concepto</th>
                 <th style="width:44%;">Detalle</th>
-                <th style="width:28%;">Importe mensual</th>
+                <th style="width:28%;">{{ $pago_anual ? 'Referencia / adicional mensual' : 'Importe mensual' }}</th>
             </tr>
         </thead>
         <tbody>
 @if($desglose_precios !== null)
             @foreach($desglose_precios['filas'] as $fila)
-            <tr><td>{{ $fila['label'] }}</td><td>Abono del sistema contratado</td><td>{{ $mensualidad_moneda }} {{ number_format($fila['mensualidad'], 2, ',', '.') }}</td></tr>
+            <tr><td>{{ $fila['label'] }}</td><td>{{ $pago_anual ? 'Referencia mensual; cubierta en el pago anual' : 'Abono del sistema contratado' }}</td><td>{{ $mensualidad_moneda }} {{ number_format($fila['mensualidad'], 2, ',', '.') }}</td></tr>
             @endforeach
 @endif
             <tr class="row-white">
-                <td>{{ $desglose_precios !== null ? 'Subtotal del abono base' : 'Mensualidad base' }}</td>
-                <td>Servicio continuo de la plataforma ({{ $usuarios_incluidos }} usuario{{ $usuarios_incluidos == 1 ? '' : 's' }} incluido{{ $usuarios_incluidos == 1 ? '' : 's' }})</td>
+                <td>{{ $pago_anual ? 'Base mensual de referencia' : ($desglose_precios !== null ? 'Subtotal del abono base' : 'Mensualidad base') }}</td>
+                <td>Servicio continuo de la plataforma ({{ $usuarios_incluidos }} usuario{{ $usuarios_incluidos == 1 ? '' : 's' }} incluido{{ $usuarios_incluidos == 1 ? '' : 's' }}){{ $pago_anual ? '; cubierto en el pago anual' : '' }}</td>
                 <td>{{ $mensualidad_moneda }} {{ $mensualidad_base ?? '—' }}</td>
             </tr>
-            @if($usuarios_extra > 0)
+            @if($usuarios_extra > 0 || $desglose_precios !== null || $pago_anual)
                 <tr class="row-alt">
                     <td>Usuarios adicionales</td>
-                    <td>{{ $usuarios_extra }} usuario{{ $usuarios_extra == 1 ? '' : 's' }} extra × {{ $mensualidad_moneda }} {{ $precio_usuario_extra }}</td>
-                    <td>{{ $mensualidad_moneda }} {{ number_format($usuarios_extra * (float) preg_replace('/[^0-9.,]/', '', (string) ($precio_usuario_extra ?? 0)), 0, ',', '.') }}</td>
+                    <td>{{ $usuarios_extra }} usuario{{ $usuarios_extra == 1 ? '' : 's' }} extra × {{ $mensualidad_moneda }} {{ $desglose_precios !== null || $pago_anual ? ($precio_usuario_extra_formateado ?? 'sin precio pactado') : $precio_usuario_extra }}</td>
+                    <td>{{ $mensualidad_moneda }} {{ $desglose_precios !== null || $pago_anual ? number_format($total_usuarios_extra, 2, ',', '.') : number_format($usuarios_extra * (float) preg_replace('/[^0-9.,]/', '', (string) ($precio_usuario_extra ?? 0)), 0, ',', '.') }}</td>
                 </tr>
             @endif
             @if($perfiles_ecommerce > 0)
                 <tr class="{{ $usuarios_extra > 0 ? 'row-white' : 'row-alt' }}">
                     <td>Módulo ecommerce</td>
                     <td>{{ $perfiles_ecommerce }} perfil{{ $perfiles_ecommerce == 1 ? '' : 'es' }} × {{ $mensualidad_moneda }} {{ $precio_perfil_ecommerce }}</td>
-                    <td>{{ $mensualidad_moneda }} {{ number_format($perfiles_ecommerce * (float) preg_replace('/[^0-9.,]/', '', (string) ($precio_perfil_ecommerce ?? 0)), 0, ',', '.') }}</td>
+                    <td>{{ $mensualidad_moneda }} {{ $desglose_precios !== null || $pago_anual ? number_format($total_perfiles, 2, ',', '.') : number_format($perfiles_ecommerce * (float) preg_replace('/[^0-9.,]/', '', (string) ($precio_perfil_ecommerce ?? 0)), 0, ',', '.') }}</td>
                 </tr>
             @endif
             <tr class="total-row">
-                <td colspan="2" style="text-align:right;"><strong>TOTAL MENSUAL</strong></td>
-                <td><strong>{{ $mensualidad_moneda }} {{ $total_mensual_formateado }}</strong></td>
+                <td colspan="2" style="text-align:right;"><strong>{{ $pago_anual ? 'ADICIONALES A ABONAR MES A MES' : 'TOTAL MENSUAL' }}</strong></td>
+                <td><strong>{{ $mensualidad_moneda }} {{ $pago_anual ? number_format($adicionales_mensuales, 2, ',', '.') : $total_mensual_formateado }}</strong></td>
             </tr>
         </tbody>
     </table>
+    <p><strong>Precio por cada usuario extra:</strong> {{ $precio_usuario_extra_formateado !== null ? $mensualidad_moneda . ' ' . $precio_usuario_extra_formateado : 'sin precio pactado en este contrato' }} por mes. Los usuarios extra se abonan mes a mes según la cantidad existente en cada período.</p>
+@if($pago_anual)
+    <p>Los usuarios extra quedan fuera del pago anual del abono base: no se cobran por adelantado, no reciben descuento anual y no quedan congelados por ese adelanto. Los importes de los adicionales mensuales indicados se pagan separadamente.</p>
+@endif
 @if($mes_gratis)
-    <p><strong>Un mes gratis:</strong> el CLIENTE tendrá bonificado el primer mes del servicio mensual continuo de los sistemas contratados, contado desde la puesta en marcha. El primer pago de la mensualidad corresponderá al período siguiente al mes bonificado.</p>
+    <p><strong>Un mes gratis:</strong> el CLIENTE tendrá bonificado el primer mes del servicio mensual continuo de los sistemas contratados, contado desde la puesta en marcha. {{ $pago_anual ? 'Los doce (12) meses pagos del abono anual comienzan en el período siguiente al mes bonificado; el mes gratis no se resta del cálculo de las doce mensualidades del adelanto.' : 'El primer pago de la mensualidad corresponderá al período siguiente al mes bonificado.' }}</p>
 @endif
     @if($fecha_primer_pago_mensual)
-        <p>El primer pago de la mensualidad deberá realizarse el <strong>{{ $fecha_primer_pago_mensual }}</strong>.</p>
+        <p>{{ $pago_anual ? 'El primer pago anual anticipado deberá realizarse el' : 'El primer pago de la mensualidad deberá realizarse el' }} <strong>{{ $fecha_primer_pago_mensual }}</strong>.</p>
     @endif
     {{-- Cada cuántos meses se actualiza por IPC: variable desde la misión modulo-cobranzas (18/9/2026).
          El texto ("seis (6) meses") lo arma LeadContractPdfService::meses_en_letras(); el `??` es la red
@@ -378,10 +394,14 @@
          5.1 es la letra chica de la modalidad (Licencia: la mensualidad es de por vida y solo se
          ajusta por IPC; Suscripción: plazo mínimo y después la lista vigente) y 5.2 los consumos de
          terceros (los mensajes de WhatsApp que cobra Meta), que solo van si se contrató Agentes. --}}
+@if($pago_anual)
+    <p>El abono base pagado por adelantado no se ajusta por IPC durante los doce (12) meses cubiertos. Los usuarios extra y los demás adicionales mensuales quedan fuera de esa cobertura y podrán actualizarse cada <strong>{{ $meses_actualizacion_texto }}</strong> conforme al índice IPC publicado por el INDEC, con un aviso previo de <strong>quince (15) días</strong> al CLIENTE. Al terminar la cobertura anual, el abono base continúa sujeto a las condiciones de actualización por IPC pactadas en este contrato.</p>
+@else
     <p>
         Los importes de la mensualidad podrán actualizarse cada <strong>{{ $meses_actualizacion_texto ?? 'seis (6) meses' }}</strong> conforme al índice IPC publicado por el INDEC,
         con un aviso previo de <strong>quince (15) días</strong> al CLIENTE.
     </p>
+@endif
 @if($modalidad === 'licencia')
     <div class="clausula-particular">
         <p class="clausula-titulo">5.1 — Mensualidad de por vida</p>
@@ -389,8 +409,7 @@
             En la modalidad Licencia, la mensualidad base pactada en este contrato es de por vida: solo podrá modificarse por la actualización
             por IPC prevista en el párrafo anterior, y no por cambios en la lista de precios de ComercioCity. Incluye las versiones nuevas de los
             sistemas contratados, el soporte y la infraestructura en la nube. No incluye: (a) sistemas o módulos que el CLIENTE no haya contratado
-            en este acuerdo, ni los que ComercioCity lance en el futuro; (b) los usuarios adicionales que se sumen después de la firma, que se
-            cobran al precio de lista vigente en ese momento; (c) los consumos de terceros que se detallan en este contrato. Si el servicio
+            en este acuerdo, ni los que ComercioCity lance en el futuro; (b) {{ $desglose_precios !== null || $pago_anual ? 'los usuarios adicionales, que se cobran por separado al precio por usuario pactado en este contrato, según la cantidad existente cada mes y con la actualización por IPC prevista;' : 'los usuarios adicionales que se sumen después de la firma, que se cobran al precio de lista vigente en ese momento;' }} (c) los consumos de terceros que se detallan en este contrato. Si el servicio
             mensual se da de baja —por rescisión del CLIENTE o por falta de pago— y luego se retoma, la mensualidad pasa a ser la de la lista
             vigente al momento de retomarlo.
         </p>

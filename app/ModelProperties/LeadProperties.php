@@ -877,6 +877,20 @@ class LeadProperties
                 'show' => false,
             ],
             [
+                'key' => 'contract_pago_anual',
+                'text' => 'Contrato — contract_pago_anual',
+                'type' => 'text',
+                'value' => null,
+                'show' => false,
+            ],
+            [
+                'key' => 'contract_descuento_anual',
+                'text' => 'Contrato — contract_descuento_anual',
+                'type' => 'text',
+                'value' => null,
+                'show' => false,
+            ],
+            [
                 'key' => 'contract_mes_gratis',
                 'text' => 'Contrato — contract_mes_gratis',
                 'type' => 'text',
