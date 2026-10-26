@@ -112,6 +112,8 @@ class SupportCodexService
                 'id' => (int) $ticket->client_id,
                 'name' => $ticket->client ? $ticket->client->resolve_display_name() : 'Cliente',
                 'api_url' => $ticket->client ? $ticket->client->api_url : null,
+                // El programa local de Martín ubica la bitácora de la implementación por slug cuando no hay estado.json.
+                'slug' => $ticket->client ? $ticket->client->slug : null,
             ],
             'contact_name' => $ticket->resolve_contact_display_name(),
             'contact_role' => $ticket->client_employee_id ? 'employee' : 'owner',
@@ -125,6 +127,9 @@ class SupportCodexService
             'expected_message_id' => $last ? (int) $last->id : null,
             'window' => app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone),
             'client_context' => app(SupportClientContextService::class)->bloque_para_el_prompt($ticket),
+            /* La implementación del sistema y de la tienda (abierta, o cerrada hace ≤ 30 días), para que
+             * Martín siga la conversación de la implementación donde la dejó Lucas. null = no tiene. */
+            'implementation' => app(SupportImplementationContextService::class)->bloque_para_el_ticket($ticket),
             'messages' => $messages->map(function ($message) use ($ticket) {
                 return [
                     'id' => (int) $message->id,
