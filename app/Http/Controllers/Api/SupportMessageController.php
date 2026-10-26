@@ -11,11 +11,15 @@ use App\Models\SupportTicket;
 use App\Models\SupportTypingState;
 use App\Services\SupportAiSuggestionDeliveryService;
 use App\Services\SupportAiSuggestionDraftService;
+use App\Services\SupportAttachmentPlaybackService;
 use App\Services\SupportClientSyncService;
 use App\Services\SupportWhatsappOpenerService;
+use App\Services\WhatsappInboundMediaService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
+use League\Flysystem\Adapter\Local;
 
 class SupportMessageController extends BaseController
 {
@@ -94,6 +98,133 @@ class SupportMessageController extends BaseController
         event(new SupportMessageReceived($message->id));
 
         return response()->json(['model' => $message], 201);
+    }
+
+    /**
+     * Sirve el archivo de un adjunto de soporte por URL firmada (imagen, audio, video o documento).
+     *
+     * Reemplaza al `/storage/<path>` directo del SPA, que dependía del symlink y dejaba el Content-Type
+     * en manos del servidor web por extensión (un `.bin` salía como octet-stream). Acá:
+     *  - Responde con BinaryFileResponse (`response()->file()`), que soporta `Range` y contesta 206:
+     *    iOS Safari exige rangos para reproducir audio y video. NO se usa `Storage::response()` porque
+     *    en Laravel 8 devuelve un StreamedResponse sin rangos.
+     *  - El Content-Type es el mime guardado SIN parámetros (`audio/ogg; codecs=opus` → `audio/ogg`).
+     *  - Inline solo para image/* (menos svg), audio/*, video/* y application/pdf. Todo lo demás
+     *    (html, svg, js…) se fuerza como descarga: el archivo lo manda un tercero y, servido inline,
+     *    correría desde el origen del admin.
+     *  - `?disposition=attachment` fuerza la descarga; `?playable=1` en un audio que Safari no
+     *    reproduce (ogg/webm/amr) sirve la copia `.m4a` si hay ffmpeg, o el original si no.
+     *
+     * @param Request    $request Petición con la firma en la query (la valida el middleware `signed`).
+     * @param int|string $id      Id de support_message_attachments.
+     *
+     * @return \Symfony\Component\HttpFoundation\Response
+     */
+    public function serve_attachment_file(Request $request, $id)
+    {
+        // Defensa extra: la ruta ya tiene el middleware `signed`, pero el archivo es de un tercero.
+        if (! $request->hasValidSignature()) {
+            abort(403, 'Enlace de adjunto inválido o expirado.');
+        }
+
+        // Adjunto pedido (404 si el id no existe).
+        $attachment = SupportMessageAttachment::query()->findOrFail($id);
+
+        // Disco donde se guardó el archivo.
+        $disk_name = trim((string) ($attachment->disk ?? 'public'));
+        if ($disk_name === '') {
+            $disk_name = 'public';
+        }
+
+        // Ruta relativa dentro del disco; 404 si el registro o el archivo ya no están.
+        $relative_path = trim((string) ($attachment->path ?? ''));
+        $disk = Storage::disk($disk_name);
+        if ($relative_path === '' || ! $disk->exists($relative_path)) {
+            abort(404, 'Adjunto no encontrado.');
+        }
+
+        // Solo un disco local permite BinaryFileResponse (y con eso los rangos); en otros se cae a Storage::response().
+        $is_local_disk = $disk->getDriver()->getAdapter() instanceof Local;
+
+        // Mime guardado, sin parámetros y en minúsculas.
+        $media_service = app(WhatsappInboundMediaService::class);
+        $mime = $media_service->normalize_mime((string) ($attachment->mime ?? ''));
+
+        // Nombre con el que se baja el archivo.
+        $download_name = basename($relative_path);
+
+        // Ruta absoluta del archivo a servir (solo disco local).
+        $absolute_path = $is_local_disk ? $disk->path($relative_path) : null;
+
+        // Sin mime guardado: se lo deduce de los bytes; y si tampoco, octet-stream.
+        if ($mime === '' && $absolute_path !== null) {
+            $detected_mime = @mime_content_type($absolute_path);
+            $mime = $detected_mime !== false ? $media_service->normalize_mime((string) $detected_mime) : '';
+        }
+        if ($mime === '') {
+            $mime = 'application/octet-stream';
+        }
+
+        // Audio que Safari no reproduce: si piden la versión reproducible y hay ffmpeg, se sirve la copia .m4a.
+        $wants_playable = (string) $request->query('playable', '') === '1';
+        if ($wants_playable && $absolute_path !== null) {
+            $playback_service = app(SupportAttachmentPlaybackService::class);
+            if ($playback_service->needs_transcoding($mime, $relative_path)) {
+                $playable_path = $playback_service->playable_absolute_path($attachment, $absolute_path);
+                if ($playable_path !== null) {
+                    $absolute_path = $playable_path;
+                    $mime = 'audio/mp4';
+                    $download_name = pathinfo($download_name, PATHINFO_FILENAME) . '.m4a';
+                }
+            }
+        }
+
+        // Inline solo para tipos que el navegador muestra sin ejecutar nada propio del archivo.
+        $is_inline_allowed = $this->is_inline_safe_mime($mime);
+        $force_download = strtolower(trim((string) $request->query('disposition', ''))) === 'attachment';
+        $disposition = ($is_inline_allowed && ! $force_download) ? 'inline' : 'attachment';
+
+        // Cabeceras comunes: la misma ventana que la firma de la URL (el navegador no vuelve a pedir el archivo).
+        $headers = [
+            'Content-Type'           => $mime,
+            'Cache-Control'          => 'private, max-age=172800',
+            'X-Content-Type-Options' => 'nosniff',
+        ];
+
+        // Disco que no es local: no hay rangos, pero se sirve igual con las mismas reglas.
+        if ($absolute_path === null) {
+            return $disk->response($relative_path, $download_name, $headers, $disposition);
+        }
+
+        // Nombre alternativo solo ASCII para la cabecera Content-Disposition.
+        $fallback_name = preg_replace('/[^\x20-\x7e]|[%\/\\\\]/', '_', $download_name);
+
+        // BinaryFileResponse: Accept-Ranges y 206 los resuelve Symfony al preparar la respuesta.
+        $response = response()->file($absolute_path, $headers);
+        $response->setContentDisposition($disposition, $download_name, $fallback_name);
+
+        return $response;
+    }
+
+    /**
+     * Indica si un mime se puede mostrar inline sin riesgo: imágenes (sin svg), audio, video y PDF.
+     *
+     * @param string $mime Mime normalizado (sin parámetros).
+     *
+     * @return bool
+     */
+    private function is_inline_safe_mime(string $mime): bool
+    {
+        // El SVG es un documento con scripts: nunca inline.
+        if (strpos($mime, 'svg') !== false) {
+            return false;
+        }
+
+        if (strpos($mime, 'image/') === 0 || strpos($mime, 'audio/') === 0 || strpos($mime, 'video/') === 0) {
+            return true;
+        }
+
+        return $mime === 'application/pdf';
     }
 
     /**

@@ -736,6 +736,12 @@ Route::prefix('admin')->group(function () {
         ->name('lead.message.attachment.file')
         ->middleware('signed');
 
+    /* Adjuntos de soporte (imagen, audio, video, documento): URL firmada, igual que los de lead. Responde con
+       BinaryFileResponse para que el navegador pueda pedir rangos (206): iOS Safari lo exige para reproducir audio/video. */
+    Route::get('support-message-attachment/{id}/file', [\App\Http\Controllers\Api\SupportMessageController::class, 'serve_attachment_file'])
+        ->name('support.message.attachment.file')
+        ->middleware('signed');
+
     Route::middleware('auth:sanctum')->group(function () {
         Route::post('logout', [AuthController::class, 'logout']);
         Route::get('me', [AuthController::class, 'me']);
