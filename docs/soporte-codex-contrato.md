@@ -51,7 +51,7 @@ Respuesta: `{lease_token,lease_expires_at,ticket:<contexto>}`. La reserva dura 1
 
 `client.slug` (string o null) es el slug del cliente en el admin: el programa local lo usa para ubicar la bitácora de la implementación cuando no tiene su `estado.json`.
 
-`implementation` (objeto o null, desde el 26/10/2026) es la implementación del cliente, la del sistema y la de la tienda. Es `null` si no tiene ninguna abierta (todo estado distinto de `completed`) ni cerrada hace 30 días o menos. Una `completed` sin `completed_at` no viaja. Un consumidor que no la conozca la puede ignorar, y la clave ausente equivale a `null`:
+`implementation` (objeto o null, desde el 26/10/2026) es la implementación del cliente, la del sistema y la de la tienda. Es `null` si no tiene ninguna abierta ni cerrada hace 30 días o menos. **Abierta es solo `status: in_progress`**; una `paused` o `pending` no viaja (ni como abierta ni como cerrada). Cerrada reciente es `completed` con `completed_at` en los últimos 30 días; una `completed` sin `completed_at` no viaja. Un consumidor que no la conozca la puede ignorar, y la clave ausente equivale a `null`:
 
 ```json
 {
@@ -63,7 +63,8 @@ Respuesta: `{lease_token,lease_expires_at,ticket:<contexto>}`. La reserva dura 1
                "acciones":[{"accion":"form_link","at":"...","canal":"whatsapp_web"}]}],
     "form_submitted_at":"...","user_setup_executed_at":null,
     "form_link":"https://.../configuracion/<token>",
-    "tienda_contratada":true,"sistema_url":"https://cliente.comerciocity.com",
+    "tienda_contratada":true,"entrega_hecha":true,"sistema_url":"https://cliente.comerciocity.com",
+    "instalacion":{"estado":"completada","at":"..."},
     "mails":[{"hito":"bienvenida","estado":"enviado","enviado_at":"..."}],
     "conversacion":[{"direction":"outbound","etapa":1,"canal":"whatsapp_web","body":"...","at":"..."}]
   },
@@ -71,7 +72,7 @@ Respuesta: `{lease_token,lease_expires_at,ticket:<contexto>}`. La reserva dura 1
     "id":3,"status":"in_progress","abierta":true,"started_at":"...","completed_at":null,
     "etapa_actual":{"numero":3,"nombre":"Instalación del API"},
     "etapas":[{"numero":1,"nombre":"Configuración de la tienda","estado":"completed","started_at":"...","completed_at":"..."}],
-    "dominio":"comercio.com.ar",
+    "dominio":"comercio.com.ar","activa":false,
     "conversacion":[{"direction":"inbound","etapa":2,"canal":"whatsapp","body":"...","at":"..."}]
   }
 }
@@ -81,9 +82,12 @@ Respuesta: `{lease_token,lease_expires_at,ticket:<contexto>}`. La reserva dura 1
 - `acciones`: lo que registraron el panel y `/implementar` en la etapa (`canal` null para las del panel). Solo qué, cuándo y por dónde: el texto y el teléfono de la acción no viajan.
 - `conversacion`: los últimos 40 mensajes del sistema o 20 de la tienda, en orden cronológico, cada `body` recortado a 2000 caracteres (con «…» al final si se cortó). `canal` es `whatsapp_web` cuando el mensaje lo registró `/implementar` desde WhatsApp Web (`whatsapp_message_id` con prefijo `waweb-`) y `whatsapp` en otro caso.
 - Una cerrada hace 30 días o menos viaja resumida: `abierta:false`, con `conversacion` y `form_link` en `null`.
-- `form_link` solo llega cuando el contacto del ticket es el dueño (`contact_role: owner`) y la implementación está abierta; a un empleado le llega `null`.
+- `form_link` y `conversacion` (de las dos implementaciones) solo llegan cuando el contacto del ticket es el dueño (`contact_role: owner`) y la implementación está abierta; a un empleado le llegan `null`.
 - `tienda_contratada`: `true`/`false` según el contrato, `null` si el contrato no lo dice.
-- **Sin datos personales:** no viajan teléfonos (ni el del dueño ni el del responsable de la migración), casillas de mail ni respuestas del formulario.
+- `entrega_hecha` (bool): `true` si la etapa 5 o una posterior está `completed`, o si hay una acción `acceso` o `entrega` registrada en cualquier etapa (la entrega se registra mientras la 5 sigue `in_progress`). `sistema_url` viaja solo con `entrega_hecha: true`; si no, `null`.
+- `instalacion`: `{estado, at}` de la última instalación `kind: completa` del cliente (de su API activa, si tiene), o `null` si no hay. `estado` es el valor real de `client_installations.status`: `pendiente`, `instalando`, `completada` o `fallida`. `at` es `finished_at`, o si no terminó `started_at` (o la creación de la fila).
+- `tienda.activa` (bool): `true` si la tienda online está `status: active` o si la etapa 5 de la tienda está `completed`.
+- **Datos personales.** No viajan los teléfonos de las fichas (ni el del dueño ni el del responsable de la migración), las casillas de mail ni las respuestas del formulario. En cada `body` de la conversación del dueño se enmascaran, en este orden: cualquier URL que contenga el token del formulario o empiece con la URL base del formulario (`implementation_form_url`) → `[link del formulario]`; lo que sigue a «contraseña» o «clave» (saltando `:`/`=` y un conector como «es», «era», «nueva») hasta el fin de esa palabra → `[oculta]`; y toda secuencia de 8 o más dígitos, aun con un espacio, guión o punto entre dígitos (teléfonos, CUIT, DNI, con su `+`) → `[número]`. Una fecha escrita con guiones (`2026-10-26`) también cae en la última regla.
 - Si no se pudo leer, el bloque llega como `{"sistema":null,"tienda":null,"error":"..."}` en vez de `null`, para que no se lea como «no tiene implementación».
 
 Los últimos 100 mensajes reales se devuelven en orden cronológico; no incluye borradores. Los adjuntos traen `{id,mime,size,download_path}`; `GET tickets/{id}/attachments/{attachment_id}` sirve el binario con la misma autenticación y valida su pertenencia al ticket.
