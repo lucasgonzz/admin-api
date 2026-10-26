@@ -312,6 +312,11 @@ Route::middleware('claude.task.key')
         Route::post('support-codex/operations/{operation_id}/reconcile', 'Api\ClaudeSupportCodexController@reconcile');
         Route::post('support-codex/tickets/{id}/claim', 'Api\ClaudeSupportCodexController@claim');
         Route::get('support-codex/tickets/{id}', 'Api\ClaudeSupportCodexController@show');
+        /* Los tickets ANTERIORES del mismo cliente (hasta 5, cualquier estado, sin el actual), para que Martín
+           sepa dónde quedó una conversación ya cerrada. Solo lectura, sin reserva (misión
+           hitos-de-implementacion-por-soporte, 26/10/2026). */
+        Route::get('support-codex/tickets/{id}/history', 'Api\ClaudeSupportCodexController@history')
+            ->whereNumber('id');
         Route::post('support-codex/tickets/{id}/reply', 'Api\ClaudeSupportCodexController@reply');
         Route::post('support-codex/tickets/{id}/release', 'Api\ClaudeSupportCodexController@release');
         Route::post('support-codex/tickets/{id}/resume', 'Api\ClaudeSupportCodexController@resume');

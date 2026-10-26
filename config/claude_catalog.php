@@ -110,7 +110,11 @@ return [
             'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => [],
         ],
         'GET api/claude/support-codex/tickets/{id}' => [
-            'para_que' => 'Contexto del ticket: cliente, últimos 100 mensajes reales, adjuntos, misión preparada y ventana WhatsApp; sin claves.',
+            'para_que' => 'Contexto del ticket: cliente, últimos 100 mensajes reales, adjuntos, misión preparada, ventana WhatsApp, la implementación del cliente y previous_tickets (resumen de hasta 5 tickets anteriores: id, status, opened_at, closed_at, mensajes; el detalle con GET .../history); sin claves.',
+            'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => [],
+        ],
+        'GET api/claude/support-codex/tickets/{id}/history' => [
+            'para_que' => 'Los tickets ANTERIORES del cliente del ticket (hasta 5, el más nuevo primero, sin el actual, en cualquier estado) con su contacto y sus últimos 30 mensajes reales (orden cronológico, sin borradores) y adjuntos, para saber dónde quedó una conversación ya cerrada. Si el contacto del ticket es un empleado, solo los tickets de ese empleado; si es el dueño, todos. El download_path de cada adjunto apunta a la ruta de adjuntos de SU ticket. Solo lectura, sin reserva; el cliente sale del ticket, nunca de un parámetro.',
             'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => [],
         ],
         'GET api/claude/support-codex/tickets/{id}/attachments/{attachment_id}' => [

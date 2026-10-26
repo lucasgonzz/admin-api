@@ -48,6 +48,25 @@ class ClaudeSupportCodexController extends Controller
         return response()->json(['ticket' => $service->context(SupportTicket::findOrFail($id))]);
     }
 
+    /**
+     * Los tickets anteriores del cliente del ticket (hasta 5, sin el actual, cualquier estado), con sus últimos
+     * 30 mensajes reales y sus adjuntos. Si el contacto es un empleado, solo los de ese empleado.
+     *
+     * Solo lectura y sin reserva (misión `hitos-de-implementacion-por-soporte`, 26/10/2026): Martín la pide
+     * cuando el resumen `previous_tickets` del contexto le dice que hay conversaciones anteriores que le
+     * sirven (dónde quedó la implementación, un problema que vuelve). El cliente sale SIEMPRE del ticket, no
+     * de un parámetro. 404 si el ticket no existe.
+     *
+     * @param int|string          $id      Id del ticket actual.
+     * @param SupportCodexService $service El servicio del puente.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function history($id, SupportCodexService $service)
+    {
+        return response()->json($service->history(SupportTicket::findOrFail($id)));
+    }
+
     public function reply(Request $request, $id, SupportCodexService $service)
     {
         $data = $request->validate([

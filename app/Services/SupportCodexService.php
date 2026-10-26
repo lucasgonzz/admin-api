@@ -17,6 +17,16 @@ class SupportCodexService
 {
     const LEASE_MINUTES = 15;
 
+    /**
+     * Cuántos tickets ANTERIORES del cliente viajan en `previous_tickets` y en `history` (misión
+     * `hitos-de-implementacion-por-soporte`, 26/10/2026). Cinco alcanzan para saber dónde quedó una
+     * implementación o un problema recurrente sin cargarle a Martín el archivo entero del cliente.
+     */
+    const TICKETS_ANTERIORES = 5;
+
+    /** Cuántos mensajes reales (los últimos) de cada ticket anterior devuelve `history`. */
+    const MENSAJES_POR_TICKET_ANTERIOR = 30;
+
     public function pending(): array
     {
         $settings = SupportCodexSettings::to_array();
@@ -130,6 +140,9 @@ class SupportCodexService
             /* La implementación del sistema y de la tienda (abierta, o cerrada hace ≤ 30 días), para que
              * Martín siga la conversación de la implementación donde la dejó Lucas. null = no tiene. */
             'implementation' => app(SupportImplementationContextService::class)->bloque_para_el_ticket($ticket),
+            /* Los tickets anteriores del cliente, resumidos (hasta 5, sin el actual; de un empleado, solo los
+             * suyos), para que Martín sepa que existen y los pida con GET .../history si le hacen falta. */
+            'previous_tickets' => $this->previous_tickets($ticket),
             'messages' => $messages->map(function ($message) use ($ticket) {
                 return [
                     'id' => (int) $message->id,
@@ -148,6 +161,130 @@ class SupportCodexService
                 ];
             })->all(),
         ];
+    }
+
+    /**
+     * Los tickets anteriores del cliente, resumidos, para el bloque `previous_tickets` del contexto:
+     * `[{id, status, opened_at, closed_at, mensajes}]`, donde `mensajes` es cuántos mensajes reales tiene
+     * (sin los borradores del agente).
+     *
+     * Misma regla que `history()` (ver `consulta_de_tickets_anteriores()`): hasta 5, el más nuevo primero, sin
+     * el actual, en cualquier estado; si el contacto del ticket es un empleado, solo los de ese empleado.
+     *
+     * @param SupportTicket $ticket El ticket que se está atendiendo.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function previous_tickets(SupportTicket $ticket): array
+    {
+        $consulta = $this->consulta_de_tickets_anteriores($ticket);
+        if ($consulta === null) {
+            return [];
+        }
+
+        $tickets = $consulta->withCount(['messages as mensajes_reales' => function ($mensajes) {
+            SupportMessage::apply_mensaje_real_conditions($mensajes, 'support_messages');
+        }])->get();
+
+        return $tickets->map(function (SupportTicket $anterior) {
+            return [
+                'id' => (int) $anterior->id,
+                'status' => $anterior->status,
+                'opened_at' => $anterior->opened_at ? $anterior->opened_at->toIso8601String() : null,
+                'closed_at' => $anterior->closed_at ? $anterior->closed_at->toIso8601String() : null,
+                'mensajes' => (int) $anterior->mensajes_reales,
+            ];
+        })->values()->all();
+    }
+
+    /**
+     * Los tickets anteriores del cliente con su conversación, para `GET support-codex/tickets/{id}/history`.
+     *
+     * Hasta 5 tickets (el más nuevo primero, sin el actual, en cualquier estado), cada uno con su contacto y
+     * sus últimos 30 mensajes REALES en orden cronológico (sin los borradores del agente), con los adjuntos.
+     * 🔴 El `download_path` de un adjunto apunta a la ruta de adjuntos del TICKET ANTERIOR
+     * (`tickets/{anterior}/attachments/{aid}`), que ya valida que el adjunto sea de ese ticket: no hace falta
+     * otra ruta ni aflojar la que hay.
+     *
+     * Es solo lectura y no pide reserva: no cambia nada del caso ni del ticket.
+     *
+     * @param SupportTicket $ticket El ticket que se está atendiendo.
+     *
+     * @return array<string, mixed> `{ticket_id, client_id, contact_role, tickets:[...]}`.
+     */
+    public function history(SupportTicket $ticket): array
+    {
+        $consulta = $this->consulta_de_tickets_anteriores($ticket);
+        $tickets = $consulta === null ? collect() : $consulta->with('client', 'client_employee')->get();
+
+        return [
+            'ticket_id' => (int) $ticket->id,
+            'client_id' => $ticket->client_id ? (int) $ticket->client_id : null,
+            'contact_role' => $ticket->client_employee_id ? 'employee' : 'owner',
+            'tickets' => $tickets->map(function (SupportTicket $anterior) {
+                $mensajes = SupportMessage::where('support_ticket_id', $anterior->id);
+                SupportMessage::apply_mensaje_real_conditions($mensajes, 'support_messages');
+                $mensajes = $mensajes->with('attachments')->orderByDesc('id')
+                    ->limit(self::MENSAJES_POR_TICKET_ANTERIOR)->get()->reverse()->values();
+
+                return [
+                    'id' => (int) $anterior->id,
+                    'status' => $anterior->status,
+                    'opened_at' => $anterior->opened_at ? $anterior->opened_at->toIso8601String() : null,
+                    'closed_at' => $anterior->closed_at ? $anterior->closed_at->toIso8601String() : null,
+                    'contact_name' => $anterior->resolve_contact_display_name(),
+                    'contact_role' => $anterior->client_employee_id ? 'employee' : 'owner',
+                    'messages' => $mensajes->map(function (SupportMessage $mensaje) use ($anterior) {
+                        return [
+                            'id' => (int) $mensaje->id,
+                            'sender_type' => $mensaje->sender_type,
+                            'body' => $mensaje->body,
+                            'kind' => $mensaje->kind,
+                            'created_at' => $mensaje->created_at ? $mensaje->created_at->toIso8601String() : null,
+                            'attachments' => $mensaje->attachments->map(function ($adjunto) use ($anterior) {
+                                return [
+                                    'id' => (int) $adjunto->id,
+                                    'mime' => $adjunto->mime,
+                                    'size' => $adjunto->size,
+                                    'download_path' => '/api/claude/support-codex/tickets/' . $anterior->id . '/attachments/' . $adjunto->id,
+                                ];
+                            })->all(),
+                        ];
+                    })->all(),
+                ];
+            })->values()->all(),
+        ];
+    }
+
+    /**
+     * La consulta de los tickets anteriores de un ticket: los del mismo `client_id`, sin el actual, el más nuevo
+     * primero (por id: es el orden de creación), hasta `TICKETS_ANTERIORES`, en cualquier estado y de cualquier
+     * canal.
+     *
+     * 🔴 EMPLEADOS. Si el contacto del ticket es un empleado (`client_employee_id`), solo los tickets de ESE
+     * empleado: lo que el dueño u otro empleado hablaron con soporte no es de él. Si es el dueño, todos los del
+     * cliente (los de sus empleados incluidos).
+     *
+     * Un ticket sin cliente no tiene anteriores (null): con `client_id` vacío la consulta juntaría los tickets
+     * sueltos de todos los clientes.
+     *
+     * @param SupportTicket $ticket El ticket actual.
+     *
+     * @return \Illuminate\Database\Eloquent\Builder|null
+     */
+    private function consulta_de_tickets_anteriores(SupportTicket $ticket)
+    {
+        if (empty($ticket->client_id)) {
+            return null;
+        }
+
+        $consulta = SupportTicket::where('client_id', (int) $ticket->client_id)->where('id', '!=', (int) $ticket->id);
+
+        if ($ticket->client_employee_id) {
+            $consulta->where('client_employee_id', (int) $ticket->client_employee_id);
+        }
+
+        return $consulta->orderByDesc('id')->limit(self::TICKETS_ANTERIORES);
     }
 
     public function reply(int $id, array $input): array
