@@ -16,6 +16,22 @@ use Illuminate\Support\Facades\Storage;
 class WhatsappInboundMediaService
 {
     /**
+     * Extensiones que se aceptan tal cual del nombre de archivo que manda un tercero (lista permitida).
+     *
+     * Imágenes, audio, video, PDF, documentos de oficina, zip, txt y csv. Nada ejecutable ni renderizable
+     * por el navegador (php, html, svg, js…).
+     *
+     * @var array<int, string>
+     */
+    const SAFE_EXTENSIONS = [
+        'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif',
+        'ogg', 'oga', 'opus', 'mp3', 'm4a', 'aac', 'amr', 'wav', 'weba',
+        'mp4', '3gp', 'mov', 'm4v', 'webm', 'mkv', 'avi',
+        'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp', 'rtf',
+        'txt', 'csv', 'zip',
+    ];
+
+    /**
      * Extrae URL y metadata de un mensaje multimedia del webhook Kapso.
      *
      * @param array<string, mixed> $message Nodo message del payload.
@@ -704,12 +720,10 @@ class WhatsappInboundMediaService
             $parts = explode('.', $filename);
             if (count($parts) > 1) {
                 $ext = strtolower((string) end($parts));
-                // Solo se confía en una extensión corta y alfanumérica, y que no sea la `.bin` genérica:
-                // el nombre viene de un tercero (o se adivinó de la URL) y termina en el disco público.
-                // Las extensiones ejecutables o renderizables por el navegador (php, html, svg, js…) se
-                // descartan: con ellas el archivo se serviría o correría desde el propio dominio.
-                $is_dangerous = (bool) preg_match('/^(php\d?|phtml|pht|phar|html?|xhtml|shtml|svg|js|mjs|htaccess)$/', $ext);
-                if ($ext !== '' && $ext !== 'bin' && ! $is_dangerous && preg_match('/^[a-z0-9]{1,5}$/', $ext)) {
+                // Solo se confía en una extensión de la lista PERMITIDA: el nombre viene de un tercero (o se
+                // adivinó de la URL) y el archivo termina en el disco público. Cualquier otra (php, html, svg,
+                // js, bin, una inventada…) se descarta y la extensión sale del mime, o `bin`.
+                if (in_array($ext, self::SAFE_EXTENSIONS, true)) {
                     return $ext;
                 }
             }

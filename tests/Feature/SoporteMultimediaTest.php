@@ -40,6 +40,13 @@ class SoporteMultimediaTest extends TestCase
     use BytesDeAudioSinteticos;
 
     /**
+     * Archivos temporales que crearon los tests (en %TEMP%) y que se borran en tearDown().
+     *
+     * @var array<int, string>
+     */
+    private $temporales_subidos = [];
+
+    /**
      * Usa un disco de mentira y registra "sin ffmpeg" por defecto (la salida a internet ya la corta TestCase).
      *
      * ffmpeg se anula por defecto para que los resultados no dependan de la máquina donde corre la suite
@@ -55,6 +62,23 @@ class SoporteMultimediaTest extends TestCase
         // (Laravel usa el primero que matchea) y TestCase ya corta toda salida a internet no falseada.
         Storage::fake('public');
         $this->registrar_ffmpeg(null);
+    }
+
+    /**
+     * Borra los temporales de la corrida (archivos subidos de mentira) antes de cerrar el test.
+     *
+     * @return void
+     */
+    protected function tearDown(): void
+    {
+        foreach ($this->temporales_subidos as $temporal) {
+            if (is_file($temporal)) {
+                @unlink($temporal);
+            }
+        }
+        $this->temporales_subidos = [];
+
+        parent::tearDown();
     }
 
     // ------------------------------------------------------------------------------------------------
@@ -235,15 +259,16 @@ class SoporteMultimediaTest extends TestCase
      * @param string               $tipo  Tipo de WhatsApp.
      * @param array<string, mixed> $nodo  Nodo del tipo con el mime que declara Meta.
      * @param string               $bytes Bytes que "devuelve" Kapso.
+     * @param string               $nombre_en_la_url Último tramo de la URL de descarga (de ahí se adivina el nombre del archivo).
      *
      * @return SupportMessageAttachment
      */
-    private function guardar_entrante(string $tipo, array $nodo, string $bytes): SupportMessageAttachment
+    private function guardar_entrante(string $tipo, array $nodo, string $bytes, string $nombre_en_la_url = 'archivo'): SupportMessageAttachment
     {
         $this->crear_config_whatsapp();
         $ticket = $this->crear_ticket('whatsapp', '+5493417790001');
 
-        $url = 'https://media.kapso.test/' . uniqid() . '/archivo';
+        $url = 'https://media.kapso.test/' . uniqid() . '/' . $nombre_en_la_url;
         Http::fake([$url => Http::response($bytes, 200)]);
 
         $servicio = new WhatsappInboundMediaService();
@@ -541,6 +566,7 @@ class SoporteMultimediaTest extends TestCase
     {
         $ruta = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'sm_' . uniqid('', true) . '_' . $nombre;
         file_put_contents($ruta, $bytes);
+        $this->temporales_subidos[] = $ruta;
 
         // test=true: Laravel lo trata como una subida válida aunque no venga de un POST real.
         return new UploadedFile($ruta, $nombre, $mime_cliente, null, true);
@@ -1503,5 +1529,67 @@ class SoporteMultimediaTest extends TestCase
         } finally {
             FfmpegLocator::forget_cached_path();
         }
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // 9. Extensión del nombre remoto: lista permitida
+    // ------------------------------------------------------------------------------------------------
+
+    /**
+     * La extensión que viene del nombre remoto solo se acepta si está en la lista permitida.
+     *
+     * Con la lista negra anterior pasaban `.xyz`, `.exe` o `.jar`; ahora cualquier extensión desconocida
+     * cae a la que corresponde al mime (o `bin`), y las conocidas (`.xlsx`) se respetan.
+     *
+     * @return void
+     */
+    public function test_la_extension_del_nombre_remoto_es_una_lista_permitida()
+    {
+        // Permitida: se respeta aunque el mime sea genérico.
+        $excel = $this->guardar_entrante('document', ['id' => 'e1', 'mime_type' => 'application/octet-stream'], 'datos', 'planilla.xlsx');
+        $this->assertSame('xlsx', pathinfo($excel->path, PATHINFO_EXTENSION));
+
+        // No permitidas: ni la inventada, ni ejecutables, ni lo que el navegador renderiza.
+        foreach (['x.xyz', 'virus.exe', 'app.jar', 'pagina.html', 'dibujo.svg', 'shell.php', 'shell.phtml', 'script.js'] as $nombre) {
+            $adjunto = $this->guardar_entrante('document', ['id' => 'e2', 'mime_type' => 'application/pdf'], '%PDF-1.4', $nombre);
+            $this->assertSame('pdf', pathinfo($adjunto->path, PATHINFO_EXTENSION), 'Se respetó la extensión de "' . $nombre . '".');
+        }
+
+        // Sin mime útil y con una extensión no permitida: bin.
+        $raro = $this->guardar_entrante('document', ['id' => 'e3', 'mime_type' => 'application/x-raro'], 'abc', 'cosa.xyz');
+        $this->assertSame('bin', pathinfo($raro->path, PATHINFO_EXTENSION));
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // 10. Audio directo a un lead: el 422 muestra el motivo
+    // ------------------------------------------------------------------------------------------------
+
+    /**
+     * Cuando el envío de un audio a un lead falla, el 422 dice POR QUÉ (y no solo "revisá los logs").
+     *
+     * @return void
+     */
+    public function test_el_422_del_audio_a_un_lead_muestra_el_motivo_del_fallo()
+    {
+        $this->crear_config_whatsapp();
+        $this->falsear_kapso();
+        $admin = $this->crear_admin('audio-lead@test.local');
+
+        $lead               = new \App\Models\Lead();
+        $lead->contact_name = 'Lead de prueba';
+        $lead->company_name = 'Empresa de prueba';
+        $lead->phone        = '549341' . random_int(1000000, 9999999);
+        $lead->status       = 'contactado';
+        $lead->save();
+
+        // WebM real (Chrome) sin ffmpeg: WhatsApp no lo acepta y no hay con qué convertirlo.
+        $respuesta = $this->actingAs($admin, 'sanctum')->post('/api/admin/lead/' . $lead->id . '/send-direct-audio', [
+            'audio' => $this->archivo_subido('grabacion.webm', $this->bytes_webm(), 'audio/webm'),
+        ], ['Accept' => 'application/json']);
+
+        $respuesta->assertStatus(422);
+        $mensaje = (string) $respuesta->json('message');
+        $this->assertStringContainsString('WebM', $mensaje, 'El 422 no trae el motivo del servicio de envío: ' . $mensaje);
+        $this->assertStringNotContainsString('Revisá los logs', $mensaje);
     }
 }

@@ -186,9 +186,9 @@ class SupportOutboundMediaService
             return $from_table;
         }
 
+        // Extensión que adivina Laravel por contenido, solo si está en la lista permitida.
         $guessed = strtolower((string) $file->guessExtension());
-        $is_safe = $guessed !== '' && (bool) preg_match('/^[a-z0-9]{1,5}$/', $guessed)
-            && ! preg_match('/^(php\d?|phtml|pht|phar|html?|xhtml|shtml|svg|js|mjs)$/', $guessed);
+        $is_safe = in_array($guessed, WhatsappInboundMediaService::SAFE_EXTENSIONS, true);
 
         return $is_safe ? $guessed : 'bin';
     }
