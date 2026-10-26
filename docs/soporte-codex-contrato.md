@@ -8,7 +8,20 @@ Base: `/api/claude/support-codex`. Todas las rutas exigen `X-Claude-Task-Key` y 
 - `PUT settings` con `{enabled:boolean}`: devuelve la misma forma. El primer encendido fija `activated_at` al reloj del servidor; no procesa automáticamente mensajes anteriores. El corte no se resetea al reiniciar el worker ni al apagar/encender. Un ticket viejo vuelve a ser elegible si el cliente escribe después del corte.
 - `GET pending`: `{enabled,activated_at,server_time,tickets:[{id,client_id,client_name,contact_name,expected_message_id,thread_id,reason,state}]}`. Máximo 50 candidatos. `reason` es `inbound`, `follow_up` o `mission_completed` (tras retomar explícitamente una corrección verificada). No lista reservas vigentes ni casos en revisión, cerrados o con un envío ambiguo.
 
-Cuando está encendido, el número principal recibe soporte aunque antes estuviera desconectado. Los clientes con asistente personal dejan de ser derivados a su otro número cuando escriben al principal. Se preservan el webhook del número del asistente y los procesos de implementación activos. El prefijo `sistema:` va a soporte sin llamar a la IA de API; el worker puede pedir sus datos con diagnostic.
+Cuando está encendido, el número principal recibe soporte aunque antes estuviera desconectado. Los clientes con asistente personal dejan de ser derivados a su otro número cuando escriben al principal. Se preserva el webhook del número del asistente. El prefijo `sistema:` va a soporte sin llamar a la IA de API; el worker puede pedir sus datos con diagnostic.
+
+### Clientes en implementación (desde el 26/10/2026)
+
+Con el circuito encendido, un cliente con una implementación en curso también llega a soporte, salvo en los dos flujos guionados que esperan respuestas concretas:
+
+| Implementación en curso (`in_progress`) | Circuito encendido | Circuito apagado |
+|---|---|---|
+| Sistema en modo `manual` | soporte (ticket, Martín); log `route: cliente-en-implementacion` | hilo de la implementación |
+| Sistema en modo `auto` | hilo de la implementación | hilo de la implementación |
+| Tienda en etapa ≥ 2 | soporte (ticket, Martín); log `route: cliente-en-implementacion` | hilo de la tienda |
+| Tienda en etapa 1 | hilo de la tienda | hilo de la tienda |
+
+Si las dos están en curso decide la del sistema y la de la tienda no se mira (la prioridad de siempre). Con el circuito apagado no cambia ningún camino. Un mensaje que va a soporte queda en `support_messages`, no en el hilo de la implementación: quien lleve la implementación lo lee en el ticket.
 
 ## Reserva y conversación
 
@@ -25,15 +38,53 @@ Respuesta: `{lease_token,lease_expires_at,ticket:<contexto>}`. La reserva dura 1
 ```json
 {
   "id":1,"status":"open","name":null,"source":"whatsapp",
-  "client":{"id":2,"name":"Comercio","api_url":"https://api-cliente.example"},
+  "client":{"id":2,"name":"Comercio","api_url":"https://api-cliente.example","slug":"comercio"},
   "contact_name":"Ana","client_employee_id":null,
   "state":"ready","thread_id":null,"mission":null,"review_reason":null,
   "reason":"inbound","expected_message_id":123,
   "window":{"open":true,"last_inbound_at":"...","expires_at":"...","origin":"support"},
   "client_context":"Ficha operativa y datos actuales del admin, sin notas internas",
+  "implementation":null,
   "messages":[{"id":123,"sender_type":"user","body":"No puedo vender","kind":"text","created_at":"...","attachments":[]}]
 }
 ```
+
+`client.slug` (string o null) es el slug del cliente en el admin: el programa local lo usa para ubicar la bitácora de la implementación cuando no tiene su `estado.json`.
+
+`implementation` (objeto o null, desde el 26/10/2026) es la implementación del cliente, la del sistema y la de la tienda. Es `null` si no tiene ninguna abierta (todo estado distinto de `completed`) ni cerrada hace 30 días o menos. Una `completed` sin `completed_at` no viaja. Un consumidor que no la conozca la puede ignorar, y la clave ausente equivale a `null`:
+
+```json
+{
+  "sistema": {
+    "id":10,"status":"in_progress","abierta":true,"automation_mode":"manual",
+    "started_at":"...","completed_at":null,
+    "etapa_actual":{"numero":3,"nombre":"Recolección de archivos"},
+    "etapas":[{"numero":1,"nombre":"Información de la empresa","estado":"completed","started_at":"...","completed_at":"...",
+               "acciones":[{"accion":"form_link","at":"...","canal":"whatsapp_web"}]}],
+    "form_submitted_at":"...","user_setup_executed_at":null,
+    "form_link":"https://.../configuracion/<token>",
+    "tienda_contratada":true,"sistema_url":"https://cliente.comerciocity.com",
+    "mails":[{"hito":"bienvenida","estado":"enviado","enviado_at":"..."}],
+    "conversacion":[{"direction":"outbound","etapa":1,"canal":"whatsapp_web","body":"...","at":"..."}]
+  },
+  "tienda": {
+    "id":3,"status":"in_progress","abierta":true,"started_at":"...","completed_at":null,
+    "etapa_actual":{"numero":3,"nombre":"Instalación del API"},
+    "etapas":[{"numero":1,"nombre":"Configuración de la tienda","estado":"completed","started_at":"...","completed_at":"..."}],
+    "dominio":"comercio.com.ar",
+    "conversacion":[{"direction":"inbound","etapa":2,"canal":"whatsapp","body":"...","at":"..."}]
+  }
+}
+```
+
+- `sistema` o `tienda` es `null` cuando esa implementación no viaja. Las etapas del sistema son las siete del flujo (más la 8 heredada solo si llegó a arrancar); las de la tienda, cinco. Los nombres salen del catálogo de la base con respaldo en el código.
+- `acciones`: lo que registraron el panel y `/implementar` en la etapa (`canal` null para las del panel). Solo qué, cuándo y por dónde: el texto y el teléfono de la acción no viajan.
+- `conversacion`: los últimos 40 mensajes del sistema o 20 de la tienda, en orden cronológico, cada `body` recortado a 2000 caracteres (con «…» al final si se cortó). `canal` es `whatsapp_web` cuando el mensaje lo registró `/implementar` desde WhatsApp Web (`whatsapp_message_id` con prefijo `waweb-`) y `whatsapp` en otro caso.
+- Una cerrada hace 30 días o menos viaja resumida: `abierta:false`, con `conversacion` y `form_link` en `null`.
+- `form_link` solo llega cuando el contacto del ticket es el dueño (`contact_role: owner`) y la implementación está abierta; a un empleado le llega `null`.
+- `tienda_contratada`: `true`/`false` según el contrato, `null` si el contrato no lo dice.
+- **Sin datos personales:** no viajan teléfonos (ni el del dueño ni el del responsable de la migración), casillas de mail ni respuestas del formulario.
+- Si no se pudo leer, el bloque llega como `{"sistema":null,"tienda":null,"error":"..."}` en vez de `null`, para que no se lea como «no tiene implementación».
 
 Los últimos 100 mensajes reales se devuelven en orden cronológico; no incluye borradores. Los adjuntos traen `{id,mime,size,download_path}`; `GET tickets/{id}/attachments/{attachment_id}` sirve el binario con la misma autenticación y valida su pertenencia al ticket.
 
