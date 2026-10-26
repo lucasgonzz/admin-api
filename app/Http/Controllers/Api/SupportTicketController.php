@@ -41,11 +41,15 @@ class SupportTicketController extends BaseController
 
         // Responde lista completa, totales legacy (nav global) y filas para botones por operador.
         $models = $query->get();
+        // Una sola query agrupada de tickets abiertos, compartida por open_totals e inbox_nav.
+        $open_map = $this->open_counts_grouped_by_assigned_admin();
         return response()->json(
             [
                 'models' => $models,
                 'unread_totals' => $this->unread_totals_for_admin_inbox($admin_id),
-                'inbox_nav' => $this->inbox_nav_rows(),
+                // Tickets abiertos (status open) para los badges de la bandeja y de la barra.
+                'open_totals' => $this->open_totals_for_admin_inbox($admin_id, $open_map),
+                'inbox_nav' => $this->inbox_nav_rows($open_map),
             ],
             200
         );
@@ -53,14 +57,19 @@ class SupportTicketController extends BaseController
 
     /**
      * Agregado de no leídos (mensajes user sin read_at) para badges "Míos" y "Otros" sin listar tickets.
+     * Suma `open_totals` y `open_count` por fila: los badges muestran tickets abiertos, no mensajes.
      */
     public function unread_badges()
     {
         $admin_id = (int) Auth::id();
+        // Una sola query agrupada de tickets abiertos, compartida por open_totals e inbox_nav.
+        $open_map = $this->open_counts_grouped_by_assigned_admin();
         return response()->json(
             [
                 'unread_totals' => $this->unread_totals_for_admin_inbox($admin_id),
-                'inbox_nav' => $this->inbox_nav_rows(),
+                // Tickets abiertos (status open) para los badges de la bandeja y de la barra.
+                'open_totals' => $this->open_totals_for_admin_inbox($admin_id, $open_map),
+                'inbox_nav' => $this->inbox_nav_rows($open_map),
             ],
             200
         );
@@ -164,10 +173,18 @@ class SupportTicketController extends BaseController
      * Filas para la bandeja lateral: un botón por cada admin del sistema (aunque no tenga tickets ni no leídos).
      * Opcionalmente la fila "Sin asignar" si hay tickets sin operador o mensajes pendientes en esa cola.
      *
-     * @return array<int, array{assigned_admin_id: int|null, display_name: string, unread_count: int}>
+     * Cada fila suma `open_count`: tickets con status open asignados a ese operador (null = sin asignar).
+     *
+     * @param array<int|string, int>|null $open_map Mapa de abiertos ya calculado; si es null se calcula acá
+     * @return array<int, array{assigned_admin_id: int|null, display_name: string, unread_count: int, open_count: int}>
      */
-    protected function inbox_nav_rows(): array
+    protected function inbox_nav_rows(?array $open_map = null): array
     {
+        // Mapa aid => cantidad de tickets abiertos (aid null agrupa en clave especial).
+        if ($open_map === null) {
+            $open_map = $this->open_counts_grouped_by_assigned_admin();
+        }
+
         // Mapa aid => cantidad de mensajes user sin leer (aid null agrupa en clave especial).
         $count_map = $this->unread_counts_grouped_by_assigned_admin();
 
@@ -183,6 +200,7 @@ class SupportTicketController extends BaseController
                 'assigned_admin_id' => $aid,
                 'display_name' => (string) $admin->name,
                 'unread_count' => (int) ($count_map[$aid] ?? 0),
+                'open_count' => (int) ($open_map[$aid] ?? 0),
             ];
         }
 
@@ -193,6 +211,7 @@ class SupportTicketController extends BaseController
                 'assigned_admin_id' => null,
                 'display_name' => 'Sin asignar',
                 'unread_count' => $unassigned_unread,
+                'open_count' => (int) ($open_map['unassigned'] ?? 0),
             ];
         }
 
@@ -224,6 +243,48 @@ class SupportTicketController extends BaseController
         }
 
         return $count_map;
+    }
+
+    /**
+     * Cuenta tickets abiertos (status open) agrupados por admin asignado (null = sin asignar).
+     * Una sola query agrupada para todos los operadores, no una por admin.
+     *
+     * @return array<int|string, int> Claves: id numérico o la cadena 'unassigned'
+     */
+    protected function open_counts_grouped_by_assigned_admin(): array
+    {
+        $aggregates = SupportTicket::query()
+            ->where('status', SupportTicket::STATUS_ABIERTO)
+            ->selectRaw('assigned_admin_id as aid, COUNT(*) as cnt')
+            ->groupBy('assigned_admin_id')
+            ->get();
+
+        $open_map = [];
+        foreach ($aggregates as $row) {
+            if ($row->aid === null) {
+                $open_map['unassigned'] = (int) $row->cnt;
+            } else {
+                $open_map[(int) $row->aid] = (int) $row->cnt;
+            }
+        }
+
+        return $open_map;
+    }
+
+    /**
+     * Totales de tickets abiertos para los badges: todos, los del operador autenticado y sin asignar.
+     *
+     * @param int $admin_id Operador autenticado
+     * @param array<int|string, int> $open_map Mapa de abiertos por operador (ver open_counts_grouped_by_assigned_admin)
+     * @return array{all: int, mine: int, unassigned: int}
+     */
+    protected function open_totals_for_admin_inbox(int $admin_id, array $open_map): array
+    {
+        return [
+            'all' => (int) array_sum($open_map),
+            'mine' => (int) ($open_map[$admin_id] ?? 0),
+            'unassigned' => (int) ($open_map['unassigned'] ?? 0),
+        ];
     }
 
     /**
