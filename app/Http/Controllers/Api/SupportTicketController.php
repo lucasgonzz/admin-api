@@ -116,6 +116,7 @@ class SupportTicketController extends BaseController
                 'client_employee',
                 'assigned_admin',
                 'lastMessage.sender_admin',
+                'support_codex_case',
             ])
             ->withUnreadMessagesCount()
             /* Indicadores del panel de inicio (`sin_responder`, `abierto_hoy`): los dos deep links
