@@ -476,6 +476,102 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         $this->assertSame('open', $ticket->fresh()->status);
     }
 
+    /** @dataProvider confirmaciones_contextuales */
+    public function test_confirmacion_breve_reconoce_la_pregunta_y_cierra_despues_del_envio(string $question, string $answer): void
+    {
+        $ticket = $this->ticket();
+        $first = $this->claim($ticket);
+        $this->reply($ticket, $first, ['action' => 'solicitar_confirmacion', 'body' => $question])->assertOk();
+        $message = $this->inbound($ticket, $answer);
+        $claim = $this->claim($ticket);
+        $payload = ['action' => 'cerrar', 'confirmation_message_id' => $message->id, 'body' => 'Gracias por confirmar.'];
+        $this->reply($ticket, $claim, $payload)->assertOk()
+            ->assertJsonPath('operation.status', 'sent')->assertJsonPath('ticket.status', 'closed');
+        $this->assertSame('closed', SupportCodexCase::where('support_ticket_id', $ticket->id)->first()->state);
+        $this->assertCount(2, $this->deliveries->bodies);
+        // Repetir la misma operación definitiva no vuelve a mandar la despedida.
+        $this->reply($ticket, $claim, $payload)->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->assertCount(2, $this->deliveries->bodies);
+    }
+
+    public function confirmaciones_contextuales(): array
+    {
+        return [
+            'Panchito todo normal' => ['¿Ya te abre el sistema en Panchito 2 y podés trabajar normalmente?', 'Todo normal'],
+            'Panchito todo bien' => ['¿Me confirmás que ya podés abrir y usar el sistema con normalidad?', 'Todo bien'],
+            'normal con agradecimiento' => ['¿Quedó resuelto?', 'Sí, todo normal. Muchas gracias.'],
+            'sí a verificar venta' => ['¿Me confirmás si ahora podés vender?', 'Sí, gracias'],
+            'confirmación breve' => ['¿Quedó resuelto?', 'Sí'],
+        ];
+    }
+
+    /** @dataProvider respuestas_que_no_confirman */
+    public function test_frase_breve_no_cierra_sin_contexto_de_solucion_o_con_dudas(string $action, string $question, string $answer): void
+    {
+        $ticket = $this->ticket();
+        $first = $this->claim($ticket);
+        $this->reply($ticket, $first, ['action' => $action, 'body' => $question])->assertOk();
+        $message = $this->inbound($ticket, $answer);
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim, ['action' => 'cerrar', 'confirmation_message_id' => $message->id])
+            ->assertStatus(422);
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->assertCount(1, $this->deliveries->bodies);
+        $this->assertSame(0, SupportCodexOperation::where('support_ticket_id', $ticket->id)->where('action', 'cerrar')->count());
+    }
+
+    public function respuestas_que_no_confirman(): array
+    {
+        return [
+            'saludo social' => ['solicitar_confirmacion', 'Hola, ¿cómo estás?', 'Todo bien'],
+            'sí a saludo social' => ['solicitar_confirmacion', '¿Todo bien?', 'Sí, gracias'],
+            'estado listo sin pedido' => ['responder', '¿Quedó resuelto?', 'Todo normal'],
+            'afirmación del agente sin pregunta' => ['solicitar_confirmacion', 'Ya podés abrir el sistema.', 'Todo normal'],
+            'agradecimiento aislado' => ['solicitar_confirmacion', '¿Quedó resuelto?', 'Gracias'],
+            'negación' => ['solicitar_confirmacion', '¿Quedó resuelto?', 'No, todavía no funciona'],
+            'problema pendiente' => ['solicitar_confirmacion', '¿Quedó resuelto?', 'Todo normal, pero no puedo vender'],
+            'condicional' => ['solicitar_confirmacion', '¿Quedó resuelto?', 'Si funciona después te aviso'],
+            'arreglo condicional' => ['solicitar_confirmacion', '¿Quedó resuelto?', 'Si lo arreglamos te aviso'],
+            'arreglo condicionado a poder' => ['solicitar_confirmacion', '¿Quedó resuelto?', 'Si podemos lo arreglamos'],
+            'arreglo negado' => ['solicitar_confirmacion', '¿Quedó resuelto?', 'Nunca lo arreglamos'],
+            'resultado dudoso' => ['solicitar_confirmacion', '¿Quedó resuelto?', 'Creo que ya quedó resuelto'],
+            'prueba futura' => ['solicitar_confirmacion', '¿Quedó resuelto?', 'Lo pruebo mañana'],
+            'sí a disponibilidad futura' => ['solicitar_confirmacion', '¿Me confirmás si podés probar mañana?', 'Sí'],
+            'sí a oferta de prueba sin resultado' => ['solicitar_confirmacion', '¿Me confirmás si podés probar?', 'Sí'],
+            'sí a disponibilidad de prueba de venta' => ['solicitar_confirmacion', '¿Me confirmás si podés probar vender?', 'Sí'],
+            'sí a resultado futuro' => ['solicitar_confirmacion', '¿Me confirmás si mañana podés vender?', 'Sí'],
+            'afirmación con futuro' => ['solicitar_confirmacion', '¿Quedó resuelto?', 'Todo normal, lo voy a probar mañana'],
+            'pregunta del cliente' => ['solicitar_confirmacion', '¿Quedó resuelto?', '¿Todo normal?'],
+            'pregunta sobre arreglo' => ['solicitar_confirmacion', '¿Quedó resuelto?', '¿Ya lo arreglamos?'],
+        ];
+    }
+
+    public function test_pregunta_de_otro_ticket_no_habilita_confirmacion_breve(): void
+    {
+        $other = $this->ticket();
+        $this->reply($other, $this->claim($other), ['action' => 'solicitar_confirmacion', 'body' => '¿Quedó resuelto?'])->assertOk();
+        $other_case = SupportCodexCase::where('support_ticket_id', $other->id)->first();
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), ['action' => 'solicitar_confirmacion', 'body' => '¿Cómo estás?'])->assertOk();
+        SupportCodexCase::where('support_ticket_id', $ticket->id)->update(['last_reply_id' => $other_case->last_reply_id]);
+        $message = $this->inbound($ticket, 'Todo normal');
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim, ['action' => 'cerrar', 'confirmation_message_id' => $message->id])->assertStatus(422);
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->assertCount(2, $this->deliveries->bodies);
+    }
+
+    public function test_resultado_explicito_actual_o_pasado_no_depende_de_formula_masculina(): void
+    {
+        foreach (['Ya quedó resuelta, gracias.', 'Sí, lo arreglamos.', 'Ya lo solucioné.'] as $answer) {
+            $ticket = $this->ticket();
+            $message = $this->inbound($ticket, $answer);
+            $claim = $this->claim($ticket);
+            $this->reply($ticket, $claim, ['action' => 'cerrar', 'confirmation_message_id' => $message->id])
+                ->assertOk()->assertJsonPath('ticket.status', 'closed');
+        }
+    }
+
     public function test_operacion_interrumpida_antes_del_commit_no_reenvia(): void
     {
         $ticket = $this->ticket();

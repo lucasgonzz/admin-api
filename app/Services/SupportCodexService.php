@@ -871,16 +871,33 @@ class SupportCodexService
             $this->fail(422, 'confirmation_required', 'El cierre requiere el último mensaje de confirmación del cliente.');
         }
         $body = Str::ascii(mb_strtolower(trim((string) $message->body)));
-        $negative = preg_match('/\b(no|todavia|aun|sigue|pero|falta|error|problema|manana|luego|despues|probare|probar|voy|cuando|veremos|ojala|deberia|podria)\b/', $body)
-            || preg_match('/\bsi (funciona|anda|queda)\b/', $body);
+        $negative = strpos($body, '?') !== false
+            || preg_match('/\b(no|nunca|tampoco|todavia|aun|sigue|pero|falta|error|problema|manana|luego|despues|probare|probar|voy|cuando|veremos|ojala|deberia|podria|creo|supongo|parece|quizas)\b/', $body)
+            || preg_match('/\bsi (funciona|anda|queda|(?:ya )?lo (arreglamos|arregle|solucionamos|solucione))\b/', $body);
+        // «Todo normal» confirma el resultado si contesta una pregunta sobre la solución,
+        // pero puede ser un saludo fuera de ese contexto. No alcanza con guardar el estado:
+        // se comprueba también el mensaje que originó el pedido, dentro de este mismo ticket.
+        $question = $case->state === 'awaiting_confirmation' && $case->last_reply_id !== null
+            ? SupportMessage::where('support_ticket_id', $ticket->id)->where('id', $case->last_reply_id)
+                ->where('sender_type', 'admin')->first()
+            : null;
+        $question_body = $question === null ? '' : Str::ascii(mb_strtolower((string) $question->body));
+        $answer_to_resolution = $question !== null && $question->id < $message->id
+            && strpos($question_body, '?') !== false
+            // Un sí a «¿podés probar mañana?» acepta una tarea, no confirma su resultado.
+            && ! preg_match('/\b(manana|luego|despues|cuando|proximamente)\b/', $question_body)
+            && (preg_match('/\b(resuelt[oa]|solucionad[oa])\b/', $question_body)
+                || (! preg_match('/\b(podes|puedes) probar\b/', $question_body)
+                    && preg_match('/\b(confirm[a-z]*|ya|ahora)\b.*\b(funciona|funcionando|anda|abre|abrir|trabajar|usar|vender)\b/s', $question_body)));
         // «Perfecto, lo pruebo mañana» no confirma nada. Se exige un resultado concreto
-        // actual/pasado, o un sí explícito como respuesta a la pregunta de confirmación.
-        $resolved = preg_match('/\b(ya )?(esta|quedo) (resuelto|solucionado|bien|funcionando)\b/', $body)
+        // actual/pasado, o una respuesta breve al pedido de verificar ese resultado.
+        $resolved = preg_match('/\b(ya )?(esta|quedo) (resuelt[oa]|solucionad[oa]|bien|funcionando)\b/', $body)
             || preg_match('/\b(ya|ahora) (funciona|anda|funciono)\b/', $body)
-            || preg_match('/^(si[,.! ]+)?(ya )?(resuelto|solucionado)[,.! ]*(muchas )?gracias[!. ]*$/', $body);
-        $thanks_after_question = $case->state === 'awaiting_confirmation'
-            && preg_match('/^si([,.! ]+(muchas )?gracias)?[!. ]*$/', $body);
-        if ($negative || (! $resolved && ! $thanks_after_question)) {
+            || preg_match('/^(si[,.! ]+)?(ya )?lo (arreglamos|arregle|solucionamos|solucione)([,.! ]+(muchas )?gracias)?[!. ]*$/', $body)
+            || preg_match('/^(si[,.! ]+)?(ya )?(resuelt[oa]|solucionad[oa])[,.! ]*(muchas )?gracias[!. ]*$/', $body);
+        $short_answer = $answer_to_resolution
+            && preg_match('/^(si[,.! ]+)?(todo (normal|bien)|si)([,.! ]+(muchas )?gracias)?[!. ]*$/', $body);
+        if ($negative || (! $resolved && ! $short_answer)) {
             $this->fail(422, 'confirmation_required', 'El mensaje no confirma de forma suficiente que el caso quedó resuelto.');
         }
     }
