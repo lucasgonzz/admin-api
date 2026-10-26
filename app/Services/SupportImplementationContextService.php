@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Http\Controllers\Api\ClaudeImplementationOpsController;
 use App\Models\Client;
+use App\Models\ClientInstallation;
 use App\Models\EcommerceImplementation;
 use App\Models\EcommerceImplementationMessage;
 use App\Models\EcommerceImplementationStageConfig;
@@ -29,10 +30,16 @@ use Illuminate\Support\Facades\Schema;
  *
  * Reglas que valen para todo el archivo:
  *
- *  - 🔴 **SIN DATOS PERSONALES.** No sale ningún teléfono (ni el del dueño ni el del responsable de la
- *    migración), ninguna casilla de mail, ni nada de lo que el cliente cargó en el formulario. El link
- *    del formulario sale solo si el que escribe es el DUEÑO (`client_employee_id === null`): es un link
- *    que deja cargar los datos de la empresa, y un empleado no tiene por qué recibirlo.
+ *  - 🔴 **SIN DATOS PERSONALES.** No sale ningún teléfono de las fichas (ni el del dueño ni el del
+ *    responsable de la migración), ninguna casilla de mail, ni nada de lo que el cliente cargó en el
+ *    formulario. El link del formulario sale solo si el que escribe es el DUEÑO
+ *    (`client_employee_id === null`): es un link que deja cargar los datos de la empresa, y un empleado
+ *    no tiene por qué recibirlo. Por la misma razón, a un empleado no le viaja la conversación (es la
+ *    del dueño con Lucas), y al dueño le viaja enmascarada (`enmascarar()`): el link del formulario,
+ *    los números largos (teléfonos, CUIT, DNI) y lo que sigue a «contraseña»/«clave».
+ *  - **Abierta es SOLO `in_progress`.** Una `paused` o `pending` no viaja (ni como abierta ni como
+ *    cerrada): no es un proceso en marcha que Martín pueda seguir, y presentarla como tal lo llevaría a
+ *    retomar algo que Lucas frenó a propósito.
  *  - **Una implementación cerrada hace más de 30 días no viaja.** Ya no es contexto: es historia, y
  *    meterla haría que Martín le hable al cliente de algo terminado hace meses.
  *  - **Una cerrada hace ≤ 30 días viaja resumida:** `abierta: false`, con etapas y mails pero con
@@ -85,6 +92,50 @@ class SupportImplementationContextService
     const PREFIJO_WHATSAPP_WEB = 'waweb-';
 
     /**
+     * Etapa del sistema cuyo cierre significa que el sistema ya se le entregó al cliente (5, «Entrega
+     * del sistema»). Antes de eso la URL del sistema no viaja: el sistema todavía no es del cliente.
+     *
+     * @var int
+     */
+    const ETAPA_DE_ENTREGA = 5;
+
+    /**
+     * Acciones de `/implementar` que prueban que la entrega ya se hizo aunque la etapa 5 siga
+     * `in_progress`: `acceso` (la skill la registra sin etapa explícita) y `entrega` (con etapa 5).
+     *
+     * @var array<int, string>
+     */
+    const ACCIONES_DE_ENTREGA = ['acceso', 'entrega'];
+
+    /**
+     * Etapa de la tienda cuyo cierre significa que la tienda ya está activa (5, «Activación»).
+     *
+     * @var int
+     */
+    const ETAPA_DE_ACTIVACION_DE_LA_TIENDA = 5;
+
+    /**
+     * Reemplazo del link del formulario en la conversación.
+     *
+     * @var string
+     */
+    const MASCARA_DEL_FORMULARIO = '[link del formulario]';
+
+    /**
+     * Reemplazo de una secuencia de 8 o más dígitos (teléfono, CUIT, DNI) en la conversación.
+     *
+     * @var string
+     */
+    const MASCARA_DE_NUMERO = '[número]';
+
+    /**
+     * Reemplazo de lo que sigue a «contraseña» / «clave» en la conversación.
+     *
+     * @var string
+     */
+    const MASCARA_DE_CLAVE = '[oculta]';
+
+    /**
      * Nombres de las etapas de la tienda, de respaldo para cuando el catálogo de la base no los tiene
      * (una base sin seeders, un entorno de tests). Son los mismos del seeder
      * `EcommerceImplementationStageConfigSeeder`; manda el de la base si está.
@@ -122,7 +173,7 @@ class SupportImplementationContextService
             $es_el_dueno = $ticket->client_employee_id === null;
 
             $sistema = $this->bloque_del_sistema($client, $es_el_dueno);
-            $tienda  = $this->bloque_de_la_tienda($client);
+            $tienda  = $this->bloque_de_la_tienda($client, $es_el_dueno);
 
             if ($sistema === null && $tienda === null) {
                 return null;
@@ -165,6 +216,7 @@ class SupportImplementationContextService
         $abierta = $this->esta_abierta($implementation->status);
         $nombres = $this->nombres_de_etapas_del_sistema();
         $actual  = (int) $implementation->current_stage;
+        $entrega = $this->entrega_hecha($implementation);
 
         return [
             'id'                     => (int) $implementation->id,
@@ -181,20 +233,28 @@ class SupportImplementationContextService
             'user_setup_executed_at' => $this->instante($implementation->user_setup_executed_at),
             'form_link'              => $abierta && $es_el_dueno ? $implementation->form_link : null,
             'tienda_contratada'      => $this->tienda_contratada($client),
-            'sistema_url'            => $this->vacio_a_null((new ClientEmpresaApiUrlResolver())->resolve_spa_url($client)),
+            'entrega_hecha'          => $entrega,
+            /* La URL del sistema solo después de la entrega: antes, el sistema está a medio armar y Martín
+             * no tiene que mandar al cliente a un lugar que todavía no está listo para él. */
+            'sistema_url'            => $entrega
+                ? $this->vacio_a_null((new ClientEmpresaApiUrlResolver())->resolve_spa_url($client))
+                : null,
+            'instalacion'            => $this->instalacion_del_sistema($client),
             'mails'                  => $this->mails_del_sistema($implementation),
-            'conversacion'           => $abierta ? $this->conversacion_del_sistema($implementation) : null,
+            /* A un empleado no le viaja la conversación: es la del dueño con Lucas. */
+            'conversacion'           => $abierta && $es_el_dueno ? $this->conversacion_del_sistema($implementation) : null,
         ];
     }
 
     /**
      * El bloque `tienda`: la implementación de la tienda online del cliente, si viaja.
      *
-     * @param Client $client Cliente del ticket.
+     * @param Client $client      Cliente del ticket.
+     * @param bool   $es_el_dueno true = el que escribe es el dueño (habilita la conversación).
      *
      * @return array<string, mixed>|null
      */
-    protected function bloque_de_la_tienda(Client $client)
+    protected function bloque_de_la_tienda(Client $client, $es_el_dueno)
     {
         $implementation = EcommerceImplementation::where('client_id', $client->id)
             ->with('stages', 'client_ecommerce')
@@ -219,12 +279,16 @@ class SupportImplementationContextService
                 : null,
             'etapas'       => $this->etapas_de_la_tienda($implementation, $nombres),
             'dominio'      => $this->dominio_de_la_tienda($implementation),
-            'conversacion' => $abierta ? $this->conversacion_de_la_tienda($implementation) : null,
+            'activa'       => $this->tienda_activa($implementation),
+            'conversacion' => $abierta && $es_el_dueno
+                ? $this->conversacion_de_la_tienda($implementation, $this->token_del_formulario($client))
+                : null,
         ];
     }
 
     /**
-     * ¿La implementación viaja en el contexto? Sí si está abierta, o si se cerró hace ≤ 30 días.
+     * ¿La implementación viaja en el contexto? Sí si está abierta (`in_progress`), o si está `completed`
+     * con `completed_at` en los últimos 30 días. Cualquier otro estado (`paused`, `pending`) no viaja.
      *
      * Una `completed` sin `completed_at` no viaja: no hay forma de saber si es reciente, y dar por
      * reciente algo que puede tener un año es lo que esta regla quiere evitar.
@@ -240,7 +304,7 @@ class SupportImplementationContextService
             return true;
         }
 
-        if (! $completed_at instanceof Carbon) {
+        if ((string) $status !== 'completed' || ! $completed_at instanceof Carbon) {
             return false;
         }
 
@@ -248,8 +312,8 @@ class SupportImplementationContextService
     }
 
     /**
-     * ¿Está abierta? Todo lo que no sea `completed` (`in_progress`, `paused`, `pending`): una pausada
-     * sigue siendo una implementación sin terminar, y Martín tiene que saberlo.
+     * ¿Está abierta? Solo `in_progress`: es el único estado con un proceso en marcha que Martín puede
+     * seguir (y el mismo que mira el ruteo del webhook).
      *
      * @param string|null $status Estado de la implementación.
      *
@@ -257,7 +321,95 @@ class SupportImplementationContextService
      */
     protected function esta_abierta($status)
     {
-        return (string) $status !== 'completed';
+        return (string) $status === 'in_progress';
+    }
+
+    /**
+     * ¿Ya se le entregó el sistema al cliente? Sí si la etapa 5 está `completed`, si cualquier etapa
+     * posterior está `completed`, o si hay registrada una acción `acceso` o `entrega` en CUALQUIER etapa:
+     * la skill registra `acceso` sin etapa explícita y `entrega` en la 5 mientras la 5 sigue `in_progress`.
+     *
+     * @param Implementation $implementation La implementación, con `stages` cargadas.
+     *
+     * @return bool
+     */
+    protected function entrega_hecha(Implementation $implementation)
+    {
+        foreach ($implementation->stages as $etapa) {
+            if ((int) $etapa->stage_number >= self::ETAPA_DE_ENTREGA && (string) $etapa->status === 'completed') {
+                return true;
+            }
+
+            $datos    = is_array($etapa->data) ? $etapa->data : [];
+            $entradas = isset($datos['actions']) && is_array($datos['actions']) ? $datos['actions'] : [];
+
+            foreach ($entradas as $entrada) {
+                if (is_array($entrada) && isset($entrada['action'])
+                    && in_array((string) $entrada['action'], self::ACCIONES_DE_ENTREGA, true)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * La instalación del sistema: estado y momento de la última `ClientInstallation` de tipo `completa`
+     * del cliente (la más nueva). Si el cliente tiene API activa, solo cuentan las de esa API: la
+     * `esqueleto` (y cualquier instalación del otro frente) no es el sistema que usa el cliente.
+     *
+     * `estado` es el valor real de `client_installations.status`: `pendiente`, `instalando`,
+     * `completada` o `fallida`. `at` es cuándo terminó o, si no terminó, cuándo arrancó (o se creó).
+     *
+     * @param Client $client Cliente.
+     *
+     * @return array<string, string|null>|null null = no hay ninguna instalación completa.
+     */
+    protected function instalacion_del_sistema(Client $client)
+    {
+        $consulta = ClientInstallation::where('client_id', $client->id)
+            ->where('kind', ClientInstallation::KIND_COMPLETA);
+
+        if ($client->active_client_api_id !== null) {
+            $consulta->where('client_api_id', $client->active_client_api_id);
+        }
+
+        $fila = $consulta->orderByDesc('id')->first();
+
+        if ($fila === null) {
+            return null;
+        }
+
+        return [
+            'estado' => (string) $fila->status,
+            'at'     => $this->instante($fila->finished_at ?: ($fila->started_at ?: $fila->created_at)),
+        ];
+    }
+
+    /**
+     * ¿La tienda ya está activa? Sí si la tienda online está `active` o si la etapa 5 («Activación») de
+     * la implementación de la tienda está `completed`.
+     *
+     * @param EcommerceImplementation $implementation La implementación, con `stages` y `client_ecommerce` cargadas.
+     *
+     * @return bool
+     */
+    protected function tienda_activa(EcommerceImplementation $implementation)
+    {
+        $tienda = $implementation->client_ecommerce;
+
+        if ($tienda !== null && (string) $tienda->status === 'active') {
+            return true;
+        }
+
+        foreach ($implementation->stages as $etapa) {
+            if ((int) $etapa->stage_number === self::ETAPA_DE_ACTIVACION_DE_LA_TIENDA && (string) $etapa->status === 'completed') {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -473,9 +625,10 @@ class SupportImplementationContextService
             ->values();
 
         $bloque = [];
+        $token  = $implementation->form_token === null ? null : (string) $implementation->form_token;
 
         foreach ($filas as $fila) {
-            $bloque[] = $this->mensaje($fila->direction, $fila->stage_number, $fila->whatsapp_message_id, $fila->body, $fila->sent_at ?: $fila->created_at);
+            $bloque[] = $this->mensaje($fila->direction, $fila->stage_number, $fila->whatsapp_message_id, $fila->body, $fila->sent_at ?: $fila->created_at, $token);
         }
 
         return $bloque;
@@ -485,10 +638,12 @@ class SupportImplementationContextService
      * Los últimos mensajes de la implementación de la tienda, en orden cronológico.
      *
      * @param EcommerceImplementation $implementation La implementación de la tienda.
+     * @param string|null             $token          Token del formulario de la implementación del sistema
+     *                                                (para enmascarar su link si aparece acá).
      *
      * @return array<int, array<string, mixed>>
      */
-    protected function conversacion_de_la_tienda(EcommerceImplementation $implementation)
+    protected function conversacion_de_la_tienda(EcommerceImplementation $implementation, $token)
     {
         $filas = EcommerceImplementationMessage::where('ecommerce_implementation_id', $implementation->id)
             ->orderByDesc('sent_at')
@@ -501,24 +656,25 @@ class SupportImplementationContextService
         $bloque = [];
 
         foreach ($filas as $fila) {
-            $bloque[] = $this->mensaje($fila->direction, $fila->stage_number, $fila->whatsapp_message_id, $fila->body, $fila->sent_at ?: $fila->created_at);
+            $bloque[] = $this->mensaje($fila->direction, $fila->stage_number, $fila->whatsapp_message_id, $fila->body, $fila->sent_at ?: $fila->created_at, $token);
         }
 
         return $bloque;
     }
 
     /**
-     * Un mensaje de la conversación, con la forma del contrato.
+     * Un mensaje de la conversación, con la forma del contrato y el cuerpo enmascarado y recortado.
      *
      * @param string|null $direction           inbound | outbound.
      * @param int|null    $stage_number        Etapa en la que se registró.
      * @param string|null $whatsapp_message_id Id externo (decide el canal).
      * @param string|null $body                Texto.
      * @param mixed       $at                  Carbon o null.
+     * @param string|null $token               Token del formulario a enmascarar, si hay.
      *
      * @return array<string, mixed>
      */
-    protected function mensaje($direction, $stage_number, $whatsapp_message_id, $body, $at)
+    protected function mensaje($direction, $stage_number, $whatsapp_message_id, $body, $at, $token)
     {
         $id = (string) $whatsapp_message_id;
 
@@ -526,7 +682,7 @@ class SupportImplementationContextService
             'direction' => (string) $direction,
             'etapa'     => $stage_number === null ? null : (int) $stage_number,
             'canal'     => strpos($id, self::PREFIJO_WHATSAPP_WEB) === 0 ? 'whatsapp_web' : 'whatsapp',
-            'body'      => $this->recortar($body),
+            'body'      => $this->recortar($this->enmascarar($body, $token)),
             'at'        => $this->instante($at),
         ];
     }
@@ -555,6 +711,71 @@ class SupportImplementationContextService
         }
 
         return $dominio !== '' ? $dominio : null;
+    }
+
+    /**
+     * El token del formulario de la implementación del sistema del cliente, si tiene (para enmascarar
+     * su link en la conversación de la tienda).
+     *
+     * @param Client $client Cliente.
+     *
+     * @return string|null
+     */
+    protected function token_del_formulario(Client $client)
+    {
+        $token = Implementation::where('client_id', $client->id)->value('form_token');
+
+        return $token === null || $token === '' ? null : (string) $token;
+    }
+
+    /**
+     * Enmascara los datos personales de un cuerpo de mensaje, en este orden:
+     *
+     *  1. **El link del formulario** → `[link del formulario]`: cualquier URL que contenga el token del
+     *     formulario de la implementación, o que empiece con la URL base del formulario configurada
+     *     (`implementation_form_url`, la misma con la que `Implementation::form_link` arma el link). Es
+     *     un link con el que se cargan los datos de la empresa: no tiene que circular.
+     *  2. **Lo que sigue a «contraseña» / «clave»** → `[oculta]`, hasta el fin de la palabra siguiente.
+     *     Se saltean un separador (`:` o `=`) y un conector («es», «era», «sería», «nueva», «actual»)
+     *     para que «la clave es Perro123» oculte `Perro123` y no `es`. Va antes que los números para
+     *     que una clave numérica quede como `[oculta]`.
+     *  3. **Secuencias de 8 o más dígitos** → `[número]`, aun con un espacio, guión o punto entre
+     *     dígitos (teléfonos, CUIT, DNI). El `+` de adelante se va con el número.
+     *
+     * @param string|null $texto Cuerpo original.
+     * @param string|null $token Token del formulario, si hay.
+     *
+     * @return string|null
+     */
+    protected function enmascarar($texto, $token)
+    {
+        if ($texto === null) {
+            return null;
+        }
+
+        $texto = (string) $texto;
+        $base  = rtrim((string) ImplementationSettings::get_form_url(), '/');
+
+        $texto = preg_replace_callback('~https?://[^\s<>"]+~iu', function ($coincidencia) use ($token, $base) {
+            $url = $coincidencia[0];
+
+            if (($token !== null && $token !== '' && strpos($url, $token) !== false)
+                || ($base !== '' && stripos($url, $base . '/') === 0)) {
+                return self::MASCARA_DEL_FORMULARIO;
+            }
+
+            return $url;
+        }, $texto);
+
+        $texto = preg_replace(
+            '~\b(contrase[ñn]as?|claves?)((?:\s*[:=]\s*|\s+)(?:(?:es|era|ser[ií]a|nueva|actual)\s*[:=]?\s+)?)[^\s]+~iu',
+            '$1$2' . self::MASCARA_DE_CLAVE,
+            $texto
+        );
+
+        $texto = preg_replace('~\+?\d(?:[\s.\-]?\d){7,}~u', self::MASCARA_DE_NUMERO, $texto);
+
+        return $texto;
     }
 
     /**

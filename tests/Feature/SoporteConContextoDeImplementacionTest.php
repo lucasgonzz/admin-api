@@ -7,6 +7,7 @@ use App\Events\SupportTicketUpdated;
 use App\Models\AdminSetting;
 use App\Models\Client;
 use App\Models\ClientEcommerce;
+use App\Models\ClientInstallation;
 use App\Models\EcommerceImplementation;
 use App\Models\EcommerceImplementationMessage;
 use App\Models\EcommerceImplementationStage;
@@ -20,6 +21,7 @@ use App\Services\SupportCodexSettings;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Str;
 use Tests\Feature\AsistenteWhatsapp\BaseDelCanal;
 
 /**
@@ -428,23 +430,224 @@ class SoporteConContextoDeImplementacionTest extends BaseDelCanal
     }
 
     /**
-     * `form_link` solo para el dueño: a un empleado le llega null, aunque la implementación esté abierta.
+     * `form_link` y `conversacion` solo para el dueño: a un empleado le llegan null (en el sistema y en
+     * la tienda), aunque las implementaciones estén abiertas y tengan mensajes.
      *
      * @return void
      */
-    public function test_form_link_solo_para_el_dueno(): void
+    public function test_form_link_y_conversacion_solo_para_el_dueno(): void
     {
         $this->prender_codex();
         AdminSetting::set('implementation_form_url', 'https://admin.example/configuracion');
         AdminSetting::flush_memo();
 
-        $client   = $this->cliente();
-        $this->implementacion($client);
+        $client         = $this->cliente();
+        $implementation = $this->implementacion($client);
+        $tienda         = $this->implementacion_de_tienda($client, 3);
+        ImplementationMessage::create([
+            'implementation_id' => $implementation->id, 'stage_number' => 3, 'direction' => 'outbound',
+            'phone' => self::TELEFONO, 'body' => 'Mandame los Excel.', 'whatsapp_message_id' => 'waweb-x', 'sent_at' => now()->subDay(),
+        ]);
+        EcommerceImplementationMessage::create([
+            'ecommerce_implementation_id' => $tienda->id, 'stage_number' => 3, 'direction' => 'outbound',
+            'body' => 'Estamos instalando la tienda.', 'whatsapp_message_id' => 'waweb-y', 'sent_at' => now()->subDay(),
+        ]);
         $empleado = $this->crear_empleado($client, '+5493416660000');
 
         $this->contexto($this->ticket($client, $empleado->id))
             ->assertJsonPath('ticket.implementation.sistema.abierta', true)
-            ->assertJsonPath('ticket.implementation.sistema.form_link', null);
+            ->assertJsonPath('ticket.implementation.sistema.form_link', null)
+            ->assertJsonPath('ticket.implementation.sistema.conversacion', null)
+            ->assertJsonPath('ticket.implementation.tienda.abierta', true)
+            ->assertJsonPath('ticket.implementation.tienda.conversacion', null);
+    }
+
+    /**
+     * Al dueño la conversación le llega enmascarada: el link del formulario (por token y por la URL
+     * base), los números de 8 o más dígitos aun con separadores, y lo que sigue a «contraseña»/«clave».
+     * Lo que no es dato personal (un precio corto, el resto del texto) queda igual.
+     *
+     * @return void
+     */
+    public function test_la_conversacion_del_dueno_viaja_enmascarada(): void
+    {
+        $this->prender_codex();
+        AdminSetting::set('implementation_form_url', 'https://admin.example/configuracion');
+        AdminSetting::flush_memo();
+
+        $client         = $this->cliente();
+        $implementation = $this->implementacion($client);
+        $token          = $implementation->form_token;
+        $cuerpos        = [
+            'Completá esto: https://admin.example/configuracion/' . $token . ' y avisame.',
+            'Otro link: https://otro.example/form?t=' . $token,
+            'El viejo: https://admin.example/configuracion/otro-token-cualquiera',
+            'Mi cel es +54 9 341 555-0101 y el fijo 4567-8901.',
+            'CUIT 20-12345678-9, DNI 12.345.678, sale $12.500.',
+            'La contraseña es Perro123 y la clave: abc-99 listo.',
+            'Contraseña Gato2026 nueva.',
+        ];
+
+        foreach ($cuerpos as $indice => $cuerpo) {
+            ImplementationMessage::create([
+                'implementation_id' => $implementation->id, 'stage_number' => 3, 'direction' => 'inbound',
+                'phone' => self::TELEFONO, 'body' => $cuerpo, 'whatsapp_message_id' => 'wamid.PII-' . $indice,
+                'sent_at' => now()->subMinutes(60 - $indice),
+            ]);
+        }
+
+        $tienda = $this->implementacion_de_tienda($client, 2);
+        EcommerceImplementationMessage::create([
+            'ecommerce_implementation_id' => $tienda->id, 'stage_number' => 2, 'direction' => 'inbound',
+            'body' => 'Llamame al 341 5550101 o entrá a https://admin.example/configuracion/' . $token,
+            'whatsapp_message_id' => 'wamid.PII-TIENDA', 'sent_at' => now()->subMinute(),
+        ]);
+
+        $respuesta = $this->contexto($this->ticket($client));
+        $cuerpos   = array_column($respuesta->json('ticket.implementation.sistema.conversacion'), 'body');
+
+        $this->assertSame([
+            'Completá esto: [link del formulario] y avisame.',
+            'Otro link: [link del formulario]',
+            'El viejo: [link del formulario]',
+            'Mi cel es [número] y el fijo [número].',
+            'CUIT [número], DNI [número], sale $12.500.',
+            'La contraseña es [oculta] y la clave: [oculta] listo.',
+            'Contraseña [oculta] nueva.',
+        ], $cuerpos);
+
+        $this->assertSame(
+            'Llamame al [número] o entrá a [link del formulario]',
+            $respuesta->json('ticket.implementation.tienda.conversacion.0.body')
+        );
+    }
+
+    /**
+     * `entrega_hecha` y `sistema_url`: antes de la entrega la URL no viaja; una acción `acceso`
+     * registrada en cualquier etapa (con la 5 todavía en curso) alcanza para darla por hecha.
+     *
+     * @return void
+     */
+    public function test_sistema_url_solo_despues_de_la_entrega(): void
+    {
+        $this->prender_codex();
+        $client = $this->cliente();
+        $api    = $this->crear_client_api($client);
+        $api->spa_url = 'https://ferreteria.comerciocity.test';
+        $api->save();
+        $implementation = $this->implementacion($client, 'in_progress', 'manual', 5);
+        $ticket         = $this->ticket($client);
+
+        $this->contexto($ticket)
+            ->assertJsonPath('ticket.implementation.sistema.entrega_hecha', false)
+            ->assertJsonPath('ticket.implementation.sistema.sistema_url', null);
+
+        $etapa_3 = ImplementationStage::where('implementation_id', $implementation->id)->where('stage_number', 3)->first();
+        $etapa_3->data = ['actions' => [['action' => 'acceso', 'at' => '2026-10-25T12:00:00+00:00', 'canal' => 'whatsapp_web']]];
+        $etapa_3->save();
+
+        $this->contexto($ticket)
+            ->assertJsonPath('ticket.implementation.sistema.entrega_hecha', true)
+            ->assertJsonPath('ticket.implementation.sistema.sistema_url', 'https://ferreteria.comerciocity.test');
+    }
+
+    /**
+     * La etapa 5 cerrada también da la entrega por hecha.
+     *
+     * @return void
+     */
+    public function test_la_etapa_cinco_cerrada_da_la_entrega_por_hecha(): void
+    {
+        $this->prender_codex();
+        $client = $this->cliente();
+        $this->implementacion($client, 'in_progress', 'manual', 6);
+
+        $this->contexto($this->ticket($client))->assertJsonPath('ticket.implementation.sistema.entrega_hecha', true);
+    }
+
+    /**
+     * `instalacion`: la última instalación `completa` de la API activa, con el valor real del estado.
+     * No cuentan la `esqueleto` (aunque sea más nueva) ni la `completa` de otra API.
+     *
+     * @return void
+     */
+    public function test_instalacion_es_la_ultima_completa_de_la_api_activa(): void
+    {
+        $this->prender_codex();
+        $client = $this->cliente();
+        $this->implementacion($client);
+        $ticket = $this->ticket($client);
+
+        $this->contexto($ticket)->assertJsonPath('ticket.implementation.sistema.instalacion', null);
+
+        $activa = $this->crear_client_api($client);
+        $this->crear_instalacion($client, $activa->id, ClientInstallation::KIND_COMPLETA, 'fallida', now()->subDays(3));
+        $this->crear_instalacion($client, $activa->id, ClientInstallation::KIND_COMPLETA, 'completada', now()->subDays(2));
+        $this->crear_instalacion($client, $activa->id, ClientInstallation::KIND_ESQUELETO, 'instalando', null);
+        $this->crear_instalacion($client, $activa->id + 1000, ClientInstallation::KIND_COMPLETA, 'pendiente', null);
+
+        $this->contexto($ticket)->assertJsonPath('ticket.implementation.sistema.instalacion', [
+            'estado' => 'completada',
+            'at'     => now()->subDays(2)->toIso8601String(),
+        ]);
+    }
+
+    /**
+     * `tienda.activa`: false mientras no esté activa; true con la tienda online `active` o con la etapa
+     * 5 de la tienda cerrada.
+     *
+     * @return void
+     */
+    public function test_tienda_activa(): void
+    {
+        $this->prender_codex();
+        $client = $this->cliente();
+        $tienda = $this->implementacion_de_tienda($client, 5);
+        $ticket = $this->ticket($client);
+
+        $this->contexto($ticket)->assertJsonPath('ticket.implementation.tienda.activa', false);
+
+        EcommerceImplementationStage::where('ecommerce_implementation_id', $tienda->id)->where('stage_number', 5)
+            ->update(['status' => 'completed']);
+        $this->contexto($ticket)->assertJsonPath('ticket.implementation.tienda.activa', true);
+
+        EcommerceImplementationStage::where('ecommerce_implementation_id', $tienda->id)->where('stage_number', 5)
+            ->update(['status' => 'in_progress']);
+        ClientEcommerce::where('id', $tienda->client_ecommerce_id)->update(['status' => 'active']);
+        $this->contexto($ticket)->assertJsonPath('ticket.implementation.tienda.activa', true);
+    }
+
+    /**
+     * Abierta es solo `in_progress`: una `paused` no viaja (ni como abierta ni como cerrada).
+     *
+     * @return void
+     */
+    public function test_una_pausada_no_viaja(): void
+    {
+        $this->prender_codex();
+        $client = $this->cliente();
+        $this->implementacion($client, 'paused');
+
+        $this->contexto($this->ticket($client))->assertJsonPath('ticket.implementation', null);
+    }
+
+    /**
+     * Instalación del cliente.
+     *
+     * @param Client      $client        Cliente.
+     * @param int         $client_api_id API destino.
+     * @param string      $kind          completa | esqueleto.
+     * @param string      $status        pendiente | instalando | completada | fallida.
+     * @param Carbon|null $finished_at   Fin, si terminó.
+     *
+     * @return ClientInstallation
+     */
+    private function crear_instalacion(Client $client, int $client_api_id, string $kind, string $status, ?Carbon $finished_at): ClientInstallation
+    {
+        return ClientInstallation::create([
+            'uuid' => (string) Str::uuid(), 'client_id' => $client->id, 'client_api_id' => $client_api_id,
+            'kind' => $kind, 'status' => $status, 'started_at' => now()->subDays(4), 'finished_at' => $finished_at,
+        ]);
     }
 
     /**
