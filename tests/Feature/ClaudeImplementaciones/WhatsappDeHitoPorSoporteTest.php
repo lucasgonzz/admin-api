@@ -527,8 +527,8 @@ class WhatsappDeHitoPorSoporteTest extends BaseDeImplementaciones
     }
 
     /**
-     * Los frenos de la entrada: parámetros de más, real sin `operation_id` o con el nombre equivocado, acción
-     * `nota`, implementación inexistente. En ninguno se manda nada.
+     * Los frenos de la entrada: parámetros de más, real sin `operation_id` o con el nombre equivocado, una acción
+     * que no existe, implementación inexistente. En ninguno se manda nada.
      *
      * @return void
      */
@@ -547,7 +547,7 @@ class WhatsappDeHitoPorSoporteTest extends BaseDeImplementaciones
 
         $this->postJson($ruta, $this->real($client, ['operation_id' => 'corta']), $this->headers())->assertStatus(422);
         $this->postJson($ruta, $this->real($client, ['confirm_client_name' => 'Otro Negocio']), $this->headers())->assertStatus(422);
-        $this->postJson($ruta, $this->real($client, ['accion' => 'nota']), $this->headers())->assertStatus(422);
+        $this->postJson($ruta, $this->real($client, ['accion' => 'inventada']), $this->headers())->assertStatus(422);
         $this->postJson($ruta, $this->real($client, ['texto' => '   ']), $this->headers())->assertStatus(422);
         $this->postJson(sprintf(self::RUTA, 99999999), $this->real($client), $this->headers())->assertStatus(404);
         $this->postJson($ruta, $this->real($client), ['Accept' => 'application/json'])->assertStatus(401);
@@ -555,6 +555,52 @@ class WhatsappDeHitoPorSoporteTest extends BaseDeImplementaciones
         $this->assertCount(0, $this->espia->plantillas);
         $this->assertCount(0, $this->espia->textos);
         $this->assertSame([], $this->data_de_la_etapa($implementation, 3));
+    }
+
+    /**
+     * `accion=nota` es un mensaje real al cliente (ARCA en la etapa 7, el centro de recursos en la 6): sale por el
+     * ticket y se registra en `data.actions[]` de la etapa pedida igual que las demás, sin copiar el texto a la
+     * entrada (vive en el mensaje del ticket).
+     *
+     * @return void
+     */
+    public function test_la_nota_se_manda_al_cliente_y_se_registra_en_la_etapa_pedida(): void
+    {
+        [$client, $implementation] = $this->escenario();
+        $implementation = $this->llevar_a_la_etapa($implementation, 7);
+        $this->abrir_la_ventana($client, (string) $client->phone);
+
+        $texto     = 'Para facturar desde el sistema necesitamos que nos delegues el servicio en ARCA. Te paso los pasos.';
+        $respuesta = $this->postJson(sprintf(self::RUTA, $implementation->id), $this->real($client, [
+            'texto'  => $texto,
+            'accion' => 'nota',
+            'etapa'  => 7,
+        ]), $this->headers());
+
+        $respuesta->assertStatus(200)
+            ->assertJsonPath('accion', 'nota')
+            ->assertJsonPath('etapa', 7)
+            ->assertJsonPath('estado', 'sent');
+
+        $this->assertCount(1, $this->espia->textos);
+        $this->assertSame($texto, $this->espia->textos[0]['body']);
+        $this->assertSame($texto, SupportMessage::find($respuesta->json('message_id'))->body);
+
+        $acciones = $this->acciones_por_whatsapp($implementation, 7);
+        $this->assertCount(1, $acciones);
+        $this->assertSame('nota', $acciones[0]['action']);
+        $this->assertSame(7, $acciones[0]['stage']);
+        $this->assertSame((int) $respuesta->json('ticket_id'), $acciones[0]['support_ticket_id']);
+        $this->assertArrayNotHasKey('texto', $acciones[0]);
+
+        /* La del centro de recursos, en la etapa 6 (explícita, distinta de la actual). */
+        $centro = $this->postJson(sprintf(self::RUTA, $implementation->id), $this->real($client, [
+            'texto'  => 'Te dejo el centro de recursos con los videos para arrancar.',
+            'accion' => 'nota',
+            'etapa'  => 6,
+        ]), $this->headers());
+        $centro->assertStatus(200)->assertJsonPath('etapa', 6)->assertJsonPath('estado', 'sent');
+        $this->assertCount(1, $this->acciones_por_whatsapp($implementation, 6));
     }
 
     /**

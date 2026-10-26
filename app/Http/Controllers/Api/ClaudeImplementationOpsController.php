@@ -319,12 +319,18 @@ class ClaudeImplementationOpsController extends Controller
     const PARAMETROS_DEL_WHATSAPP = ['texto', 'accion', 'etapa', 'telefono', 'operation_id', 'dry_run', 'confirm_client_name'];
 
     /**
-     * Las acciones que se pueden mandar por el ticket de soporte: las de `ACCIONES` menos `nota`, que es una
-     * anotación interna y no un mensaje al cliente (para eso está `actions` con `accion=nota`).
+     * Las acciones que se pueden mandar por el ticket de soporte: TODAS las de `ACCIONES`.
+     *
+     * 🔴 `nota` incluida (corrección del 26/10/2026): acá NO es una anotación interna sino la clave de los mensajes
+     * al cliente que no tienen un hito propio en el checklist. `/implementar` la usa para tres WhatsApp reales —el
+     * pedido de la delegación de ARCA (4b, `etapa: 7`), el centro de recursos (5b, `etapa: 6`) y «artículos nuevos
+     * cargados» (6)—, y antes salían por WhatsApp Web registrados con `actions` y `accion=nota`. Se registra en
+     * `data.actions[]` igual que las demás; a diferencia de la nota de `actions`, el texto NO se copia a la entrada:
+     * vive en el mensaje del ticket.
      *
      * @var array<int, string>
      */
-    const ACCIONES_DEL_WHATSAPP = ['presentacion', 'form_link', 'progreso', 'pedir_archivos', 'entrega', 'acceso', 'imagenes', 'categorias', 'descripciones', 'listo'];
+    const ACCIONES_DEL_WHATSAPP = self::ACCIONES;
 
     /** Patrón de `operation_id`: el mismo alfabeto que la clave idempotente de `support-codex/.../reply`. */
     const PATRON_DE_OPERATION_ID = '/^[A-Za-z0-9_-]+$/';
