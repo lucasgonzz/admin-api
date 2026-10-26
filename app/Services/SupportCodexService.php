@@ -136,6 +136,9 @@ class SupportCodexService
             'mission' => $case ? $case->mission : null,
             'review_reason' => $case ? $case->review_reason : null,
             'reason' => $this->pending_reason($ticket, $case),
+            // El helper debe verificar esta capacidad ANTES de pedir el modo nuevo: un admin
+            // anterior ignoraría el campo y ejecutaría el resume que consume la consulta.
+            'capabilities' => ['continue_pending' => true],
             'expected_message_id' => $last ? (int) $last->id : null,
             'window' => app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone),
             'client_context' => app(SupportClientContextService::class)->bloque_para_el_prompt($ticket),
@@ -657,6 +660,26 @@ class SupportCodexService
             $last = $this->last_real_message($id);
             if ($last === null || (int) $last->id !== (int) $input['expected_message_id']) {
                 $this->fail(409, 'stale_message', 'Cambió la conversación.');
+            }
+            if (! empty($input['continue_pending'])) {
+                if (! empty($input['request_confirmation'])) {
+                    $this->fail(422, 'incompatible_resume_mode', 'Continuar una consulta no anuncia una misión resuelta.');
+                }
+                if ($last->sender_type !== 'user' || (int) $last->id <= (int) $case->handled_message_id) {
+                    $this->fail(409, 'not_pending', 'No hay una consulta nueva del cliente sin atender.');
+                }
+                if (! app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone)['open']) {
+                    $this->fail(422, 'window_expired', 'Venció la ventana de WhatsApp; no se retoma el texto libre.');
+                }
+                // Recuperar una consulta técnica rechazada NO resuelve la misión que ya existía.
+                // Tampoco consume el entrante: pending/claim deben poder ofrecérselo a Martín.
+                $case->state = trim((string) $case->mission) !== '' ? 'mission_pending' : 'ready';
+                $case->review_reason = mb_substr('Retomado por Lucas: ' . $input['reason'], 0, 500);
+                $case->lease_hash = null;
+                $case->lease_expires_at = null;
+                $case->confirmation_due_at = null;
+                $case->save();
+                return ['ticket' => $this->context($ticket, $case)];
             }
             $case->state = ! empty($input['request_confirmation']) ? 'ready_to_confirm' : 'ready';
             $case->handled_message_id = (int) $last->id;

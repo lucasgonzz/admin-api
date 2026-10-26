@@ -147,6 +147,7 @@ class ClaudeSupportCodexController extends Controller
             'expected_message_id' => 'required|integer|min:1',
             'reason' => 'required|string|max:500',
             'request_confirmation' => 'sometimes|boolean',
+            'continue_pending' => 'sometimes|boolean',
         ]);
         return response()->json($service->resume((int) $id, $data));
     }

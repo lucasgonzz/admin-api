@@ -460,6 +460,118 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
     }
 
+    public function test_continuar_consulta_pendiente_conserva_mision_y_no_consume_el_entrante(): void
+    {
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        $mission = '/cruzada Corregir el visor de imágenes.';
+        $this->reply($ticket, $claim, ['action' => 'escalar', 'mission' => $mission])->assertOk();
+        $message = $this->inbound($ticket, 'También necesito ver el nombre completo.');
+        app(SupportCodexService::class)->pause_for_human($ticket);
+        $before = SupportCodexCase::where('support_ticket_id', $ticket->id)->first();
+        $escalation = $ticket->fresh()->escalation_reason;
+        $messages = SupportMessage::where('support_ticket_id', $ticket->id)->count();
+
+        $this->getJson($this->base . '/tickets/' . $ticket->id, $this->headers)
+            ->assertJsonPath('ticket.capabilities.continue_pending', true);
+        $this->postJson($this->base . '/tickets/' . $ticket->id . '/resume', [
+            'expected_message_id' => $message->id, 'reason' => 'Continuar consulta de columnas sin resolver el visor.',
+            'continue_pending' => true,
+        ], $this->headers)->assertOk()->assertJsonPath('ticket.state', 'mission_pending')
+            ->assertJsonPath('ticket.mission', $mission)->assertJsonPath('ticket.reason', 'inbound');
+
+        $after = $before->fresh();
+        $this->assertSame($before->handled_message_id, $after->handled_message_id);
+        $this->assertSame($before->last_reply_id, $after->last_reply_id);
+        $this->assertSame($before->thread_id, $after->thread_id);
+        $this->assertSame($escalation, $ticket->fresh()->escalation_reason);
+        $this->assertNotNull($ticket->fresh()->escalated_at);
+        $this->assertSame($messages, SupportMessage::where('support_ticket_id', $ticket->id)->count());
+        $this->assertCount(1, $this->deliveries->bodies, 'Retomar no envía una respuesta por sí mismo.');
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonPath('tickets.0.expected_message_id', $message->id);
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim, ['body' => 'Activá Salto de línea en Nombre. El visor sigue pendiente.'])
+            ->assertOk()->assertJsonPath('ticket.state', 'mission_pending')->assertJsonPath('ticket.mission', $mission);
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->assertCount(2, $this->deliveries->bodies);
+    }
+
+    public function test_continuar_consulta_sin_mision_la_deja_disponible_sin_consumirla(): void
+    {
+        $ticket = $this->ticket();
+        $last = SupportMessage::where('support_ticket_id', $ticket->id)->latest('id')->first();
+        app(SupportCodexService::class)->pause_for_human($ticket);
+        $this->postJson($this->base . '/tickets/' . $ticket->id . '/resume', [
+            'expected_message_id' => $last->id, 'reason' => 'Continuidad autorizada por Lucas.', 'continue_pending' => true,
+        ], $this->headers)->assertOk()->assertJsonPath('ticket.state', 'ready')->assertJsonPath('ticket.reason', 'inbound');
+        $this->assertEmpty($this->deliveries->bodies);
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonPath('tickets.0.expected_message_id', $last->id);
+    }
+
+    public function test_continuar_consulta_no_admite_confirmar_mision_ni_reprocesar_un_mensaje_atendido(): void
+    {
+        $ticket = $this->ticket();
+        $last = SupportMessage::where('support_ticket_id', $ticket->id)->latest('id')->first();
+        app(SupportCodexService::class)->pause_for_human($ticket);
+        $path = $this->base . '/tickets/' . $ticket->id . '/resume';
+        $payload = ['expected_message_id' => $last->id, 'reason' => 'Continuidad autorizada.', 'continue_pending' => true];
+        $this->postJson($path, array_merge($payload, ['request_confirmation' => true]), $this->headers)->assertStatus(422);
+        $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->first();
+        $case->handled_message_id = $last->id;
+        $case->save();
+        $this->postJson($path, $payload, $this->headers)->assertStatus(409);
+        $this->assertSame('manual_review', $case->fresh()->state);
+        $this->assertEmpty($this->deliveries->bodies);
+    }
+
+    public function test_continuar_consulta_no_repite_la_ultima_respuesta_del_equipo(): void
+    {
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim)->assertOk();
+        app(SupportCodexService::class)->pause_for_human($ticket);
+        $last = SupportMessage::where('support_ticket_id', $ticket->id)->latest('id')->first();
+        $this->postJson($this->base . '/tickets/' . $ticket->id . '/resume', [
+            'expected_message_id' => $last->id, 'reason' => 'Continuidad autorizada.', 'continue_pending' => true,
+        ], $this->headers)->assertStatus(409);
+        $this->assertCount(1, $this->deliveries->bodies);
+    }
+
+    public function test_continuar_consulta_conserva_frenos_de_reserva_y_envio_ambiguo(): void
+    {
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        $path = $this->base . '/tickets/' . $ticket->id . '/resume';
+        $payload = ['expected_message_id' => $claim['ticket']['expected_message_id'], 'reason' => 'Continuidad autorizada.', 'continue_pending' => true];
+        $this->postJson($path, $payload, $this->headers)->assertStatus(423);
+        $this->deliveries->success = false;
+        $this->reply($ticket, $claim)->assertOk()->assertJsonPath('operation.status', 'unknown');
+        $last = $this->inbound($ticket, '¿Llegó mi mensaje?');
+        $payload['expected_message_id'] = $last->id;
+        $this->postJson($path, $payload, $this->headers)->assertStatus(409);
+        $this->assertSame('manual_review', SupportCodexCase::where('support_ticket_id', $ticket->id)->first()->state);
+        $this->assertCount(1, $this->deliveries->bodies);
+    }
+
+    public function test_continuar_consulta_no_elude_mensaje_nuevo_ventana_vencida_ni_agente_apagado(): void
+    {
+        $ticket = $this->ticket();
+        $old = SupportMessage::where('support_ticket_id', $ticket->id)->latest('id')->first();
+        app(SupportCodexService::class)->pause_for_human($ticket);
+        $last = $this->inbound($ticket, 'Otra captura.');
+        $path = $this->base . '/tickets/' . $ticket->id . '/resume';
+        $payload = ['expected_message_id' => $old->id, 'reason' => 'Continuidad autorizada.', 'continue_pending' => true];
+        $this->postJson($path, $payload, $this->headers)->assertStatus(409);
+        $payload['expected_message_id'] = $last->id;
+        Carbon::setTestNow(now()->addHours(25));
+        $this->postJson($path, $payload, $this->headers)->assertStatus(422);
+        $ticket->claude_auto_reply = false;
+        $ticket->save();
+        $this->postJson($path, $payload, $this->headers)->assertStatus(409);
+        $this->assertSame('manual_review', SupportCodexCase::where('support_ticket_id', $ticket->id)->first()->state);
+        $this->assertEmpty($this->deliveries->bodies);
+    }
+
     public function test_un_empleado_sin_permiso_no_consulta_datos_del_negocio(): void
     {
         $ticket = $this->ticket();
