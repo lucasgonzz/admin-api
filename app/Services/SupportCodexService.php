@@ -317,6 +317,43 @@ class SupportCodexService
         });
     }
 
+    /**
+     * El interruptor devuelve la atención cedida a Lucas, sin revivir un turno viejo.
+     * El llamador debe estar en una transacción con el ticket bloqueado, igual que claim/reply.
+     */
+    public function agent_toggled(SupportTicket $ticket): void
+    {
+        $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->lockForUpdate()->first();
+        if ($case === null) {
+            return;
+        }
+        if (! $ticket->claude_auto_reply) {
+            // El chequeo del flag solo no alcanza: apagado y encendido rápidos permitirían
+            // que un agente anterior mande después de que Lucas retomó la conversación.
+            $case->lease_hash = null;
+            $case->lease_expires_at = null;
+            $case->save();
+            return;
+        }
+        if (! SupportCodexSettings::manages($ticket) || $ticket->status !== 'open'
+            || $case->state !== 'manual_review'
+            || $case->review_reason !== 'Lucas retomó la atención desde el admin.'
+            || ! empty($case->mission) || $this->has_unfinished_operation($ticket->id)
+            || ($case->lease_expires_at !== null && $case->lease_expires_at->isFuture())) {
+            return;
+        }
+        $last = $this->last_real_message($ticket->id);
+        if ($last === null || $last->sender_type !== 'user'
+            || (int) $last->id <= (int) $case->handled_message_id) {
+            return;
+        }
+        // No usar resume(): marca el último mensaje como atendido y perdería la consulta
+        // que llegó mientras Lucas tenía el agente apagado (caso SanBlas, 26/10/2026).
+        $case->state = 'ready';
+        $case->review_reason = 'Lucas encendió el agente para atender la consulta pendiente.';
+        $case->save();
+    }
+
     public function assert_current(SupportTicket $ticket, array $input, bool $check_unfinished = true): SupportCodexCase
     {
         $this->assert_managed($ticket);
