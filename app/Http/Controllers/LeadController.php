@@ -2913,7 +2913,13 @@ class LeadController extends Controller
                         $attachment->delete();
                         Storage::disk('public')->delete($stored_path);
 
-                        return response()->json(['message' => 'El audio se grabó correctamente pero no se pudo enviar a WhatsApp. Revisá los logs para más detalles.'], 422);
+                        // Si el servicio dejó el motivo (formato que WhatsApp no acepta, Meta rechazó la subida…) se lo muestra.
+                        $send_error = trim((string) $whatsapp_send_service->last_send_error);
+                        $failure_message = $send_error !== ''
+                            ? 'El audio se grabó correctamente pero no se pudo enviar a WhatsApp: ' . $send_error
+                            : 'El audio se grabó correctamente pero no se pudo enviar a WhatsApp. Revisá los logs para más detalles.';
+
+                        return response()->json(['message' => $failure_message], 422);
                     }
                 }
             } catch (\Throwable $e) {

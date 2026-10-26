@@ -665,6 +665,35 @@ class ControlDelAgenteDeSoporteTest extends TestCase
         );
     }
 
+    public function test_encender_el_agente_genera_sugerencia_para_el_entrante_pendiente()
+    {
+        AdminSetting::set(\App\Services\SupportCodexSettings::KEY_ENABLED, '0');
+        $admin = $this->crear_admin('prende-con-pendiente@test.local');
+        $ticket = $this->crear_ticket($this->crear_cliente());
+        $ticket->claude_auto_reply = false;
+        $ticket->save();
+        $sender = $this->espiar_sender();
+        $claude = $this->espiar_claude($this->respuesta_del_agente('Se carga desde Ventas.'));
+        $this->actingAs($admin, 'sanctum')->postJson('/api/admin/support-ticket/' . $ticket->id . '/toggle-claude-auto-reply')->assertOk();
+        $this->assertSame(1, $claude->llamadas);
+        $this->assertDatabaseHas('support_messages', ['support_ticket_id' => $ticket->id, 'is_ai_suggestion_draft' => true, 'body' => 'Se carga desde Ventas.']);
+        $this->assertCount(0, $sender->textos);
+    }
+
+    public function test_encender_el_agente_no_genera_sugerencia_si_lucas_ya_contesto()
+    {
+        AdminSetting::set(\App\Services\SupportCodexSettings::KEY_ENABLED, '0');
+        $admin = $this->crear_admin('prende-ya-contestado@test.local');
+        $ticket = $this->crear_ticket($this->crear_cliente());
+        $ticket->claude_auto_reply = false;
+        $ticket->save();
+        SupportMessage::create(['support_ticket_id' => $ticket->id, 'sender_type' => 'admin', 'kind' => 'text', 'body' => 'Se carga desde Ventas.', 'delivered_at' => now()]);
+        $claude = $this->espiar_claude($this->respuesta_del_agente('No debería generarse.'));
+        $this->actingAs($admin, 'sanctum')->postJson('/api/admin/support-ticket/' . $ticket->id . '/toggle-claude-auto-reply')->assertOk();
+        $this->assertSame(0, $claude->llamadas);
+        $this->assertSame(0, SupportMessage::where('support_ticket_id', $ticket->id)->where('is_ai_suggestion_draft', true)->count());
+    }
+
     /**
      * El texto del agente queda sellado como suyo aunque salga sin correcciones.
      *

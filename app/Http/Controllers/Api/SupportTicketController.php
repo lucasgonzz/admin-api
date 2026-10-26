@@ -547,16 +547,28 @@ class SupportTicketController extends BaseController
      */
     public function toggle_claude_auto_reply($id)
     {
-        $ticket = SupportTicket::findOrFail($id);
-
-        $ticket->claude_auto_reply = ! (bool) $ticket->claude_auto_reply;
-        $ticket->save();
+        $ticket = \Illuminate\Support\Facades\DB::transaction(function () use ($id) {
+            $ticket = SupportTicket::lockForUpdate()->findOrFail($id);
+            $ticket->claude_auto_reply = ! (bool) $ticket->claude_auto_reply;
+            $ticket->save();
+            app(\App\Services\SupportCodexService::class)->agent_toggled($ticket);
+            return $ticket;
+        });
 
         // Apagarlo también se lleva lo que ya estaba en curso: un borrador con fecha de
         // autoenvío sigue saliendo aunque el agente quede apagado, y apagar el agente y ver
         // que igual le contesta al cliente es lo peor que puede hacer este botón.
         if (! $ticket->claude_auto_reply) {
             (new SupportAiSuggestionDraftService())->clear_ticket_pending_state($ticket);
+        } elseif ($ticket->status === 'open') {
+            $last = SupportMessage::where('support_ticket_id', $ticket->id);
+            SupportMessage::apply_mensaje_real_conditions($last, 'support_messages');
+            $last = $last->orderByDesc('id')->first();
+            if ($last !== null && $last->sender_type === 'user') {
+                // Prender también es un disparador: el proveedor anterior no tiene un
+                // monitor que encuentre por sí solo lo que llegó con el agente apagado.
+                app(\App\Services\SupportAiSuggestionScheduler::class)->schedule_after_client_inbound((int) $ticket->id);
+            }
         }
 
         // Vía ::dispatch() y no event(new ...): el dispatch del evento pasa por BroadcastGuard,

@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Events\SupportMessageReceived;
 use App\Events\SupportTicketUpdated;
 use App\Models\AdminSetting;
+use App\Models\Admin;
 use App\Models\Client;
 use App\Models\ClientEmployee;
 use App\Models\SupportCodexCase;
@@ -113,6 +114,124 @@ class SoporteAutomaticoEnCodexTest extends TestCase
             'action' => 'responder', 'body' => 'Probá abrir Ventas.',
             'thread_id' => 'thread-ticket-' . $ticket->id,
         ], $extra), $this->headers);
+    }
+
+    private function toggle_agent(SupportTicket $ticket): void
+    {
+        $admin = Admin::firstOrCreate(['email' => 'reactivar-' . $ticket->id . '@test.local'], ['name' => 'Lucas', 'password' => bcrypt('prueba')]);
+        $this->actingAs($admin, 'sanctum')->postJson('/api/admin/support-ticket/' . $ticket->id . '/toggle-claude-auto-reply')->assertOk();
+        $ticket->refresh();
+    }
+
+    public function test_encender_recupera_consulta_pendiente_tras_atencion_manual_sin_consumirla(): void
+    {
+        $ticket = $this->ticket();
+        app(SupportCodexService::class)->pause_for_human($ticket);
+        SupportCodexCase::where('support_ticket_id', $ticket->id)->update(['thread_id' => 'hilo-conservado']);
+        SupportMessage::create(['support_ticket_id' => $ticket->id, 'sender_type' => 'admin', 'kind' => 'text', 'body' => 'Ya lo revisé.', 'delivered_at' => now()]);
+        $this->toggle_agent($ticket);
+        $last = $this->inbound($ticket, 'Ahora aparece una barra negra al ampliar la foto.');
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
+        $this->toggle_agent($ticket);
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(1, 'tickets')
+            ->assertJsonPath('tickets.0.expected_message_id', $last->id)->assertJsonPath('tickets.0.thread_id', 'hilo-conservado');
+        $claim = $this->claim($ticket);
+        $this->assertSame($last->id, $claim['ticket']['expected_message_id']);
+        $this->assertCount(0, $this->deliveries->bodies);
+    }
+
+    public function test_encender_sin_caso_previo_recupera_entrante_en_ambos_ordenes(): void
+    {
+        foreach ([true, false] as $mensaje_antes_de_apagar) {
+            $ticket = $this->ticket();
+            if ($mensaje_antes_de_apagar) {
+                $last = $this->inbound($ticket, 'Necesito una respuesta.');
+            }
+            $this->toggle_agent($ticket);
+            if (! $mensaje_antes_de_apagar) {
+                $last = $this->inbound($ticket, 'Necesito una respuesta.');
+            }
+            $this->toggle_agent($ticket);
+            $claim = $this->claim($ticket);
+            $this->assertSame($last->id, $claim['ticket']['expected_message_id']);
+        }
+    }
+
+    public function test_apagar_y_prender_no_revive_la_reserva_anterior(): void
+    {
+        $ticket = $this->ticket();
+        $old = $this->claim($ticket);
+        $this->toggle_agent($ticket);
+        $this->toggle_agent($ticket);
+        $this->reply($ticket, $old)->assertStatus(423);
+        $new = $this->claim($ticket);
+        $this->assertNotSame($old['lease_token'], $new['lease_token']);
+        $this->assertCount(0, $this->deliveries->bodies);
+    }
+
+    public function test_encender_no_repite_consulta_ya_respondida_por_lucas(): void
+    {
+        $ticket = $this->ticket();
+        app(SupportCodexService::class)->pause_for_human($ticket);
+        $this->toggle_agent($ticket);
+        SupportMessage::create(['support_ticket_id' => $ticket->id, 'sender_type' => 'admin', 'kind' => 'text', 'body' => 'Se hace desde Ventas.', 'delivered_at' => now()]);
+        $this->toggle_agent($ticket);
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
+        $this->assertDatabaseHas('support_codex_cases', ['support_ticket_id' => $ticket->id, 'state' => 'manual_review']);
+    }
+
+    public function test_encender_no_repite_mensaje_ya_atendido_ni_reabre_ticket_cerrado(): void
+    {
+        foreach (['open', 'closed'] as $status) {
+            $ticket = $this->ticket();
+            $last = SupportMessage::where('support_ticket_id', $ticket->id)->orderByDesc('id')->first();
+            $case = SupportCodexCase::create(['support_ticket_id' => $ticket->id, 'state' => 'manual_review', 'handled_message_id' => $last->id, 'review_reason' => 'Lucas retomó la atención desde el admin.']);
+            $this->toggle_agent($ticket);
+            $ticket->status = $status;
+            $ticket->save();
+            $this->toggle_agent($ticket);
+            $this->assertSame('manual_review', $case->fresh()->state);
+        }
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
+    }
+
+    public function test_encender_no_elude_revision_por_error_envio_incierto_ni_mision(): void
+    {
+        foreach (['revision', 'unknown', 'sending', 'mission_pending', 'mision_pausada'] as $scenario) {
+            $ticket = $this->ticket();
+            $last = SupportMessage::where('support_ticket_id', $ticket->id)->orderByDesc('id')->first();
+            $state = $scenario === 'mission_pending' ? 'mission_pending' : 'manual_review';
+            $case = SupportCodexCase::create([
+                'support_ticket_id' => $ticket->id, 'state' => $state,
+                'review_reason' => $scenario === 'revision' ? 'Falló la atención; revisar.' : 'Lucas retomó la atención desde el admin.',
+                'mission' => in_array($scenario, ['mission_pending', 'mision_pausada'], true) ? 'Arreglo todavía pendiente.' : null,
+            ]);
+            if (in_array($scenario, ['unknown', 'sending'], true)) {
+                SupportCodexOperation::create(['operation_id' => 'incierta-' . $ticket->id, 'support_ticket_id' => $ticket->id, 'expected_message_id' => $last->id, 'action' => 'responder', 'request_hash' => str_repeat('a', 64), 'status' => $scenario]);
+            }
+            $this->toggle_agent($ticket);
+            $this->toggle_agent($ticket);
+            $this->assertSame($state, $case->fresh()->state);
+        }
+        $this->assertCount(0, $this->deliveries->bodies);
+    }
+
+    public function test_reactivar_pausa_humana_es_idempotente_y_no_pisa_reserva_vigente(): void
+    {
+        $ticket = $this->ticket();
+        app(SupportCodexService::class)->pause_for_human($ticket);
+        $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->first();
+        $case->lease_hash = hash('sha256', 'reserva-vigente');
+        $case->lease_expires_at = now()->addMinutes(5);
+        $case->save();
+        app(SupportCodexService::class)->agent_toggled($ticket);
+        $this->assertSame('manual_review', $case->fresh()->state);
+        $case->lease_expires_at = now()->subMinute();
+        $case->save();
+        app(SupportCodexService::class)->agent_toggled($ticket);
+        app(SupportCodexService::class)->agent_toggled($ticket);
+        $this->assertSame('ready', $case->fresh()->state);
+        $this->claim($ticket);
     }
 
     public function test_sin_clave_no_hay_lectura_ni_activacion(): void
