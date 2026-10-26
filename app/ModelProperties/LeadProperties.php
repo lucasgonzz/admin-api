@@ -863,6 +863,27 @@ class LeadProperties
              * de todo lead nuevo sin que nadie lo eligiera.
              */
             [
+                'key' => 'contract_precios_sistemas',
+                'text' => 'Contrato — contract_precios_sistemas',
+                'type' => 'text',
+                'value' => null,
+                'show' => false,
+            ],
+            [
+                'key' => 'contract_descuento_conjunto',
+                'text' => 'Contrato — contract_descuento_conjunto',
+                'type' => 'text',
+                'value' => null,
+                'show' => false,
+            ],
+            [
+                'key' => 'contract_mes_gratis',
+                'text' => 'Contrato — contract_mes_gratis',
+                'type' => 'text',
+                'value' => null,
+                'show' => false,
+            ],
+            [
                 'key' => 'contract_modalidad',
                 'text' => 'Contrato — modalidad (licencia / suscripción)',
                 'type' => 'text',

@@ -747,6 +747,8 @@ class LeadController extends Controller
         // Se asigna recién en la promoción a Client.
         $request->request->remove('user_id');
 
+        \App\Services\ContractPreciosService::preparar_request($request, $lead);
+
         // Seteamos campos usando helper declarativo para respetar properties().
         ModelPropertiesHelper::set_from_request($lead, $request, 'lead');
         $this->sync_personalized_demo_videos_from_request($lead, $request);

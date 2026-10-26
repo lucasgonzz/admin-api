@@ -106,6 +106,9 @@ class Client extends Model
         /* Modalidad del contrato (misión precios-dos-modalidades, 13/10/2026): los mismos casts
          * que en `Lead`, por el mismo motivo que el resto del bloque. `contract_modalidad` es texto
          * y no lleva cast. */
+        'contract_precios_sistemas'          => 'array',
+        'contract_descuento_conjunto'        => 'float',
+        'contract_mes_gratis'                => 'boolean',
         'contract_sistemas'                  => 'array',
         'contract_permanencia_meses'         => 'integer',
         'contract_copiado_desde_lead_at'     => 'datetime',

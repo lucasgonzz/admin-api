@@ -140,6 +140,9 @@
             font-style: italic;
             color: #444444;
         }
+@if($desglose_precios !== null)
+        h2.section-title, .etapa-title { page-break-after: avoid; }
+@endif
     </style>
 </head>
 <body>
@@ -237,6 +240,21 @@
         <strong>{{ $moneda }} {{ $precio_licencia ?? '—' }}</strong>, conforme al plan de cuotas que se detalla a continuación:
     </p>
 @endif
+@if($desglose_precios !== null)
+    <table class="data-table" style="page-break-inside: avoid;">
+        <thead><tr><th>Sistema contratado</th><th>Licencia individual</th></tr></thead>
+        <tbody>
+        @foreach($desglose_precios['filas'] as $fila)
+            <tr><td>{{ $fila['label'] }}</td><td>{{ $moneda }} {{ number_format($fila['licencia'], 2, ',', '.') }}</td></tr>
+        @endforeach
+            <tr><td>Subtotal de licencias individuales</td><td>{{ $moneda }} {{ number_format($desglose_precios['subtotal'], 2, ',', '.') }}</td></tr>
+        @if(count($desglose_precios['filas']) === 3)
+            <tr><td>Descuento por contratar los tres sistemas</td><td>- {{ $moneda }} {{ number_format($desglose_precios['descuento'], 2, ',', '.') }}</td></tr>
+        @endif
+            <tr class="total-row"><td>Total de licencia e implementación{{ count($desglose_precios['filas']) === 3 ? ' con descuento aplicado' : '' }}</td><td>{{ $moneda }} {{ number_format($desglose_precios['total'], 2, ',', '.') }}</td></tr>
+        </tbody>
+    </table>
+@endif
     <table class="data-table">
         <thead>
             <tr>
@@ -317,8 +335,13 @@
             </tr>
         </thead>
         <tbody>
+@if($desglose_precios !== null)
+            @foreach($desglose_precios['filas'] as $fila)
+            <tr><td>{{ $fila['label'] }}</td><td>Abono del sistema contratado</td><td>{{ $mensualidad_moneda }} {{ number_format($fila['mensualidad'], 2, ',', '.') }}</td></tr>
+            @endforeach
+@endif
             <tr class="row-white">
-                <td>Mensualidad base</td>
+                <td>{{ $desglose_precios !== null ? 'Subtotal del abono base' : 'Mensualidad base' }}</td>
                 <td>Servicio continuo de la plataforma ({{ $usuarios_incluidos }} usuario{{ $usuarios_incluidos == 1 ? '' : 's' }} incluido{{ $usuarios_incluidos == 1 ? '' : 's' }})</td>
                 <td>{{ $mensualidad_moneda }} {{ $mensualidad_base ?? '—' }}</td>
             </tr>
@@ -342,6 +365,9 @@
             </tr>
         </tbody>
     </table>
+@if($mes_gratis)
+    <p><strong>Un mes gratis:</strong> el CLIENTE tendrá bonificado el primer mes del servicio mensual continuo de los sistemas contratados, contado desde la puesta en marcha. El primer pago de la mensualidad corresponderá al período siguiente al mes bonificado.</p>
+@endif
     @if($fecha_primer_pago_mensual)
         <p>El primer pago de la mensualidad deberá realizarse el <strong>{{ $fecha_primer_pago_mensual }}</strong>.</p>
     @endif
@@ -417,6 +443,9 @@
          manual_sistema/general/comunidad-y-acompanamiento.md: si cambia allá, se revisa acá. --}}
     <div class="clausula-particular">
         <p class="clausula-titulo">6.1 — Comunidad ComercioCity y adaptaciones a medida</p>
+@if($desglose_precios !== null && $modalidad !== 'suscripcion')
+        <p>La pertenencia a la comunidad y las adaptaciones o modificaciones del sistema incluidas en esta cláusula se mantienen <strong>de por vida</strong>, con el alcance y las exclusiones que se detallan a continuación.</p>
+@endif
         <p>
             Cualquiera sea la modalidad de contratación, el CLIENTE integra la comunidad ComercioCity durante la vigencia de su
             licencia de uso y podrá solicitar al PRESTADOR, en cualquier momento,
