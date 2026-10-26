@@ -1232,6 +1232,8 @@ Route::prefix('admin')->group(function () {
         Route::post('support-ticket/{ticket_id}/suggest', [\App\Http\Controllers\Api\SupportAiSuggestionController::class, 'suggest']);
         Route::post('support-message/{id}/retry-remote-sync', [\App\Http\Controllers\Api\SupportMessageController::class, 'retry_remote_sync']);
         Route::post('support-message/{id}/mark-read', [\App\Http\Controllers\Api\SupportMessageController::class, 'mark_read']);
+        // Reacción con emoji del operador a un mensaje del cliente (ticket de WhatsApp); emoji vacío = quitar.
+        Route::post('support-message/{id}/reaction', [\App\Http\Controllers\Api\SupportMessageController::class, 'reaction']);
         // Variante en lote de la de arriba. Se AGREGA: la de a uno sigue viva y admin-spa la usa
         // como respaldo. No colisiona con support-message/{id}/mark-read porque tiene un segmento
         // menos, pero igual va pegada a ella para que las dos se lean juntas.

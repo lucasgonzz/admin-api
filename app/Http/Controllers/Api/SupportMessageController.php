@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Events\SupportMessageReceived;
+use App\Events\SupportMessageStatusUpdated;
 use App\Http\Controllers\CommonLaravel\BaseController;
 use App\Models\Admin;
 use App\Models\SupportMessage;
@@ -17,6 +18,7 @@ use App\Services\SupportClientSyncService;
 use App\Services\SupportOutboundMediaService;
 use App\Services\SupportWhatsappOpenerService;
 use App\Services\WhatsappInboundMediaService;
+use App\Services\WhatsappSendService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -483,6 +485,276 @@ class SupportMessageController extends BaseController
         }
 
         return response()->json(['ok' => true], 200);
+    }
+
+    /**
+     * Pone, cambia o quita la reacción con emoji del operador sobre un mensaje que mandó el cliente.
+     *
+     * Contrato con admin-spa: `POST support-message/{id}/reaction` con `{ "emoji": "👍" }`; un
+     * `emoji` vacío o `null` QUITA la reacción (el campo tiene que venir: sin él es 422, para que
+     * un body mal armado no borre una reacción en silencio).
+     *
+     * Solo se puede reaccionar a mensajes `sender_type = 'user'` con `whatsapp_message_id` de un
+     * ticket `source = 'whatsapp'` con `whatsapp_phone`. Cualquier otro caso es **422** con
+     * `{ "error": "<motivo en español>" }`.
+     *
+     * 🔴 Si Meta no acepta el envío (ventana de 24 h cerrada, mensaje de más de 30 días, etc.) es
+     * **422** y **no se guarda nada**: una reacción pintada en la burbuja dice que el cliente la
+     * vio, y si no salió, no la vio. Al quitar pasa lo mismo: si Meta rechaza el quitado, la
+     * reacción sigue puesta en el teléfono del cliente y el panel tiene que seguir mostrándola.
+     *
+     * Una reacción propia NO crea un `SupportMessage`, no toca `last_message`, ni el `updated_at`
+     * del ticket, ni dispara al agente: es solo un atributo del mensaje reaccionado. Las otras
+     * pestañas se enteran por {@see SupportMessageStatusUpdated}.
+     *
+     * Usa `skip_failure_notification = true`: el aviso por WhatsApp a los admins está throttleado
+     * globalmente (1 cada 10 minutos) y un operador probando la paleta en un hilo frío se comería
+     * ese cupo; quien apretó ya ve el error en la respuesta.
+     *
+     * @param Request             $request       Trae `emoji` ('' o null = quitar).
+     * @param int|string          $id            Id del SupportMessage al que se reacciona.
+     * @param WhatsappSendService $send_service  Envío saliente vía Kapso.
+     *
+     * @return \Illuminate\Http\JsonResponse 200 `{ model }` | 422 `{ error }`.
+     */
+    public function reaction(Request $request, $id, WhatsappSendService $send_service)
+    {
+        // El campo tiene que venir (puede venir null o ''); si viene con algo, tiene que ser string.
+        $request->validate([
+            'emoji' => ['present', 'nullable', 'string', 'max:32'],
+        ]);
+
+        // Mensaje reaccionado con su ticket (404 si no existe).
+        $message = SupportMessage::with('ticket')->findOrFail($id);
+        $ticket = $message->ticket;
+
+        // Solo los mensajes del cliente que vinieron por WhatsApp tienen a qué engancharse.
+        if ($message->sender_type !== 'user') {
+            return $this->reaction_error('Solo se puede reaccionar a los mensajes que mandó el cliente.');
+        }
+        if ($ticket === null || $ticket->source !== 'whatsapp' || trim((string) $ticket->whatsapp_phone) === '') {
+            return $this->reaction_error('Solo se puede reaccionar en conversaciones de WhatsApp: este ticket no es de WhatsApp.');
+        }
+        // wamid del mensaje del cliente al que se reacciona (lo pide Meta como objetivo).
+        $target_wamid = trim((string) $message->whatsapp_message_id);
+        if ($target_wamid === '') {
+            return $this->reaction_error('Este mensaje no tiene el id de WhatsApp, así que no se le puede reaccionar.');
+        }
+
+        // Emoji pedido, ya sin espacios. Vacío = quitar.
+        $raw_emoji = trim((string) $request->input('emoji'));
+
+        if ($raw_emoji === '') {
+            return $this->remove_reaction($message, $ticket, $target_wamid, $send_service);
+        }
+
+        // Forma canónica del emoji (la que sale a Meta), o null si no está en la paleta.
+        $emoji = $this->resolve_reaction_emoji($raw_emoji);
+        if ($emoji === null) {
+            return $this->reaction_error('Ese emoji no está en la paleta de reacciones rápidas.');
+        }
+
+        // Meta no entrega una reacción cuyo mensaje objetivo tenga más de 30 días, pero acepta el
+        // POST y avisa recién después por webhook: se corta acá para no pintar algo que no llega.
+        $target_date = $message->delivered_at !== null ? $message->delivered_at : $message->created_at;
+        if ($target_date !== null && $target_date->lt(now()->subDays(30))) {
+            return $this->reaction_error('WhatsApp no permite reaccionar a mensajes de más de 30 días: el cliente no vería la reacción.');
+        }
+
+        // wamid simulado de una prueba local con el modo de prueba ya apagado: no existe en WhatsApp.
+        if (strncmp($target_wamid, 'test-', 5) === 0) {
+            $whatsapp_config = \App\Models\WhatsappConfig::getActive();
+            $in_test_mode = $whatsapp_config && $whatsapp_config->is_active && $whatsapp_config->test_mode;
+            if (! $in_test_mode) {
+                return $this->reaction_error('Ese mensaje se recibió con el modo de prueba activo: su id no existe en WhatsApp.');
+            }
+        }
+
+        // wamid de la reacción que devuelve Meta, o null si no salió.
+        $reaction_wamid = null;
+        try {
+            $reaction_wamid = $send_service->send_reaction(
+                (string) $ticket->whatsapp_phone,
+                $target_wamid,
+                $emoji,
+                'Reacción del panel - Ticket #' . $ticket->id,
+                true
+            );
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->error('SupportMessageController@reaction: excepción de WhatsApp.', [
+                'support_message_id' => $message->id,
+                'error'              => $exception->getMessage(),
+            ]);
+
+            return $this->reaction_error($this->describe_reaction_failure($exception->getMessage(), $send_service->last_send_status_code, false));
+        }
+
+        // Si no salió, no se guarda nada. El detalle crudo va al log; a la pantalla, el motivo en español.
+        if ($reaction_wamid === null) {
+            $detail = trim((string) $send_service->last_send_error);
+            Log::channel('daily')->error('SupportMessageController@reaction: la reacción no salió.', [
+                'support_message_id' => $message->id,
+                'status_code'        => $send_service->last_send_status_code,
+                'detalle'            => $detail,
+            ]);
+
+            return $this->reaction_error($this->describe_reaction_failure($detail, $send_service->last_send_status_code, false));
+        }
+
+        // Se guarda con update() sobre el mensaje: toca su propio updated_at pero NO el del ticket.
+        $message->update([
+            'admin_reaction_emoji'               => $emoji,
+            'admin_reaction_at'                  => now(),
+            'admin_reaction_admin_id'            => (int) Auth::id(),
+            'admin_reaction_whatsapp_message_id' => $reaction_wamid,
+        ]);
+
+        // Avisa a las otras pestañas/operadores.
+        SupportMessageStatusUpdated::dispatch((int) $message->id);
+
+        return response()->json(['model' => SupportMessage::where('id', $message->id)->withAll()->first()], 200);
+    }
+
+    /**
+     * Quita la reacción que el operador había dejado sobre un mensaje del cliente.
+     *
+     * - Sin reacción guardada: 200 sin hacer nada (el endpoint es idempotente).
+     * - Reacción simulada (wamid `test-…` o sin wamid): nunca llegó al cliente, limpieza local.
+     * - Reacción real: se le pide a Meta el quitado (emoji vacío). Si lo rechaza NO se limpia nada.
+     *
+     * @param SupportMessage      $message      Mensaje del cliente con la reacción.
+     * @param SupportTicket       $ticket       Ticket de WhatsApp del mensaje.
+     * @param string              $target_wamid wamid del mensaje del cliente.
+     * @param WhatsappSendService $send_service Envío saliente vía Kapso.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    private function remove_reaction(SupportMessage $message, SupportTicket $ticket, string $target_wamid, WhatsappSendService $send_service)
+    {
+        // Nada que quitar: se devuelve el modelo igual para que el SPA tenga qué commitear.
+        if (trim((string) $message->admin_reaction_emoji) === '') {
+            return response()->json(['model' => SupportMessage::where('id', $message->id)->withAll()->first()], 200);
+        }
+
+        // wamid de la reacción puesta; vacío o 'test-…' = simulada.
+        $reaction_wamid = trim((string) $message->admin_reaction_whatsapp_message_id);
+        $is_simulated = ($reaction_wamid === '' || strncmp($reaction_wamid, 'test-', 5) === 0);
+
+        if (! $is_simulated) {
+            try {
+                $removed_wamid = $send_service->send_reaction(
+                    (string) $ticket->whatsapp_phone,
+                    $target_wamid,
+                    '',
+                    'Quitar reacción del panel - Ticket #' . $ticket->id,
+                    true
+                );
+            } catch (\Throwable $exception) {
+                Log::channel('daily')->error('SupportMessageController@reaction: excepción al quitar la reacción.', [
+                    'support_message_id' => $message->id,
+                    'error'              => $exception->getMessage(),
+                ]);
+
+                return $this->reaction_error($this->describe_reaction_failure($exception->getMessage(), $send_service->last_send_status_code, true));
+            }
+
+            // Meta lo rechazó: las columnas quedan como están, a propósito.
+            if ($removed_wamid === null) {
+                $detail = trim((string) $send_service->last_send_error);
+                Log::channel('daily')->error('SupportMessageController@reaction: el quitado no salió.', [
+                    'support_message_id' => $message->id,
+                    'status_code'        => $send_service->last_send_status_code,
+                    'detalle'            => $detail,
+                ]);
+
+                return $this->reaction_error($this->describe_reaction_failure($detail, $send_service->last_send_status_code, true));
+            }
+        }
+
+        $message->update([
+            'admin_reaction_emoji'               => null,
+            'admin_reaction_at'                  => null,
+            'admin_reaction_admin_id'            => null,
+            'admin_reaction_whatsapp_message_id' => null,
+        ]);
+
+        SupportMessageStatusUpdated::dispatch((int) $message->id);
+
+        return response()->json(['model' => SupportMessage::where('id', $message->id)->withAll()->first()], 200);
+    }
+
+    /**
+     * Respuesta 422 con el formato del contrato: `{ "error": "<motivo legible>" }`.
+     *
+     * @param string $reason Motivo en español, listo para mostrarle al operador.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    private function reaction_error(string $reason)
+    {
+        return response()->json(['error' => $reason], 422);
+    }
+
+    /**
+     * Traduce el fallo de una reacción al mensaje que ve el operador, en español.
+     *
+     * El detalle crudo de Guzzle es inglés técnico y truncado; se loguea aparte. El status HTTP
+     * sirve para no diagnosticar la ventana de 24 h sobre un fallo que es otra cosa (Meta la
+     * rechaza con un 400).
+     *
+     * @param string   $detail      Detalle crudo (last_send_error o mensaje de la excepción).
+     * @param int|null $status_code last_send_status_code del servicio, si se pudo capturar.
+     * @param bool     $removing    true si lo que falló era el quitado de una reacción ya puesta.
+     *
+     * @return string
+     */
+    private function describe_reaction_failure(string $detail, $status_code, bool $removing): string
+    {
+        // Detalle en minúsculas para buscar las marcas de la ventana cerrada.
+        $normalized = strtolower($detail);
+        $status = $status_code === null ? null : (int) $status_code;
+        $closed_window = ($status === null || $status === 400) && (
+            strpos($normalized, '131047') !== false
+            || strpos($normalized, '24 hours') !== false
+            || strpos($normalized, '24 horas') !== false
+        );
+
+        if ($closed_window) {
+            return $removing
+                ? 'El cliente no escribe hace más de 24 horas, así que WhatsApp no deja quitarle la reacción: sigue puesta en su teléfono hasta que vuelva a escribir.'
+                : 'El cliente no escribe hace más de 24 horas y WhatsApp no deja mandarle nada nuevo hasta que vuelva a escribir.';
+        }
+
+        return $removing
+            ? 'No se pudo quitar la reacción del WhatsApp del cliente: sigue puesta en su teléfono. Probá de nuevo en un rato.'
+            : 'No se pudo enviar la reacción por WhatsApp. El detalle quedó en el log; probá de nuevo en un rato.';
+    }
+
+    /**
+     * Valida un emoji contra la paleta del panel y devuelve su forma canónica.
+     *
+     * Se compara sin el selector de variación (U+FE0F) de los dos lados: el ❤️ viaja del navegador
+     * con o sin él según cómo se escribió el literal. Lo que sale a Meta es siempre la forma
+     * canónica de {@see SupportMessage::REACCIONES_DEL_PANEL}, nunca lo que mandó el cliente.
+     *
+     * @param string $emoji Emoji tal como llegó en el request.
+     *
+     * @return string|null Forma canónica, o null si no está en la paleta.
+     */
+    private function resolve_reaction_emoji(string $emoji): ?string
+    {
+        $received = str_replace("\u{FE0F}", '', $emoji);
+        if ($received === '') {
+            return null;
+        }
+
+        foreach (SupportMessage::REACCIONES_DEL_PANEL as $allowed) {
+            if (str_replace("\u{FE0F}", '', $allowed) === $received) {
+                return $allowed;
+            }
+        }
+
+        return null;
     }
 
     /**
