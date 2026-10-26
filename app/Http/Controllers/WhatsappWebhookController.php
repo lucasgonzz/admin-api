@@ -561,37 +561,53 @@ class WhatsappWebhookController extends Controller
 
         // Nivel de cada estado para no retroceder: sin valor (enviado) < fallido < entregado < leído.
         $rank = ['fallido' => 1, 'entregado' => 2, 'leido' => 3];
-        // Nivel del estado que ya tiene guardado el mensaje (0 si todavía no tiene ninguno).
-        $current_status = (string) $message->whatsapp_delivery_status;
-        $current_rank = isset($rank[$current_status]) ? $rank[$current_status] : 0;
 
-        if ($rank[$status] <= $current_rank) {
-            // Evento repetido o llegado fuera de orden: el estado guardado ya es igual o más avanzado.
-            return true;
-        }
-
-        // Campos a actualizar según el estado nuevo.
-        $updates = ['whatsapp_delivery_status' => $status];
-        if ($status === 'entregado') {
-            $updates['whatsapp_delivered_at'] = now();
-        } elseif ($status === 'leido') {
-            $updates['whatsapp_seen_at'] = now();
-            // Un mensaje leído siempre fue entregado: si el delivered no llegó antes, se completa.
-            if ($message->whatsapp_delivered_at === null) {
-                $updates['whatsapp_delivered_at'] = now();
+        // 🔴 Leer, comparar y escribir van juntos bajo candado de fila: Kapso puede mandar «entregado» y «leído»
+        // casi a la vez a dos procesos, y sin el candado el que lee primero pisaba con «entregado» el «leído»
+        // que el otro acababa de guardar (los ticks azules volvían a gris en la base).
+        $applied = DB::transaction(function () use ($message, $status, $rank, $payload) {
+            // Fila fresca y bloqueada: el estado que cuenta es el de AHORA, no el que se leyó al buscar el wamid.
+            $locked = SupportMessage::query()->lockForUpdate()->find($message->id);
+            if ($locked === null) {
+                return false;
             }
-        } elseif ($status === 'fallido') {
-            $motivo = $this->extract_delivery_failure_reason($payload);
-            Log::channel('daily')->warning('WhatsApp webhook: entrega fallida de un mensaje de soporte.', [
-                'support_message_id' => (int) $message->id,
-                'motivo_extraido'    => $motivo !== '' ? $motivo : '(no se pudo extraer)',
-            ]);
+
+            // Nivel del estado que ya tiene guardado el mensaje (0 si todavía no tiene ninguno).
+            $current_status = (string) $locked->whatsapp_delivery_status;
+            $current_rank = isset($rank[$current_status]) ? $rank[$current_status] : 0;
+
+            if ($rank[$status] <= $current_rank) {
+                // Evento repetido o llegado fuera de orden: el estado guardado ya es igual o más avanzado.
+                return false;
+            }
+
+            // Campos a actualizar según el estado nuevo.
+            $updates = ['whatsapp_delivery_status' => $status];
+            if ($status === 'entregado') {
+                $updates['whatsapp_delivered_at'] = now();
+            } elseif ($status === 'leido') {
+                $updates['whatsapp_seen_at'] = now();
+                // Un mensaje leído siempre fue entregado: si el delivered no llegó antes, se completa.
+                if ($locked->whatsapp_delivered_at === null) {
+                    $updates['whatsapp_delivered_at'] = now();
+                }
+            } elseif ($status === 'fallido') {
+                $motivo = $this->extract_delivery_failure_reason($payload);
+                Log::channel('daily')->warning('WhatsApp webhook: entrega fallida de un mensaje de soporte.', [
+                    'support_message_id' => (int) $locked->id,
+                    'motivo_extraido'    => $motivo !== '' ? $motivo : '(no se pudo extraer)',
+                ]);
+            }
+
+            $locked->update($updates);
+
+            return true;
+        });
+
+        // Aviso en tiempo real a las bandejas abiertas (cambian los ticks del mensaje), solo si algo cambió.
+        if ($applied) {
+            \App\Events\SupportMessageStatusUpdated::dispatch((int) $message->id);
         }
-
-        $message->update($updates);
-
-        // Aviso en tiempo real a las bandejas abiertas (cambian los ticks del mensaje).
-        \App\Events\SupportMessageStatusUpdated::dispatch((int) $message->id);
 
         return true;
     }
