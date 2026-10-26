@@ -45,6 +45,7 @@ Respuesta: `{lease_token,lease_expires_at,ticket:<contexto>}`. La reserva dura 1
   "window":{"open":true,"last_inbound_at":"...","expires_at":"...","origin":"support"},
   "client_context":"Ficha operativa y datos actuales del admin, sin notas internas",
   "implementation":null,
+  "previous_tickets":[{"id":98,"status":"closed","opened_at":"...","closed_at":"...","mensajes":12}],
   "messages":[{"id":123,"sender_type":"user","body":"No puedo vender","kind":"text","created_at":"...","attachments":[]}]
 }
 ```
@@ -90,6 +91,29 @@ Respuesta: `{lease_token,lease_expires_at,ticket:<contexto>}`. La reserva dura 1
 - **Datos personales.** No viajan los teléfonos de las fichas (ni el del dueño ni el del responsable de la migración), las casillas de mail ni las respuestas del formulario. En cada `body` de la conversación del dueño se enmascaran, en este orden: cualquier URL que contenga el token del formulario o empiece con la URL base del formulario (`implementation_form_url`) → `[link del formulario]`; lo que sigue a «contraseña» o «clave» (saltando `:`/`=` y un conector como «es», «era», «nueva») hasta el fin de esa palabra → `[oculta]`; y toda secuencia de 8 o más dígitos, aun con un espacio, guión o punto entre dígitos (teléfonos, CUIT, DNI, con su `+`) → `[número]`. Una fecha escrita con guiones (`2026-10-26`) también cae en la última regla.
 - Si no se pudo leer, el bloque llega como `{"sistema":null,"tienda":null,"error":"..."}` en vez de `null`, para que no se lea como «no tiene implementación».
 
+`previous_tickets` (lista, desde el 26/10/2026) resume los tickets ANTERIORES del mismo cliente para que el monitor sepa que existen sin pedirlos: hasta 5, el más nuevo primero (por id), sin el ticket actual, en cualquier estado y de cualquier canal. `mensajes` es la cantidad de mensajes reales (sin borradores). Si el contacto del ticket es un empleado, solo viajan los tickets de ESE empleado; si es el dueño, todos los del cliente (los de sus empleados incluidos). Un ticket sin cliente trae `[]`. Un consumidor que no la conozca la puede ignorar; la clave ausente (admin anterior) equivale a `[]`.
+
+### Tickets anteriores: `GET tickets/{id}/history`
+
+Solo lectura, sin reserva (no cambia nada del caso). El cliente sale del ticket, nunca de un parámetro. Mismos tickets y misma regla de empleados que `previous_tickets`, con la conversación:
+
+```json
+{
+  "ticket_id":123,"client_id":2,"contact_role":"owner",
+  "tickets":[{
+    "id":98,"status":"closed","opened_at":"...","closed_at":"...",
+    "contact_name":"Ana","contact_role":"owner",
+    "messages":[{"id":555,"sender_type":"user","body":"...","kind":"text","created_at":"...",
+                 "attachments":[{"id":7,"mime":"application/pdf","size":1234,
+                                 "download_path":"/api/claude/support-codex/tickets/98/attachments/7"}]}]
+  }]
+}
+```
+
+- `messages`: los últimos 30 mensajes reales de cada ticket, en orden cronológico, sin borradores.
+- `download_path` apunta a la ruta de adjuntos del ticket ANTERIOR (`tickets/{anterior}/attachments/{aid}`), que valida la pertenencia del adjunto a ese ticket; pedido con el id del ticket actual es 404.
+- 404 si el ticket no existe. Contra un admin anterior al 26/10/2026 la ruta no existe (404): el monitor lo informa como «historial no disponible», sin romper.
+
 Los últimos 100 mensajes reales se devuelven en orden cronológico; no incluye borradores. Los adjuntos traen `{id,mime,size,download_path}`; `GET tickets/{id}/attachments/{attachment_id}` sirve el binario con la misma autenticación y valida su pertenencia al ticket.
 
 `POST tickets/{id}/diagnostic` con `{lease_token,query:string}` consulta el ERP correspondiente a ese ticket, sin pasar por un modelo de API. Devuelve `{data:<payload remoto>,queried_at}`. Es el lector existente `admin-sync/sistema-query` (stock, ventas, facturas, clientes), no SQL arbitrario. Si no hay acceso/configuración/datos válidos devuelve 502, nunca un resultado vacío presentado como éxito. Las claves permanecen en el servidor. No acepta client_id, owner ni URL del consumidor.
@@ -123,6 +147,14 @@ El interruptor por ticket (`POST /api/admin/support-ticket/{id}/toggle-claude-au
 `POST tickets/{id}/resume` es una acción explícita de Lucas: `{expected_message_id,reason,request_confirmation?:boolean}`. Requiere el último mensaje actual y ninguna reserva vigente ni entrega ambigua. Sin request_confirmation, vuelve a ready pero marca los mensajes anteriores como atendidos: esperará un nuevo entrante. Con request_confirmation=true (solo después de verificar la misión en producción), deja ready_to_confirm y entrega reason=mission_completed al monitor para pedir que el cliente pruebe, únicamente si la ventana sigue abierta. Conserva el thread_id y registra el motivo de Lucas. No inicia una misión ni manda nada por sí solo.
 
 El contexto incluye `can_query_system`. Un empleado sin ese permiso recibe 403 en diagnostic; no obtiene datos del negocio por haber escrito al soporte. Esta restricción también debe respetarse al consultar producción desde herramientas locales. El diagnóstico técnico interno no autoriza divulgar ventas/caja/clientes a un contacto sin permiso.
+
+## Hitos de la implementación por el ticket (desde el 26/10/2026)
+
+`/implementar` manda los hitos de la implementación (presentación, link del formulario, pedido de archivos, entrega...) con `POST /api/claude/implementations/{id}/whatsapp`, por el ticket de soporte del contacto (lo describe `GET claude/catalog`). Para el monitor importa esto:
+
+- El mensaje queda en el ticket como `sender_type: admin` (el remitente es el admin con el que firma `claude/*`), así que aparece en `messages` y en `history` como cualquier respuesta de Lucas.
+- Si Martín tiene la reserva vigente del ticket que se reusaría, el envío es 423 `martin_atendiendo` y no se manda nada.
+- El envío NO pasa el caso a `manual_review` (no es «Lucas tomó la atención»): cuando el cliente conteste, el ticket vuelve a `pending` con `reason: inbound` como siempre. Si llegara a mandarse entre un `claim` y su `reply`, la respuesta de Martín da 409 (`stale_message`) y el monitor relee.
 
 ## Errores
 
