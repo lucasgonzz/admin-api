@@ -152,6 +152,15 @@ class ClaudeSupportCodexController extends Controller
         return response()->json($service->resume((int) $id, $data));
     }
 
+    public function mission_started(Request $request, $id, SupportCodexService $service)
+    {
+        $data = $request->validate([
+            'mission_thread_id' => 'required|string|max:150|regex:/^[a-zA-Z0-9_-]+$/',
+            'mission_hash' => 'required|string|size:64|regex:/^[a-f0-9]{64}$/',
+        ]);
+        return response()->json($service->mission_started((int) $id, $data));
+    }
+
     public function reconcile(Request $request, $operation_id, SupportCodexService $service)
     {
         $data = $request->validate([

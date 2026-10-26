@@ -20,6 +20,7 @@ use App\Services\SupportWhatsappOpenerService;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
@@ -122,6 +123,202 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         $admin = Admin::firstOrCreate(['email' => 'reactivar-' . $ticket->id . '@test.local'], ['name' => 'Lucas', 'password' => bcrypt('prueba')]);
         $this->actingAs($admin, 'sanctum')->postJson('/api/admin/support-ticket/' . $ticket->id . '/toggle-claude-auto-reply')->assertOk();
         $ticket->refresh();
+    }
+
+    private function prepare_mission(SupportTicket $ticket): SupportCodexCase
+    {
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim, ['action' => 'escalar', 'mission' => 'Corregir la barra del listado que tapa la foto ampliada.'])->assertOk();
+        return SupportCodexCase::where('support_ticket_id', $ticket->id)->firstOrFail();
+    }
+
+    private function register_mission(SupportTicket $ticket, SupportCodexCase $case, array $extra = [])
+    {
+        return $this->postJson($this->base . '/tickets/' . $ticket->id . '/mission-started', array_merge([
+            'mission_thread_id' => 'tarea-mision-18', 'mission_hash' => hash('sha256', $case->mission),
+        ], $extra), $this->headers);
+    }
+
+    public function test_mision_pendiente_y_necesidad_humana_se_serializan_por_separado(): void
+    {
+        $ticket = $this->ticket();
+        $case = $this->prepare_mission($ticket);
+        $attention = $ticket->fresh()->load('support_codex_case')->toArray();
+        $this->assertFalse($attention['support_attention']['needs_human']);
+        $this->assertSame('pending', $attention['support_attention']['mission']['status']);
+        $this->assertNull($attention['support_attention']['reason']);
+        $this->assertArrayNotHasKey('support_codex_case', $attention);
+        $this->assertStringNotContainsString($case->mission, json_encode($attention));
+        $this->assertStringNotContainsString('lease_hash', json_encode($attention));
+        $case->update(['state' => 'manual_review', 'review_reason' => 'El envío necesita conciliación.']);
+        $attention = $ticket->fresh()->load('support_codex_case')->support_attention;
+        $this->assertTrue($attention['needs_human']);
+        $this->assertSame('El envío necesita conciliación.', $attention['reason']);
+        $this->assertSame('pending', $attention['mission']['status']);
+        $ticket->update(['status' => 'closed']);
+        $attention = $ticket->fresh()->load('support_codex_case')->support_attention;
+        $this->assertSame(['needs_human' => false, 'reason' => null, 'mission' => null], $attention);
+    }
+
+    public function test_registrar_mision_iniciada_es_idempotente_y_no_atiende_ni_resuelve(): void
+    {
+        $ticket = $this->ticket();
+        $case = $this->prepare_mission($ticket);
+        $this->getJson($this->base . '/tickets/' . $ticket->id, $this->headers)
+            ->assertJsonPath('ticket.capabilities.mission_started', true)
+            ->assertJsonPath('ticket.mission_lifecycle.status', 'pending');
+        $before = $case->getAttributes();
+        $this->register_mission($ticket, $case)->assertOk()
+            ->assertJsonPath('ticket.mission_lifecycle.status', 'started')
+            ->assertJsonPath('ticket.mission_lifecycle.thread_id', 'tarea-mision-18');
+        $started = $case->fresh()->mission_started_at->toIso8601String();
+        Carbon::setTestNow(now()->addMinutes(10));
+        $this->register_mission($ticket, $case)->assertOk()->assertJsonPath('ticket.mission_lifecycle.started_at', $started);
+        $after = $case->fresh();
+        foreach (['mission', 'state', 'thread_id', 'handled_message_id', 'expected_message_id', 'last_reply_id', 'lease_hash', 'lease_expires_at'] as $field) {
+            $this->assertEquals($before[$field], $after->getRawOriginal($field), $field);
+        }
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->assertCount(1, $this->deliveries->bodies);
+        $this->assertStringNotContainsString('debe iniciarla', $ticket->fresh()->escalation_reason);
+        Event::assertDispatched(SupportTicketUpdated::class);
+    }
+
+    public function test_registro_exige_diagnostico_vigente_y_no_reemplaza_otra_tarea(): void
+    {
+        $ticket = $this->ticket();
+        $case = $this->prepare_mission($ticket);
+        $this->register_mission($ticket, $case, ['mission_hash' => str_repeat('0', 64)])->assertStatus(409);
+        $this->assertNull($case->fresh()->mission_started_at);
+        $this->register_mission($ticket, $case, ['mission_thread_id' => $case->thread_id])->assertStatus(409);
+        $this->assertNull($case->fresh()->mission_started_at);
+        $this->assertNull($case->fresh()->mission_thread_id);
+        $this->register_mission($ticket, $case)->assertOk();
+        $this->register_mission($ticket, $case, ['mission_thread_id' => 'otra-tarea'])->assertStatus(409);
+        $this->assertSame('tarea-mision-18', $case->fresh()->mission_thread_id);
+        $this->register_mission($ticket, $case, ['mission_thread_id' => 'https://no-es-un-id.test'])->assertStatus(422);
+        $this->assertCount(1, $this->deliveries->bodies);
+    }
+
+    public function test_registro_no_borra_revision_humana_ni_consume_reserva_activa(): void
+    {
+        $ticket = $this->ticket();
+        $case = $this->prepare_mission($ticket);
+        $this->inbound($ticket, '¿Cómo acomodo las columnas?');
+        $claim = $this->claim($ticket);
+        $case = $case->fresh();
+        $lease = $case->lease_hash;
+        $case->update(['state' => 'manual_review', 'review_reason' => 'Revisar una entrega incierta.']);
+        $this->register_mission($ticket, $case)->assertOk()->assertJsonPath('ticket.state', 'manual_review');
+        $this->assertSame($lease, $case->fresh()->lease_hash);
+        $attention = $ticket->fresh()->load('support_codex_case')->support_attention;
+        $this->assertTrue($attention['needs_human']);
+        $this->assertSame('Revisar una entrega incierta.', $attention['reason']);
+        $this->assertSame('started', $attention['mission']['status']);
+    }
+
+    public function test_registro_de_tarea_no_reactiva_agente_ni_proveedor_apagados(): void
+    {
+        $ticket = $this->ticket();
+        $case = $this->prepare_mission($ticket);
+        $this->inbound($ticket, 'También necesito acomodar las columnas.');
+        $this->claim($ticket);
+        $case = $case->fresh();
+        $lease = $case->lease_hash;
+        $handled = $case->handled_message_id;
+        $ticket->update(['claude_auto_reply' => false]);
+        AdminSetting::set(SupportCodexSettings::KEY_ENABLED, '0');
+        $case->update(['state' => 'manual_review', 'review_reason' => 'Lucas pausó la atención.']);
+        $this->register_mission($ticket, $case)->assertOk()
+            ->assertJsonPath('ticket.state', 'manual_review')
+            ->assertJsonPath('ticket.mission_lifecycle.status', 'started');
+        $this->assertFalse($ticket->fresh()->claude_auto_reply);
+        $this->assertFalse(SupportCodexSettings::enabled());
+        $this->assertSame('manual_review', $case->fresh()->state);
+        $this->assertSame('Lucas pausó la atención.', $case->fresh()->review_reason);
+        $this->assertSame($lease, $case->fresh()->lease_hash);
+        $this->assertSame($handled, $case->fresh()->handled_message_id);
+        $this->assertSame($case->mission, $case->fresh()->mission);
+        $this->assertCount(1, $this->deliveries->bodies);
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
+    }
+
+    public function test_respuesta_humana_no_es_una_alerta_pendiente_y_la_mision_sigue_independiente(): void
+    {
+        foreach ([false, true] as $with_mission) {
+            $ticket = $this->ticket();
+            if ($with_mission) {
+                $this->prepare_mission($ticket);
+            } else {
+                // Un escalado legado tampoco vuelve pendiente la respuesta que Lucas ya dio.
+                $ticket->update(['escalated_at' => now(), 'escalation_reason' => 'Revisión anterior.']);
+            }
+            $this->human_reply($ticket);
+            $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->firstOrFail();
+            $this->assertTrue($case->is_human_reply_pause());
+            $attention = $ticket->fresh()->load('support_codex_case')->support_attention;
+            $this->assertFalse($attention['needs_human']);
+            $this->assertNull($attention['reason']);
+            $this->assertSame($with_mission ? 'pending' : null, $attention['mission']['status'] ?? null);
+            $case->update(['review_reason' => 'El envío no tiene entrega confirmada.']);
+            $attention = $ticket->fresh()->load('support_codex_case')->support_attention;
+            $this->assertTrue($attention['needs_human']);
+            $this->assertSame('El envío no tiene entrega confirmada.', $attention['reason']);
+            $this->assertSame($with_mission ? 'pending' : null, $attention['mission']['status'] ?? null);
+        }
+    }
+
+    public function test_mision_nueva_reinicia_su_seguimiento_y_la_misma_lo_conserva(): void
+    {
+        $ticket = $this->ticket();
+        $case = $this->prepare_mission($ticket);
+        $this->register_mission($ticket, $case)->assertOk();
+        $this->inbound($ticket, 'Otra captura del mismo problema.');
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim, ['action' => 'escalar', 'mission' => $case->mission])->assertOk();
+        $this->assertSame('tarea-mision-18', $case->fresh()->mission_thread_id);
+        $this->assertNotNull($case->fresh()->mission_started_at);
+        $this->inbound($ticket, 'Ahora tengo otro problema.');
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim, ['action' => 'escalar', 'mission' => 'Investigar otra falla diferente del visor.'])->assertOk();
+        $this->assertNull($case->fresh()->mission_thread_id);
+        $this->assertNull($case->fresh()->mission_started_at);
+    }
+
+    public function test_no_registra_inicio_si_no_hay_mision_o_el_ticket_esta_cerrado(): void
+    {
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        $path = $this->base . '/tickets/' . $ticket->id . '/mission-started';
+        $input = ['mission_thread_id' => 'tarea-mision-18', 'mission_hash' => hash('sha256', '')];
+        $this->postJson($path, $input, $this->headers)->assertStatus(409);
+        $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->first();
+        $this->assertNull($case->fresh()->mission_started_at);
+        $ticket->update(['status' => 'closed']);
+        $this->postJson($path, $input, $this->headers)->assertStatus(409);
+        $this->assertCount(0, $this->deliveries->bodies);
+    }
+
+    public function test_bandeja_y_detalle_precargan_resumen_y_legacy_sigue_requiriendo_humano(): void
+    {
+        $ticket = $this->ticket();
+        $case = $this->prepare_mission($ticket);
+        $legacy = $this->ticket();
+        $legacy->update(['escalated_at' => now(), 'escalation_reason' => 'Necesita que Lucas revise el contrato.']);
+        $admin = Admin::firstOrCreate(['email' => 'misiones-bandeja@test.local'], ['name' => 'Lucas', 'password' => bcrypt('prueba')]);
+        DB::enableQueryLog();
+        $this->actingAs($admin, 'sanctum')->getJson('/api/admin/support-ticket?assigned_filter=all')->assertOk()
+            ->assertJsonFragment(['support_attention' => ['needs_human' => false, 'reason' => null,
+                'mission' => ['status' => 'pending', 'thread_id' => null, 'started_at' => null]]])
+            ->assertJsonFragment(['support_attention' => ['needs_human' => true, 'reason' => 'Necesita que Lucas revise el contrato.', 'mission' => null]]);
+        $case_queries = array_filter(DB::getQueryLog(), function ($query) {
+            return stripos($query['query'], 'support_codex_cases') !== false;
+        });
+        DB::disableQueryLog();
+        $this->assertCount(1, $case_queries, 'Los casos se precargan en una consulta, no una por ticket.');
+        $this->getJson('/api/admin/support-ticket/' . $ticket->id)->assertOk()
+            ->assertJsonPath('model.support_attention.mission.status', 'pending');
+        $this->assertNull($ticket->fresh()->toArray()['support_attention']);
     }
 
     public function test_encender_recupera_consulta_pendiente_tras_atencion_manual_sin_consumirla(): void

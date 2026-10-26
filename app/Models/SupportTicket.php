@@ -29,6 +29,11 @@ class SupportTicket extends Model
      */
     protected $guarded = [];
 
+    protected $appends = ['support_attention'];
+
+    // La bandeja recibe el resumen; nunca las reservas ni el diagnóstico privado del caso.
+    protected $hidden = ['support_codex_case'];
+
     /**
      * Valor por defecto del interruptor del agente.
      *
@@ -111,7 +116,37 @@ class SupportTicket extends Model
      */
     public function scopeWithAll($query)
     {
-        $query->with('client', 'client_employee', 'assigned_admin', 'messages.attachments', 'messages.sender_admin');
+        $query->with('client', 'client_employee', 'assigned_admin', 'messages.attachments', 'messages.sender_admin', 'support_codex_case');
+    }
+
+    public function support_codex_case()
+    {
+        return $this->hasOne(SupportCodexCase::class, 'support_ticket_id');
+    }
+
+    /** Misión y atención humana son ejes independientes: una no debe esconder a la otra. */
+    public function getSupportAttentionAttribute(): ?array
+    {
+        // Solo la bandeja/detalle admin precargan este resumen. Un serializador genérico
+        // no debe disparar consultas por fila ni agregar motivos internos a otros canales.
+        if (! $this->relationLoaded('support_codex_case')) {
+            return null;
+        }
+        if ($this->status !== self::STATUS_ABIERTO) {
+            return ['needs_human' => false, 'reason' => null, 'mission' => null];
+        }
+        $case = $this->support_codex_case;
+        $mission = $case ? $case->mission_lifecycle() : null;
+        $human_reply_pause = $case !== null && $case->is_human_reply_pause();
+        $needs_human = ! $human_reply_pause && (($case !== null && $case->state === 'manual_review')
+            || ($mission === null && $this->escalated_at !== null));
+        $reason = null;
+        if ($needs_human) {
+            $reason = $case !== null && $case->state === 'manual_review'
+                ? (trim((string) $case->review_reason) !== '' ? $case->review_reason : 'La atención necesita revisión humana.')
+                : $this->escalation_reason;
+        }
+        return ['needs_human' => $needs_human, 'reason' => $reason, 'mission' => $mission];
     }
 
     /**

@@ -141,11 +141,12 @@ class SupportCodexService
             'state' => $case ? $case->state : 'ready',
             'thread_id' => $case ? $case->thread_id : null,
             'mission' => $case ? $case->mission : null,
+            'mission_lifecycle' => $case ? $case->mission_lifecycle() : null,
             'review_reason' => $case ? $case->review_reason : null,
             'reason' => $this->pending_reason($ticket, $case),
             // El helper debe verificar esta capacidad ANTES de pedir el modo nuevo: un admin
             // anterior ignoraría el campo y ejecutaría el resume que consume la consulta.
-            'capabilities' => ['continue_pending' => true],
+            'capabilities' => ['continue_pending' => true, 'mission_started' => true],
             'expected_message_id' => $last ? (int) $last->id : null,
             'window' => app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone),
             'client_context' => app(SupportClientContextService::class)->bloque_para_el_prompt($ticket),
@@ -546,11 +547,18 @@ class SupportCodexService
             $ticket->escalation_reason = null;
             $ticket->save();
         } elseif ($input['action'] === 'escalar') {
+            $mission = trim($input['mission']);
+            if ((string) $case->mission !== $mission) {
+                $case->mission_thread_id = null;
+                $case->mission_started_at = null;
+            }
             $case->state = 'mission_pending';
-            $case->mission = trim($input['mission']);
+            $case->mission = $mission;
             $case->confirmation_due_at = null;
             $ticket->escalated_at = now();
-            $ticket->escalation_reason = 'Misión preparada en Codex; Lucas debe iniciarla.';
+            $ticket->escalation_reason = $case->mission_started_at !== null
+                ? 'Misión iniciada en Codex; pendiente de corrección verificada.'
+                : 'Misión pendiente de inicio en Codex.';
             $ticket->save();
         } elseif ($case->state !== 'mission_pending') {
             $case->state = 'ready';
@@ -590,7 +598,7 @@ class SupportCodexService
             // pausa recuperable. Solo cedemos este turno; el próximo entrante puede volver a Martín.
             if ($case->state !== 'manual_review' || $this->is_human_reply_pause($case)) {
                 $case->state = 'manual_review';
-                $case->review_reason = 'Lucas retomó la atención desde el admin.';
+                $case->review_reason = SupportCodexCase::HUMAN_REPLY_REVIEW_REASON;
                 $last = $this->last_real_message($ticket->id);
                 $case->expected_message_id = $last ? (int) $last->id : null;
             }
@@ -620,7 +628,7 @@ class SupportCodexService
         }
         if (! SupportCodexSettings::manages($ticket) || $ticket->status !== 'open'
             || $case->state !== 'manual_review'
-            || $case->review_reason !== 'Lucas retomó la atención desde el admin.'
+            || $case->review_reason !== SupportCodexCase::HUMAN_REPLY_REVIEW_REASON
             || ! empty($case->mission) || $this->has_unfinished_operation($ticket->id)
             || ($case->lease_expires_at !== null && $case->lease_expires_at->isFuture())) {
             return;
@@ -701,12 +709,56 @@ class SupportCodexService
             $case->lease_expires_at = null;
             $case->confirmation_due_at = null;
             $case->mission = null;
+            $case->mission_thread_id = null;
+            $case->mission_started_at = null;
             $case->save();
             $ticket->escalated_at = null;
             $ticket->escalation_reason = null;
             $ticket->save();
             return ['ticket' => $this->context($ticket, $case)];
         });
+    }
+
+    /** Registra la tarea creada por Lucas; no inicia, atiende ni resuelve el ticket. */
+    public function mission_started(int $id, array $input): array
+    {
+        $result = DB::transaction(function () use ($id, $input) {
+            $ticket = SupportTicket::where('id', $id)->lockForUpdate()->findOrFail($id);
+            // Registrar una tarea ya creada no es retomar la atención: debe poder asentarse
+            // aunque Lucas haya apagado al agente o pausado el proveedor mientras tanto.
+            if ($ticket->status !== 'open') {
+                $this->fail(409, 'disabled_or_ineligible', 'El ticket cerrado no admite registrar una misión pendiente.');
+            }
+            $case = SupportCodexCase::where('support_ticket_id', $id)->lockForUpdate()->first();
+            if ($case === null || trim((string) $case->mission) === '') {
+                $this->fail(409, 'mission_missing', 'El ticket no tiene una misión pendiente para vincular.');
+            }
+            if (! hash_equals(hash('sha256', (string) $case->mission), $input['mission_hash'])) {
+                $this->fail(409, 'mission_changed', 'El diagnóstico cambió; volvé a leerlo antes de vincular la tarea.');
+            }
+            if ($case->thread_id !== null && $case->thread_id === $input['mission_thread_id']) {
+                $this->fail(409, 'mission_thread_conflict', 'El hilo de atención no es la tarea de la misión.');
+            }
+            if ($case->mission_thread_id !== null && $case->mission_thread_id !== $input['mission_thread_id']) {
+                $this->fail(409, 'mission_thread_conflict', 'La misión ya tiene otra tarea vinculada.');
+            }
+            if ($case->mission_started_at === null) {
+                $case->mission_thread_id = $input['mission_thread_id'];
+                $case->mission_started_at = now();
+                $case->save();
+            }
+            // Es una actualización de seguimiento: no cambia manual_review ni consume la reserva.
+            // El motivo humano, si lo hubiera, sigue en review_reason y convive con la misión.
+            $ticket->escalation_reason = 'Misión iniciada en Codex; pendiente de corrección verificada.';
+            $ticket->save();
+            return ['ticket' => $this->context($ticket, $case)];
+        });
+        try {
+            SupportTicketUpdated::dispatch($id);
+        } catch (\Throwable $exception) {
+            // El registro durable no se revierte si el realtime no está disponible.
+        }
+        return $result;
     }
 
     public function assert_lease(?SupportCodexCase $case, string $token): void
@@ -821,8 +873,7 @@ class SupportCodexService
 
     private function is_human_reply_pause(SupportCodexCase $case): bool
     {
-        return $case->state === 'manual_review'
-            && $case->review_reason === 'Lucas retomó la atención desde el admin.';
+        return $case->is_human_reply_pause();
     }
 
     private function is_follow_up(SupportCodexCase $case, int $expected): bool
