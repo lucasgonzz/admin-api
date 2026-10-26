@@ -126,7 +126,8 @@ class WhatsappWebhookController extends Controller
         $event_type = $this->resolve_event_type($request, $payload);
 
         // Procesar eventos de estado de entrega de mensajes salientes (entregado / leído / fallido).
-        // Solo afecta LeadMessages; si el wamid no corresponde a ninguno, se ignora sin error.
+        // Afecta a LeadMessage y, si el wamid no es de un lead, a SupportMessage (ticks del hilo de
+        // soporte); si no corresponde a ninguno, se ignora sin error.
         if (array_key_exists((string) $event_type, self::STATUS_EVENTS)) {
             $this->handle_outbound_status_event((string) $event_type, $payload);
             return response()->json(['ok' => true], 200);
@@ -396,6 +397,12 @@ class WhatsappWebhookController extends Controller
             // Si no existe (p.ej. es de soporte o implementación), ignorar silenciosamente.
             $message = LeadMessage::query()->where('whatsapp_message_id', $wamid)->first();
             if ($message === null) {
+                // Segundo destino posible: un mensaje saliente del hilo de soporte (ticks de WhatsApp).
+                // El camino de leads NO se toca: esto solo corre cuando el wamid no es de un lead.
+                if ($this->handle_support_outbound_status_event((string) $event_type, (string) $wamid, $payload)) {
+                    return;
+                }
+
                 // Antes de darlo por ajeno: puede ser el wamid de una reacción que el panel mandó.
                 // Camino aparte, solo para 'failed', que NO toca ninguna columna del mensaje original.
                 $this->handle_failed_admin_reaction_status((string) $event_type, (string) $wamid, $payload);
@@ -482,6 +489,115 @@ class WhatsappWebhookController extends Controller
                 'error'      => $exception->getMessage(),
             ]);
         }
+    }
+
+    /**
+     * Procesa un evento de estado de entrega cuando el wamid corresponde a un mensaje de SOPORTE.
+     *
+     * Es el equivalente, para `support_messages`, de lo que `handle_outbound_status_event()` hace
+     * con `lead_messages`: guarda `whatsapp_delivery_status` (entregado | leido | fallido) y los
+     * sellos `whatsapp_delivered_at` / `whatsapp_seen_at`, y avisa al SPA con
+     * {@see \App\Events\SupportMessageStatusUpdated}.
+     *
+     * 🔴 Reglas que NO son iguales a las de leads:
+     * - **Nunca se retrocede.** Kapso/Meta pueden entregar los webhooks desordenados (un `read`
+     *   antes que su `delivered`). El orden de los estados es enviado(sin valor) < fallido <
+     *   entregado < leído, y un evento solo se aplica si sube de nivel; si no, se descarta. Así
+     *   un doble check azul nunca vuelve a gris.
+     * - Un `leido` sin `entregado` previo completa también `whatsapp_delivered_at`.
+     * - Usa SOLO columnas `whatsapp_*`: `delivered_at` (espejo con el ERP) y `read_at` (leído por
+     *   el operador) NO se tocan, porque alimentan los no leídos de la bandeja.
+     * - El estado `enviado` no se persiste (se infiere por la presencia de `whatsapp_message_id`).
+     *
+     * Además, si el evento es un `fallido` cuyo wamid es el de una REACCIÓN del operador
+     * (`admin_reaction_whatsapp_message_id`), Meta la rechazó después de aceptar el POST: se
+     * despinta para que el panel no muestre algo que el cliente nunca vio.
+     *
+     * @param string               $event_type Nombre del evento Kapso (clave de STATUS_EVENTS).
+     * @param string               $wamid      wamid que vino en el payload (message.id).
+     * @param array<string, mixed> $payload    Body JSON decodificado del webhook.
+     *
+     * @return bool true si el wamid pertenece a un mensaje de soporte (se haya aplicado el cambio
+     *              o no); false si no es de soporte y el llamador puede seguir con otros destinos.
+     */
+    private function handle_support_outbound_status_event(string $event_type, string $wamid, array $payload): bool
+    {
+        // Estado interno mapeado al evento recibido (enviado | entregado | leido | fallido).
+        $status = isset(self::STATUS_EVENTS[$event_type]) ? self::STATUS_EVENTS[$event_type] : null;
+        if ($status === null) {
+            return false;
+        }
+
+        // Mensaje de soporte que el panel/agente mandó con ese wamid.
+        $message = SupportMessage::query()->where('whatsapp_message_id', $wamid)->first();
+
+        if ($message === null) {
+            // ¿Es el wamid de una reacción nuestra que Meta rechazó? Solo 'fallido' toca esa columna.
+            if ($status !== 'fallido') {
+                return false;
+            }
+            $reaction_owner = SupportMessage::query()->where('admin_reaction_whatsapp_message_id', $wamid)->first();
+            if ($reaction_owner === null) {
+                return false;
+            }
+
+            $reason = $this->extract_delivery_failure_reason($payload);
+            $reaction_owner->update([
+                'admin_reaction_emoji'               => null,
+                'admin_reaction_at'                  => null,
+                'admin_reaction_admin_id'            => null,
+                'admin_reaction_whatsapp_message_id' => null,
+            ]);
+            Log::channel('daily')->warning('WhatsApp webhook: Meta rechazó la reacción del panel en un ticket; se despinta.', [
+                'support_message_id' => (int) $reaction_owner->id,
+                'wamid_reaccion'     => $wamid,
+                'motivo'             => $reason !== '' ? $reason : 'Meta no informó motivo en el payload.',
+            ]);
+            \App\Events\SupportMessageStatusUpdated::dispatch((int) $reaction_owner->id);
+
+            return true;
+        }
+
+        // 'enviado' se infiere por el wamid; no se persiste ni se avisa.
+        if ($status === 'enviado') {
+            return true;
+        }
+
+        // Nivel de cada estado para no retroceder: sin valor (enviado) < fallido < entregado < leído.
+        $rank = ['fallido' => 1, 'entregado' => 2, 'leido' => 3];
+        // Nivel del estado que ya tiene guardado el mensaje (0 si todavía no tiene ninguno).
+        $current_status = (string) $message->whatsapp_delivery_status;
+        $current_rank = isset($rank[$current_status]) ? $rank[$current_status] : 0;
+
+        if ($rank[$status] <= $current_rank) {
+            // Evento repetido o llegado fuera de orden: el estado guardado ya es igual o más avanzado.
+            return true;
+        }
+
+        // Campos a actualizar según el estado nuevo.
+        $updates = ['whatsapp_delivery_status' => $status];
+        if ($status === 'entregado') {
+            $updates['whatsapp_delivered_at'] = now();
+        } elseif ($status === 'leido') {
+            $updates['whatsapp_seen_at'] = now();
+            // Un mensaje leído siempre fue entregado: si el delivered no llegó antes, se completa.
+            if ($message->whatsapp_delivered_at === null) {
+                $updates['whatsapp_delivered_at'] = now();
+            }
+        } elseif ($status === 'fallido') {
+            $motivo = $this->extract_delivery_failure_reason($payload);
+            Log::channel('daily')->warning('WhatsApp webhook: entrega fallida de un mensaje de soporte.', [
+                'support_message_id' => (int) $message->id,
+                'motivo_extraido'    => $motivo !== '' ? $motivo : '(no se pudo extraer)',
+            ]);
+        }
+
+        $message->update($updates);
+
+        // Aviso en tiempo real a las bandejas abiertas (cambian los ticks del mensaje).
+        \App\Events\SupportMessageStatusUpdated::dispatch((int) $message->id);
+
+        return true;
     }
 
     /**
