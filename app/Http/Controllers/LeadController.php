@@ -40,6 +40,8 @@ use App\Services\LeadSuggestionSendService;
 use App\Services\LeadWhatsappOnboardingService;
 use App\Services\LeadWhatsAppPasteCleaner;
 use App\Services\SeparadorDeMensajesManuales;
+use App\Services\SignedAttachmentResponder;
+use App\Services\SupportAttachmentFileResolver;
 use App\Services\PromoteLeadService;
 use App\Services\PromoteLeadToClientService;
 use App\Services\LeadContractPdfService;
@@ -4375,10 +4377,23 @@ class LeadController extends Controller
     /**
      * Sirve un adjunto de lead vía URL firmada (nueva pestaña sin depender de public/storage).
      *
+     * Responde con BinaryFileResponse (`response()->file()`) a través de {@see SignedAttachmentResponder}, la
+     * misma política que los adjuntos de soporte: soporta `Range` (206; iOS Safari lo exige para reproducir
+     * audio y video), mime validado y sin parámetros, `nosniff`, CSP, y solo inline para image/* (menos svg),
+     * audio/*, video/* y application/pdf. Antes usaba `Storage::response()`, que en Laravel 8 es un
+     * StreamedResponse sin `Accept-Ranges`.
+     *
+     * 🔴 El disco es SIEMPRE `public` (así los guardan el webhook y el panel) y la columna `disk` se ignora;
+     * además el archivo real tiene que quedar adentro de la raíz de ese disco (si no, 404). Ver
+     * {@see SupportAttachmentFileResolver}.
+     *
+     * `?disposition=attachment` (viaja dentro de la firma; es el `download_url` del modelo) fuerza la descarga
+     * con el nombre original que mandó el lead.
+     *
      * @param \Illuminate\Http\Request $request
      * @param int|string               $id      ID de lead_message_attachments.
      *
-     * @return \Symfony\Component\HttpFoundation\StreamedResponse|\Illuminate\Http\Response
+     * @return \Symfony\Component\HttpFoundation\Response
      */
     public function serve_message_attachment_file_json(Request $request, $id)
     {
@@ -4387,39 +4402,29 @@ class LeadController extends Controller
             abort(403, 'Enlace de adjunto inválido o expirado.');
         }
 
+        // Adjunto pedido (404 si el id no existe).
         $attachment = LeadMessageAttachment::query()->findOrFail($id);
-        $disk = trim((string) ($attachment->disk ?? 'public'));
-        if ($disk === '') {
-            $disk = 'public';
-        }
 
+        // Ruta relativa dentro del disco `public` (la columna `disk` se ignora a propósito: ver el docblock).
         $path = trim((string) ($attachment->path ?? ''));
-        if ($path === '' || ! Storage::disk($disk)->exists($path)) {
+
+        // Archivo real adentro de la raíz de `public`; ruta con `..`, absoluta, directorio o fuera de la raíz: 404.
+        $absolute_path = app(SupportAttachmentFileResolver::class)->resolve($path);
+        if ($absolute_path === null) {
             abort(404, 'Adjunto no encontrado.');
         }
 
+        // Nombre con el que se baja: el original que mandó el lead, o el basename del path en disco.
         $download_name = $attachment->display_filename ?: basename($path);
-        $mime = trim((string) ($attachment->mime ?? ''));
 
-        $headers = [];
-        if ($mime !== '') {
-            $headers['Content-Type'] = $mime;
-        }
-        // Misma ventana que la firma de la URL (LeadMessageAttachment::getPublicUrlAttribute):
-        // el navegador no vuelve a pedir el archivo mientras la URL firmada siga siendo válida.
-        $headers['Cache-Control'] = 'private, max-age=172800';
-
-        // Parámetro opcional (viaja dentro de la firma) que fuerza descarga en vez de inline:
-        // usado por el download_url de LeadMessageAttachment para documentos/archivos que
-        // deben bajarse con su nombre real en lugar de abrirse en el navegador.
-        $disposition = strtolower(trim((string) $request->query('disposition', '')));
-        if ($disposition === 'attachment') {
-            // Fuerza descarga con Content-Disposition: attachment y el nombre real del archivo.
-            return Storage::disk($disk)->download($path, $download_name, $headers);
-        }
-
-        // Por defecto, inline (imágenes y videos se muestran/reproducen en la misma página).
-        return Storage::disk($disk)->response($path, $download_name, $headers);
+        // Mime, disposición, cabeceras de seguridad, Range/206 y caché privada de 172800 s (misma ventana que
+        // la firma de la URL de LeadMessageAttachment::getPublicUrlAttribute).
+        return app(SignedAttachmentResponder::class)->respond(
+            $request,
+            $absolute_path,
+            $attachment->mime,
+            (string) $download_name
+        );
     }
 
     /**
