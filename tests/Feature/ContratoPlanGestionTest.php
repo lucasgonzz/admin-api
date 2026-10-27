@@ -58,8 +58,8 @@ class ContratoPlanGestionTest extends BaseDeCobranzas
         $esperado = [
             ['inicial', 34200, 'Plan Inicial (hasta 300 ventas por mes)'],
             ['estandar', 71500, 'Plan Estándar (hasta 1.500 ventas por mes)'],
-            ['pro', 105600, 'Plan Pro (hasta 5.000 ventas por mes)'],
-            ['a_medida', 250000, 'Plan A medida (más de 5.000 ventas por mes)'],
+            ['pro', 105600, 'Plan Pro (hasta 7.000 ventas por mes)'],
+            ['a_medida', 250000, 'Plan A medida (más de 7.000 ventas por mes)'],
         ];
         foreach ($esperado as [$plan, $abono, $texto]) {
             $lead = $this->lead();
@@ -140,7 +140,7 @@ class ContratoPlanGestionTest extends BaseDeCobranzas
             ->assertOk()->assertJsonPath('contrato.contract_plan_gestion', 'pro');
         $this->putJson($url, ['contract_plan_gestion' => 'otro'])->assertStatus(422);
         $this->postJson($url.'/pdf', ['incluir_firma' => false])->assertOk()->assertHeader('Content-Type', 'application/pdf');
-        $this->assertStringContainsString('Plan Pro (hasta 5.000 ventas por mes)', $this->html($client->fresh()));
+        $this->assertStringContainsString('Plan Pro (hasta 7.000 ventas por mes)', $this->html($client->fresh()));
     }
 
     public function test_con_pago_anual_la_fila_de_gestion_conserva_la_referencia_mensual(): void
@@ -155,6 +155,6 @@ class ContratoPlanGestionTest extends BaseDeCobranzas
     public function test_la_tabla_de_planes_coincide_con_la_politica(): void
     {
         $this->assertSame([34200, 71500, 105600, null], array_column(array_values(ContractPreciosService::PLANES_GESTION), 'abono'));
-        $this->assertSame([300, 1500, 5000, null], array_column(array_values(ContractPreciosService::PLANES_GESTION), 'limite'));
+        $this->assertSame([300, 1500, 7000, null], array_column(array_values(ContractPreciosService::PLANES_GESTION), 'limite'));
     }
 }

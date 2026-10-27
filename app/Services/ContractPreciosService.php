@@ -11,12 +11,12 @@ class ContractPreciosService
     /**
      * Planes de Gestión por ventas mensuales (política del 26/10/2026). El abono de cada plan lo
      * precarga la SPA y es editable por contrato; acá viven el nombre y el límite para el PDF.
-     * `limite` null = sin tope (a medida: más de 5.000 ventas por mes, importe libre).
+     * `limite` null = sin tope (a medida: más de 7.000 ventas por mes, importe libre).
      */
     const PLANES_GESTION = [
         'inicial'  => ['nombre' => 'Inicial',  'limite' => 300,  'abono' => 34200],
         'estandar' => ['nombre' => 'Estándar', 'limite' => 1500, 'abono' => 71500],
-        'pro'      => ['nombre' => 'Pro',      'limite' => 5000, 'abono' => 105600],
+        'pro'      => ['nombre' => 'Pro',      'limite' => 7000, 'abono' => 105600],
         'a_medida' => ['nombre' => 'A medida', 'limite' => null, 'abono' => null],
     ];
 
