@@ -26,6 +26,11 @@ use Illuminate\Support\Facades\Log;
  *
  * El admin NO tiene el `MP_APP_SECRET` ni canjea nada: el canje del `code` sigue en cada ERP. Acá
  * no se guarda ni se loguea ningún `code`: viaja en la URL y se reenvía tal cual.
+ *
+ * Mercado Libre usa el mismo mecanismo (misión mercado-libre-integracion, 27/10/2026):
+ * MercadoLibreOAuthRelayService hereda de esta clase y solo cambia `ERP_CALLBACK_PATH` y `LOG_TAG`.
+ * Por eso esas dos constantes se leen con `static::`; el resto (forma del `state`, resolución contra la
+ * base, claves que se reenvían) es compartido y no se pisa en la clase hija.
  */
 class MercadoPagoOAuthRelayService
 {
@@ -46,8 +51,16 @@ class MercadoPagoOAuthRelayService
 
     /**
      * Ruta FIJA del callback en el empresa-api. Se concatena a la base registrada; nunca sale de la request.
+     *
+     * Se lee con `static::` para que el relay de Mercado Libre (MercadoLibreOAuthRelayService, que hereda
+     * de esta clase) apunte a su propia ruta fija sin tocar nada más del mecanismo.
      */
     const ERP_CALLBACK_PATH = '/api/integraciones/mercadopago/callback';
+
+    /**
+     * Prefijo de los mensajes de log de este relay. Se lee con `static::` por la misma razón que la ruta.
+     */
+    const LOG_TAG = '[MP_OAUTH_RELAY]';
 
     /**
      * Tope de largo de cada parámetro que se reenvía (`code`, `error`, `error_description`).
@@ -69,7 +82,7 @@ class MercadoPagoOAuthRelayService
 
         $parsed = $this->parse_state($state);
         if ($parsed === null) {
-            Log::warning('[MP_OAUTH_RELAY] state con formato inválido.', [
+            Log::warning(static::LOG_TAG . ' state con formato inválido.', [
                 'state_largo' => strlen($state),
                 'host_crudo'  => $this->sanitize_for_log($this->raw_host_of($state)),
             ]);
@@ -79,7 +92,7 @@ class MercadoPagoOAuthRelayService
 
         $base_url = $this->resolve_base_url($parsed['host']);
         if ($base_url === null) {
-            Log::warning('[MP_OAUTH_RELAY] host no registrado en client_apis ni en demos.', [
+            Log::warning(static::LOG_TAG . ' host no registrado en client_apis ni en demos.', [
                 'host' => $parsed['host'],
             ]);
 
@@ -186,7 +199,7 @@ class MercadoPagoOAuthRelayService
             }
         }
 
-        return rtrim($base_url, '/') . self::ERP_CALLBACK_PATH . '?' . http_build_query($params, '', '&', PHP_QUERY_RFC3986);
+        return rtrim($base_url, '/') . static::ERP_CALLBACK_PATH . '?' . http_build_query($params, '', '&', PHP_QUERY_RFC3986);
     }
 
     /**

@@ -138,6 +138,20 @@ Route::get('mercadopago/callback', [\App\Http\Controllers\Api\MercadoPagoOAuthRe
     ->middleware('throttle:60,1');
 
 /*
+| Callback CENTRAL de OAuth de Mercado Libre (misión mercado-libre-integracion, 27/10/2026).
+|
+| Mismo mecanismo que el de Mercado Pago de arriba, y PÚBLICA por la misma razón (pega el navegador
+| del comerciante, redirigido por Mercado Libre). Es la única `redirect_uri` que se registra en la app
+| de Mercado Libre (`4899702990695294`): `https://api-admin.comerciocity.com/api/mercadolibre/callback`.
+|
+| Reenvía el `code` a la ruta WEB del empresa-api `<base registrada>/platform-connector/mercadolibre/callback`.
+| El destino NUNCA sale de la request: el host del `state` se busca en `client_apis` / `demos`, y si no
+| está, 422 sin redirección. Ver MercadoLibreOAuthRelayService (hereda de MercadoPagoOAuthRelayService).
+*/
+Route::get('mercadolibre/callback', [\App\Http\Controllers\Api\MercadoLibreOAuthRelayController::class, 'callback'])
+    ->middleware('throttle:60,1');
+
+/*
 | Formulario público de configuración de implementación (acceso por token, sin auth).
 | El cliente accede con un link único que contiene form_token; no requiere Sanctum.
 */
