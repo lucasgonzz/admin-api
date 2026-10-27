@@ -8,6 +8,31 @@ use Illuminate\Validation\ValidationException;
 /** Desglose acordado en cada contrato; los contratos anteriores conservan sus totales. */
 class ContractPreciosService
 {
+    /**
+     * Planes de Gestión por ventas mensuales (política del 26/10/2026). El abono de cada plan lo
+     * precarga la SPA y es editable por contrato; acá viven el nombre y el límite para el PDF.
+     * `limite` null = sin tope (a medida: más de 5.000 ventas por mes, importe libre).
+     */
+    const PLANES_GESTION = [
+        'inicial'  => ['nombre' => 'Inicial',  'limite' => 300,  'abono' => 34200],
+        'estandar' => ['nombre' => 'Estándar', 'limite' => 1500, 'abono' => 71500],
+        'pro'      => ['nombre' => 'Pro',      'limite' => 5000, 'abono' => 105600],
+        'a_medida' => ['nombre' => 'A medida', 'limite' => null, 'abono' => null],
+    ];
+
+    /** Texto del plan para el PDF, o null si la clave no es un plan conocido. */
+    public static function plan_gestion($clave): ?array
+    {
+        if (!is_string($clave) || !isset(self::PLANES_GESTION[$clave])) {
+            return null;
+        }
+        $plan = self::PLANES_GESTION[$clave];
+        $limite = $plan['limite'] === null
+            ? 'más de '.number_format(self::PLANES_GESTION['pro']['limite'], 0, ',', '.').' ventas por mes'
+            : 'hasta '.number_format($plan['limite'], 0, ',', '.').' ventas por mes';
+        return ['clave' => $clave, 'nombre' => $plan['nombre'], 'limite' => $limite];
+    }
+
     public static function reglas(): array
     {
         $centavos = function ($atributo, $valor, $fallar) {
@@ -19,6 +44,7 @@ class ContractPreciosService
             'contract_precios_sistemas' => ['nullable', 'array:gestion,ecommerce,agentes', 'size:3'],
             'contract_descuento_conjunto' => ['nullable', 'numeric', 'min:0', 'max:999999999', $centavos],
             'contract_mes_gratis' => ['nullable', 'boolean'],
+            'contract_plan_gestion' => ['nullable', 'string', 'in:'.implode(',', array_keys(self::PLANES_GESTION))],
             'contract_pago_anual' => ['nullable', 'boolean'],
             'contract_descuento_anual' => ['nullable', 'numeric', 'min:0', 'max:100', $centavos],
             'contract_meses_actualizacion' => ['nullable', 'integer', 'min:1', 'max:60'],

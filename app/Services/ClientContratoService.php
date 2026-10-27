@@ -62,6 +62,7 @@ class ClientContratoService
         'contract_clausulas_particulares',
         'contract_modalidad',
         'contract_precios_sistemas',
+        'contract_plan_gestion',
         'contract_descuento_conjunto',
         'contract_pago_anual',
         'contract_descuento_anual',

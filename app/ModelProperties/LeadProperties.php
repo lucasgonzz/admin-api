@@ -870,6 +870,13 @@ class LeadProperties
                 'show' => false,
             ],
             [
+                'key' => 'contract_plan_gestion',
+                'text' => 'Contrato — contract_plan_gestion',
+                'type' => 'text',
+                'value' => null,
+                'show' => false,
+            ],
+            [
                 'key' => 'contract_descuento_conjunto',
                 'text' => 'Contrato — contract_descuento_conjunto',
                 'type' => 'text',

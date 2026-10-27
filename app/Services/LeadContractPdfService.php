@@ -161,6 +161,11 @@ class LeadContractPdfService
             ? ContractPreciosService::resumen($lead->contract_precios_sistemas, is_array($sistemas_raw) ? $sistemas_raw : [], (float) ($lead->contract_descuento_conjunto ?? 300))
             : null;
 
+        // El plan solo se muestra si el contrato tiene desglose y Gestión entre los sistemas elegidos.
+        $plan_gestion = $desglose !== null && is_array($sistemas_raw) && in_array('gestion', $sistemas_raw, true)
+            ? ContractPreciosService::plan_gestion($lead->contract_plan_gestion)
+            : null;
+
         $pago_anual = (bool) $lead->contract_pago_anual;
         $base_numerica = $desglose !== null ? $desglose['mensualidad'] : ClientContratoService::monto_desde_texto($lead->contract_mensualidad_base);
         $precio_extra_numerico = ClientContratoService::monto_desde_texto($lead->contract_precio_usuario_extra);
@@ -174,6 +179,7 @@ class LeadContractPdfService
 
         return array_merge(self::build_signature_data($lead, $incluir_firma), [
             'desglose_precios' => $desglose,
+            'plan_gestion' => $plan_gestion,
             'mes_gratis' => (bool) $lead->contract_mes_gratis,
             'pago_anual' => $pago_anual,
             'abono_anual' => $anual,

@@ -349,7 +349,7 @@
         <tbody>
 @if($desglose_precios !== null)
             @foreach($desglose_precios['filas'] as $fila)
-            <tr><td>{{ $fila['label'] }}</td><td>{{ $pago_anual ? 'Referencia mensual; cubierta en el pago anual' : 'Abono del sistema contratado' }}</td><td>{{ $mensualidad_moneda }} {{ number_format($fila['mensualidad'], 2, ',', '.') }}</td></tr>
+            <tr><td>{{ $fila['label'] }}</td><td>@if($fila['key'] === 'gestion' && $plan_gestion !== null)Plan {{ $plan_gestion['nombre'] }} ({{ $plan_gestion['limite'] }}){{ $pago_anual ? '; referencia mensual cubierta en el pago anual' : '' }}@else{{ $pago_anual ? 'Referencia mensual; cubierta en el pago anual' : 'Abono del sistema contratado' }}@endif</td><td>{{ $mensualidad_moneda }} {{ number_format($fila['mensualidad'], 2, ',', '.') }}</td></tr>
             @endforeach
 @endif
             <tr class="row-white">
