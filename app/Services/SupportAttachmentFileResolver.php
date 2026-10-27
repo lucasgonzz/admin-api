@@ -6,7 +6,9 @@ use Illuminate\Support\Facades\Storage;
 use League\Flysystem\Adapter\Local;
 
 /**
- * Resuelve la ruta absoluta de un adjunto de soporte, y SOLO si es un archivo del disco `public`.
+ * Resuelve la ruta absoluta de un adjunto de soporte o de lead, y SOLO si es un archivo del disco `public`.
+ * (Lo usan los dos controladores que sirven adjuntos por URL firmada; el nombre quedó por historia y no se
+ * cambia para no chocar con ramas en vuelo.)
  *
  * 🔴 Por qué existe: `support_message_attachments.disk` y `.path` los puede escribir el cliente
  * (`InboundSupportMessageController` los guarda tal cual vienen en la metadata remota). Servir el disco

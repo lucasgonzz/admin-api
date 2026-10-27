@@ -10,6 +10,7 @@ use App\Models\SupportMessage;
 use App\Models\SupportMessageAttachment;
 use App\Models\SupportTicket;
 use App\Models\SupportTypingState;
+use App\Services\SignedAttachmentResponder;
 use App\Services\SupportAiSuggestionDeliveryService;
 use App\Services\SupportAiSuggestionDraftService;
 use App\Services\SupportAttachmentFileResolver;
@@ -17,7 +18,6 @@ use App\Services\SupportAttachmentPlaybackService;
 use App\Services\SupportClientSyncService;
 use App\Services\SupportOutboundMediaService;
 use App\Services\SupportWhatsappOpenerService;
-use App\Services\WhatsappInboundMediaService;
 use App\Services\WhatsappSendService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -132,6 +132,9 @@ class SupportMessageController extends BaseController
     /**
      * Sirve el archivo de un adjunto de soporte por URL firmada (imagen, audio, video o documento).
      *
+     * La política de mime/disposición/cabeceras/Range vive en {@see SignedAttachmentResponder}, compartida con
+     * los adjuntos de leads; acá queda la resolución de la ruta y el tramo `playable=1` (solo de soporte).
+     *
      * Reemplaza al `/storage/<path>` directo del SPA, que dependía del symlink y dejaba el Content-Type
      * en manos del servidor web por extensión (un `.bin` salía como octet-stream). Acá:
      *  - Responde con BinaryFileResponse (`response()->file()`), que soporta `Range` y contesta 206:
@@ -172,28 +175,14 @@ class SupportMessageController extends BaseController
             abort(404, 'Adjunto no encontrado.');
         }
 
-        // Mime guardado, sin parámetros y en minúsculas.
-        $media_service = app(WhatsappInboundMediaService::class);
-        $mime = $media_service->normalize_mime((string) ($attachment->mime ?? ''));
+        // Servicio compartido con los adjuntos de leads: arma el mime definitivo y la respuesta.
+        $responder = app(SignedAttachmentResponder::class);
 
         // Nombre con el que se baja el archivo.
         $download_name = basename($relative_path);
 
-        // Sin mime guardado: se lo deduce de los bytes; y si tampoco, octet-stream.
-        if ($mime === '') {
-            $detected_mime = @mime_content_type($absolute_path);
-            $mime = $detected_mime !== false ? $media_service->normalize_mime((string) $detected_mime) : '';
-        }
-
-        // El mime viene de la base (y a veces del cliente): si no tiene forma de mime se lo trata como binario.
-        // Un mime inválido nunca se refleja en el Content-Type y fuerza la descarga.
-        $force_download = false;
-        if ($mime === '') {
-            $mime = 'application/octet-stream';
-        } elseif (! preg_match('#^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$#', $mime)) {
-            $mime = 'application/octet-stream';
-            $force_download = true;
-        }
+        // Mime definitivo (guardado normalizado, deducido de los bytes u octet-stream) y si obliga a descargar.
+        list($mime, $force_download) = $responder->resolve_mime($absolute_path, (string) ($attachment->mime ?? ''));
 
         // Audio que Safari no reproduce: si piden la versión reproducible y hay ffmpeg, se sirve la copia .m4a.
         $wants_playable = (string) $request->query('playable', '') === '1';
@@ -209,54 +198,8 @@ class SupportMessageController extends BaseController
             }
         }
 
-        // Inline solo para tipos que el navegador muestra sin ejecutar nada propio del archivo.
-        $is_inline_allowed = $this->is_inline_safe_mime($mime);
-        if (strtolower(trim((string) $request->query('disposition', ''))) === 'attachment') {
-            $force_download = true;
-        }
-        $disposition = ($is_inline_allowed && ! $force_download) ? 'inline' : 'attachment';
-
-        // Cabeceras: nosniff y una CSP que anula cualquier script/recurso si el archivo llegara a renderizarse.
-        $headers = [
-            'Content-Type'            => $mime,
-            'X-Content-Type-Options'  => 'nosniff',
-            'Content-Security-Policy' => "sandbox; default-src 'none'",
-        ];
-
-        // Nombre alternativo solo ASCII para la cabecera Content-Disposition.
-        $fallback_name = preg_replace('/[^\x20-\x7e]|[%\/\\\\]/', '_', $download_name);
-
-        // BinaryFileResponse: Accept-Ranges y 206 los resuelve Symfony al preparar la respuesta.
-        $response = response()->file($absolute_path, $headers);
-        $response->setContentDisposition($disposition, $download_name, $fallback_name);
-
-        // BinaryFileResponse arranca en `public`: se lo pasa a `private` (el archivo es de un cliente) con la
-        // misma ventana que la firma de la URL, para que el navegador no vuelva a pedirlo.
-        $response->setPrivate();
-        $response->setMaxAge(172800);
-
-        return $response;
-    }
-
-    /**
-     * Indica si un mime se puede mostrar inline sin riesgo: imágenes (sin svg), audio, video y PDF.
-     *
-     * @param string $mime Mime normalizado (sin parámetros).
-     *
-     * @return bool
-     */
-    private function is_inline_safe_mime(string $mime): bool
-    {
-        // El SVG es un documento con scripts: nunca inline.
-        if (strpos($mime, 'svg') !== false) {
-            return false;
-        }
-
-        if (strpos($mime, 'image/') === 0 || strpos($mime, 'audio/') === 0 || strpos($mime, 'video/') === 0) {
-            return true;
-        }
-
-        return $mime === 'application/pdf';
+        // Disposición, cabeceras de seguridad, Range/206 y caché: política compartida (SignedAttachmentResponder).
+        return $responder->build_response($request, $absolute_path, $mime, $force_download, $download_name);
     }
 
     /**
