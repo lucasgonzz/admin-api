@@ -1,0 +1,353 @@
+<?php
+
+namespace Tests\Feature\Cobranzas;
+
+use App\Models\ComisionPago;
+use App\Models\LicenciaCuota;
+use App\Models\Venta;
+use App\Services\LicenciaCuotaService;
+use App\Services\VentaService;
+use Laravel\Sanctum\Sanctum;
+
+/**
+ * Los arreglos que pidió la revisión independiente de la misión ventas-y-comisiones (28/10/2026).
+ * Una prueba por punto, en el orden en que se arreglaron:
+ *
+ *  1. La liberación cuenta una cuota `pagada` por su monto completo y topa lo cobrado de cada cuota
+ *     en su monto (pagos en pesos sobre una cuota en dólares no liberan de más).
+ *  2. La moneda de una cuota con venta es siempre la de la venta (la distinta se ignora, sin 422), y
+ *     una venta con pagos de comisión no cambia de moneda (422 en `moneda`).
+ *  3. Una venta en pesos sin importe es 422 (los precios de lista son en dólares), en el panel y
+ *     en claude/*.
+ *  4. En `cobranzas/ventas`, las cifras de comisión del resumen por moneda suman solo ventas con
+ *     vendedor.
+ *  5. Después de cambiar de vendedor, `pagada` cuenta solo los pagos al vendedor actual, y "Mis
+ *     comisiones" usa el mismo criterio para "Ya cobrado" y la lista de pagos.
+ *  6. Alta, edición y baja de una cuota van en la misma transacción que el recálculo de su venta.
+ *  7. Al editar, asignar vendedor con `comision_porcentaje` null a una venta sin % le pone el por
+ *     defecto (un null con vendedor se trata como ausente; para cero se manda 0).
+ */
+class RevisionDeVentasYComisionesTest extends BaseDeVentas
+{
+    /**
+     * Registra un pago del cliente sobre una cuota por la ruta de licencias de siempre.
+     *
+     * @param int   $client_id
+     * @param int   $cuota_id
+     * @param float $monto
+     * @param bool  $completa
+     *
+     * @return void
+     */
+    private function pagar_cuota(int $client_id, int $cuota_id, float $monto, bool $completa = false): void
+    {
+        $this->postJson('/api/admin/client/' . $client_id . '/licencias/' . $cuota_id . '/pago', [
+            'monto_pagado' => $monto,
+            'completa'     => $completa,
+        ])->assertStatus(200);
+    }
+
+    /**
+     * 1. Tres cuotas de 500 pagadas con 480 y "completa": la comisión se libera entera. Una cuota de
+     * USD 500 con 1.200.000 cargados (pesos sobre dólares): libera solo su tercio.
+     *
+     * @return void
+     */
+    public function test_la_liberacion_cuenta_la_cuota_pagada_completa_y_topa_lo_cobrado_en_su_monto(): void
+    {
+        $this->admin_logueado();
+        $this->crear_vendedor();
+        $client = $this->crear_cliente();
+
+        // Tres de 500 dadas por completas con 480 cada una: para el vendedor, la venta está cobrada.
+        $venta_id = (int) $this->alta_de_venta($client, ['productos' => ['gestion', 'ecommerce', 'agentes']])->json('venta.id');
+        foreach ($this->cuotas_de($venta_id) as $cuota) {
+            $this->pagar_cuota($client->id, $cuota->id, 480, true);
+        }
+
+        $venta = $this->venta_de_la_lista($client, $venta_id);
+        $this->assertEqualsWithDelta(225.0, $venta['comision']['liberada'], 0.001, 'Las tres cuotas están pagadas: se libera el 100 %.');
+        $this->assertEqualsWithDelta(0.0, $venta['comision']['por_liberar'], 0.001);
+        $this->assertEqualsWithDelta(1440.0, $venta['resumen']['cobrado'], 0.001, 'Lo que se muestra como cobrado no cambia: es lo que entró.');
+
+        // Una cuota de USD 500 con 1.200.000 cargados: cuenta 500, no 1.200.000.
+        $otra_id = (int) $this->alta_de_venta($client, ['productos' => ['gestion', 'ecommerce', 'agentes']])->json('venta.id');
+        $primera = $this->cuotas_de($otra_id)->first();
+        $this->pagar_cuota($client->id, $primera->id, 1200000);
+
+        $otra = $this->venta_de_la_lista($client, $otra_id);
+        $this->assertEqualsWithDelta(75.0, $otra['comision']['liberada'], 0.001, 'Una de tres cuotas: un tercio, aunque el monto cargado sea enorme.');
+        $this->assertEqualsWithDelta(150.0, $otra['comision']['por_liberar'], 0.001);
+    }
+
+    /**
+     * 2. Una cuota que es de una venta va siempre en la moneda de la venta, por la ruta nueva y por
+     * las viejas; una cuota suelta se sigue editando como siempre. Y una venta con pagos de
+     * comisión no puede cambiar de moneda.
+     *
+     * @return void
+     */
+    public function test_las_cuotas_de_una_venta_van_en_su_moneda_y_con_pagos_no_cambia(): void
+    {
+        $this->admin_logueado();
+        $this->crear_vendedor();
+        $client = $this->crear_cliente();
+
+        $venta_id = (int) $this->alta_de_venta($client, ['productos' => ['gestion'], 'moneda' => 'USD'])->json('venta.id');
+
+        // Agregar una cuota mandando otra moneda: se ignora, va en dólares (sin 422).
+        $agregada = $this->postJson('/api/admin/client/' . $client->id . '/ventas/' . $venta_id . '/cuotas', [
+            'monto'  => 100,
+            'moneda' => 'ARS',
+        ]);
+        $agregada->assertStatus(201);
+        $this->assertSame('USD', $agregada->json('venta.cuotas.1.moneda'));
+
+        // Editarla por la ruta vieja mandando otra moneda: el monto cambia, la moneda no.
+        $cuota_id = (int) $agregada->json('venta.cuotas.1.id');
+        $this->putJson('/api/admin/client/' . $client->id . '/licencias/' . $cuota_id, ['monto' => 150, 'moneda' => 'ARS'])->assertStatus(200);
+        $cuota = LicenciaCuota::find($cuota_id);
+        $this->assertSame('USD', $cuota->moneda);
+        $this->assertEqualsWithDelta(150.0, (float) $cuota->monto, 0.001);
+        $this->assertSame(0, LicenciaCuota::where('venta_id', $venta_id)->where('moneda', '!=', 'USD')->count());
+
+        // Una cuota suelta sí cambia de moneda, como siempre.
+        $suelta_id = (int) $this->postJson('/api/admin/client/' . $client->id . '/licencias', ['monto' => 10, 'moneda' => 'USD'])->json('cuota.id');
+        $this->putJson('/api/admin/client/' . $client->id . '/licencias/' . $suelta_id, ['moneda' => 'ARS'])->assertStatus(200);
+        $this->assertSame('ARS', LicenciaCuota::find($suelta_id)->moneda);
+
+        // Con un pago de comisión registrado, la venta no cambia de moneda.
+        $this->pagar_cuota($client->id, $this->cuotas_de($venta_id)->first()->id, 800);
+        $this->postJson('/api/admin/ventas/' . $venta_id . '/comision/pagos', ['monto' => 50])->assertStatus(201);
+
+        $cambio = $this->putJson('/api/admin/client/' . $client->id . '/ventas/' . $venta_id, ['moneda' => 'ARS']);
+        $cambio->assertStatus(422);
+        $cambio->assertJsonValidationErrors(['moneda']);
+        $this->assertSame('USD', Venta::find($venta_id)->moneda);
+        $this->assertSame(0, LicenciaCuota::where('venta_id', $venta_id)->where('moneda', '!=', 'USD')->count());
+
+        // Mandar la MISMA moneda no es un cambio: pasa.
+        $this->putJson('/api/admin/client/' . $client->id . '/ventas/' . $venta_id, ['moneda' => 'USD', 'observacion' => 'ok'])->assertStatus(200);
+    }
+
+    /**
+     * 3. Una venta en ARS de productos de lista sin `monto_total` (ni cuotas) es 422 en el panel y
+     * en claude/*, sin escribir nada. Con importe, o con cuotas explícitas, pasa.
+     *
+     * @return void
+     */
+    public function test_una_venta_en_pesos_sin_importe_es_422(): void
+    {
+        $this->admin_logueado();
+        $client = $this->crear_cliente(['name' => 'Ferretería en pesos']);
+
+        $panel = $this->alta_de_venta($client, ['productos' => ['gestion'], 'moneda' => 'ARS']);
+        $panel->assertStatus(422);
+        $panel->assertJsonValidationErrors(['monto_total']);
+        $this->assertSame(0, Venta::where('client_id', $client->id)->count());
+
+        config(['services.claude_task_ingest.key' => 'clave-revision-ventas']);
+        $headers = ['X-Claude-Task-Key' => 'clave-revision-ventas', 'Accept' => 'application/json'];
+
+        $claude = $this->postJson('/api/claude/clients/' . $client->id . '/ventas', [
+            'productos' => ['gestion', 'ecommerce', 'agentes'],
+            'moneda'    => 'ARS',
+        ], $headers);
+        $claude->assertStatus(422);
+        $this->assertNotEmpty($claude->json('detalles'));
+
+        // Con importe, o con las cuotas escritas, sí.
+        $this->alta_de_venta($client, ['productos' => ['gestion'], 'moneda' => 'ARS', 'monto_total' => 1200000])->assertStatus(201);
+        $this->alta_de_venta($client, ['productos' => ['gestion'], 'moneda' => 'ARS', 'cuotas' => [['monto' => 500000]]])->assertStatus(201);
+        $this->assertSame(2, Venta::where('client_id', $client->id)->where('moneda', 'ARS')->count());
+    }
+
+    /**
+     * 4. El resumen por moneda de `cobranzas/ventas` (por cliente y el de arriba) suma la comisión
+     * solo de las ventas con vendedor; lo que deben los clientes, de todas.
+     *
+     * @return void
+     */
+    public function test_el_resumen_de_ventas_suma_comision_solo_con_vendedor(): void
+    {
+        $this->admin_logueado();
+        $vendedor = $this->crear_vendedor();
+        $client = $this->crear_cliente();
+
+        // Con vendedor: 800 al 15 % = 120. Sin vendedor (null explícito): 500 al 15 % = 75, que no cuenta.
+        $this->alta_de_venta($client, ['productos' => ['gestion'], 'vendedor_admin_id' => $vendedor->id])->assertStatus(201);
+        $sin = $this->alta_de_venta($client, ['productos' => ['ecommerce'], 'vendedor_admin_id' => null]);
+        $sin->assertStatus(201);
+        $this->assertEqualsWithDelta(75.0, $sin->json('venta.comision_monto'), 0.001, 'La venta sin vendedor tiene su comisión calculada…');
+
+        $tabla = $this->getJson('/api/admin/cobranzas/ventas');
+        $tabla->assertStatus(200);
+        $fila = collect($tabla->json('clientes'))->firstWhere('client_id', $client->id);
+
+        $usd = $fila['resumen_por_moneda']['USD'];
+        $this->assertEqualsWithDelta(1300.0, $usd['total'], 0.001, 'Lo que deben los clientes cuenta todas las ventas.');
+        $this->assertEqualsWithDelta(1300.0, $usd['pendiente'], 0.001);
+        $this->assertEqualsWithDelta(120.0, $usd['comision_total'], 0.001, '…pero no entra en lo que hay que pagarle a los vendedores.');
+        $this->assertEqualsWithDelta(120.0, $usd['comision_por_liberar'], 0.001);
+        $this->assertEqualsWithDelta(0.0, $usd['comision_a_pagar'], 0.001);
+    }
+
+    /**
+     * 5. Una venta pagada al vendedor A pasa al vendedor B: para B no hay nada pagado (le toca la
+     * comisión liberada entera), y en "Mis comisiones" de cada uno "Ya cobrado" es la suma de la
+     * lista de pagos.
+     *
+     * @return void
+     */
+    public function test_los_pagos_cuentan_solo_para_el_vendedor_actual(): void
+    {
+        $lucas = $this->admin_logueado('Lucas');
+        $a = $this->crear_vendedor('Vendedor A');
+        $b = $this->crear_vendedor('Vendedor B');
+        $client = $this->crear_cliente();
+
+        $venta_id = (int) $this->alta_de_venta($client, ['productos' => ['gestion'], 'vendedor_admin_id' => $a->id])->json('venta.id');
+        $this->pagar_cuota($client->id, $this->cuotas_de($venta_id)->first()->id, 800);
+        $this->postJson('/api/admin/ventas/' . $venta_id . '/comision/pagos', ['monto' => 100])->assertStatus(201);
+
+        $antes = $this->venta_de_la_lista($client, $venta_id);
+        $this->assertEqualsWithDelta(100.0, $antes['comision']['pagada'], 0.001);
+        $this->assertEqualsWithDelta(20.0, $antes['comision']['a_pagar'], 0.001);
+
+        // La venta pasa a B: lo pagado a A no descuenta de lo de B.
+        $this->putJson('/api/admin/client/' . $client->id . '/ventas/' . $venta_id, ['vendedor_admin_id' => $b->id])->assertStatus(200);
+        $despues = $this->venta_de_la_lista($client, $venta_id);
+        $this->assertEqualsWithDelta(0.0, $despues['comision']['pagada'], 0.001);
+        $this->assertEqualsWithDelta(120.0, $despues['comision']['a_pagar'], 0.001);
+        $this->assertSame(1, ComisionPago::where('venta_id', $venta_id)->count(), 'El pago a A sigue existiendo.');
+
+        // "Mis comisiones" de B: la venta, nada cobrado, lista vacía.
+        Sanctum::actingAs($b);
+        $mias_b = $this->getJson('/api/admin/comisiones/mias');
+        $this->assertSame([$venta_id], collect($mias_b->json('comisiones'))->pluck('id')->all());
+        $this->assertEqualsWithDelta(0.0, $mias_b->json('resumen.por_moneda.USD.pagada'), 0.001);
+        $this->assertCount(0, $mias_b->json('resumen.pagos'));
+
+        // "Mis comisiones" de A: ya no tiene la venta, y "Ya cobrado" y la lista cierran (los dos vacíos).
+        Sanctum::actingAs($a);
+        $mias_a = $this->getJson('/api/admin/comisiones/mias');
+        $this->assertCount(0, $mias_a->json('comisiones'));
+        $this->assertSame([], (array) $mias_a->json('resumen.por_moneda'));
+        $this->assertCount(0, $mias_a->json('resumen.pagos'));
+
+        // B cobra 50: figura en su lista y en su "Ya cobrado".
+        Sanctum::actingAs($lucas);
+        $this->postJson('/api/admin/ventas/' . $venta_id . '/comision/pagos', ['monto' => 50])->assertStatus(201);
+        Sanctum::actingAs($b);
+        $mias_b = $this->getJson('/api/admin/comisiones/mias');
+        $this->assertEqualsWithDelta(50.0, $mias_b->json('resumen.por_moneda.USD.pagada'), 0.001);
+        $this->assertCount(1, $mias_b->json('resumen.pagos'));
+        $this->assertEqualsWithDelta(50.0, $mias_b->json('resumen.pagos.0.monto'), 0.001);
+    }
+
+    /**
+     * 6. Si el recálculo de la venta falla, la cuota no queda creada, editada ni borrada: van en la
+     * misma transacción. Se fuerza la falla con un VentaService cuyo `sincronizar_total` tira.
+     *
+     * @return void
+     */
+    public function test_la_cuota_y_el_total_de_su_venta_van_en_la_misma_transaccion(): void
+    {
+        $this->admin_logueado();
+        $client = $this->crear_cliente();
+
+        $venta_id = (int) $this->alta_de_venta($client, ['productos' => ['gestion']])->json('venta.id');
+        $cuota = $this->cuotas_de($venta_id)->first();
+
+        /** @var LicenciaCuotaService $cuotas */
+        $cuotas = app(LicenciaCuotaService::class);
+
+        // Desde acá, recalcular una venta falla siempre.
+        $this->app->instance(VentaService::class, new class($cuotas) extends VentaService {
+            public function sincronizar_total(Venta $venta): Venta
+            {
+                throw new \RuntimeException('Falla forzada del recálculo.');
+            }
+        });
+
+        $fallo = function (callable $operacion) {
+            try {
+                $operacion();
+            } catch (\RuntimeException $error) {
+                return $error->getMessage();
+            }
+
+            return null;
+        };
+
+        // Alta: la cuota no queda.
+        $this->assertSame('Falla forzada del recálculo.', $fallo(function () use ($cuotas, $client, $venta_id) {
+            $cuotas->crear($client, ['monto' => 100, 'venta_id' => $venta_id]);
+        }));
+        $this->assertSame(1, LicenciaCuota::where('venta_id', $venta_id)->count(), 'La cuota nueva no quedó guardada.');
+
+        // Edición del monto: no queda.
+        $this->assertSame('Falla forzada del recálculo.', $fallo(function () use ($cuotas, $cuota) {
+            $cuotas->editar(LicenciaCuota::find($cuota->id), ['monto' => 1]);
+        }));
+        $this->assertEqualsWithDelta(800.0, (float) LicenciaCuota::find($cuota->id)->monto, 0.001, 'El monto nuevo no quedó guardado.');
+
+        // Baja: la cuota sigue.
+        $this->assertSame('Falla forzada del recálculo.', $fallo(function () use ($cuotas, $cuota) {
+            $cuotas->eliminar(LicenciaCuota::find($cuota->id));
+        }));
+        $this->assertNotNull(LicenciaCuota::find($cuota->id), 'La cuota no quedó borrada.');
+
+        // Y la venta no se movió.
+        $this->assertEqualsWithDelta(800.0, (float) Venta::find($venta_id)->monto_total, 0.001);
+    }
+
+    /**
+     * 7. Una venta sin vendedor ni comisión (como las viejas migradas): asignarle vendedor mandando
+     * `comision_porcentaje: null` —lo que manda un formulario con el campo vacío— le pone el % por
+     * defecto, no la deja sin comisión. Un null con vendedor no borra un % que ya había; 0 sí deja
+     * la comisión en cero; y sin vendedor, null saca la comisión.
+     *
+     * @return void
+     */
+    public function test_asignar_vendedor_con_porcentaje_null_aplica_el_por_defecto(): void
+    {
+        $this->admin_logueado();
+        $vendedor = $this->crear_vendedor();
+        $client = $this->crear_cliente();
+
+        // Una venta vieja: sin vendedor ni comisión.
+        $venta_id = (int) $this->alta_de_venta($client, ['productos' => ['gestion'], 'vendedor_admin_id' => null])->json('venta.id');
+        Venta::where('id', $venta_id)->update(['comision_porcentaje' => null, 'comision_monto' => null]);
+
+        $asignada = $this->putJson('/api/admin/client/' . $client->id . '/ventas/' . $venta_id, [
+            'vendedor_admin_id'   => $vendedor->id,
+            'comision_porcentaje' => null,
+        ]);
+        $asignada->assertStatus(200);
+        $this->assertEqualsWithDelta(15.0, $asignada->json('venta.comision_porcentaje'), 0.001);
+        $this->assertEqualsWithDelta(120.0, $asignada->json('venta.comision_monto'), 0.001);
+
+        // Con vendedor y un % ya puesto, otro null no lo borra.
+        $this->putJson('/api/admin/client/' . $client->id . '/ventas/' . $venta_id, ['comision_porcentaje' => 20])->assertStatus(200);
+        $de_nuevo = $this->putJson('/api/admin/client/' . $client->id . '/ventas/' . $venta_id, [
+            'vendedor_admin_id'   => $vendedor->id,
+            'comision_porcentaje' => null,
+        ]);
+        $this->assertEqualsWithDelta(20.0, $de_nuevo->json('venta.comision_porcentaje'), 0.001);
+
+        // 0 es "sin comisión" con vendedor.
+        $cero = $this->putJson('/api/admin/client/' . $client->id . '/ventas/' . $venta_id, ['comision_porcentaje' => 0]);
+        $this->assertEqualsWithDelta(0.0, $cero->json('venta.comision_porcentaje'), 0.001);
+        $this->assertEqualsWithDelta(0.0, $cero->json('venta.comision_monto'), 0.001);
+
+        // Sin vendedor, null saca la comisión.
+        $sin = $this->putJson('/api/admin/client/' . $client->id . '/ventas/' . $venta_id, [
+            'vendedor_admin_id'   => null,
+            'comision_porcentaje' => null,
+        ]);
+        $this->assertNull($sin->json('venta.vendedor_admin_id'));
+        $this->assertNull($sin->json('venta.comision_porcentaje'));
+        $this->assertNull($sin->json('venta.comision_monto'));
+    }
+}

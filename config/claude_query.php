@@ -3060,6 +3060,145 @@ return [
             ],
             'nota' => 'from_stage_name / to_stage_name y data son FOTOS del momento: si después se renombró la etapa o se borró un campo, acá sigue lo de entonces. data: [{key, label, type, value}] en created / stage_change; {from, to, note} en next_action; {from, to} con NOMBRES de admins en owner. Las notas (type=note) pueden tener occurred_at anterior a created_at.',
         ],
+
+        /* ---------------------------------------------------------------
+         | venta — lo que se le vendió a cada cliente (misión ventas-y-comisiones,
+         | 28/10/2026): productos, total, moneda, origen y la comisión del vendedor.
+         |
+         | Entra entera: no tiene credenciales ni datos de una persona (el vendedor
+         | es un id de admin). `observacion` es una nota de negocio.
+         | ⚠️ `comision_monto` es la comisión TOTAL; la liberada (la que el vendedor
+         | puede cobrar) se calcula según lo cobrado y la sirve
+         | GET claude/clients/{id}/ventas, no esta tabla.
+         --------------------------------------------------------------- */
+        'venta' => [
+            'tabla'           => 'ventas',
+            'descripcion'     => 'Ventas a clientes (sistema de gestión, e-commerce, agentes, desarrollo a medida u otro) con su total, moneda, origen, vendedor y comisión total. Sus cuotas están en licencia_cuota (venta_id).',
+            'columnas'        => [
+                'id', 'client_id', 'lead_id', 'productos', 'descripcion', 'fecha',
+                'monto_total', 'moneda', 'origen', 'vendedor_admin_id',
+                'comision_porcentaje', 'comision_monto', 'observacion',
+                'created_by_admin_id', 'created_at', 'updated_at',
+            ],
+            'clave_de_cursor' => 'id',
+            'orden_default'   => 'desc',
+            'limite_default'  => 200,
+            'limite_max'      => 500,
+            'busqueda'        => ['descripcion'],
+            'filtros'         => [
+                'client_id'         => ['columna' => 'client_id',         'tipo' => 'entero'],
+                'lead_id'           => ['columna' => 'lead_id',           'tipo' => 'entero'],
+                'vendedor_admin_id' => ['columna' => 'vendedor_admin_id', 'tipo' => 'entero'],
+                'sin_vendedor'      => ['columna' => 'vendedor_admin_id', 'tipo' => 'nulo'],
+                /* Enumeraciones reales: Venta::ORIGENES y LicenciaCuota::MONEDAS. */
+                'origen'            => ['columna' => 'origen',            'tipo' => 'en', 'valores' => ['contrato', 'manual', 'claude', 'planilla']],
+                'moneda'            => ['columna' => 'moneda',            'tipo' => 'en', 'valores' => ['USD', 'ARS']],
+                'fecha_desde'       => ['columna' => 'fecha',             'tipo' => 'fecha_desde'],
+                'fecha_hasta'       => ['columna' => 'fecha',             'tipo' => 'fecha_hasta'],
+                'ids'               => ['columna' => 'id',                'tipo' => 'lista_de_enteros'],
+            ],
+            'relaciones'      => [
+                'cliente' => [
+                    'tipo'        => 'belongs_to', 'tabla' => 'clients',
+                    'clave_local' => 'client_id', 'clave_externa' => 'id',
+                    'columnas'    => ['id', 'uuid', 'name', 'company_name', 'is_active'],
+                ],
+                'cuotas' => [
+                    'tipo'        => 'has_many', 'tabla' => 'licencia_cuotas',
+                    'clave_local' => 'id', 'clave_externa' => 'venta_id',
+                    'columnas'    => ['id', 'numero', 'periodo', 'vencimiento', 'monto', 'moneda', 'estado', 'monto_pagado', 'fecha_pago'],
+                    'limite'      => 60,
+                ],
+                'pagos_de_comision' => [
+                    'tipo'        => 'has_many', 'tabla' => 'comision_pagos',
+                    'clave_local' => 'id', 'clave_externa' => 'venta_id',
+                    'columnas'    => ['id', 'vendedor_admin_id', 'monto', 'moneda', 'fecha', 'nota'],
+                    'limite'      => 50,
+                ],
+            ],
+            'nota' => 'Columnas crudas. La comisión liberada (según lo que pagó el cliente), lo pagado y lo que falta pagarle al vendedor, ya calculados, están en GET claude/clients/{id}/ventas. Para dar de alta una venta: POST claude/clients/{id}/ventas (dry_run por defecto).',
+        ],
+
+        /* ---------------------------------------------------------------
+         | comision_pago — los pagos al vendedor a cuenta de la comisión de una
+         | venta (misión ventas-y-comisiones, 28/10/2026). Sin credenciales ni PII.
+         --------------------------------------------------------------- */
+        'comision_pago' => [
+            'tabla'           => 'comision_pagos',
+            'descripcion'     => 'Pagos hechos a un vendedor a cuenta de la comisión de una venta: monto, moneda, fecha y nota.',
+            'columnas'        => [
+                'id', 'venta_id', 'vendedor_admin_id', 'monto', 'moneda', 'fecha', 'nota',
+                'registrado_por_admin_id', 'created_at', 'updated_at',
+            ],
+            'clave_de_cursor' => 'id',
+            'orden_default'   => 'desc',
+            'limite_default'  => 200,
+            'limite_max'      => 500,
+            'busqueda'        => ['nota'],
+            'filtros'         => [
+                'venta_id'          => ['columna' => 'venta_id',          'tipo' => 'entero'],
+                'vendedor_admin_id' => ['columna' => 'vendedor_admin_id', 'tipo' => 'entero'],
+                'moneda'            => ['columna' => 'moneda',            'tipo' => 'en', 'valores' => ['USD', 'ARS']],
+                'fecha_desde'       => ['columna' => 'fecha',             'tipo' => 'fecha_desde'],
+                'fecha_hasta'       => ['columna' => 'fecha',             'tipo' => 'fecha_hasta'],
+                'ids'               => ['columna' => 'id',                'tipo' => 'lista_de_enteros'],
+            ],
+            'relaciones'      => [
+                'venta' => [
+                    'tipo'        => 'belongs_to', 'tabla' => 'ventas',
+                    'clave_local' => 'venta_id', 'clave_externa' => 'id',
+                    'columnas'    => ['id', 'client_id', 'productos', 'monto_total', 'moneda', 'comision_monto'],
+                ],
+            ],
+            'nota' => 'Solo lectura. Los pagos se registran desde Cobranzas → Comisiones del admin; no hay escritura por Claude.',
+        ],
+
+        /* ---------------------------------------------------------------
+         | licencia_cuota — las cuotas de lo vendido a cada cliente (misión
+         | modulo-cobranzas, 18/9/2026; `venta_id` desde ventas-y-comisiones,
+         | 28/10/2026). Verificada columna por columna contra la migración:
+         | ninguna credencial ni dato de una persona. `observacion` es la nota
+         | de la cuota (a veces trae lo que se pagó, como la planilla).
+         --------------------------------------------------------------- */
+        'licencia_cuota' => [
+            'tabla'           => 'licencia_cuotas',
+            'descripcion'     => 'Cuotas de lo vendido a cada cliente: número, mes, vencimiento, monto, moneda, estado (pendiente/parcial/pagada) y lo pagado. venta_id null = cuota suelta, anterior a las ventas.',
+            'columnas'        => [
+                'id', 'client_id', 'venta_id', 'numero', 'periodo', 'vencimiento',
+                'monto', 'moneda', 'estado', 'monto_pagado', 'fecha_pago',
+                'observacion', 'importado', 'created_at', 'updated_at',
+            ],
+            'clave_de_cursor' => 'id',
+            'orden_default'   => 'asc',
+            'limite_default'  => 200,
+            'limite_max'      => 500,
+            'busqueda'        => ['observacion'],
+            'filtros'         => [
+                'client_id'         => ['columna' => 'client_id',   'tipo' => 'entero'],
+                'venta_id'          => ['columna' => 'venta_id',    'tipo' => 'entero'],
+                'sin_venta'         => ['columna' => 'venta_id',    'tipo' => 'nulo'],
+                /* Enumeraciones reales: LicenciaCuota::ESTADOS y LicenciaCuota::MONEDAS. */
+                'estado'            => ['columna' => 'estado',      'tipo' => 'en', 'valores' => ['pendiente', 'parcial', 'pagada']],
+                'moneda'            => ['columna' => 'moneda',      'tipo' => 'en', 'valores' => ['USD', 'ARS']],
+                'importado'         => ['columna' => 'importado',   'tipo' => 'booleano'],
+                'vencimiento_desde' => ['columna' => 'vencimiento', 'tipo' => 'fecha_desde'],
+                'vencimiento_hasta' => ['columna' => 'vencimiento', 'tipo' => 'fecha_hasta'],
+                'ids'               => ['columna' => 'id',          'tipo' => 'lista_de_enteros'],
+            ],
+            'relaciones'      => [
+                'cliente' => [
+                    'tipo'        => 'belongs_to', 'tabla' => 'clients',
+                    'clave_local' => 'client_id', 'clave_externa' => 'id',
+                    'columnas'    => ['id', 'uuid', 'name', 'company_name', 'is_active'],
+                ],
+                'venta' => [
+                    'tipo'        => 'belongs_to', 'tabla' => 'ventas',
+                    'clave_local' => 'venta_id', 'clave_externa' => 'id',
+                    'columnas'    => ['id', 'productos', 'fecha', 'monto_total', 'moneda', 'origen', 'vendedor_admin_id'],
+                ],
+            ],
+            'nota' => 'Una cuota `pagada` con monto_pagado null (las importadas de la planilla) se considera cobrada por su monto entero. Lo cobrado y lo pendiente ya calculados, por venta, están en GET claude/clients/{id}/ventas.',
+        ],
     ],
 
     /*
@@ -3140,5 +3279,5 @@ return [
      | archivo. La nota de abajo los nombra a todos; ninguno de los 11 está
      | verificado columna por columna.
      */
-    'nota_de_exclusiones' => 'Los modelos que no figuran ni en `modelos` ni en `modelos_excluidos` están fuera de la tanda: sin secreto conocido, pero sin verificar columna por columna. El 3/9/2026 entraron los cinco bloques probables (comercial y agentes, soporte, demos, implementaciones y facturación) y con eso se cerraron las tres advertencias que esta nota tenía escritas: MensualidadInvoice, Implementation y SupportTicket ya están en `modelos`, con `request`/`response`, `form_token` y la PII afuera o en opt-in. Ese mismo día Lead pasó de `modelos_excluidos` a `modelos`: los dos tokens que lo excluían (demo_ingreso_token, demo_eventos_token) y las 17 contract_* quedan afuera por lista blanca, igual que api_key y afip_* en client, y la PII viaja sólo con include=contacto. Lo que queda sin declarar son DIECIOCHO modelos (recontado el 27/9/2026). Siete se dejaron a propósito el 3/9/2026: marcas de lectura de la SPA (client_notification_reads, lead_manual_unread_marks, lead_message_reads), estado efímero (support_typing_states), notificaciones de tareas (admin_task_notifications), plantillas de tarea (task_templates) y bloques de user_id (user_id_blocks). Los otros ONCE entraron después sin pasar por este archivo y no están verificados columna por columna: ai_plans, client_ai_token_usages, client_ai_token_usage_people, client_ai_token_usage_person_models, client_assistant_messages, client_upgrade_notices, lead_scheduled_messages, licencia_cuotas, mensualidad_actualizaciones, mensualidad_pagos y mensualidad_periodos. Las cuatro tablas del CRM de pipelines (27/9/2026) sí entraron declaradas en `modelos`. No cuentan como "sin declarar" las tablas pivote de modelos que ya están (admin_task_assignees, client_version_upgrade_versions, version_item_clients), que no tienen modelo propio, ni las tablas de infraestructura de Laravel (jobs, failed_jobs, migrations), que no son datos del negocio. personal_access_tokens tampoco tiene modelo en app/Models/ —la clase es de Sanctum— pero SÍ está declarada en `modelos_excluidos`, porque guarda el hash del token con el que se autentica el panel y no queremos que el próximo la sume sin pensarlo. Agregar uno son ~25 líneas acá y un DESCRIBE de la tabla, no una misión.',
+    'nota_de_exclusiones' => 'Los modelos que no figuran ni en `modelos` ni en `modelos_excluidos` están fuera de la tanda: sin secreto conocido, pero sin verificar columna por columna. El 3/9/2026 entraron los cinco bloques probables (comercial y agentes, soporte, demos, implementaciones y facturación) y con eso se cerraron las tres advertencias que esta nota tenía escritas: MensualidadInvoice, Implementation y SupportTicket ya están en `modelos`, con `request`/`response`, `form_token` y la PII afuera o en opt-in. Ese mismo día Lead pasó de `modelos_excluidos` a `modelos`: los dos tokens que lo excluían (demo_ingreso_token, demo_eventos_token) y las 17 contract_* quedan afuera por lista blanca, igual que api_key y afip_* en client, y la PII viaja sólo con include=contacto. Lo que queda sin declarar son DIECISIETE modelos (dieciocho al 27/9/2026, menos licencia_cuotas el 28/10/2026). Siete se dejaron a propósito el 3/9/2026: marcas de lectura de la SPA (client_notification_reads, lead_manual_unread_marks, lead_message_reads), estado efímero (support_typing_states), notificaciones de tareas (admin_task_notifications), plantillas de tarea (task_templates) y bloques de user_id (user_id_blocks). Los otros entraron después sin pasar por este archivo y no están verificados columna por columna: ai_plans, client_ai_token_usages, client_ai_token_usage_people, client_ai_token_usage_person_models, client_assistant_messages, client_upgrade_notices, lead_scheduled_messages, mensualidad_actualizaciones, mensualidad_pagos y mensualidad_periodos (eran ONCE; licencia_cuotas entró declarada el 28/10/2026 con la misión ventas-y-comisiones, junto con ventas y comision_pagos). Las cuatro tablas del CRM de pipelines (27/9/2026) sí entraron declaradas en `modelos`. No cuentan como "sin declarar" las tablas pivote de modelos que ya están (admin_task_assignees, client_version_upgrade_versions, version_item_clients), que no tienen modelo propio, ni las tablas de infraestructura de Laravel (jobs, failed_jobs, migrations), que no son datos del negocio. personal_access_tokens tampoco tiene modelo en app/Models/ —la clase es de Sanctum— pero SÍ está declarada en `modelos_excluidos`, porque guarda el hash del token con el que se autentica el panel y no queremos que el próximo la sume sin pensarlo. Agregar uno son ~25 líneas acá y un DESCRIBE de la tabla, no una misión.',
 ];

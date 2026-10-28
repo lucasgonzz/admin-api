@@ -41,6 +41,10 @@ class Admin extends Authenticatable
         // de conversaciones de leads se asignan automáticamente a todos los admins con
         // este flag activo. Distinto de is_default_task_assignee (preselección manual).
         'es_setter'                => 'boolean',
+        // Flag que identifica al admin como vendedor (misión ventas-y-comisiones, 28/10/2026): se
+        // le liquida comisión por las ventas que se le asignan y ve su módulo "Mis comisiones".
+        // Si hay un solo vendedor, las ventas nuevas se le asignan solas.
+        'es_vendedor'              => 'boolean',
         // Flag para recibir WhatsApp cuando el agente escala una conversación de lead.
         'notify_lead_escalation_whatsapp' => 'boolean',
         // Flag para recibir WhatsApp cuando el agente escala un ticket de soporte de un cliente.

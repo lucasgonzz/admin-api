@@ -69,6 +69,16 @@ class AdminProperties
                 'description' => 'Los setters son los dueños del lead hasta que pasa al closer: les llegan las notificaciones de los mensajes de esos leads, la de los mensajes que están esperando que alguien los apruebe y la de las conversaciones que el agente no pudo resolver. Estas dos últimas les llegan siempre, incluso cuando el lead ya es del closer, porque el que aprueba lo que sale es el setter. También reciben automáticamente todas las tareas que nacen de conversaciones de leads: cuando el agente detecta que una conversación necesita que intervenga una persona, la tarea se le asigna a todos los admins marcados como setter, y a cada uno le aparece el aviso en pantalla hasta que lo cierra. Si no hay ningún setter marcado, esas tareas quedan sin asignar y las puede tomar cualquiera, y las notificaciones caen en quien haya activado la campanita del lead.',
             ],
             [
+                // Flag que identifica al admin como vendedor (misión ventas-y-comisiones, 28/10/2026):
+                // se le liquida comisión por las ventas que se le asignan.
+                'key'   => 'es_vendedor',
+                'text'  => 'Es vendedor',
+                'type'  => 'boolean',
+                'value' => false,
+                'show'  => true,
+                'description' => 'Se le liquida comisión por las ventas que se le asignan. Si hay un solo vendedor, las ventas nuevas se le asignan solas.',
+            ],
+            [
                 // Flag para asignación automática al crear nuevas tareas internas manualmente.
                 'key'   => 'is_default_task_assignee',
                 'text'  => 'Asignado por defecto en tareas nuevas',

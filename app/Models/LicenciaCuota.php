@@ -14,6 +14,8 @@ use Illuminate\Database\Eloquent\Model;
  * (salvo en la nota).
  *
  * @property int         $client_id    Cliente.
+ * @property int|null    $venta_id     Venta a la que pertenece (misión ventas-y-comisiones, 28/10/2026);
+ *                                     null = cuota suelta, anterior a las ventas o cargada por la ruta vieja.
  * @property int         $numero       Número de cuota (1, 2, 3...).
  * @property string      $periodo      Mes, 'YYYY-MM'.
  * @property string|null $vencimiento  Fecha puntual de vencimiento, si el contrato la tiene.
@@ -67,6 +69,7 @@ class LicenciaCuota extends Model
      */
     protected $casts = [
         'client_id'    => 'integer',
+        'venta_id'     => 'integer',
         'numero'       => 'integer',
         'vencimiento'  => 'date',
         'monto'        => 'decimal:2',
@@ -94,6 +97,17 @@ class LicenciaCuota extends Model
     public function client()
     {
         return $this->belongsTo(Client::class);
+    }
+
+    /**
+     * Venta a la que pertenece la cuota (misión ventas-y-comisiones, 28/10/2026). Puede no tener:
+     * las cuotas anteriores a las ventas quedan sueltas hasta que corre `ventas:migrar-licencias`.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
+     */
+    public function venta()
+    {
+        return $this->belongsTo(Venta::class, 'venta_id');
     }
 
     /**

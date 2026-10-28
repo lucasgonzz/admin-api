@@ -6,7 +6,9 @@ use App\Helpers\AppTime;
 use App\Models\Client;
 use App\Models\Lead;
 use App\Models\LicenciaCuota;
+use App\Models\Venta;
 use Carbon\Carbon;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -196,6 +198,13 @@ class ClientContratoService
      * Si el cliente ya tiene alguna cuota (importada de la planilla o cargada a mano) no hace nada:
      * lo que hay es la verdad y no se duplica.
      *
+     * Desde la misión ventas-y-comisiones (28/10/2026) las cuotas generadas forman además UNA
+     * venta (`origen = contrato`) con los sistemas del contrato, el total de las cuotas, el
+     * vendedor por defecto y la comisión por defecto (ver `VentaService::crear_desde_cuotas()`).
+     * 🔴 Si armar la venta falla, las cuotas quedan igual (sueltas) y se loguea: este método corre
+     * en la promoción de un lead y nada de lo que agrega esta misión puede frenarla. Las cuotas
+     * sueltas las agrupa después `ventas:migrar-licencias`.
+     *
      * @param Client $client
      *
      * @return int Cuántas cuotas creó.
@@ -246,10 +255,13 @@ class ClientContratoService
 
         $creadas = 0;
 
+        /** Las cuotas que se crean, para engancharlas a la venta del contrato. */
+        $cuotas = new Collection();
+
         foreach ($filas as $indice => $fila) {
             $vencimiento = $this->parsear_fecha($fila['fecha']);
 
-            LicenciaCuota::create([
+            $cuotas->push(LicenciaCuota::create([
                 'client_id'    => $client->id,
                 'numero'       => $indice + 1,
                 'periodo'      => $vencimiento ? $vencimiento->format('Y-m') : AppTime::now()->format('Y-m'),
@@ -261,12 +273,57 @@ class ClientContratoService
                 'fecha_pago'   => null,
                 'observacion'  => null,
                 'importado'    => false,
-            ]);
+            ]));
 
             $creadas++;
         }
 
+        $this->crear_venta_del_contrato($client, $cuotas);
+
         return $creadas;
+    }
+
+    /**
+     * Arma la venta del contrato con las cuotas recién generadas (misión ventas-y-comisiones,
+     * 28/10/2026). La fecha de la venta es la de emisión del contrato, o hoy si no la tiene; el
+     * lead es el que se promovió a este cliente, si se conoce.
+     *
+     * Nunca tira: un error se loguea y las cuotas quedan sueltas (las agrupa
+     * `ventas:migrar-licencias`).
+     *
+     * @param Client     $client
+     * @param Collection $cuotas LicenciaCuota recién creadas.
+     *
+     * @return Venta|null
+     */
+    private function crear_venta_del_contrato(Client $client, Collection $cuotas): ?Venta
+    {
+        if ($cuotas->isEmpty()) {
+            return null;
+        }
+
+        try {
+            /** @var VentaService $ventas */
+            $ventas = app(VentaService::class);
+
+            $fecha = $this->parsear_fecha($client->contract_fecha_emision) ?: AppTime::now()->copy()->startOfDay();
+
+            return $ventas->crear_desde_cuotas(
+                $client,
+                $cuotas,
+                Venta::ORIGEN_CONTRATO,
+                $ventas->lead_de_origen_id($client),
+                true,
+                $fecha
+            );
+        } catch (\Throwable $error) {
+            Log::error('ClientContratoService: no se pudo armar la venta del contrato; las cuotas quedan sueltas.', [
+                'client_id' => $client->id,
+                'error'     => $error->getMessage(),
+            ]);
+
+            return null;
+        }
     }
 
     /**

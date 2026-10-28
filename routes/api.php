@@ -16,6 +16,8 @@ use App\Http\Controllers\ClientContratoController;
 use App\Http\Controllers\ClientImagenesController;
 use App\Http\Controllers\ClientModelosIaController;
 use App\Http\Controllers\ClientLicenciaController;
+use App\Http\Controllers\ClientVentaController;
+use App\Http\Controllers\ComisionController;
 use App\Http\Controllers\ClientMensualidadController;
 use App\Http\Controllers\CobranzasController;
 use App\Http\Controllers\ClientScheduleController;
@@ -523,6 +525,14 @@ Route::middleware('claude.task.key')
         /* Reintento del push de horarios al empresa-api del cliente. Idempotente y sin frenos:
            reenvía lo que el admin ya tiene y encola, nunca hace el HTTP adentro del request. */
         Route::post('clients/{id}/schedule/sync', 'Api\ClaudeClientOpsController@sync_schedule_json');
+        /* Las ventas de un cliente (misión ventas-y-comisiones, 28/10/2026). El GET devuelve el mismo
+           JSON que la pestaña Ventas del admin; el POST da de alta una venta con `origen = claude` y
+           los frenos del bloque: dry_run por defecto true y confirm_client_name para escribir.
+           Están en ClaudeVentasController; la lógica, en VentaService (la misma del admin). */
+        Route::get('clients/{id}/ventas', 'Api\ClaudeVentasController@index_json')
+            ->whereNumber('id');
+        Route::post('clients/{id}/ventas', 'Api\ClaudeVentasController@store_json')
+            ->whereNumber('id');
         /* 🔴 El acceso del motor de `/categorizar` al catálogo de UN cliente SIN que su clave pase por
            la máquina de Lucas (misión `implementacion-dos-sistemas`, 6/10/2026). Los dos viven en
            ClaudeClientCatalogoController y no llevan nunca el valor de `clients.api_key` en una
@@ -988,6 +998,28 @@ Route::prefix('admin')->group(function () {
             ->where('cuotaId', '[0-9]+');
         Route::delete('client/{clientId}/licencias/{cuotaId}', [ClientLicenciaController::class, 'destroy_json'])
             ->where('cuotaId', '[0-9]+');
+
+        /* 5. Ventas y comisiones (misión ventas-y-comisiones, 28/10/2026). Las "licencias" pasan a
+              ser ventas: lo que se le vende a un cliente, con sus cuotas y la comisión del vendedor.
+              Las rutas de licencias de arriba siguen andando igual (la gestión de cada cuota sigue
+              por ahí). Toda ruta con `{clientId}` y `{ventaId}` verifica que la venta sea del cliente
+              (404 si no); los ids se restringen a dígitos. */
+        Route::get('cobranzas/ventas', [CobranzasController::class, 'ventas_json']);
+        Route::get('client/{clientId}/ventas', [ClientVentaController::class, 'index_json']);
+        Route::post('client/{clientId}/ventas', [ClientVentaController::class, 'store_json']);
+        Route::put('client/{clientId}/ventas/{ventaId}', [ClientVentaController::class, 'update_json'])
+            ->where('ventaId', '[0-9]+');
+        Route::delete('client/{clientId}/ventas/{ventaId}', [ClientVentaController::class, 'destroy_json'])
+            ->where('ventaId', '[0-9]+');
+        Route::post('client/{clientId}/ventas/{ventaId}/cuotas', [ClientVentaController::class, 'store_cuota_json'])
+            ->where('ventaId', '[0-9]+');
+        // Comisiones: la tabla de Lucas, "Mis comisiones" del vendedor y los pagos al vendedor.
+        Route::get('comisiones', [ComisionController::class, 'index_json']);
+        Route::get('comisiones/mias', [ComisionController::class, 'mias_json']);
+        Route::post('ventas/{ventaId}/comision/pagos', [ComisionController::class, 'registrar_pago_json'])
+            ->where('ventaId', '[0-9]+');
+        Route::delete('comision-pagos/{pagoId}', [ComisionController::class, 'eliminar_pago_json'])
+            ->where('pagoId', '[0-9]+');
 
         Route::get('lead/atribucion/metricas', [\App\Http\Controllers\LeadAtribucionController::class, 'metricas']);
         Route::get('lead/{id}/atribucion', [\App\Http\Controllers\LeadAtribucionController::class, 'detalle'])->where('id', '[0-9]+');
