@@ -52,7 +52,7 @@ class ClaudeAgentImplementationOpsController extends Controller
     const PARAMS_STORE = ['client_id', 'camino'];
 
     /** Lista blanca del PATCH. */
-    const PARAMS_UPDATE = ['camino', 'kapso_customer_id', 'phone_number_id', 'waba_id', 'business_portfolio_id', 'status'];
+    const PARAMS_UPDATE = ['camino', 'kapso_customer_id', 'phone_number_id', 'waba_id', 'business_portfolio_id', 'contact_phone', 'status'];
 
     /** Lista blanca del registro de una etapa. */
     const PARAMS_STAGE = ['status', 'data', 'nota'];
@@ -236,14 +236,23 @@ class ClaudeAgentImplementationOpsController extends Controller
      |============================================================================================= */
 
     /**
-     * Cambia el camino, carga los ids de Kapso y Meta, y/o cierra la implementación (`completed` o
-     * `cancelled`). Todo opcional: solo se toca lo que vino (un null explícito borra el valor del id).
+     * Cambia el camino, carga los ids de Kapso y Meta y el teléfono de contacto, y/o cierra la implementación
+     * (`completed` o `cancelled`). Todo opcional: solo se toca lo que vino (un null explícito borra el valor).
+     *
+     * `contact_phone` es el teléfono al que `.../whatsapp` le escribe al dueño en vez del de la ficha: en el
+     * camino `propio`, cuando el dueño elimina su cuenta para conectar el número del negocio a Meta, ese número
+     * deja de tener la app. Acá no se valida contra los contactos del cliente: lo valida el envío (422
+     * `telefono_ajeno`), que es donde importa y donde los contactos están al día.
+     *
+     * 🔴 Una implementación cerrada (`completed` o `cancelled`) no cambia de estado: 409 `implementacion_cerrada`
+     * (reabrirla o recerrarla escondería el cierre; para empezar de nuevo está el alta). Mandar el mismo estado
+     * que ya tiene es un no-op (un reintento del cierre no falla). Los demás campos se pueden corregir igual.
      *
      * @param Request    $request Body: camino?, kapso_customer_id?, phone_number_id?, waba_id?,
-     *                            business_portfolio_id?, status? (completed | cancelled).
+     *                            business_portfolio_id?, contact_phone?, status? (completed | cancelled).
      * @param int|string $id      Id de la implementación.
      *
-     * @return \Illuminate\Http\JsonResponse 200 `{model}` · 404 · 422.
+     * @return \Illuminate\Http\JsonResponse 200 `{model}` · 404 · 409 · 422.
      */
     public function update_json(Request $request, $id)
     {
@@ -258,6 +267,7 @@ class ClaudeAgentImplementationOpsController extends Controller
             'phone_number_id'       => 'nullable|string|max:60',
             'waba_id'               => 'nullable|string|max:60',
             'business_portfolio_id' => 'nullable|string|max:60',
+            'contact_phone'         => 'nullable|string|max:30',
             'status'                => 'nullable|string|in:' . implode(',', self::CLOSING_STATUSES),
         ]);
         if ($invalid !== null) {
@@ -267,6 +277,11 @@ class ClaudeAgentImplementationOpsController extends Controller
         $implementation = AgentImplementation::find((int) $id);
         if ($implementation === null) {
             return $this->error_404('no existe la implementación de agentes ' . (int) $id);
+        }
+
+        $status = $this->texto_o_null($request->input('status'));
+        if ($status !== null && ! $implementation->is_open() && $status !== (string) $implementation->status) {
+            return $this->closed_response($implementation);
         }
 
         /* Solo las claves que vinieron: `has()` distingue «no mandé el id» de «mandé null para borrarlo». */
@@ -292,7 +307,7 @@ class ClaudeAgentImplementationOpsController extends Controller
      * @param int|string $id      Id de la implementación.
      * @param int|string $n       Número de etapa (1 a 8; fuera de rango, 422).
      *
-     * @return \Illuminate\Http\JsonResponse 200 `{model}` · 404 · 422.
+     * @return \Illuminate\Http\JsonResponse 200 `{model}` · 404 · 409 `implementacion_cerrada` · 422.
      */
     public function stage_json(Request $request, $id, $n)
     {
@@ -339,6 +354,12 @@ class ClaudeAgentImplementationOpsController extends Controller
         $implementation = AgentImplementation::find((int) $id);
         if ($implementation === null) {
             return $this->error_404('no existe la implementación de agentes ' . (int) $id);
+        }
+
+        /* 🔴 Cerrada no se registran etapas: cambiaría `current_stage` de algo terminado y Martín leería un
+           avance que no fue. Lo que haga falta anotar después del cierre va a la bitácora (`.../events`). */
+        if (! $implementation->is_open()) {
+            return $this->closed_response($implementation);
         }
 
         $updated = $this->service->update_stage(
@@ -408,14 +429,17 @@ class ClaudeAgentImplementationOpsController extends Controller
      |============================================================================================= */
 
     /**
-     * Manda un WhatsApp al DUEÑO del cliente por su ticket de soporte (número de Kapso del admin), así la
-     * conversación queda donde la lee Martín, y lo deja en la bitácora (`kind: whatsapp`).
+     * Manda un WhatsApp al DUEÑO del cliente (a su `contact_phone` si la implementación lo tiene) por su ticket
+     * de soporte (número de Kapso del admin), así la conversación queda donde la lee Martín, y deja en la
+     * bitácora un evento `kind: whatsapp` que dice que se mandó, sin el cuerpo (el texto queda en el ticket).
      *
      * 🔴 Mismos frenos que `POST claude/implementations/{id}/whatsapp` (la cuenta la hace el mismo servicio,
      * `ImplementationSupportWhatsappService::plan()`), en este orden; en ninguno se manda nada:
      *   1. Lista blanca y tipos (422). La implementación (404), el cliente (404) y activo (422 `cliente_inactivo`).
      *   2. Circuito de Codex apagado: 422 `codex_apagado` (nadie atendería la respuesta del ticket).
-     *   3. El dueño con un teléfono válido en la ficha (422 `sin_contacto`) y un admin remitente (422 `sin_admin`).
+     *   3. El destino: el `contact_phone` de la implementación si está cargado (tiene que ser un contacto del
+     *      cliente: si no, 422 `telefono_ajeno`) o, si no, el dueño con un teléfono válido en la ficha (422
+     *      `sin_contacto`). Y un admin remitente (422 `sin_admin`).
      *   4. Idempotencia por `operation_id`: misma clave y mismo contenido → el resultado guardado
      *      (`repetida: true`, sin reenviar); otro contenido → 409 `operation_id_reusado`; todavía mandando →
      *      409 `envio_en_curso`.
@@ -475,7 +499,8 @@ class ClaudeAgentImplementationOpsController extends Controller
                 'El soporte de Codex está apagado: lo que conteste el cliente quedaría en el ticket sin que nadie lo atienda. No se mandó nada.',
                 [
                     'motivo' => 'codex_apagado',
-                    'ayuda'  => 'Prendé el circuito (PUT claude/support-codex/settings) o mandalo por WhatsApp Web y registralo con POST .../events (kind whatsapp).',
+                    'ayuda'  => 'Prendé el circuito (PUT claude/support-codex/settings) o que lo mande Lucas a mano desde la bandeja de soporte del admin '
+                        . '(Soporte → «Nueva conversación por WhatsApp»): así la respuesta del cliente la atiende él.',
                 ]
             );
         }
@@ -484,11 +509,25 @@ class ClaudeAgentImplementationOpsController extends Controller
         $etapa        = $this->entero_o_null($request->input('etapa'));
         $etapa        = $etapa === null ? (int) $implementation->current_stage : $etapa;
 
-        /* --- Freno 3: el contacto (siempre el dueño) y el remitente. --- */
+        /* --- Freno 3: el contacto y el remitente. El dueño por la ficha, salvo que la implementación tenga un
+           `contact_phone` (camino `propio`, después de eliminar la cuenta del número del negocio): entonces ese,
+           que tiene que ser un contacto del cliente con el MISMO criterio que el webhook (`resolver_contacto` →
+           `ClientPhoneDirectory::resolve_for_client`); si no, la respuesta no caería en el ticket. --- */
         $sender   = app(AgentImplementationSupportWhatsappService::class);
         $system   = $sender->system_service();
-        $resolved = $system->resolver_contacto($client, null);
+        $resolved = $system->resolver_contacto($client, $this->texto_o_null($implementation->contact_phone));
         $contact  = $resolved['contacto'];
+
+        if ($contact === null && $resolved['motivo'] === 'telefono_ajeno') {
+            return $this->error_422(
+                'El contact_phone de la implementación no es un contacto del cliente (ni el dueño, ni un empleado, ni el lead promovido). No se mandó nada.',
+                [
+                    'motivo' => 'telefono_ajeno',
+                    'ayuda'  => 'Cargalo como empleado en la ficha del cliente en el admin (Clientes → el cliente → Empleados) o corregí el contact_phone '
+                        . 'con PATCH: si no, el webhook no reconoce la respuesta y cae en el pipeline de leads.',
+                ]
+            );
+        }
 
         if ($contact === null) {
             return $this->error_422(
@@ -662,6 +701,24 @@ class ClaudeAgentImplementationOpsController extends Controller
         }
 
         return $response;
+    }
+
+    /**
+     * 409 `implementacion_cerrada`: la implementación está `completed` o `cancelled` y no acepta lo que se pidió.
+     *
+     * @param AgentImplementation $implementation La implementación cerrada.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    protected function closed_response(AgentImplementation $implementation)
+    {
+        return response()->json([
+            'error'  => 'implementacion_cerrada',
+            'id'     => (int) $implementation->id,
+            'status' => (string) $implementation->status,
+            'ayuda'  => 'La implementación de agentes ' . (int) $implementation->id . ' está cerrada (' . $implementation->status . '): no cambia de estado '
+                . 'ni registra etapas. Para anotar algo, POST .../events; para empezar de nuevo, POST claude/agent-implementations. No se escribió nada.',
+        ], 409);
     }
 
     /**

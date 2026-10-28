@@ -294,6 +294,74 @@ class ImplementacionDeAgentesPorClaudeTest extends BaseDeImplementaciones
     }
 
     /**
+     * Cerrada (completed o cancelled): `stages/{n}` y un cambio de `status` son 409 `implementacion_cerrada` sin
+     * escribir nada; el mismo status es un no-op (un reintento del cierre no falla); los eventos y los demás
+     * campos se aceptan.
+     *
+     * @return void
+     */
+    public function test_cerrada_no_acepta_etapas_ni_cambio_de_estado_pero_si_eventos(): void
+    {
+        foreach (['completed' => 'cancelled', 'cancelled' => 'completed'] as $cierre => $otro) {
+            $client = $this->crear_cliente('Cerrada ' . $cierre);
+            $id     = $this->alta($client->id);
+            $ruta   = self::RUTA . '/' . $id;
+
+            $this->patchJson($ruta, ['status' => $cierre], $this->headers())->assertStatus(200);
+            $eventos = AgentImplementationEvent::where('agent_implementation_id', $id)->count();
+
+            $this->postJson($ruta . '/stages/2', ['status' => 'completed', 'data' => ['chats_leidos' => 10]], $this->headers())
+                ->assertStatus(409)
+                ->assertJsonPath('error', 'implementacion_cerrada')
+                ->assertJsonPath('id', $id)
+                ->assertJsonPath('status', $cierre);
+            $this->assertSame('pending', AgentImplementationStage::where('agent_implementation_id', $id)->where('stage_number', 2)->value('status'));
+
+            $this->patchJson($ruta, ['status' => $otro], $this->headers())
+                ->assertStatus(409)
+                ->assertJsonPath('error', 'implementacion_cerrada');
+            $this->assertSame($cierre, AgentImplementation::find($id)->status);
+            $this->assertSame($eventos, AgentImplementationEvent::where('agent_implementation_id', $id)->count(), 'Los 409 no escriben nada.');
+
+            $this->patchJson($ruta, ['status' => $cierre], $this->headers())->assertStatus(200)->assertJsonPath('model.status', $cierre);
+
+            $this->postJson($ruta . '/events', ['texto' => 'El dueño avisó que el agente anda bien.'], $this->headers())->assertStatus(201);
+            $this->patchJson($ruta, ['kapso_customer_id' => 'kapso-corregido'], $this->headers())
+                ->assertStatus(200)
+                ->assertJsonPath('model.kapso_customer_id', 'kapso-corregido');
+        }
+    }
+
+    /**
+     * `contact_phone`: se carga y se borra por PATCH, sale enmascarado en el estado y la bitácora nombra que se
+     * cargó pero nunca el número.
+     *
+     * @return void
+     */
+    public function test_contact_phone_por_patch_enmascarado_y_fuera_de_la_bitacora(): void
+    {
+        $client = $this->crear_cliente('Contacto Agentes');
+        $id     = $this->alta($client->id);
+        $ruta   = self::RUTA . '/' . $id;
+
+        $respuesta = $this->patchJson($ruta, ['contact_phone' => '+54 9 341 555-8877'], $this->headers());
+        $respuesta->assertStatus(200)->assertJsonPath('model.contact_phone', '•••••••••8877');
+        $this->assertSame('+54 9 341 555-8877', AgentImplementation::find($id)->contact_phone);
+        $this->assertStringNotContainsString('5558877', $this->cuerpo($respuesta));
+
+        $this->patchJson($ruta, ['contact_phone' => str_repeat('1', 31)], $this->headers())->assertStatus(422);
+
+        $this->patchJson($ruta, ['contact_phone' => null], $this->headers())
+            ->assertStatus(200)
+            ->assertJsonPath('model.contact_phone', null);
+        $this->assertNull(AgentImplementation::find($id)->contact_phone);
+
+        $bitacora = AgentImplementationEvent::where('agent_implementation_id', $id)->pluck('texto')->implode(' | ');
+        $this->assertStringContainsString('contact_phone', $bitacora);
+        $this->assertStringNotContainsString('8877', $bitacora);
+    }
+
+    /**
      * Lecturas: GET por id (404 si no existe), listado con `{data: [...]}` filtrado por cliente y por
      * estado, y la lista blanca (un parámetro de más es 422).
      *

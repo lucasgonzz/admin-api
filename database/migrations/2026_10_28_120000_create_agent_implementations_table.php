@@ -42,6 +42,11 @@ class CreateAgentImplementationsTable extends Migration
             $table->string('phone_number_id', 60)->nullable();
             $table->string('waba_id', 60)->nullable();
             $table->string('business_portfolio_id', 60)->nullable();
+            // Teléfono por el que se le escribe al dueño durante la implementación, si NO es el de la ficha.
+            // Existe por el camino `propio`: cuando el dueño elimina su cuenta de WhatsApp para conectar el
+            // número del negocio a Meta, ese número deja de tener la app y hay que escribirle a otro. Tiene que
+            // ser un contacto del cliente (lo verifica el envío). Nunca viaja al contexto de Martín ni a eventos.
+            $table->string('contact_phone', 30)->nullable();
             // Arranque y cierre (completed o cancelled) de la implementación.
             $table->timestamp('started_at')->nullable();
             $table->timestamp('completed_at')->nullable();

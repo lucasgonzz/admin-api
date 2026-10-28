@@ -26,6 +26,9 @@ use Illuminate\Database\Eloquent\Model;
  * @property string|null      $phone_number_id       Id del número en Meta (que exista = conectado).
  * @property string|null      $waba_id               Cuenta de WhatsApp Business.
  * @property string|null      $business_portfolio_id Portfolio comercial de Meta.
+ * @property string|null      $contact_phone         Teléfono al que se le escribe al dueño si no es el de la ficha
+ *                                                   (camino `propio`, después de eliminar su cuenta). Dato personal:
+ *                                                   no viaja a Martín ni a la bitácora.
  * @property \Carbon\Carbon|null $started_at
  * @property \Carbon\Carbon|null $completed_at       Cierre (completed o cancelled).
  */
@@ -114,6 +117,7 @@ class AgentImplementation extends Model
         'phone_number_id',
         'waba_id',
         'business_portfolio_id',
+        'contact_phone',
         'started_at',
         'completed_at',
     ];

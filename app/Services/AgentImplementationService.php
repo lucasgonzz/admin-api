@@ -182,10 +182,10 @@ class AgentImplementationService
     }
 
     /**
-     * Cambia los datos de la implementación (camino, ids de Kapso y Meta) y/o la cierra.
+     * Cambia los datos de la implementación (camino, ids de Kapso y Meta, teléfono de contacto) y/o la cierra.
      *
-     * - Los ids se guardan en sus columnas y se deja un evento `dato` que nombra QUÉ se cargó pero no los
-     *   valores: la bitácora viaja al contexto de Martín y ahí no van ids de Meta.
+     * - Los ids y el teléfono se guardan en sus columnas y se deja un evento `dato` que nombra QUÉ se cargó
+     *   pero no los valores: la bitácora viaja al contexto de Martín y ahí no van ids de Meta ni teléfonos.
      * - `status` `completed` o `cancelled` cierra la implementación con `completed_at` = ahora (si cambia
      *   de estado) y deja un evento `avance`. Mandar el mismo estado que ya tiene no hace nada.
      *
@@ -200,7 +200,7 @@ class AgentImplementationService
             $locked = AgentImplementation::where('id', $implementation->id)->lockForUpdate()->first();
 
             $changed_data = [];
-            foreach (['camino', 'kapso_customer_id', 'phone_number_id', 'waba_id', 'business_portfolio_id'] as $column) {
+            foreach (['camino', 'kapso_customer_id', 'phone_number_id', 'waba_id', 'business_portfolio_id', 'contact_phone'] as $column) {
                 if (! array_key_exists($column, $fields)) {
                     continue;
                 }
@@ -225,7 +225,7 @@ class AgentImplementationService
 
             if (count($changed_data) > 0) {
                 /* Solo los NOMBRES de lo que cambió (y el camino, que no es un dato sensible): los ids de Meta
-                   no van a la bitácora. */
+                   y el teléfono de contacto no van a la bitácora. */
                 $parts = [];
                 foreach ($changed_data as $column) {
                     $parts[] = $column === 'camino'
@@ -347,6 +347,10 @@ class AgentImplementationService
             'phone_number_id'       => $implementation->phone_number_id,
             'waba_id'               => $implementation->waba_id,
             'business_portfolio_id' => $implementation->business_portfolio_id,
+            /* Enmascarado: la respuesta la lee una sesión que la pega en una conversación, y para saber si
+               está cargado y cuál es alcanza con el final (mismo criterio que el destino del WhatsApp del
+               sistema). */
+            'contact_phone'         => $this->mask_phone($implementation->contact_phone),
             'started_at'            => $this->instant($implementation->started_at),
             'completed_at'          => $this->instant($implementation->completed_at),
             'created_at'            => $this->instant($implementation->created_at),
@@ -355,6 +359,24 @@ class AgentImplementationService
             'eventos'               => $events,
             'cliente'               => $client === null ? null : ['id' => (int) $client->id, 'name' => (string) $client->name],
         ];
+    }
+
+    /**
+     * Un teléfono enmascarado (todo menos los últimos cuatro dígitos), o null si no hay.
+     *
+     * @param string|null $phone El teléfono.
+     *
+     * @return string|null
+     */
+    public function mask_phone($phone)
+    {
+        $digits = preg_replace('/\D+/', '', (string) $phone);
+
+        if ($digits === '') {
+            return null;
+        }
+
+        return str_repeat('•', max(0, strlen($digits) - 4)) . substr($digits, -4);
     }
 
     /**
