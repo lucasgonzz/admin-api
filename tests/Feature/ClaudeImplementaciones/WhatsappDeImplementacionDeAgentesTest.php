@@ -8,6 +8,7 @@ use App\Models\AgentImplementation;
 use App\Models\AgentImplementationEvent;
 use App\Models\AgentImplementationStage;
 use App\Models\Client;
+use App\Models\ClientEmployee;
 use App\Models\SupportCodexCase;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
@@ -191,11 +192,18 @@ class WhatsappDeImplementacionDeAgentesTest extends BaseDeImplementaciones
         $ticket_id = (int) $respuesta->json('ticket_id');
         $this->assertSame((int) $client->id, (int) SupportTicket::findOrFail($ticket_id)->client_id);
 
+        /* El evento dice que se mandó, por qué ticket, en qué etapa y cuánto medía; NUNCA el cuerpo (el link de
+           Kapso o el código de WhatsApp Web viajarían al contexto de Martín). El texto queda en el ticket. */
         $eventos = $this->eventos_whatsapp($implementation);
         $this->assertCount(1, $eventos);
-        $this->assertSame($texto, $eventos[0]->texto);
+        $this->assertSame(
+            'Mensaje enviado por el ticket #' . $ticket_id . ' (etapa 1, ' . mb_strlen($texto) . ' caracteres).',
+            $eventos[0]->texto
+        );
+        $this->assertStringNotContainsString('guias', $eventos[0]->texto);
         $this->assertSame(1, (int) $eventos[0]->stage_number);
         $this->assertSame('claude', $eventos[0]->source);
+        $this->assertStringContainsString('agentes-ia-numero-propio.pdf', (string) SupportMessage::where('support_ticket_id', $ticket_id)->orderByDesc('id')->value('body'));
 
         $data = AgentImplementationStage::where('agent_implementation_id', $implementation->id)->where('stage_number', 1)->value('data');
         $data = is_array($data) ? $data : json_decode((string) $data, true);
@@ -224,6 +232,71 @@ class WhatsappDeImplementacionDeAgentesTest extends BaseDeImplementaciones
             ->assertStatus(200)
             ->assertJsonPath('etapa', 3);
         $this->assertSame(3, (int) $this->eventos_whatsapp($implementation)->sortByDesc('id')->first()->stage_number);
+    }
+
+    /**
+     * Con `contact_phone` cargado (camino propio, después de eliminar la cuenta del número del negocio) el mensaje va
+     * a ese teléfono si es un contacto del cliente (acá, un empleado); si no lo es, 422 `telefono_ajeno` sin mandar
+     * nada. Borrado el `contact_phone`, vuelve a ir a la ficha. El teléfono no queda en la bitácora.
+     *
+     * @return void
+     */
+    public function test_con_contact_phone_va_a_ese_contacto_y_si_es_ajeno_es_422(): void
+    {
+        [$client, $implementation] = $this->escenario();
+        $ruta = sprintf(self::RUTA, $implementation->id);
+
+        ClientEmployee::create(['client_id' => $client->id, 'name' => 'Ana (celular personal)', 'phone' => '+5493415559911']);
+
+        /* Un número que no es contacto del cliente: 422 y no sale nada. */
+        $this->patchJson('/api/claude/agent-implementations/' . $implementation->id, ['contact_phone' => '+5493415550000'], $this->headers())
+            ->assertStatus(200)
+            ->assertJsonPath('model.contact_phone', '•••••••••0000');
+        $this->postJson($ruta, ['operation_id' => 'op-agentes-0101', 'texto' => 'Hola'], $this->headers())
+            ->assertStatus(422)
+            ->assertJsonPath('motivo', 'telefono_ajeno');
+        $this->assertCount(0, $this->espia->plantillas);
+
+        /* El del empleado, en otro formato: resuelve y sale a ese teléfono. */
+        $this->patchJson('/api/claude/agent-implementations/' . $implementation->id, ['contact_phone' => '341 555 9911'], $this->headers())
+            ->assertStatus(200);
+        $this->postJson($ruta, ['operation_id' => 'op-agentes-0102', 'texto' => 'Hola Ana'], $this->headers())
+            ->assertStatus(200)
+            ->assertJsonPath('enviado', true);
+        $this->assertCount(1, $this->espia->plantillas);
+        $this->assertSame('+5493415559911', '+' . ltrim($this->espia->plantillas[0]['to'], '+'));
+
+        /* Sin contact_phone: vuelve a la ficha del dueño. */
+        $this->patchJson('/api/claude/agent-implementations/' . $implementation->id, ['contact_phone' => null], $this->headers())
+            ->assertStatus(200)
+            ->assertJsonPath('model.contact_phone', null);
+        $this->postJson($ruta, ['operation_id' => 'op-agentes-0103', 'texto' => 'Hola dueño'], $this->headers())->assertStatus(200);
+        $this->assertCount(2, $this->espia->plantillas);
+        $this->assertSame(ltrim((string) $client->phone, '+'), ltrim($this->espia->plantillas[1]['to'], '+'));
+
+        $bitacora = AgentImplementationEvent::where('agent_implementation_id', $implementation->id)->pluck('texto')->implode(' | ');
+        $this->assertStringNotContainsString('9911', $bitacora);
+        $this->assertStringNotContainsString('0000', $bitacora);
+    }
+
+    /**
+     * Con el circuito de Codex apagado, el `ayuda` manda a Lucas a la bandeja de soporte, no a WhatsApp Web.
+     *
+     * @return void
+     */
+    public function test_el_ayuda_de_codex_apagado_manda_a_la_bandeja(): void
+    {
+        [, $implementation] = $this->escenario();
+
+        AdminSetting::set(SupportCodexSettings::KEY_ENABLED, '0');
+        AdminSetting::flush_memo();
+
+        $ayuda = (string) $this->postJson(sprintf(self::RUTA, $implementation->id), ['operation_id' => 'op-agentes-0104', 'texto' => 'Hola'], $this->headers())
+            ->assertStatus(422)
+            ->json('ayuda');
+
+        $this->assertStringContainsString('bandeja de soporte', $ayuda);
+        $this->assertStringNotContainsString('WhatsApp Web', $ayuda);
     }
 
     /**

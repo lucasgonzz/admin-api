@@ -190,7 +190,7 @@ class SupportImplementationContextService
 
             $sistema = $this->bloque_del_sistema($client, $es_el_dueno);
             $tienda  = $this->bloque_de_la_tienda($client, $es_el_dueno);
-            $agentes = $this->bloque_de_agentes($client);
+            $agentes = $this->bloque_de_agentes($client, $es_el_dueno);
 
             if ($sistema === null && $tienda === null && $agentes === null) {
                 return null;
@@ -321,14 +321,19 @@ class SupportImplementationContextService
      * textos de la bitácora y de `data` pasan por `enmascarar()` (un teléfono, CUIT o clave que alguien haya
      * escrito en una nota no viaja).
      *
+     * 🔴 A un empleado NO le viajan los `eventos` (salen en null): la bitácora es el ida y vuelta del dueño con
+     * nosotros, igual que la `conversacion` de sistema y tienda, que tampoco le viaja. Las etapas sí: decir en
+     * qué paso está la conexión no expone nada del dueño.
+     *
      * 🔴 Nunca lanza: si algo falla devuelve `{error: ...}` y el resto del bloque viaja igual. Null significa
      * «no tiene», y Martín lo leería así.
      *
-     * @param Client $client Cliente del ticket.
+     * @param Client $client      Cliente del ticket.
+     * @param bool   $es_el_dueno true = el que escribe es el dueño (habilita `eventos`).
      *
      * @return array<string, mixed>|null
      */
-    protected function bloque_de_agentes(Client $client)
+    protected function bloque_de_agentes(Client $client, $es_el_dueno)
     {
         try {
             $implementation = AgentImplementation::where('client_id', $client->id)
@@ -363,19 +368,24 @@ class SupportImplementationContextService
                 ];
             }
 
-            $eventos = [];
-            $filas   = AgentImplementationEvent::where('agent_implementation_id', $implementation->id)
-                ->orderByDesc('id')
-                ->limit(self::EVENTOS_DE_AGENTES)
-                ->get();
-            foreach ($filas as $evento) {
-                $eventos[] = [
-                    'etapa'      => $evento->stage_number === null ? null : (int) $evento->stage_number,
-                    'kind'       => (string) $evento->kind,
-                    'source'     => (string) $evento->source,
-                    'texto'      => $this->enmascarar((string) $evento->texto, null),
-                    'created_at' => $this->instante($evento->created_at),
-                ];
+            /* A un empleado no le viaja la bitácora (null, no lista vacía: «no te corresponde» no es «no hay nada»). */
+            $eventos = null;
+            if ($es_el_dueno) {
+                $eventos = [];
+                $filas   = AgentImplementationEvent::where('agent_implementation_id', $implementation->id)
+                    ->orderByDesc('id')
+                    ->limit(self::EVENTOS_DE_AGENTES)
+                    ->get();
+
+                foreach ($filas as $evento) {
+                    $eventos[] = [
+                        'etapa'      => $evento->stage_number === null ? null : (int) $evento->stage_number,
+                        'kind'       => (string) $evento->kind,
+                        'source'     => (string) $evento->source,
+                        'texto'      => $this->enmascarar((string) $evento->texto, null),
+                        'created_at' => $this->instante($evento->created_at),
+                    ];
+                }
             }
 
             $actual = (int) $implementation->current_stage;

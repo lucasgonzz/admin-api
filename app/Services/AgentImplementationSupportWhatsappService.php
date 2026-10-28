@@ -164,9 +164,38 @@ class AgentImplementationSupportWhatsappService
     }
 
     /**
+     * El texto del evento `whatsapp`: QUE se mandó, por qué ticket, en qué etapa y cuánto medía; NUNCA el cuerpo.
+     *
+     * 🔴 Por qué sin el cuerpo: en estos mensajes viajan el link de conexión de Kapso y el código de vinculación de
+     * WhatsApp Web, que `enmascarar()` no tapa (no son números largos ni siguen a «clave»), y la bitácora viaja al
+     * contexto de Martín. El texto completo ya queda en el ticket de soporte, que es donde Martín lee la conversación.
+     *
+     * @param array<string, mixed> $result El resultado del envío (`ticket_id`, `estado`, partes).
+     * @param int                  $etapa  La etapa.
+     * @param string               $texto  El texto mandado (solo para contar sus caracteres).
+     *
+     * @return string
+     */
+    protected function event_summary(array $result, $etapa, $texto)
+    {
+        $ticket = isset($result['ticket_id']) && $result['ticket_id'] !== null ? '#' . (int) $result['ticket_id'] : 'de soporte';
+        $largo  = mb_strlen(trim((string) $texto));
+
+        if ($result['estado'] === ImplementationSupportWhatsappService::ESTADO_PARCIAL) {
+            $partes = isset($result['partes_enviadas'], $result['partes_totales'])
+                ? ', ' . (int) $result['partes_enviadas'] . ' de ' . (int) $result['partes_totales'] . ' partes'
+                : '';
+
+            return 'Mensaje enviado EN PARTE por el ticket ' . $ticket . ' (etapa ' . (int) $etapa . ', ' . $largo . ' caracteres' . $partes . ').';
+        }
+
+        return 'Mensaje enviado por el ticket ' . $ticket . ' (etapa ' . (int) $etapa . ', ' . $largo . ' caracteres).';
+    }
+
+    /**
      * Cierra la operación con su resultado y, si el cliente recibió el mensaje (`sent` o `partial`), deja
-     * el evento `whatsapp` en la bitácora con el texto (recortado a 1000). 🔴 Un `failed` o `unknown` no
-     * deja evento: Martín leería que se le dijo algo que el cliente no recibió.
+     * el evento `whatsapp` en la bitácora con un resumen SIN el cuerpo (`event_summary()`). 🔴 Un `failed` o
+     * `unknown` no deja evento: Martín leería que se le dijo algo que el cliente no recibió.
      *
      * @param AgentImplementation  $implementation La implementación.
      * @param int                  $etapa          La etapa de la operación.
@@ -214,7 +243,7 @@ class AgentImplementationSupportWhatsappService
             if ($delivered) {
                 $this->implementations->add_event(
                     $implementation,
-                    $texto,
+                    $this->event_summary($result, (int) $etapa, $texto),
                     (int) $etapa,
                     AgentImplementationEvent::KIND_WHATSAPP,
                     AgentImplementationEvent::SOURCE_CLAUDE

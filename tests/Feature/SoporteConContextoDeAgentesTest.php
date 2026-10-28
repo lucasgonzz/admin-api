@@ -220,6 +220,35 @@ class SoporteConContextoDeAgentesTest extends TestCase
     }
 
     /**
+     * A un empleado no le viajan los eventos (null, como la conversación de sistema y tienda); las etapas sí. Al
+     * dueño le viajan.
+     *
+     * @return void
+     */
+    public function test_a_un_empleado_no_le_viajan_los_eventos(): void
+    {
+        $client         = $this->cliente('Con Empleado');
+        $implementation = $this->agentes($client);
+        app(AgentImplementationService::class)->add_event($implementation, 'Quedó en mandar el DNI del titular', 1, 'nota', 'claude');
+
+        $empleado = \App\Models\ClientEmployee::create(['client_id' => $client->id, 'name' => 'Empleado', 'phone' => '+5493415550188']);
+        $ticket   = SupportTicket::create([
+            'client_id' => $client->id, 'client_user_id' => 0, 'client_employee_id' => $empleado->id, 'status' => 'open',
+            'source' => 'whatsapp', 'whatsapp_phone' => '+5493415550188', 'opened_at' => now(), 'last_client_message_at' => now(),
+        ]);
+
+        $agentes = $this->contexto($ticket)->json('ticket.implementation.agentes');
+        $this->assertNull($agentes['eventos']);
+        $this->assertCount(8, $agentes['etapas']);
+        $this->assertSame(1, $agentes['etapa_actual']);
+        $this->assertStringNotContainsString('DNI del titular', json_encode($agentes));
+
+        $del_dueno = $this->contexto($this->ticket($client))->json('ticket.implementation.agentes.eventos');
+        $this->assertIsArray($del_dueno);
+        $this->assertSame('Quedó en mandar el DNI del titular', $del_dueno[0]['texto']);
+    }
+
+    /**
      * Viajan los últimos 20 eventos, más nuevos primero.
      *
      * @return void
