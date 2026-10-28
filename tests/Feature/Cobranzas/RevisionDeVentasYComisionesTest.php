@@ -12,6 +12,8 @@ use App\Models\Venta;
  *
  *  1. La liberación cuenta una cuota `pagada` por su monto completo y topa lo cobrado de cada cuota
  *     en su monto (pagos en pesos sobre una cuota en dólares no liberan de más).
+ *  2. La moneda de una cuota con venta es siempre la de la venta (la distinta se ignora, sin 422), y
+ *     una venta con pagos de comisión no cambia de moneda (422 en `moneda`).
  */
 class RevisionDeVentasYComisionesTest extends BaseDeVentas
 {
@@ -64,5 +66,55 @@ class RevisionDeVentasYComisionesTest extends BaseDeVentas
         $otra = $this->venta_de_la_lista($client, $otra_id);
         $this->assertEqualsWithDelta(75.0, $otra['comision']['liberada'], 0.001, 'Una de tres cuotas: un tercio, aunque el monto cargado sea enorme.');
         $this->assertEqualsWithDelta(150.0, $otra['comision']['por_liberar'], 0.001);
+    }
+
+    /**
+     * 2. Una cuota que es de una venta va siempre en la moneda de la venta, por la ruta nueva y por
+     * las viejas; una cuota suelta se sigue editando como siempre. Y una venta con pagos de
+     * comisión no puede cambiar de moneda.
+     *
+     * @return void
+     */
+    public function test_las_cuotas_de_una_venta_van_en_su_moneda_y_con_pagos_no_cambia(): void
+    {
+        $this->admin_logueado();
+        $this->crear_vendedor();
+        $client = $this->crear_cliente();
+
+        $venta_id = (int) $this->alta_de_venta($client, ['productos' => ['gestion'], 'moneda' => 'USD'])->json('venta.id');
+
+        // Agregar una cuota mandando otra moneda: se ignora, va en dólares (sin 422).
+        $agregada = $this->postJson('/api/admin/client/' . $client->id . '/ventas/' . $venta_id . '/cuotas', [
+            'monto'  => 100,
+            'moneda' => 'ARS',
+        ]);
+        $agregada->assertStatus(201);
+        $this->assertSame('USD', $agregada->json('venta.cuotas.1.moneda'));
+
+        // Editarla por la ruta vieja mandando otra moneda: el monto cambia, la moneda no.
+        $cuota_id = (int) $agregada->json('venta.cuotas.1.id');
+        $this->putJson('/api/admin/client/' . $client->id . '/licencias/' . $cuota_id, ['monto' => 150, 'moneda' => 'ARS'])->assertStatus(200);
+        $cuota = LicenciaCuota::find($cuota_id);
+        $this->assertSame('USD', $cuota->moneda);
+        $this->assertEqualsWithDelta(150.0, (float) $cuota->monto, 0.001);
+        $this->assertSame(0, LicenciaCuota::where('venta_id', $venta_id)->where('moneda', '!=', 'USD')->count());
+
+        // Una cuota suelta sí cambia de moneda, como siempre.
+        $suelta_id = (int) $this->postJson('/api/admin/client/' . $client->id . '/licencias', ['monto' => 10, 'moneda' => 'USD'])->json('cuota.id');
+        $this->putJson('/api/admin/client/' . $client->id . '/licencias/' . $suelta_id, ['moneda' => 'ARS'])->assertStatus(200);
+        $this->assertSame('ARS', LicenciaCuota::find($suelta_id)->moneda);
+
+        // Con un pago de comisión registrado, la venta no cambia de moneda.
+        $this->pagar_cuota($client->id, $this->cuotas_de($venta_id)->first()->id, 800);
+        $this->postJson('/api/admin/ventas/' . $venta_id . '/comision/pagos', ['monto' => 50])->assertStatus(201);
+
+        $cambio = $this->putJson('/api/admin/client/' . $client->id . '/ventas/' . $venta_id, ['moneda' => 'ARS']);
+        $cambio->assertStatus(422);
+        $cambio->assertJsonValidationErrors(['moneda']);
+        $this->assertSame('USD', Venta::find($venta_id)->moneda);
+        $this->assertSame(0, LicenciaCuota::where('venta_id', $venta_id)->where('moneda', '!=', 'USD')->count());
+
+        // Mandar la MISMA moneda no es un cambio: pasa.
+        $this->putJson('/api/admin/client/' . $client->id . '/ventas/' . $venta_id, ['moneda' => 'USD', 'observacion' => 'ok'])->assertStatus(200);
     }
 }

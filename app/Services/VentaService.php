@@ -351,7 +351,9 @@ class VentaService
      * presentes en `$datos`.
      *
      * - Cambiar la `moneda` la cambia también en las cuotas de la venta: es la misma venta, y una
-     *   cuota en otra moneda partiría el total en dos números que no se suman.
+     *   cuota en otra moneda partiría el total en dos números que no se suman. Si la venta ya tiene
+     *   pagos de comisión, NO se puede cambiar (422 en `moneda`): esos pagos salieron en la moneda
+     *   vieja y quedarían comparados contra una comisión en otra.
      * - Asignar un vendedor a una venta sin porcentaje (las viejas, migradas sin comisión) le pone
      *   el porcentaje por defecto si no vino uno.
      * - `comision_porcentaje` null explícito saca la comisión (venta sin comisión).
@@ -363,6 +365,15 @@ class VentaService
      */
     public function editar(Venta $venta, array $datos): Venta
     {
+        /* La moneda no cambia si ya se le pagó comisión al vendedor en la moneda actual. */
+        if (array_key_exists('moneda', $datos) && $datos['moneda'] !== null && $datos['moneda'] !== ''
+            && $this->moneda($datos['moneda']) !== $venta->moneda
+            && ComisionPago::where('venta_id', $venta->id)->exists()) {
+            throw ValidationException::withMessages([
+                'moneda' => 'Esta venta ya tiene pagos de comisión en ' . $venta->moneda . ': no se le puede cambiar la moneda. Eliminá esos pagos antes.',
+            ]);
+        }
+
         DB::transaction(function () use ($venta, $datos) {
             if (array_key_exists('productos', $datos) && is_array($datos['productos'])) {
                 $productos = $this->normalizar_productos($datos['productos']);
@@ -445,19 +456,17 @@ class VentaService
     /**
      * Agrega una cuota a una venta existente (`POST client/{id}/ventas/{ventaId}/cuotas`). Reusa
      * `LicenciaCuotaService::crear()` con `venta_id`, que de paso suma la cuota al total de la
-     * venta y recalcula la comisión. La moneda es la de la venta si no viene otra.
+     * venta y recalcula la comisión. La moneda es SIEMPRE la de la venta: si viene otra, se ignora.
      *
      * @param Venta $venta
-     * @param array $datos {monto, vencimiento?, periodo?, observacion?, moneda?}
+     * @param array $datos {monto, vencimiento?, periodo?, observacion?, moneda? (se ignora)}
      *
      * @return Venta
      */
     public function agregar_cuota(Venta $venta, array $datos): Venta
     {
         $datos['venta_id'] = $venta->id;
-        if (! isset($datos['moneda']) || $datos['moneda'] === null || $datos['moneda'] === '') {
-            $datos['moneda'] = $venta->moneda;
-        }
+        $datos['moneda'] = $venta->moneda;
 
         $this->cuotas->crear($venta->client, $datos);
 

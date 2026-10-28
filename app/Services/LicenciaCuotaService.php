@@ -34,8 +34,8 @@ class LicenciaCuotaService
      * pantalla lo necesita siempre.
      *
      * `venta_id` (opcional, misión ventas-y-comisiones): la cuota nace dentro de esa venta, que
-     * tiene que ser del mismo cliente (si no, 422). La cuota se suma al total de la venta y la
-     * comisión se recalcula.
+     * tiene que ser del mismo cliente (si no, 422), y en la moneda de la venta (la que venga se
+     * ignora). La cuota se suma al total de la venta y la comisión se recalcula.
      *
      * @param Client $client
      * @param array  $datos {monto, moneda?, vencimiento?, periodo?, numero?, observacion?, venta_id?}
@@ -73,7 +73,10 @@ class LicenciaCuotaService
             'periodo'      => $this->periodo_de($datos['periodo'] ?? null, $vencimiento),
             'vencimiento'  => $vencimiento ? $vencimiento->toDateString() : null,
             'monto'        => round((float) $datos['monto'], 2),
-            'moneda'       => $this->moneda($datos['moneda'] ?? null),
+            // Con venta, la moneda es SIEMPRE la de la venta: una cuota en otra moneda partiría el
+            // total en dos números que no se suman. La que venga se ignora (sin 422, para que la
+            // SPA vieja, que manda la moneda del formulario, no se rompa).
+            'moneda'       => $venta ? $venta->moneda : $this->moneda($datos['moneda'] ?? null),
             'estado'       => LicenciaCuota::ESTADO_PENDIENTE,
             'monto_pagado' => null,
             'fecha_pago'   => null,
@@ -107,7 +110,10 @@ class LicenciaCuotaService
             $cuota->monto = round((float) $datos['monto'], 2);
         }
 
-        if (array_key_exists('moneda', $datos) && $datos['moneda'] !== null && $datos['moneda'] !== '') {
+        /* La moneda de una cuota que es de una venta no se cambia de a una: es la de la venta, y se
+           cambia desde la venta (que la cambia en todas sus cuotas). Se ignora en silencio, sin 422,
+           para que la SPA vieja —que manda la moneda en cada edición— no se rompa. */
+        if ($cuota->venta_id === null && array_key_exists('moneda', $datos) && $datos['moneda'] !== null && $datos['moneda'] !== '') {
             $cuota->moneda = $this->moneda($datos['moneda']);
         }
 
