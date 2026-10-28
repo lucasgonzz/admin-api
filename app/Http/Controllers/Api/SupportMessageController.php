@@ -21,6 +21,7 @@ use App\Services\SupportWhatsappOpenerService;
 use App\Services\WhatsappSendService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
@@ -35,6 +36,23 @@ class SupportMessageController extends BaseController
         // Ticket destino donde se agregará el mensaje.
         $ticket = SupportTicket::findOrFail($ticket_id);
 
+        // El identificador pertenece al borrador, no al intento HTTP: una respuesta perdida no debe
+        // crear ni enviar una segunda nota. Se acepta antes del cierre del ticket y de validar el archivo
+        // nuevamente, porque ese mismo audio ya puede estar guardado de forma duradera.
+        $request->validate([
+            'client_message_id' => ['nullable', 'string', 'min:8', 'max:100', 'regex:/^[A-Za-z0-9_-]+$/'],
+        ]);
+        $client_message_id = $request->input('client_message_id');
+        $admin_id = (int) Auth::id();
+        if ($client_message_id !== null) {
+            $existing = SupportMessage::where('support_ticket_id', $ticket->id)
+                ->where('sender_admin_id', $admin_id)
+                ->where('client_message_id', $client_message_id)->withAll()->first();
+            if ($existing !== null) {
+                return response()->json(['model' => $existing], 200);
+            }
+        }
+
         // Evita escribir sobre tickets cerrados.
         if ($ticket->status !== 'open') {
             return response()->json(['error' => 'ticket closed'], 422);
@@ -42,6 +60,10 @@ class SupportMessageController extends BaseController
 
         // Tipo de contenido recibido desde frontend (en WhatsApp se corrige abajo con el que sale de los bytes).
         $kind = $request->input('kind', 'text');
+
+        if ($kind === 'audio' && (! $request->hasFile('attachment') || (int) $request->file('attachment')->getSize() === 0)) {
+            return response()->json(['error' => 'El audio no llegó completo. Conservá el borrador y volvé a intentar.'], 422);
+        }
 
         // Adjunto ya analizado (kind real, mime y extensión coherentes), o null si no hay archivo.
         $prepared_attachment = null;
@@ -69,57 +91,86 @@ class SupportMessageController extends BaseController
             $body = trim($body);
         }
 
-        $message = DB::transaction(function () use ($ticket, $kind, $body) {
-            $locked_ticket = SupportTicket::where('id', $ticket->id)->lockForUpdate()->firstOrFail();
-            abort_if($locked_ticket->status !== 'open', 422, 'ticket closed');
-            // El claim usa este mismo lock: nunca puede retomar en el hueco entre la
-            // invalidación del turno viejo y la creación de la respuesta de Lucas.
-            app(\App\Services\SupportCodexService::class)->pause_for_human($locked_ticket);
-            (new SupportAiSuggestionDraftService())->clear_ticket_pending_state($locked_ticket);
-            return SupportMessage::create([
-                'support_ticket_id' => $locked_ticket->id,
-                'sender_type' => 'admin',
-                'sender_admin_id' => (int) Auth::id(),
-                'kind' => $kind,
-                'body' => $body,
-                'delivered_at' => now(),
-            ]);
-        });
+        $stored_path = null;
+        $created = false;
+        try {
+            $message = DB::transaction(function () use ($ticket, $kind, $body, $request, $prepared_attachment, $client_message_id, $admin_id, &$stored_path, &$created) {
+                $locked_ticket = SupportTicket::where('id', $ticket->id)->lockForUpdate()->firstOrFail();
+                // El lock del ticket serializa dos subidas simultáneas del mismo borrador; el índice
+                // único también protege a cualquier consumidor que inserte sin pasar por este método.
+                if ($client_message_id !== null) {
+                    $existing = SupportMessage::where('support_ticket_id', $ticket->id)
+                        ->where('sender_admin_id', $admin_id)
+                        ->where('client_message_id', $client_message_id)->first();
+                    if ($existing !== null) {
+                        return $existing;
+                    }
+                }
+                abort_if($locked_ticket->status !== 'open', 422, 'ticket closed');
+                app(\App\Services\SupportCodexService::class)->pause_for_human($locked_ticket);
+                (new SupportAiSuggestionDraftService())->clear_ticket_pending_state($locked_ticket);
+                $attributes = [
+                    'support_ticket_id' => $locked_ticket->id,
+                    'sender_type' => 'admin',
+                    'sender_admin_id' => $admin_id,
+                    'kind' => $kind,
+                    'body' => $body,
+                    'delivered_at' => now(),
+                    // Si el proceso muere después de guardar y antes de entregar, queda visible y
+                    // reintentable en el hilo, nunca como una entrega confirmada al cliente.
+                    'remote_delivery_status' => 'not_received',
+                ];
+                if ($client_message_id !== null) {
+                    $attributes['client_message_id'] = $client_message_id;
+                }
+                $message = SupportMessage::create($attributes);
 
-        // Persiste adjunto si llegó archivo desde formulario.
-        if ($prepared_attachment !== null) {
-            // Archivo enviado por operador.
-            $attachment_file = $request->file('attachment');
-            // Carpeta lógica por ticket.
-            $directory = 'support_messages/' . $ticket->id;
-            // Nombre propio con la extensión que corresponde a lo que el archivo ES (no a lo que dijo el navegador).
-            $stored_name = 'out_' . now()->format('Ymd_His') . '_' . substr(md5(uniqid('', true)), 0, 8)
-                . '.' . $prepared_attachment['extension'];
-            // Guardado en disco público para acceso controlado.
-            $stored_path = Storage::disk('public')->putFileAs($directory, $attachment_file, $stored_name);
+                if ($prepared_attachment !== null) {
+                    $attachment_file = $request->file('attachment');
+                    $directory = 'support_messages/' . $ticket->id;
+                    $stored_name = 'out_' . now()->format('Ymd_His') . '_' . bin2hex(random_bytes(4))
+                        . '.' . $prepared_attachment['extension'];
+                    $stored_path = $directory . '/' . $stored_name;
+                    $disk = Storage::disk('public');
+                    $written_path = $disk->putFileAs($directory, $attachment_file, $stored_name);
+                    if (! is_string($written_path) || $written_path !== $stored_path || ! $disk->exists($stored_path)
+                        || (int) $disk->size($stored_path) !== (int) $attachment_file->getSize()) {
+                        throw new \RuntimeException('No se pudo guardar el adjunto completo. El audio sigue en tu borrador; volvé a intentar.');
+                    }
+                    SupportMessageAttachment::create([
+                        'support_message_id' => $message->id,
+                        'disk' => 'public',
+                        'path' => $stored_path,
+                        'mime' => $prepared_attachment['mime'],
+                        'size' => $attachment_file->getSize(),
+                    ]);
+                }
+                $created = true;
 
-            SupportMessageAttachment::create([
-                'support_message_id' => $message->id,
-                'disk' => 'public',
-                'path' => $stored_path,
-                'mime' => $prepared_attachment['mime'],
-                'size' => $attachment_file->getSize(),
-            ]);
+                return $message;
+            });
+        } catch (\Throwable $exception) {
+            // El archivo no es transaccional. Sólo se limpia si la base confirma que no quedó
+            // referenciado: ante una caída de DB es preferible un huérfano a borrar un audio válido.
+            if ($stored_path !== null) {
+                try {
+                    if (! SupportMessageAttachment::where('path', $stored_path)->exists()) {
+                        Storage::disk('public')->delete($stored_path);
+                    }
+                } catch (\Throwable $cleanup_exception) {
+                    Log::warning('No se pudo limpiar un adjunto de soporte sin confirmar.', ['path' => $stored_path]);
+                }
+            }
+            throw $exception;
+        }
+
+        if (! $created) {
+            return response()->json(['model' => $message->load('ticket', 'attachments', 'sender_admin')], 200);
         }
 
         $message = SupportMessage::where('id', $message->id)->withAll()->first();
 
-        // Entrega según origen del ticket: WhatsApp y ERP son flujos excluyentes.
-        if ($ticket->source === 'whatsapp') {
-            $this->deliver_admin_message_via_whatsapp($ticket, $message);
-        } elseif ($ticket->source === 'erp') {
-            // Sincroniza a empresa-api del cliente; si falla, el operador ve estado "no recibido" en destino.
-            $sync_ok = $sync_service->sync_message_to_client($message);
-            if (! $sync_ok) {
-                $message->remote_delivery_status = 'not_received';
-                $message->save();
-            }
-        }
+        $this->deliver_saved_admin_message($ticket, $message, $sync_service);
 
         $message = SupportMessage::where('id', $message->id)->withAll()->first();
 
@@ -200,6 +251,34 @@ class SupportMessageController extends BaseController
 
         // Disposición, cabeceras de seguridad, Range/206 y caché: política compartida (SignedAttachmentResponder).
         return $responder->build_response($request, $absolute_path, $mime, $force_download, $download_name);
+    }
+
+    /**
+     * Serializa entrega inicial y reintento sin mantener una transacción de base durante HTTP.
+     * El store de archivo se elige explícitamente: un cache array por proceso no impediría dos
+     * envíos de PHP-FPM. El plazo supera los timeouts del proveedor y el lock se libera en finally.
+     * Una respuesta incierta del proveedor sigue sin poder ofrecer exactamente una entrega externa.
+     */
+    private function deliver_saved_admin_message(SupportTicket $ticket, SupportMessage $message, SupportClientSyncService $sync_service): void
+    {
+        $lock = Cache::store('file')->lock('support-outbound-' . $message->id, 300);
+        if (! $lock->get()) {
+            return;
+        }
+        try {
+            $message->refresh();
+            if ($ticket->source === 'whatsapp') {
+                if (empty($message->whatsapp_message_id)) {
+                    $this->deliver_admin_message_via_whatsapp($ticket, $message);
+                }
+            } elseif ($ticket->source === 'erp' && $message->synced_to_client_at === null) {
+                $sync_ok = $sync_service->sync_message_to_client($message);
+                $message->remote_delivery_status = $sync_ok ? null : 'not_received';
+                $message->save();
+            }
+        } finally {
+            $lock->release();
+        }
     }
 
     /**
@@ -795,19 +874,8 @@ class SupportMessageController extends BaseController
 
         $ticket = $message->ticket;
 
-        if ($ticket && $ticket->source === 'whatsapp') {
-            if (empty($message->whatsapp_message_id)) {
-                $this->deliver_admin_message_via_whatsapp($ticket, $message);
-            }
-        } else {
-            $sync_ok = $sync_service->sync_message_to_client($message);
-            if ($sync_ok) {
-                $message->remote_delivery_status = null;
-                $message->save();
-            } else {
-                $message->remote_delivery_status = 'not_received';
-                $message->save();
-            }
+        if ($ticket !== null) {
+            $this->deliver_saved_admin_message($ticket, $message, $sync_service);
         }
 
         $message = SupportMessage::where('id', $message->id)->withAll()->first();
