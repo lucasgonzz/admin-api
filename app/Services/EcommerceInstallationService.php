@@ -218,7 +218,7 @@ class EcommerceInstallationService
     }
 
     /**
-     * Frena el pipeline si la tienda es la de una demo marcada como VPS.
+     * Frena el pipeline si la tienda del cliente o de la demo está marcada como VPS.
      *
      * 🔴 POR QUÉ EN EL CONSTRUCTOR Y NO EN LA ETAPA QUE CORRESPONDA. El pipeline de ecommerce
      * tiene `shared_hosting` FIJO en cinco puntos (connect_hosting_ssh(), los dos
@@ -234,6 +234,12 @@ class EcommerceInstallationService
     protected function assert_ecommerce_soportado(): void
     {
         if (! $this->owner_is_demo()) {
+            // La migración puede mantener los dominios y el registro de la tienda: sin esta
+            // guarda, el próximo update escribiría en el shared que la tienda ya abandonó.
+            if ($this->ecommerce->is_vps()) {
+                throw new \RuntimeException(ClientEcommerce::CLIENTE_VPS_NO_SOPORTADO);
+            }
+
             return;
         }
 

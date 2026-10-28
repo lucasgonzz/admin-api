@@ -30,6 +30,22 @@ use Illuminate\Database\Eloquent\Model;
  */
 class ClientEcommerce extends Model
 {
+    public const CLIENTE_VPS_NO_SOPORTADO = 'La tienda está migrada al VPS. Actualizala por el procedimiento de tiendas VPS; este pipeline sólo despliega al hosting compartido.';
+
+    /**
+     * El ERP puede estar en VPS y su tienda seguir en shared: manda la metadata de ESTA tienda.
+     * Sin el dato se conserva el alojamiento histórico, para no bloquear tiendas existentes.
+     */
+    public function is_vps(): bool
+    {
+        $datos = $this->ecommerce_setup_data;
+
+        return is_array($datos)
+            && isset($datos['hosting_type'])
+            && is_string($datos['hosting_type'])
+            && strtolower(trim($datos['hosting_type'])) === 'vps';
+    }
+
     /**
      * @var array<int, string>
      */

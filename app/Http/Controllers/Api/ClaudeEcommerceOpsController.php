@@ -346,6 +346,7 @@ class ClaudeEcommerceOpsController extends Controller
                 'spa_url'              => $tienda->spa_url,
                 'api_url'              => $tienda->api_url,
                 'status'               => $tienda->status,
+                'hosting_type'         => $tienda->is_vps() ? 'vps' : 'shared_hosting',
                 'ultima_corrida'       => isset($ultimas[$id]) ? $ultimas[$id] : null,
                 'puede_actualizarse'   => $motivo === null,
                 'motivo'               => $motivo,
@@ -1737,6 +1738,10 @@ class ClaudeEcommerceOpsController extends Controller
      */
     private function motivo_por_el_que_no_se_puede_actualizar(ClientEcommerce $tienda, array $contexto)
     {
+        if ($tienda->is_vps()) {
+            return ClientEcommerce::CLIENTE_VPS_NO_SOPORTADO;
+        }
+
         /* Configuración mínima de la tienda. Se usa `resolve_domain()` y no la columna cruda
            `domain` por lo mismo que el panel: el dominio puede estar derivado del host de `spa_url`. */
         $faltantes = [];

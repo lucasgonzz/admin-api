@@ -1052,6 +1052,58 @@ class ActualizacionDelEcommercePorClaudeTest extends TestCase
         $post->assertStatus(422);
     }
 
+    public function test_la_tienda_migrada_al_vps_se_informa_y_no_se_encola_en_shared(): void
+    {
+        Queue::fake();
+        $escenario = $this->escenario_listo('Tienda migrada');
+        $escenario['tienda']->update(['ecommerce_setup_data' => ['hosting_type' => 'vps']]);
+        $antes = $this->corridas_totales();
+
+        $this->getJson('/api/claude/ecommerce/stores?client_id=' . $escenario['cliente']->id, $this->headers())
+            ->assertStatus(200)
+            ->assertJsonPath('data.0.hosting_type', 'vps')
+            ->assertJsonPath('data.0.puede_actualizarse', false)
+            ->assertJsonPath('data.0.motivo', ClientEcommerce::CLIENTE_VPS_NO_SOPORTADO);
+
+        $this->postJson('/api/claude/ecommerce/updates', [
+            'client_id' => $escenario['cliente']->id,
+            'confirm_client_name' => 'Tienda migrada',
+        ], $this->headers())->assertStatus(422);
+
+        $this->postJson('/api/claude/ecommerce/updates/batch', [
+            'client_ids' => [$escenario['cliente']->id],
+        ], $this->headers())->assertStatus(200)->assertJsonPath('actualizarian', 0);
+
+        $this->assertSame($antes, $this->corridas_totales());
+        Queue::assertNothingPushed();
+    }
+
+    public function test_un_erp_en_vps_no_bloquea_su_tienda_que_sigue_en_shared(): void
+    {
+        Queue::fake();
+        $escenario = $this->escenario_listo('ERP en VPS y tienda shared');
+        $api = new ClientApi();
+        $api->client_id = $escenario['cliente']->id;
+        $api->url = 'https://api-erp-vps.test';
+        $api->path = 'erp-vps/api';
+        $api->hosting_type = 'vps';
+        $api->vps_path = 'erp-vps';
+        $api->save();
+        $escenario['cliente']->update(['active_client_api_id' => $api->id]);
+
+        $this->getJson('/api/claude/ecommerce/stores?client_id=' . $escenario['cliente']->id, $this->headers())
+            ->assertStatus(200)
+            ->assertJsonPath('data.0.hosting_type', 'shared_hosting')
+            ->assertJsonPath('data.0.puede_actualizarse', true);
+
+        $this->postJson('/api/claude/ecommerce/updates', [
+            'client_id' => $escenario['cliente']->id,
+            'confirm_client_name' => 'ERP en VPS y tienda shared',
+        ], $this->headers())->assertStatus(202);
+
+        Queue::assertPushed(RunEcommerceInstallationJob::class, 1);
+    }
+
     /* ------------------------------------------------------------------------------------------
      | 7. La ventana `pendiente`: el freno que no cubría el reintento
      |----------------------------------------------------------------------------------------- */

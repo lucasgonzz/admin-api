@@ -502,6 +502,10 @@ class EcommerceInstallationController extends BaseController
      */
     protected function assert_deploy_prerequisites(ClientEcommerce $client_ecommerce, string $mode): ?JsonResponse
     {
+        if (! $client_ecommerce->is_demo() && $client_ecommerce->is_vps()) {
+            return response()->json(['error' => ClientEcommerce::CLIENTE_VPS_NO_SOPORTADO], 422);
+        }
+
         // Credenciales SSH del VPS donde se compila tienda-spa/tienda-api. Sin esta fila el job
         // muere adentro de connect_build_vps() con un ModelNotFoundException de Eloquent.
         $has_vps_credential = ClientSshCredential::where('type', 'vps')->exists();
