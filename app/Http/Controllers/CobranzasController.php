@@ -5,8 +5,10 @@ namespace App\Http\Controllers;
 use App\Helpers\AppTime;
 use App\Models\Client;
 use App\Models\LicenciaCuota;
+use App\Models\Venta;
 use App\Services\CobranzasMensualidadService;
 use App\Services\LicenciaCuotaService;
+use App\Services\VentaService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 
@@ -162,6 +164,52 @@ class CobranzasController extends Controller
                 'desde' => $periodo_minimo ?? $mes_corriente,
                 'hasta' => $periodo_maximo ?? $mes_corriente,
             ],
+        ]);
+    }
+
+    /**
+     * La tabla de Ventas (misión ventas-y-comisiones, 28/10/2026): un renglón por cliente CON
+     * ventas, cada uno con sus ventas (cuotas, lo que debe el cliente y la comisión del vendedor) y
+     * el resumen por moneda.
+     *
+     * A diferencia de Licencias, acá van solo los clientes que tienen al menos una venta: la tabla
+     * es de lo vendido, no del padrón. Todo sale en tres consultas (ventas con cuotas, pagos de
+     * comisión, vendedor y cliente), sin una por fila.
+     *
+     * `resumen_por_moneda` de arriba (clave agregada al contrato) son las cifras de la cabecera:
+     * lo que deben todos los clientes y lo que hay que pagarles a los vendedores, por moneda.
+     *
+     * @param  VentaService $service
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function ventas_json(VentaService $service)
+    {
+        $ventas = Venta::query()
+            ->with(['cuotas', 'comision_pagos', 'vendedor', 'client'])
+            ->orderBy('client_id')->orderBy('fecha')->orderBy('id')
+            ->get();
+
+        $filas = [];
+
+        foreach ($ventas->groupBy('client_id') as $client_id => $del_cliente) {
+            $client = $del_cliente->first()->client;
+
+            $filas[] = [
+                'client_id'          => (int) $client_id,
+                'nombre'             => $client ? $client->resolve_display_name() : null,
+                'is_active'          => $client ? (bool) $client->is_active : null,
+                'ventas'             => $del_cliente->map(function (Venta $venta) use ($service) {
+                    return $service->venta_para_json($venta);
+                })->values()->all(),
+                'resumen_por_moneda' => $service->resumen_por_moneda($del_cliente),
+            ];
+        }
+
+        return response()->json([
+            'clientes'           => $filas,
+            'vendedores'         => $service->vendedores(),
+            'productos'          => Venta::PRODUCTOS,
+            'resumen_por_moneda' => $service->resumen_por_moneda($ventas),
         ]);
     }
 
