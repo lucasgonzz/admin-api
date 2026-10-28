@@ -585,8 +585,17 @@ class EcommerceImplementationConversationService
         $client_ecommerce = $this->resolve_client_ecommerce($implementation);
 
         if ($client_ecommerce !== null) {
+            // La conversación reemplaza respuestas comerciales; no puede deshacer una migración.
+            // Estas claves son operativas: borrarlas habilitaría otra vez el deploy al shared.
+            // Sólo se preserva alojamiento, nunca colores, entregas u otras respuestas anteriores.
+            $claves_alojamiento = array_flip(['hosting_type', 'vps']);
+            $config_anterior = is_array($client_ecommerce->ecommerce_setup_data)
+                ? $client_ecommerce->ecommerce_setup_data : [];
+            $config_recolectada = array_diff_key($data, $claves_alojamiento);
+            $config_alojamiento = array_intersect_key($config_anterior, $claves_alojamiento);
+
             $client_ecommerce->domain               = (string) ($data['domain'] ?? $client_ecommerce->domain);
-            $client_ecommerce->ecommerce_setup_data = $data;
+            $client_ecommerce->ecommerce_setup_data = array_merge($config_recolectada, $config_alojamiento);
             $client_ecommerce->save();
         }
 
