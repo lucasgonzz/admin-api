@@ -7,6 +7,7 @@ use App\Models\Client;
 use App\Models\LicenciaCuota;
 use App\Models\Venta;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
 /**
@@ -61,34 +62,38 @@ class LicenciaCuotaService
             }
         }
 
-        /** Siguiente número libre del cliente. */
-        $numero = isset($datos['numero']) && (int) $datos['numero'] > 0
-            ? (int) $datos['numero']
-            : ((int) LicenciaCuota::where('client_id', $client->id)->max('numero')) + 1;
+        /* La cuota y el total de su venta van juntos o no van: si el recálculo fallara después de
+           guardar la cuota, la venta quedaría con un total que no es la suma de sus cuotas. */
+        return DB::transaction(function () use ($client, $datos, $vencimiento, $venta) {
+            /** Siguiente número libre del cliente. */
+            $numero = isset($datos['numero']) && (int) $datos['numero'] > 0
+                ? (int) $datos['numero']
+                : ((int) LicenciaCuota::where('client_id', $client->id)->max('numero')) + 1;
 
-        $cuota = LicenciaCuota::create([
-            'client_id'    => $client->id,
-            'venta_id'     => $venta ? $venta->id : null,
-            'numero'       => $numero,
-            'periodo'      => $this->periodo_de($datos['periodo'] ?? null, $vencimiento),
-            'vencimiento'  => $vencimiento ? $vencimiento->toDateString() : null,
-            'monto'        => round((float) $datos['monto'], 2),
-            // Con venta, la moneda es SIEMPRE la de la venta: una cuota en otra moneda partiría el
-            // total en dos números que no se suman. La que venga se ignora (sin 422, para que la
-            // SPA vieja, que manda la moneda del formulario, no se rompa).
-            'moneda'       => $venta ? $venta->moneda : $this->moneda($datos['moneda'] ?? null),
-            'estado'       => LicenciaCuota::ESTADO_PENDIENTE,
-            'monto_pagado' => null,
-            'fecha_pago'   => null,
-            'observacion'  => $this->texto_o_null($datos['observacion'] ?? null),
-            'importado'    => false,
-        ]);
+            $cuota = LicenciaCuota::create([
+                'client_id'    => $client->id,
+                'venta_id'     => $venta ? $venta->id : null,
+                'numero'       => $numero,
+                'periodo'      => $this->periodo_de($datos['periodo'] ?? null, $vencimiento),
+                'vencimiento'  => $vencimiento ? $vencimiento->toDateString() : null,
+                'monto'        => round((float) $datos['monto'], 2),
+                // Con venta, la moneda es SIEMPRE la de la venta: una cuota en otra moneda partiría el
+                // total en dos números que no se suman. La que venga se ignora (sin 422, para que la
+                // SPA vieja, que manda la moneda del formulario, no se rompa).
+                'moneda'       => $venta ? $venta->moneda : $this->moneda($datos['moneda'] ?? null),
+                'estado'       => LicenciaCuota::ESTADO_PENDIENTE,
+                'monto_pagado' => null,
+                'fecha_pago'   => null,
+                'observacion'  => $this->texto_o_null($datos['observacion'] ?? null),
+                'importado'    => false,
+            ]);
 
-        if ($venta !== null) {
-            $this->ventas()->sincronizar_total($venta);
-        }
+            if ($venta !== null) {
+                $this->ventas()->sincronizar_total($venta);
+            }
 
-        return $cuota;
+            return $cuota;
+        });
     }
 
     /**
@@ -145,12 +150,15 @@ class LicenciaCuotaService
 
         $cambio_el_monto = $cuota->isDirty('monto');
 
-        $cuota->save();
+        // Guardar la cuota y recalcular su venta, en una sola transacción (mismo motivo que crear()).
+        DB::transaction(function () use ($cuota, $cambio_el_monto) {
+            $cuota->save();
 
-        // Si la cuota es de una venta y cambió su monto, el total de la venta y su comisión lo siguen.
-        if ($cambio_el_monto) {
-            $this->sincronizar_venta_de($cuota);
-        }
+            // Si la cuota es de una venta y cambió su monto, el total de la venta y su comisión lo siguen.
+            if ($cambio_el_monto) {
+                $this->sincronizar_venta_de($cuota);
+            }
+        });
 
         return $cuota;
     }
@@ -196,10 +204,13 @@ class LicenciaCuotaService
      */
     public function eliminar(LicenciaCuota $cuota): void
     {
-        $cuota->delete();
+        // Borrar la cuota y recalcular su venta, en una sola transacción (mismo motivo que crear()).
+        DB::transaction(function () use ($cuota) {
+            $cuota->delete();
 
-        // Si era de una venta, la venta baja su total (y su comisión) en lo que valía la cuota.
-        $this->sincronizar_venta_de($cuota);
+            // Si era de una venta, la venta baja su total (y su comisión) en lo que valía la cuota.
+            $this->sincronizar_venta_de($cuota);
+        });
     }
 
     /**

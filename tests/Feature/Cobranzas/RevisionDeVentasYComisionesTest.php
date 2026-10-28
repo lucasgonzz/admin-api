@@ -5,6 +5,8 @@ namespace Tests\Feature\Cobranzas;
 use App\Models\ComisionPago;
 use App\Models\LicenciaCuota;
 use App\Models\Venta;
+use App\Services\LicenciaCuotaService;
+use App\Services\VentaService;
 use Laravel\Sanctum\Sanctum;
 
 /**
@@ -21,6 +23,7 @@ use Laravel\Sanctum\Sanctum;
  *     vendedor.
  *  5. Después de cambiar de vendedor, `pagada` cuenta solo los pagos al vendedor actual, y "Mis
  *     comisiones" usa el mismo criterio para "Ya cobrado" y la lista de pagos.
+ *  6. Alta, edición y baja de una cuota van en la misma transacción que el recálculo de su venta.
  */
 class RevisionDeVentasYComisionesTest extends BaseDeVentas
 {
@@ -238,5 +241,62 @@ class RevisionDeVentasYComisionesTest extends BaseDeVentas
         $this->assertEqualsWithDelta(50.0, $mias_b->json('resumen.por_moneda.USD.pagada'), 0.001);
         $this->assertCount(1, $mias_b->json('resumen.pagos'));
         $this->assertEqualsWithDelta(50.0, $mias_b->json('resumen.pagos.0.monto'), 0.001);
+    }
+
+    /**
+     * 6. Si el recálculo de la venta falla, la cuota no queda creada, editada ni borrada: van en la
+     * misma transacción. Se fuerza la falla con un VentaService cuyo `sincronizar_total` tira.
+     *
+     * @return void
+     */
+    public function test_la_cuota_y_el_total_de_su_venta_van_en_la_misma_transaccion(): void
+    {
+        $this->admin_logueado();
+        $client = $this->crear_cliente();
+
+        $venta_id = (int) $this->alta_de_venta($client, ['productos' => ['gestion']])->json('venta.id');
+        $cuota = $this->cuotas_de($venta_id)->first();
+
+        /** @var LicenciaCuotaService $cuotas */
+        $cuotas = app(LicenciaCuotaService::class);
+
+        // Desde acá, recalcular una venta falla siempre.
+        $this->app->instance(VentaService::class, new class($cuotas) extends VentaService {
+            public function sincronizar_total(Venta $venta): Venta
+            {
+                throw new \RuntimeException('Falla forzada del recálculo.');
+            }
+        });
+
+        $fallo = function (callable $operacion) {
+            try {
+                $operacion();
+            } catch (\RuntimeException $error) {
+                return $error->getMessage();
+            }
+
+            return null;
+        };
+
+        // Alta: la cuota no queda.
+        $this->assertSame('Falla forzada del recálculo.', $fallo(function () use ($cuotas, $client, $venta_id) {
+            $cuotas->crear($client, ['monto' => 100, 'venta_id' => $venta_id]);
+        }));
+        $this->assertSame(1, LicenciaCuota::where('venta_id', $venta_id)->count(), 'La cuota nueva no quedó guardada.');
+
+        // Edición del monto: no queda.
+        $this->assertSame('Falla forzada del recálculo.', $fallo(function () use ($cuotas, $cuota) {
+            $cuotas->editar(LicenciaCuota::find($cuota->id), ['monto' => 1]);
+        }));
+        $this->assertEqualsWithDelta(800.0, (float) LicenciaCuota::find($cuota->id)->monto, 0.001, 'El monto nuevo no quedó guardado.');
+
+        // Baja: la cuota sigue.
+        $this->assertSame('Falla forzada del recálculo.', $fallo(function () use ($cuotas, $cuota) {
+            $cuotas->eliminar(LicenciaCuota::find($cuota->id));
+        }));
+        $this->assertNotNull(LicenciaCuota::find($cuota->id), 'La cuota no quedó borrada.');
+
+        // Y la venta no se movió.
+        $this->assertEqualsWithDelta(800.0, (float) Venta::find($venta_id)->monto_total, 0.001);
     }
 }
