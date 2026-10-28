@@ -1698,7 +1698,8 @@ return [
             'frenos'       => [
                 'Lista blanca de parámetros: cualquier otra clave es 422.',
                 'status solo acepta completed o cancelled: abrir es el alta.',
-                'La bitácora no guarda los ids de Meta: viaja al contexto de Martín.',
+                'Una implementación ya cerrada (completed o cancelled) no cambia de status: 409 implementacion_cerrada sin escribir nada (mandar el mismo status que ya tiene no hace nada). Los demás campos se pueden corregir.',
+                'La bitácora no guarda los ids de Meta ni el teléfono de contacto: viaja al contexto de Martín. contact_phone sale enmascarado en el estado.',
             ],
             'parametros'   => [
                 ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'La implementación.'],
@@ -1707,6 +1708,7 @@ return [
                 ['nombre' => 'phone_number_id', 'obligatorio' => false, 'validacion' => 'nullable|string|max:60', 'que_es' => 'El id del número en Meta (que exista = conectado).'],
                 ['nombre' => 'waba_id', 'obligatorio' => false, 'validacion' => 'nullable|string|max:60', 'que_es' => 'La cuenta de WhatsApp Business.'],
                 ['nombre' => 'business_portfolio_id', 'obligatorio' => false, 'validacion' => 'nullable|string|max:60', 'que_es' => 'El portfolio comercial de Meta.'],
+                ['nombre' => 'contact_phone', 'obligatorio' => false, 'validacion' => 'nullable|string|max:30', 'que_es' => 'Teléfono al que van los WhatsApp de la implementación en vez del de la ficha (camino propio: el número del negocio deja de tener la app). Tiene que ser un contacto del cliente (empleado, ficha o lead promovido).'],
                 ['nombre' => 'status', 'obligatorio' => false, 'validacion' => 'nullable|string|in:completed,cancelled', 'que_es' => 'Cierra la implementación.'],
             ],
         ],
@@ -1717,6 +1719,7 @@ return [
             'frenos'       => [
                 'Lista blanca de parámetros: cualquier otra clave es 422.',
                 'Etapa fuera de 1–8: 422 motivo etapa_fuera_de_rango, sin escribir nada.',
+                'Implementación cerrada (completed o cancelled): 409 implementacion_cerrada, sin escribir nada.',
                 'data tiene que ser un objeto (una lista es 422 data_no_es_objeto) y no puede traer whatsapp_ops (422 clave_reservada: es la memoria de la idempotencia de los envíos).',
             ],
             'parametros'   => [
@@ -1744,12 +1747,12 @@ return [
             ],
         ],
         'POST api/claude/agent-implementations/{id}/whatsapp' => [
-            'para_que'     => 'Manda un WhatsApp al DUEÑO del cliente por su TICKET DE SOPORTE (número de Kapso del admin, SupportWhatsappOpenerService::open(): reusa el ticket abierto o abre uno; texto libre con la ventana abierta, plantilla cc_soporte_apertura si está cerrada) y lo deja en la bitácora como evento whatsapp si el cliente lo recibió. La operación queda en agent_implementation_stages.data.whatsapp_ops de la etapa (o de la actual). Respuesta {dry_run:false, repetida, operation_id, etapa, enviado, estado (sent|failed|partial|unknown), uso_plantilla, ventana_abierta, ticket_id, message_id, whatsapp_message_id, reusado, error, respuesta_ira_a, avisos, at}.',
+            'para_que'     => 'Manda un WhatsApp al DUEÑO del cliente por su TICKET DE SOPORTE (número de Kapso del admin, SupportWhatsappOpenerService::open(): reusa el ticket abierto o abre uno; texto libre con la ventana abierta, plantilla cc_soporte_apertura si está cerrada) y lo deja en la bitácora como evento whatsapp si el cliente lo recibió (sin el cuerpo: «Mensaje enviado por el ticket #N (etapa X, NNN caracteres)»; el texto queda en el ticket). La operación queda en agent_implementation_stages.data.whatsapp_ops de la etapa (o de la actual). Respuesta {dry_run:false, repetida, operation_id, etapa, enviado, estado (sent|failed|partial|unknown), uso_plantilla, ventana_abierta, ticket_id, message_id, whatsapp_message_id, reusado, error, respuesta_ira_a, avisos, at}.',
             'escribe'      => true,
             'peligrosidad' => 'media',
             'frenos'       => [
-                'Lista blanca de parámetros: cualquier otra clave es 422 (no hay dry_run ni telefono: siempre va al dueño, clients.phone).',
-                '🔴 Circuito de Codex apagado: 422 motivo codex_apagado (nadie atendería la respuesta del ticket).',
+                'Lista blanca de parámetros: cualquier otra clave es 422 (no hay dry_run ni telefono). Destino: el contact_phone de la implementación si está cargado (si no es contacto del cliente, 422 telefono_ajeno); si no, el dueño (clients.phone).',
+                '🔴 Circuito de Codex apagado: 422 motivo codex_apagado (nadie atendería la respuesta del ticket): lo manda Lucas desde la bandeja de soporte del admin.',
                 'Cliente inexistente 404; dado de baja 422 cliente_inactivo; sin teléfono válido del dueño 422 sin_contacto; sin admin remitente 422 sin_admin.',
                 '🔴 Mismos frenos que POST claude/implementations/{id}/whatsapp, con la misma cuenta (ImplementationSupportWhatsappService::plan()): ventana cerrada y texto de más de 600 → 422 texto_largo_para_plantilla; la respuesta no caería en el ticket → 422 respuesta_al_hilo; Martín con reserva vigente → 423 martin_atendiendo; un entrante esperando a Martín → 423 martin_pendiente. En ninguno se manda nada.',
                 '🔴 Idempotente por operation_id (8 a 80, letras, números, guión y guión bajo): misma clave y mismo contenido (texto, etapa y destinatario) → 200 con lo guardado y repetida=true sin reenviar; otro contenido → 409 operation_id_reusado; todavía mandando → 409 envio_en_curso. Búsqueda y reserva con la implementación bloqueada.',
