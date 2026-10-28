@@ -516,6 +516,14 @@ Route::middleware('claude.task.key')
         /* Reintento del push de horarios al empresa-api del cliente. Idempotente y sin frenos:
            reenvía lo que el admin ya tiene y encola, nunca hace el HTTP adentro del request. */
         Route::post('clients/{id}/schedule/sync', 'Api\ClaudeClientOpsController@sync_schedule_json');
+        /* Las ventas de un cliente (misión ventas-y-comisiones, 28/10/2026). El GET devuelve el mismo
+           JSON que la pestaña Ventas del admin; el POST da de alta una venta con `origen = claude` y
+           los frenos del bloque: dry_run por defecto true y confirm_client_name para escribir.
+           Están en ClaudeVentasController; la lógica, en VentaService (la misma del admin). */
+        Route::get('clients/{id}/ventas', 'Api\ClaudeVentasController@index_json')
+            ->whereNumber('id');
+        Route::post('clients/{id}/ventas', 'Api\ClaudeVentasController@store_json')
+            ->whereNumber('id');
         /* 🔴 El acceso del motor de `/categorizar` al catálogo de UN cliente SIN que su clave pase por
            la máquina de Lucas (misión `implementacion-dos-sistemas`, 6/10/2026). Los dos viven en
            ClaudeClientCatalogoController y no llevan nunca el valor de `clients.api_key` en una
