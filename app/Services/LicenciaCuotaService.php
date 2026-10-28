@@ -5,7 +5,9 @@ namespace App\Services;
 use App\Helpers\AppTime;
 use App\Models\Client;
 use App\Models\LicenciaCuota;
+use App\Models\Venta;
 use Carbon\Carbon;
+use Illuminate\Validation\ValidationException;
 
 /**
  * Las cuotas de la licencia de un cliente: alta, edición, pagos (enteros o parciales), baja y el
@@ -16,6 +18,11 @@ use Carbon\Carbon;
  * entró, y el estado se deduce de ahí (`pagada` si cubre el monto o si Lucas la da por completa,
  * `parcial` si entró algo, `pendiente` si nada). El resumen se separa por moneda porque en la
  * planilla conviven pesos y dólares, a veces dentro del mismo cliente, y sumarlos sería mentir.
+ *
+ * Desde la misión ventas-y-comisiones (28/10/2026) una cuota puede pertenecer a una venta
+ * (`venta_id`). Cuando cambia una cuota de una venta —alta, monto, baja— el total de la venta y su
+ * comisión se recalculan con `VentaService::sincronizar_total()`: el total de una venta es siempre
+ * la suma de sus cuotas. Las cuotas sueltas (sin venta) se comportan exactamente como antes.
  */
 class LicenciaCuotaService
 {
@@ -26,22 +33,42 @@ class LicenciaCuotaService
      * del vencimiento (o del mes corriente) si no viene, porque la columna del Excel es el mes y la
      * pantalla lo necesita siempre.
      *
+     * `venta_id` (opcional, misión ventas-y-comisiones): la cuota nace dentro de esa venta, que
+     * tiene que ser del mismo cliente (si no, 422). La cuota se suma al total de la venta y la
+     * comisión se recalcula.
+     *
      * @param Client $client
-     * @param array  $datos {monto, moneda?, vencimiento?, periodo?, numero?, observacion?}
+     * @param array  $datos {monto, moneda?, vencimiento?, periodo?, numero?, observacion?, venta_id?}
      *
      * @return LicenciaCuota
+     *
+     * @throws ValidationException Si `venta_id` no es una venta de este cliente.
      */
     public function crear(Client $client, array $datos): LicenciaCuota
     {
         $vencimiento = $this->fecha_o_null($datos['vencimiento'] ?? null);
+
+        /* La venta, si vino: tiene que ser de ESTE cliente. Una cuota colgada de la venta de otro
+           cliente sumaría plata a una cuenta ajena sin que nada lo muestre. */
+        $venta = null;
+        if (isset($datos['venta_id']) && $datos['venta_id'] !== null && $datos['venta_id'] !== '') {
+            $venta = Venta::where('client_id', $client->id)->find((int) $datos['venta_id']);
+
+            if ($venta === null) {
+                throw ValidationException::withMessages([
+                    'venta_id' => 'La venta indicada no existe o no es de este cliente.',
+                ]);
+            }
+        }
 
         /** Siguiente número libre del cliente. */
         $numero = isset($datos['numero']) && (int) $datos['numero'] > 0
             ? (int) $datos['numero']
             : ((int) LicenciaCuota::where('client_id', $client->id)->max('numero')) + 1;
 
-        return LicenciaCuota::create([
+        $cuota = LicenciaCuota::create([
             'client_id'    => $client->id,
+            'venta_id'     => $venta ? $venta->id : null,
             'numero'       => $numero,
             'periodo'      => $this->periodo_de($datos['periodo'] ?? null, $vencimiento),
             'vencimiento'  => $vencimiento ? $vencimiento->toDateString() : null,
@@ -53,6 +80,12 @@ class LicenciaCuotaService
             'observacion'  => $this->texto_o_null($datos['observacion'] ?? null),
             'importado'    => false,
         ]);
+
+        if ($venta !== null) {
+            $this->ventas()->sincronizar_total($venta);
+        }
+
+        return $cuota;
     }
 
     /**
@@ -104,7 +137,14 @@ class LicenciaCuotaService
             $cuota->estado = $this->estado_por_monto($cuota, false);
         }
 
+        $cambio_el_monto = $cuota->isDirty('monto');
+
         $cuota->save();
+
+        // Si la cuota es de una venta y cambió su monto, el total de la venta y su comisión lo siguen.
+        if ($cambio_el_monto) {
+            $this->sincronizar_venta_de($cuota);
+        }
 
         return $cuota;
     }
@@ -151,6 +191,9 @@ class LicenciaCuotaService
     public function eliminar(LicenciaCuota $cuota): void
     {
         $cuota->delete();
+
+        // Si era de una venta, la venta baja su total (y su comisión) en lo que valía la cuota.
+        $this->sincronizar_venta_de($cuota);
     }
 
     /**
@@ -183,6 +226,7 @@ class LicenciaCuotaService
         return [
             'id'              => $cuota->id,
             'client_id'       => $cuota->client_id,
+            'venta_id'        => $cuota->venta_id !== null ? (int) $cuota->venta_id : null,
             'numero'          => (int) $cuota->numero,
             'periodo'         => $cuota->periodo,
             'vencimiento'     => $cuota->vencimiento ? Carbon::parse($cuota->vencimiento)->toDateString() : null,
@@ -252,6 +296,38 @@ class LicenciaCuotaService
             'pendientes'           => $pendientes,
             'parciales'            => $parciales,
         ];
+    }
+
+    /**
+     * Recalcula el total (y la comisión) de la venta de la cuota, si tiene. No hace nada con una
+     * cuota suelta.
+     *
+     * @param LicenciaCuota $cuota
+     *
+     * @return void
+     */
+    protected function sincronizar_venta_de(LicenciaCuota $cuota): void
+    {
+        if ($cuota->venta_id === null) {
+            return;
+        }
+
+        $venta = Venta::find($cuota->venta_id);
+
+        if ($venta !== null) {
+            $this->ventas()->sincronizar_total($venta);
+        }
+    }
+
+    /**
+     * El servicio de ventas, resuelto a demanda: `VentaService` recibe a este servicio por
+     * constructor, así que inyectarlo acá también armaría un ciclo en el contenedor.
+     *
+     * @return VentaService
+     */
+    protected function ventas(): VentaService
+    {
+        return app(VentaService::class);
     }
 
     /**
