@@ -596,9 +596,9 @@ class VentaService
      * La comisión de una venta, liberada a medida que paga el cliente.
      *
      *  - `total`: la comisión entera (`comision_monto`).
-     *  - `liberada`: `total × min(1, cobrado / monto_total)`. `cobrado` es la suma de
-     *    `monto_cobrado()` de las cuotas: el mismo criterio que el resumen de cuotas (una cuota
-     *    `pagada` sin `monto_pagado` cuenta completa).
+     *  - `liberada`: `total × min(1, cobrado / monto_total)`, con `cobrado` según
+     *    `cobrado_para_comision()`: una cuota `pagada` cuenta su monto completo, y lo cobrado de
+     *    cada cuota se topa en su monto.
      *  - `pagada`: lo que ya se le pagó al vendedor por esta venta.
      *  - `a_pagar`: lo liberado que todavía no se le pagó (nunca negativo).
      *  - `por_liberar`: lo que se libera cuando el cliente termine de pagar.
@@ -614,7 +614,7 @@ class VentaService
     {
         $total = $venta->comision_monto !== null ? (float) $venta->comision_monto : 0.0;
         $monto_total = (float) $venta->monto_total;
-        $cobrado = $this->cobrado_de($venta);
+        $cobrado = $this->cobrado_para_comision($venta);
 
         $fraccion = $monto_total > 0 ? min(1.0, $cobrado / $monto_total) : 0.0;
         $liberada = round($total * $fraccion, 2);
@@ -818,6 +818,37 @@ class VentaService
     {
         return round((float) $venta->cuotas->sum(function (LicenciaCuota $cuota) {
             return $cuota->monto_cobrado();
+        }), 2);
+    }
+
+    /**
+     * Lo cobrado de una venta A LOS EFECTOS DE LIBERAR LA COMISIÓN (revisión de la misión,
+     * 28/10/2026). No es `cobrado_de()`, y la diferencia es a propósito:
+     *
+     *  - Una cuota `pagada` cuenta su `monto` completo, aunque `monto_pagado` diga menos: si Lucas la
+     *    dio por completa ("con esto la cuota está", un descuento o una diferencia de cambio), para
+     *    el vendedor la cuota está cobrada.
+     *  - Lo cobrado de cada cuota se topa en su `monto`. El caso real es Únicas: pagos en PESOS
+     *    cargados sobre una cuota en DÓLARES (`monto_pagado` = 436.000 sobre USD 600). Sumados
+     *    tal cual, una sola cuota liberaría la comisión de la venta entera.
+     *
+     * El resumen de la venta (`resumen.cobrado`) sigue usando `cobrado_de()`, el mismo criterio que
+     * el resumen de cuotas de siempre: lo que se muestra como cobrado no cambia.
+     *
+     * @param Venta $venta
+     *
+     * @return float
+     */
+    protected function cobrado_para_comision(Venta $venta): float
+    {
+        return round((float) $venta->cuotas->sum(function (LicenciaCuota $cuota) {
+            $monto = (float) $cuota->monto;
+
+            if ($cuota->estado === LicenciaCuota::ESTADO_PAGADA) {
+                return $monto;
+            }
+
+            return min($monto, max(0.0, (float) ($cuota->monto_pagado ?? 0)));
         }), 2);
     }
 
