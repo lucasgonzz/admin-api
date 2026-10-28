@@ -4,6 +4,8 @@ namespace App\Services;
 
 use App\Events\SupportMessageReceived;
 use App\Events\SupportTicketUpdated;
+use App\Models\AgentImplementation;
+use App\Models\AgentImplementationEvent;
 use App\Models\Implementation;
 use App\Models\ImplementationStage;
 use App\Models\SupportCodexCase;
@@ -28,6 +30,12 @@ class SupportCodexService
 
     /** Cuántos mensajes reales (los últimos) de cada ticket anterior devuelve `history`. */
     const MENSAJES_POR_TICKET_ANTERIOR = 30;
+
+    /** `tipo` de `implementation-note` por defecto: la implementación del SISTEMA (el comportamiento de siempre). */
+    const NOTE_TYPE_SISTEMA = 'sistema';
+
+    /** `tipo` de `implementation-note` para la implementación de Agentes de IA (misión `implementacion-agentes-ia`). */
+    const NOTE_TYPE_AGENTES = 'agentes';
 
     public function pending(): array
     {
@@ -356,13 +364,20 @@ class SupportCodexService
      * devuelve la entrada que ya estaba con `registrada: false`. Todo en una transacción con el ticket, el caso y la
      * etapa bloqueados.
      *
+     * Con `tipo: agentes` (misión `implementacion-agentes-ia`, 28/10/2026) la nota va a la implementación de Agentes
+     * de IA: ver `agent_implementation_note()`. Sin `tipo` (o con `sistema`) el camino es exactamente el de siempre.
+     *
      * @param int                  $id    Id del ticket.
-     * @param array<string, mixed> $input lease_token, texto, etapa (opcional).
+     * @param array<string, mixed> $input lease_token, texto, etapa (opcional), tipo (opcional).
      *
      * @return array{registrada: bool, implementation_id: int, etapa: int, at: string}
      */
     public function implementation_note(int $id, array $input): array
     {
+        if (isset($input['tipo']) && $input['tipo'] === self::NOTE_TYPE_AGENTES) {
+            return $this->agent_implementation_note($id, $input);
+        }
+
         return DB::transaction(function () use ($id, $input) {
             $ticket = SupportTicket::lockForUpdate()->findOrFail($id);
             $case = SupportCodexCase::where('support_ticket_id', $id)->lockForUpdate()->first();
@@ -419,6 +434,75 @@ class SupportCodexService
                 'implementation_id' => (int) $implementation->id,
                 'etapa' => $etapa,
                 'at' => $entrada['at'],
+            ];
+        });
+    }
+
+    /**
+     * La nota de Martín en la implementación de AGENTES DE IA del cliente del ticket (`implementation-note` con
+     * `tipo: agentes`, misión `implementacion-agentes-ia`, 28/10/2026).
+     *
+     * Agrega un evento `{kind: nota, source: martin}` a la bitácora de la implementación de agentes ABIERTA del
+     * cliente del ticket, en la etapa pedida (1..8) o en la actual. No cambia estados ni manda nada.
+     *
+     * Frenos, los mismos que la del sistema: la reserva vigente del ticket (423 `invalid_lease`); una implementación
+     * de agentes `in_progress` del cliente del ticket (409 `sin_implementacion_abierta`, que `soporte.py` traduce a
+     * `registrada: false` con el motivo, igual que en el sistema; el cliente sale del ticket, nunca de un
+     * parámetro). Idempotente: el mismo texto de Martín en la misma etapa devuelve el evento que ya estaba con
+     * `registrada: false` (la bitácora no guarda el ticket, así que la clave es texto + etapa + origen).
+     *
+     * @param int                  $id    Id del ticket.
+     * @param array<string, mixed> $input lease_token, texto, etapa (opcional), tipo (`agentes`).
+     *
+     * @return array{registrada: bool, tipo: string, implementation_id: int, etapa: int, at: string}
+     */
+    private function agent_implementation_note(int $id, array $input): array
+    {
+        return DB::transaction(function () use ($id, $input) {
+            $ticket = SupportTicket::lockForUpdate()->findOrFail($id);
+            $case = SupportCodexCase::where('support_ticket_id', $id)->lockForUpdate()->first();
+            $this->assert_lease($case, (string) $input['lease_token']);
+
+            $implementation = empty($ticket->client_id) ? null : AgentImplementation::where('client_id', (int) $ticket->client_id)
+                ->where('status', AgentImplementation::STATUS_IN_PROGRESS)->orderByDesc('id')->lockForUpdate()->first();
+            if ($implementation === null) {
+                $this->fail(409, 'sin_implementacion_abierta', 'El cliente de este ticket no tiene una implementación de Agentes de IA en curso.');
+            }
+
+            $etapa = isset($input['etapa']) && $input['etapa'] !== null ? (int) $input['etapa'] : (int) $implementation->current_stage;
+            $texto = trim((string) $input['texto']);
+
+            $existente = AgentImplementationEvent::where('agent_implementation_id', $implementation->id)
+                ->where('kind', AgentImplementationEvent::KIND_NOTA)
+                ->where('source', AgentImplementationEvent::SOURCE_MARTIN)
+                ->where('stage_number', $etapa)
+                ->where('texto', AgentImplementationEvent::fit_texto($texto))
+                ->orderBy('id')
+                ->first();
+            if ($existente !== null) {
+                return [
+                    'registrada' => false,
+                    'tipo' => self::NOTE_TYPE_AGENTES,
+                    'implementation_id' => (int) $implementation->id,
+                    'etapa' => $etapa,
+                    'at' => $existente->created_at === null ? '' : $existente->created_at->toISOString(),
+                ];
+            }
+
+            $evento = app(AgentImplementationService::class)->add_event(
+                $implementation,
+                $texto,
+                $etapa,
+                AgentImplementationEvent::KIND_NOTA,
+                AgentImplementationEvent::SOURCE_MARTIN
+            );
+
+            return [
+                'registrada' => true,
+                'tipo' => self::NOTE_TYPE_AGENTES,
+                'implementation_id' => (int) $implementation->id,
+                'etapa' => $etapa,
+                'at' => $evento->created_at === null ? now()->toISOString() : $evento->created_at->toISOString(),
             ];
         });
     }

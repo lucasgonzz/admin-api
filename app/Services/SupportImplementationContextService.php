@@ -3,6 +3,9 @@
 namespace App\Services;
 
 use App\Http\Controllers\Api\ClaudeImplementationOpsController;
+use App\Models\AgentImplementation;
+use App\Models\AgentImplementationEvent;
+use App\Models\AgentImplementationStage;
 use App\Models\Client;
 use App\Models\ClientInstallation;
 use App\Models\EcommerceImplementation;
@@ -47,6 +50,12 @@ use Illuminate\Support\Facades\Schema;
  *  - **Nunca lanza.** El contexto se arma en cada `claim` y en cada `GET tickets/{id}`; si una consulta
  *    de acá fallara, el ticket se quedaría sin atender. Ante un error el bloque lo DICE (`error`) en vez
  *    de volver null, porque null significa «no tiene implementación» y Martín lo leería así.
+ *
+ * Desde el 28/10/2026 (misión `implementacion-agentes-ia`) el bloque suma una tercera clave, `agentes`: la
+ * implementación de Agentes de IA del cliente (conectar su número de WhatsApp), con las mismas reglas de
+ * abierta/cerrada y sin teléfonos ni ids de Meta (`conectado` alcanza). Es aditiva: los consumidores viejos
+ * la ignoran. Se arma con su propio `try`: si falla, `agentes` dice `{error: ...}` y `sistema`/`tienda`
+ * viajan igual.
  *
  * Lógica replicada (no reutilizada) de `ClaudeImplementationOpsController`: sus métodos son `protected`
  * y están atados al request de la skill. Acá se usan solo sus constantes públicas (`ETAPAS`,
@@ -151,12 +160,19 @@ class SupportImplementationContextService
     ];
 
     /**
+     * Cuántos eventos (los más nuevos) de la bitácora de la implementación de agentes viajan.
+     *
+     * @var int
+     */
+    const EVENTOS_DE_AGENTES = 20;
+
+    /**
      * Arma el bloque `implementation` para un ticket.
      *
      * @param SupportTicket $ticket Ticket de soporte (con o sin `client` cargado).
      *
-     * @return array<string, mixed>|null null = el cliente no tiene ninguna implementación abierta ni
-     *                                   cerrada en los últimos 30 días.
+     * @return array<string, mixed>|null null = el cliente no tiene ninguna implementación (sistema, tienda
+     *                                   ni agentes) abierta ni cerrada en los últimos 30 días.
      */
     public function bloque_para_el_ticket(SupportTicket $ticket)
     {
@@ -174,14 +190,16 @@ class SupportImplementationContextService
 
             $sistema = $this->bloque_del_sistema($client, $es_el_dueno);
             $tienda  = $this->bloque_de_la_tienda($client, $es_el_dueno);
+            $agentes = $this->bloque_de_agentes($client);
 
-            if ($sistema === null && $tienda === null) {
+            if ($sistema === null && $tienda === null && $agentes === null) {
                 return null;
             }
 
             return [
                 'sistema' => $sistema,
                 'tienda'  => $tienda,
+                'agentes' => $agentes,
             ];
         } catch (\Throwable $exception) {
             Log::channel('daily')->error('Soporte Codex: no se pudo armar el contexto de la implementación.', [
@@ -192,6 +210,7 @@ class SupportImplementationContextService
             return [
                 'sistema' => null,
                 'tienda'  => null,
+                'agentes' => null,
                 'error'   => 'No se pudo leer la implementación de este cliente. No des por hecho que no tiene una: consultalo con Lucas.',
             ];
         }
@@ -284,6 +303,124 @@ class SupportImplementationContextService
                 ? $this->conversacion_de_la_tienda($implementation, $this->token_del_formulario($client))
                 : null,
         ];
+    }
+
+    /**
+     * El bloque `agentes`: la implementación de Agentes de IA del cliente (conectar su número de WhatsApp),
+     * si viaja. Misión `implementacion-agentes-ia`, 28/10/2026.
+     *
+     * Forma (contrato con `herramientas/soporte-codex/soporte.py`): `{id, abierta, camino, etapa_actual,
+     * nombre_etapa_actual, etapas: [{numero, nombre, estado, completada_at, data}], eventos: [los últimos 20,
+     * más nuevos primero: {etapa, kind, source, texto, created_at}], conectado}`.
+     *
+     * Reglas, las mismas que sistema y tienda: viaja la abierta (`in_progress`); si no hay abierta, la última
+     * `completed` cerrada hace ≤ 30 días, con `abierta: false`; una cancelada o una más vieja no viaja (null).
+     *
+     * 🔴 Sin datos personales: ni el teléfono ni los ids de Meta/Kapso (Martín no los necesita: `conectado`
+     * dice si ya hay número conectado), `data` sin `whatsapp_ops` (la memoria interna de los envíos), y los
+     * textos de la bitácora y de `data` pasan por `enmascarar()` (un teléfono, CUIT o clave que alguien haya
+     * escrito en una nota no viaja).
+     *
+     * 🔴 Nunca lanza: si algo falla devuelve `{error: ...}` y el resto del bloque viaja igual. Null significa
+     * «no tiene», y Martín lo leería así.
+     *
+     * @param Client $client Cliente del ticket.
+     *
+     * @return array<string, mixed>|null
+     */
+    protected function bloque_de_agentes(Client $client)
+    {
+        try {
+            $implementation = AgentImplementation::where('client_id', $client->id)
+                ->where('status', AgentImplementation::STATUS_IN_PROGRESS)
+                ->orderByDesc('id')
+                ->first();
+
+            /* Sin abierta, la última completada (si cerró hace ≤ 30 días viaja; si no, `viaja()` la deja afuera). */
+            if ($implementation === null) {
+                $implementation = AgentImplementation::where('client_id', $client->id)
+                    ->where('status', AgentImplementation::STATUS_COMPLETED)
+                    ->orderByDesc('id')
+                    ->first();
+            }
+
+            if ($implementation === null || ! $this->viaja($implementation->status, $implementation->completed_at)) {
+                return null;
+            }
+
+            $etapas = [];
+            $filas  = AgentImplementationStage::where('agent_implementation_id', $implementation->id)->orderBy('stage_number')->get();
+            foreach ($filas as $etapa) {
+                $data = $this->enmascarar_datos($etapa->public_data());
+
+                $etapas[] = [
+                    'numero'        => (int) $etapa->stage_number,
+                    'nombre'        => AgentImplementation::stage_name($etapa->stage_number),
+                    'estado'        => (string) $etapa->status,
+                    'completada_at' => $this->instante($etapa->completed_at),
+                    /* Objeto JSON aunque esté vacía ({} y no []): el que la lee le pide claves. */
+                    'data'          => count($data) > 0 ? $data : new \stdClass(),
+                ];
+            }
+
+            $eventos = [];
+            $filas   = AgentImplementationEvent::where('agent_implementation_id', $implementation->id)
+                ->orderByDesc('id')
+                ->limit(self::EVENTOS_DE_AGENTES)
+                ->get();
+            foreach ($filas as $evento) {
+                $eventos[] = [
+                    'etapa'      => $evento->stage_number === null ? null : (int) $evento->stage_number,
+                    'kind'       => (string) $evento->kind,
+                    'source'     => (string) $evento->source,
+                    'texto'      => $this->enmascarar((string) $evento->texto, null),
+                    'created_at' => $this->instante($evento->created_at),
+                ];
+            }
+
+            $actual = (int) $implementation->current_stage;
+
+            return [
+                'id'                  => (int) $implementation->id,
+                'abierta'             => $this->esta_abierta($implementation->status),
+                'camino'              => $implementation->camino === null ? null : (string) $implementation->camino,
+                'etapa_actual'        => $actual,
+                'nombre_etapa_actual' => AgentImplementation::stage_name($actual),
+                'etapas'              => $etapas,
+                'eventos'             => $eventos,
+                'conectado'           => trim((string) $implementation->phone_number_id) !== '',
+            ];
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->error('Soporte Codex: no se pudo armar el contexto de la implementación de agentes.', [
+                'client_id' => $client->id,
+                'error'     => $exception->getMessage(),
+            ]);
+
+            return [
+                'error' => 'No se pudo leer la implementación de Agentes de IA de este cliente. No des por hecho que no tiene una: consultalo con Lucas.',
+            ];
+        }
+    }
+
+    /**
+     * Enmascara los textos de un `data` de etapa con `enmascarar()`, recorriendo listas y objetos anidados.
+     * Lo que no es texto (booleanos, números) queda igual.
+     *
+     * @param array<mixed> $datos Los datos de la etapa (ya sin `whatsapp_ops`).
+     *
+     * @return array<mixed>
+     */
+    protected function enmascarar_datos(array $datos)
+    {
+        foreach ($datos as $clave => $valor) {
+            if (is_array($valor)) {
+                $datos[$clave] = $this->enmascarar_datos($valor);
+            } elseif (is_string($valor)) {
+                $datos[$clave] = $this->enmascarar($valor, null);
+            }
+        }
+
+        return $datos;
     }
 
     /**

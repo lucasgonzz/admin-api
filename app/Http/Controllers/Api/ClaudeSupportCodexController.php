@@ -72,7 +72,11 @@ class ClaudeSupportCodexController extends Controller
      * la etapa; no cambia estados ni manda nada). Exige la reserva vigente del ticket. El cliente y la
      * implementación salen del ticket, nunca del body. Frenos y forma en `SupportCodexService::implementation_note()`.
      *
-     * @param Request             $request Body: lease_token, texto (1..1000), etapa (1..7, opcional: la actual).
+     * Campo opcional `tipo` (misión `implementacion-agentes-ia`, 28/10/2026): `sistema` (default: sin `tipo` se
+     * comporta exactamente como antes) o `agentes`, que deja la nota en la bitácora de la implementación de
+     * Agentes de IA abierta del cliente (etapa 1..8). La etapa máxima depende del tipo: 7 del sistema, 8 de agentes.
+     *
+     * @param Request             $request Body: lease_token, texto (1..1000), etapa (opcional: la actual), tipo (opcional).
      * @param int|string          $id      Id del ticket.
      * @param SupportCodexService $service El servicio del puente.
      *
@@ -80,10 +84,13 @@ class ClaudeSupportCodexController extends Controller
      */
     public function implementation_note(Request $request, $id, SupportCodexService $service)
     {
+        $es_de_agentes = $request->input('tipo') === SupportCodexService::NOTE_TYPE_AGENTES;
         $data = $request->validate([
             'lease_token' => 'required|string|min:32|max:128',
             'texto' => 'required|string|min:1|max:1000',
-            'etapa' => 'sometimes|nullable|integer|between:1,' . \App\Models\Implementation::ULTIMA_ETAPA,
+            'etapa' => 'sometimes|nullable|integer|between:1,'
+                . ($es_de_agentes ? \App\Models\AgentImplementation::LAST_STAGE : \App\Models\Implementation::ULTIMA_ETAPA),
+            'tipo' => 'sometimes|nullable|string|in:' . SupportCodexService::NOTE_TYPE_SISTEMA . ',' . SupportCodexService::NOTE_TYPE_AGENTES,
         ]);
         $resultado = $service->implementation_note((int) $id, $data);
 
