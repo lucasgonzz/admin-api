@@ -182,6 +182,15 @@ Route::get('client/{clientId}/factura/{invoiceId}/pdf-view/{token}', [ClientMens
 Route::get('client/{clientId}/factura/{invoiceId}/pdf-publico/{token}', [ClientMensualidadController::class, 'factura_pdf_publico']);
 
 /*
+| Guías públicas para el cliente (misión implementacion-agentes-ia, 28/10/2026): los PDF de cómo conectar su
+| número de WhatsApp a los Agentes de IA, para mandarle el link por WhatsApp. Públicas a propósito (las abre el
+| cliente, sin sesión). Viven en resources/guias y no en public/ porque /deploy-admin no despliega public/. Lista
+| blanca CERRADA de nombres en PublicGuideController: cualquier otro nombre es 404 (no hay forma de leer otro archivo).
+*/
+Route::get('guias/{archivo}', [\App\Http\Controllers\PublicGuideController::class, 'show'])
+    ->where('archivo', '[A-Za-z0-9._-]+');
+
+/*
 | Página inmersiva de demo (grupo 300, prompt 03): pública, sin auth:sanctum, identificada por
 | el uuid del lead (no enumerable). GET arma el payload completo de la página; POST recibe las
 | nueve respuestas del formulario de configuración. Ver App\Http\Controllers\DemoExperienciaController.
