@@ -747,6 +747,26 @@ Route::middleware('claude.task.key')
         Route::post('implementations/{id}/whatsapp', 'Api\ClaudeImplementationOpsController@whatsapp_json')
             ->whereNumber('id');
 
+        /* Implementaciones de AGENTES DE IA (misión `implementacion-agentes-ia`, 28/10/2026): conectar el número de
+           WhatsApp del cliente a sus Agentes de IA en ocho etapas, registradas acá por la skill `/implementar-agentes`
+           para que Martín las vea en el contexto del ticket (clave `agentes`). Solo escriben filas del admin, salvo
+           `whatsapp`, que manda al dueño por su ticket de soporte con los mismos frenos que el de `implementations`.
+           Las rutas sin {id} van ANTES que las con {id}, y {id} solo dígitos (misma convención del bloque). `{n}` se
+           restringe a dígitos y el rango 1–8 lo valida el controlador con un 422 legible. */
+        Route::get('agent-implementations', 'Api\ClaudeAgentImplementationOpsController@index_json');
+        Route::post('agent-implementations', 'Api\ClaudeAgentImplementationOpsController@store_json');
+        Route::get('agent-implementations/{id}', 'Api\ClaudeAgentImplementationOpsController@show_json')
+            ->whereNumber('id');
+        Route::patch('agent-implementations/{id}', 'Api\ClaudeAgentImplementationOpsController@update_json')
+            ->whereNumber('id');
+        Route::post('agent-implementations/{id}/stages/{n}', 'Api\ClaudeAgentImplementationOpsController@stage_json')
+            ->whereNumber('id')
+            ->whereNumber('n');
+        Route::post('agent-implementations/{id}/events', 'Api\ClaudeAgentImplementationOpsController@event_json')
+            ->whereNumber('id');
+        Route::post('agent-implementations/{id}/whatsapp', 'Api\ClaudeAgentImplementationOpsController@whatsapp_json')
+            ->whereNumber('id');
+
         /* Centro de recursos para clientes (misión centro-de-recursos-clientes, 13/10/2026). La carga del catálogo la
            manda `publicar_centro.py` después de subir los videos a R2: upsert por `codigo` y, con desactivar_faltantes,
            los que no vinieron quedan inactivos (nunca se borran: tienen avance). Borra la caché del catálogo público.
