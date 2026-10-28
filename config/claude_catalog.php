@@ -1656,6 +1656,112 @@ return [
                 ['nombre' => 'confirm_client_name', 'obligatorio' => false, 'validacion' => 'required_if:dry_run,false|nullable|string|max:190', 'que_es' => 'El nombre exacto del cliente (clients.name). Obligatorio con dry_run=false.'],
             ],
         ],
+        /* Implementaciones de Agentes de IA (misión implementacion-agentes-ia, 28/10/2026). Van después de
+           'POST api/claude/implementations/{id}/whatsapp'. */
+        'GET api/claude/agent-implementations' => [
+            'para_que'     => 'Las implementaciones de Agentes de IA (conectar el número de WhatsApp del cliente a sus agentes, ocho etapas), más nuevas primero, filtradas por client_id y/o status. Hasta 100, sin paginar. Cada una con el estado completo: columnas (id, client_id, status, camino, current_stage, kapso_customer_id, phone_number_id, waba_id, business_portfolio_id, started_at, completed_at, created_at, updated_at) + etapas [{numero, nombre, estado, data, started_at, completed_at}] (data sin whatsapp_ops, {} si vacía) + eventos (los últimos 50, más nuevos primero: id, etapa, kind, source, texto, created_at) + cliente {id, name}. Respuesta {data: [impl]}.',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+            'parametros'   => [
+                ['nombre' => 'client_id', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:1', 'que_es' => 'Solo las de ese cliente.'],
+                ['nombre' => 'status', 'obligatorio' => false, 'validacion' => 'nullable|string|in:in_progress,completed,cancelled', 'que_es' => 'Solo las de ese estado.'],
+            ],
+        ],
+        'GET api/claude/agent-implementations/{id}' => [
+            'para_que'     => 'El estado completo de UNA implementación de Agentes de IA ({model: impl}, misma forma que el listado). 404 si no existe.',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'La implementación.'],
+            ],
+        ],
+        'POST api/claude/agent-implementations' => [
+            'para_que'     => 'Da de alta la implementación de Agentes de IA de un cliente con sus ocho etapas (Preparación, Entrenamiento, Conexión con Meta, Conexión al sistema, Plantillas, Agente y pruebas, Pago y verificación, En marcha): la 1 en curso con el camino en su data y el resto pending. Deja un evento de avance. Solo escribe filas del admin. 201 {model}.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Lista blanca de parámetros: cualquier otra clave es 422 y no se crea nada.',
+                'Una sola abierta por cliente: si ya tiene una in_progress, 409 {error: ya_tiene_una_abierta, id} y no se crea nada (para empezar de nuevo, se cancela con PATCH). El chequeo va con la fila del cliente bloqueada: dos altas simultáneas no crean dos.',
+                '404 si el cliente no existe.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'client_id', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'El cliente.'],
+                ['nombre' => 'camino', 'obligatorio' => true, 'validacion' => 'required|string|in:nuevo,propio', 'que_es' => 'nuevo = línea nueva sin historial; propio = el número que el negocio ya usa.'],
+            ],
+        ],
+        'PATCH api/claude/agent-implementations/{id}' => [
+            'para_que'     => 'Cambia el camino, carga los ids de Kapso y Meta en sus columnas y/o cierra la implementación (completed o cancelled, con completed_at). Solo toca lo que vino; un null explícito borra el id. Deja eventos dato (nombra qué se cargó, nunca los valores) y avance (al cerrar). 200 {model}.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Lista blanca de parámetros: cualquier otra clave es 422.',
+                'status solo acepta completed o cancelled: abrir es el alta.',
+                'La bitácora no guarda los ids de Meta: viaja al contexto de Martín.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'La implementación.'],
+                ['nombre' => 'camino', 'obligatorio' => false, 'validacion' => 'nullable|string|in:nuevo,propio', 'que_es' => 'El camino.'],
+                ['nombre' => 'kapso_customer_id', 'obligatorio' => false, 'validacion' => 'nullable|string|max:80', 'que_es' => 'El cliente de Kapso.'],
+                ['nombre' => 'phone_number_id', 'obligatorio' => false, 'validacion' => 'nullable|string|max:60', 'que_es' => 'El id del número en Meta (que exista = conectado).'],
+                ['nombre' => 'waba_id', 'obligatorio' => false, 'validacion' => 'nullable|string|max:60', 'que_es' => 'La cuenta de WhatsApp Business.'],
+                ['nombre' => 'business_portfolio_id', 'obligatorio' => false, 'validacion' => 'nullable|string|max:60', 'que_es' => 'El portfolio comercial de Meta.'],
+                ['nombre' => 'status', 'obligatorio' => false, 'validacion' => 'nullable|string|in:completed,cancelled', 'que_es' => 'Cierra la implementación.'],
+            ],
+        ],
+        'POST api/claude/agent-implementations/{id}/stages/{n}' => [
+            'para_que'     => 'Registra una etapa (1 a 8): su estado, lo que se suma a su data (se MEZCLA: las claves nuevas pisan las del mismo nombre, el resto queda) y una nota opcional (evento nota). Si el estado cambió deja un evento avance. Recalcula current_stage = la primera etapa que no está completed ni skipped (8 si todas). in_progress pone started_at; completed/skipped ponen completed_at; pending limpia las dos. 200 {model}.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Lista blanca de parámetros: cualquier otra clave es 422.',
+                'Etapa fuera de 1–8: 422 motivo etapa_fuera_de_rango, sin escribir nada.',
+                'data tiene que ser un objeto (una lista es 422 data_no_es_objeto) y no puede traer whatsapp_ops (422 clave_reservada: es la memoria de la idempotencia de los envíos).',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'La implementación.'],
+                ['nombre' => '{n} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; 1 a 8', 'que_es' => 'La etapa.'],
+                ['nombre' => 'status', 'obligatorio' => true, 'validacion' => 'required|string|in:pending,in_progress,completed,skipped', 'que_es' => 'El estado de la etapa.'],
+                ['nombre' => 'data', 'obligatorio' => false, 'validacion' => 'nullable|array (objeto JSON)', 'que_es' => 'Lo que se registra en la etapa (claves sugeridas en AgentImplementation::STAGES).'],
+                ['nombre' => 'nota', 'obligatorio' => false, 'validacion' => 'nullable|string|max:1000', 'que_es' => 'Una nota que queda como evento de la etapa.'],
+            ],
+        ],
+        'POST api/claude/agent-implementations/{id}/events' => [
+            'para_que'     => 'Agrega un evento a la bitácora de la implementación de Agentes de IA (la que lee Martín en el contexto del ticket). 201 {event: {id, etapa, kind, source, texto, created_at}}.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Lista blanca de parámetros: cualquier otra clave es 422.',
+                'texto obligatorio, no vacío y de hasta 1000 caracteres. No escribas teléfonos ni ids de Meta: viaja al contexto de Martín (igual se enmascaran los números largos).',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'La implementación.'],
+                ['nombre' => 'texto', 'obligatorio' => true, 'validacion' => 'required|string|max:1000', 'que_es' => 'El texto del evento.'],
+                ['nombre' => 'etapa', 'obligatorio' => false, 'validacion' => 'nullable|integer|between:1,8', 'que_es' => 'La etapa a la que se refiere (sin ella, general).'],
+                ['nombre' => 'kind', 'obligatorio' => false, 'validacion' => 'nullable|string|in:nota,avance,whatsapp,dato — default nota', 'que_es' => 'El tipo de evento.'],
+                ['nombre' => 'source', 'obligatorio' => false, 'validacion' => 'nullable|string|in:martin,claude,panel — default claude', 'que_es' => 'Quién lo deja asentado.'],
+            ],
+        ],
+        'POST api/claude/agent-implementations/{id}/whatsapp' => [
+            'para_que'     => 'Manda un WhatsApp al DUEÑO del cliente por su TICKET DE SOPORTE (número de Kapso del admin, SupportWhatsappOpenerService::open(): reusa el ticket abierto o abre uno; texto libre con la ventana abierta, plantilla cc_soporte_apertura si está cerrada) y lo deja en la bitácora como evento whatsapp si el cliente lo recibió. La operación queda en agent_implementation_stages.data.whatsapp_ops de la etapa (o de la actual). Respuesta {dry_run:false, repetida, operation_id, etapa, enviado, estado (sent|failed|partial|unknown), uso_plantilla, ventana_abierta, ticket_id, message_id, whatsapp_message_id, reusado, error, respuesta_ira_a, avisos, at}.',
+            'escribe'      => true,
+            'peligrosidad' => 'media',
+            'frenos'       => [
+                'Lista blanca de parámetros: cualquier otra clave es 422 (no hay dry_run ni telefono: siempre va al dueño, clients.phone).',
+                '🔴 Circuito de Codex apagado: 422 motivo codex_apagado (nadie atendería la respuesta del ticket).',
+                'Cliente inexistente 404; dado de baja 422 cliente_inactivo; sin teléfono válido del dueño 422 sin_contacto; sin admin remitente 422 sin_admin.',
+                '🔴 Mismos frenos que POST claude/implementations/{id}/whatsapp, con la misma cuenta (ImplementationSupportWhatsappService::plan()): ventana cerrada y texto de más de 600 → 422 texto_largo_para_plantilla; la respuesta no caería en el ticket → 422 respuesta_al_hilo; Martín con reserva vigente → 423 martin_atendiendo; un entrante esperando a Martín → 423 martin_pendiente. En ninguno se manda nada.',
+                '🔴 Idempotente por operation_id (8 a 80, letras, números, guión y guión bajo): misma clave y mismo contenido (texto, etapa y destinatario) → 200 con lo guardado y repetida=true sin reenviar; otro contenido → 409 operation_id_reusado; todavía mandando → 409 envio_en_curso. Búsqueda y reserva con la implementación bloqueada.',
+                'Un envío que falla NO tira: 200 con enviado=false y no deja evento; la misma clave devuelve el failed guardado (reintentar es con una operation_id nueva).',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'La implementación.'],
+                ['nombre' => 'operation_id', 'obligatorio' => true, 'validacion' => 'required|string|min:8|max:80|regex:/^[A-Za-z0-9_-]+$/', 'que_es' => 'Clave idempotente del envío, una nueva por mensaje.'],
+                ['nombre' => 'texto', 'obligatorio' => true, 'validacion' => 'required|string|max:4000 (no vacío)', 'que_es' => 'El mensaje al dueño, tal como lo aprobó Lucas. Con la ventana cerrada no puede pasar de 600 caracteres.'],
+                ['nombre' => 'etapa', 'obligatorio' => false, 'validacion' => 'nullable|integer|between:1,8', 'que_es' => 'La etapa donde se guarda la operación y el evento. Por defecto la actual.'],
+            ],
+        ],
         /* Centro de recursos para clientes (misión centro-de-recursos-clientes, 13/10/2026). Va al final de
            `endpoints`, después de 'POST api/claude/implementations/{id}/mail'. */
         'POST api/claude/recursos/catalogo' => [
