@@ -16,6 +16,8 @@ use App\Models\Venta;
  *     una venta con pagos de comisión no cambia de moneda (422 en `moneda`).
  *  3. Una venta en pesos sin importe es 422 (los precios de lista son en dólares), en el panel y
  *     en claude/*.
+ *  4. En `cobranzas/ventas`, las cifras de comisión del resumen por moneda suman solo ventas con
+ *     vendedor.
  */
 class RevisionDeVentasYComisionesTest extends BaseDeVentas
 {
@@ -150,5 +152,35 @@ class RevisionDeVentasYComisionesTest extends BaseDeVentas
         $this->alta_de_venta($client, ['productos' => ['gestion'], 'moneda' => 'ARS', 'monto_total' => 1200000])->assertStatus(201);
         $this->alta_de_venta($client, ['productos' => ['gestion'], 'moneda' => 'ARS', 'cuotas' => [['monto' => 500000]]])->assertStatus(201);
         $this->assertSame(2, Venta::where('client_id', $client->id)->where('moneda', 'ARS')->count());
+    }
+
+    /**
+     * 4. El resumen por moneda de `cobranzas/ventas` (por cliente y el de arriba) suma la comisión
+     * solo de las ventas con vendedor; lo que deben los clientes, de todas.
+     *
+     * @return void
+     */
+    public function test_el_resumen_de_ventas_suma_comision_solo_con_vendedor(): void
+    {
+        $this->admin_logueado();
+        $vendedor = $this->crear_vendedor();
+        $client = $this->crear_cliente();
+
+        // Con vendedor: 800 al 15 % = 120. Sin vendedor (null explícito): 500 al 15 % = 75, que no cuenta.
+        $this->alta_de_venta($client, ['productos' => ['gestion'], 'vendedor_admin_id' => $vendedor->id])->assertStatus(201);
+        $sin = $this->alta_de_venta($client, ['productos' => ['ecommerce'], 'vendedor_admin_id' => null]);
+        $sin->assertStatus(201);
+        $this->assertEqualsWithDelta(75.0, $sin->json('venta.comision_monto'), 0.001, 'La venta sin vendedor tiene su comisión calculada…');
+
+        $tabla = $this->getJson('/api/admin/cobranzas/ventas');
+        $tabla->assertStatus(200);
+        $fila = collect($tabla->json('clientes'))->firstWhere('client_id', $client->id);
+
+        $usd = $fila['resumen_por_moneda']['USD'];
+        $this->assertEqualsWithDelta(1300.0, $usd['total'], 0.001, 'Lo que deben los clientes cuenta todas las ventas.');
+        $this->assertEqualsWithDelta(1300.0, $usd['pendiente'], 0.001);
+        $this->assertEqualsWithDelta(120.0, $usd['comision_total'], 0.001, '…pero no entra en lo que hay que pagarle a los vendedores.');
+        $this->assertEqualsWithDelta(120.0, $usd['comision_por_liberar'], 0.001);
+        $this->assertEqualsWithDelta(0.0, $usd['comision_a_pagar'], 0.001);
     }
 }

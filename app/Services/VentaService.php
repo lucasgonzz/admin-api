@@ -754,8 +754,9 @@ class VentaService
     }
 
     /**
-     * Resumen de un conjunto de ventas por moneda: lo que deben los clientes y lo que hay que
-     * pagarle a los vendedores. Lo usa la tabla del módulo (por cliente) y sus cifras de arriba.
+     * Resumen de un conjunto de ventas por moneda: lo que deben los clientes (todas las ventas) y lo
+     * que hay que pagarle a los vendedores (solo las ventas CON vendedor). Lo usa la tabla del
+     * módulo (por cliente) y sus cifras de arriba.
      *
      * @param iterable<Venta> $ventas Con `cuotas` y `comision_pagos` cargadas.
      *
@@ -785,6 +786,14 @@ class VentaService
             $resumen[$moneda]['total'] = round($resumen[$moneda]['total'] + $json['resumen']['total'], 2);
             $resumen[$moneda]['cobrado'] = round($resumen[$moneda]['cobrado'] + $json['resumen']['cobrado'], 2);
             $resumen[$moneda]['pendiente'] = round($resumen[$moneda]['pendiente'] + $json['resumen']['pendiente'], 2);
+
+            /* La comisión cuenta solo si la venta tiene vendedor: una venta sin vendedor puede tener
+               porcentaje (y comision_monto), pero no hay a quién pagarle, y sumarla inflaría "lo que
+               hay que pagarle a los vendedores" con plata que no le corresponde a nadie. */
+            if ($json['vendedor_admin_id'] === null) {
+                continue;
+            }
+
             $resumen[$moneda]['comision_total'] = round($resumen[$moneda]['comision_total'] + $json['comision']['total'], 2);
             $resumen[$moneda]['comision_liberada'] = round($resumen[$moneda]['comision_liberada'] + $json['comision']['liberada'], 2);
             $resumen[$moneda]['comision_pagada'] = round($resumen[$moneda]['comision_pagada'] + $json['comision']['pagada'], 2);
