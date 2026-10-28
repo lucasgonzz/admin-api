@@ -127,6 +127,9 @@ class AuthController extends Controller
             'name'                      => $admin->name,
             'email'                     => $admin->email,
             'is_closer'                 => (bool) ($admin->is_closer ?? false),
+            // Misión ventas-y-comisiones (28/10/2026): la SPA muestra "Mis comisiones" en el menú
+            // solo a los vendedores, y lo lee de acá (`auth.admin.es_vendedor`).
+            'es_vendedor'               => (bool) ($admin->es_vendedor ?? false),
             'is_default_support_owner'  => (bool) $admin->is_default_support_owner,
             'is_default_task_assignee'  => (bool) ($admin->is_default_task_assignee ?? false),
         ];

@@ -154,8 +154,9 @@ class ComisionesDeVendedoresTest extends BaseDeVentas
         $filtrada = $this->getJson('/api/admin/comisiones?vendedor_admin_id=' . $otra->id);
         $this->assertSame([$venta_otra], collect($filtrada->json('comisiones'))->pluck('id')->all());
 
-        // "Mis comisiones" como Tomás: solo lo suyo.
+        // "Mis comisiones" como Tomás: solo lo suyo. Y `me` le dice a la SPA que es vendedor.
         Sanctum::actingAs($tomas);
+        $this->assertTrue($this->getJson('/api/admin/me')->json('admin.es_vendedor'));
         $mias = $this->getJson('/api/admin/comisiones/mias');
         $mias->assertStatus(200);
         $this->assertSame([$venta_tomas], collect($mias->json('comisiones'))->pluck('id')->all());
@@ -177,5 +178,6 @@ class ComisionesDeVendedoresTest extends BaseDeVentas
         // Lucas, que no vende, no tiene comisiones propias.
         Sanctum::actingAs($lucas);
         $this->assertCount(0, $this->getJson('/api/admin/comisiones/mias')->json('comisiones'));
+        $this->assertFalse($this->getJson('/api/admin/me')->json('admin.es_vendedor'));
     }
 }
