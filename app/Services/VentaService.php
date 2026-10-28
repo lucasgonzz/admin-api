@@ -365,7 +365,9 @@ class VentaService
      *   vieja y quedarían comparados contra una comisión en otra.
      * - Asignar un vendedor a una venta sin porcentaje (las viejas, migradas sin comisión) le pone
      *   el porcentaje por defecto si no vino uno.
-     * - `comision_porcentaje` null explícito saca la comisión (venta sin comisión).
+     * - `comision_porcentaje` null explícito saca la comisión SOLO si la venta queda sin vendedor.
+     *   Con vendedor, un null se trata como ausente (se conserva el % o se pone el por defecto);
+     *   para una venta con vendedor y sin comisión se manda 0.
      *
      * @param Venta $venta
      * @param array $datos {productos?, descripcion?, fecha?, moneda?, vendedor_admin_id?, comision_porcentaje?, observacion?}
@@ -417,13 +419,21 @@ class VentaService
                     : null;
             }
 
-            if (array_key_exists('comision_porcentaje', $datos)) {
-                $venta->comision_porcentaje = $this->viene_con_valor($datos, 'comision_porcentaje')
-                    ? round((float) $datos['comision_porcentaje'], 2)
-                    : null;
-            } elseif ($venta->vendedor_admin_id !== null && $venta->comision_porcentaje === null) {
-                // Se le asignó vendedor a una venta sin comisión: arranca con el porcentaje por defecto.
-                $venta->comision_porcentaje = $this->porcentaje_por_defecto($venta->client, (array) $venta->productos);
+            /* El porcentaje (revisión, 28/10/2026):
+               - con valor → ese (0 es válido: "sin comisión" se pide con 0, no con null);
+               - con vendedor y sin valor (ausente o null): un null explícito con vendedor no tiene
+                 sentido —es el formulario mandando el campo vacío—, así que se trata igual que si no
+                 viniera: se conserva el que tenía o, si no tenía, arranca con el por defecto;
+               - sin vendedor y null explícito → null (venta sin comisión). */
+            if ($this->viene_con_valor($datos, 'comision_porcentaje')) {
+                $venta->comision_porcentaje = round((float) $datos['comision_porcentaje'], 2);
+            } elseif ($venta->vendedor_admin_id !== null) {
+                if ($venta->comision_porcentaje === null) {
+                    // Se le asignó vendedor a una venta sin comisión: arranca con el porcentaje por defecto.
+                    $venta->comision_porcentaje = $this->porcentaje_por_defecto($venta->client, (array) $venta->productos);
+                }
+            } elseif (array_key_exists('comision_porcentaje', $datos)) {
+                $venta->comision_porcentaje = null;
             }
 
             $venta->comision_monto = $venta->comision_porcentaje !== null

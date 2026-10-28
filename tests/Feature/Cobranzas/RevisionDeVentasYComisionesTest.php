@@ -24,6 +24,8 @@ use Laravel\Sanctum\Sanctum;
  *  5. Después de cambiar de vendedor, `pagada` cuenta solo los pagos al vendedor actual, y "Mis
  *     comisiones" usa el mismo criterio para "Ya cobrado" y la lista de pagos.
  *  6. Alta, edición y baja de una cuota van en la misma transacción que el recálculo de su venta.
+ *  7. Al editar, asignar vendedor con `comision_porcentaje` null a una venta sin % le pone el por
+ *     defecto (un null con vendedor se trata como ausente; para cero se manda 0).
  */
 class RevisionDeVentasYComisionesTest extends BaseDeVentas
 {
@@ -298,5 +300,54 @@ class RevisionDeVentasYComisionesTest extends BaseDeVentas
 
         // Y la venta no se movió.
         $this->assertEqualsWithDelta(800.0, (float) Venta::find($venta_id)->monto_total, 0.001);
+    }
+
+    /**
+     * 7. Una venta sin vendedor ni comisión (como las viejas migradas): asignarle vendedor mandando
+     * `comision_porcentaje: null` —lo que manda un formulario con el campo vacío— le pone el % por
+     * defecto, no la deja sin comisión. Un null con vendedor no borra un % que ya había; 0 sí deja
+     * la comisión en cero; y sin vendedor, null saca la comisión.
+     *
+     * @return void
+     */
+    public function test_asignar_vendedor_con_porcentaje_null_aplica_el_por_defecto(): void
+    {
+        $this->admin_logueado();
+        $vendedor = $this->crear_vendedor();
+        $client = $this->crear_cliente();
+
+        // Una venta vieja: sin vendedor ni comisión.
+        $venta_id = (int) $this->alta_de_venta($client, ['productos' => ['gestion'], 'vendedor_admin_id' => null])->json('venta.id');
+        Venta::where('id', $venta_id)->update(['comision_porcentaje' => null, 'comision_monto' => null]);
+
+        $asignada = $this->putJson('/api/admin/client/' . $client->id . '/ventas/' . $venta_id, [
+            'vendedor_admin_id'   => $vendedor->id,
+            'comision_porcentaje' => null,
+        ]);
+        $asignada->assertStatus(200);
+        $this->assertEqualsWithDelta(15.0, $asignada->json('venta.comision_porcentaje'), 0.001);
+        $this->assertEqualsWithDelta(120.0, $asignada->json('venta.comision_monto'), 0.001);
+
+        // Con vendedor y un % ya puesto, otro null no lo borra.
+        $this->putJson('/api/admin/client/' . $client->id . '/ventas/' . $venta_id, ['comision_porcentaje' => 20])->assertStatus(200);
+        $de_nuevo = $this->putJson('/api/admin/client/' . $client->id . '/ventas/' . $venta_id, [
+            'vendedor_admin_id'   => $vendedor->id,
+            'comision_porcentaje' => null,
+        ]);
+        $this->assertEqualsWithDelta(20.0, $de_nuevo->json('venta.comision_porcentaje'), 0.001);
+
+        // 0 es "sin comisión" con vendedor.
+        $cero = $this->putJson('/api/admin/client/' . $client->id . '/ventas/' . $venta_id, ['comision_porcentaje' => 0]);
+        $this->assertEqualsWithDelta(0.0, $cero->json('venta.comision_porcentaje'), 0.001);
+        $this->assertEqualsWithDelta(0.0, $cero->json('venta.comision_monto'), 0.001);
+
+        // Sin vendedor, null saca la comisión.
+        $sin = $this->putJson('/api/admin/client/' . $client->id . '/ventas/' . $venta_id, [
+            'vendedor_admin_id'   => null,
+            'comision_porcentaje' => null,
+        ]);
+        $this->assertNull($sin->json('venta.vendedor_admin_id'));
+        $this->assertNull($sin->json('venta.comision_porcentaje'));
+        $this->assertNull($sin->json('venta.comision_monto'));
     }
 }
