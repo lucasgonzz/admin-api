@@ -14,6 +14,8 @@ use App\Models\Venta;
  *     en su monto (pagos en pesos sobre una cuota en dólares no liberan de más).
  *  2. La moneda de una cuota con venta es siempre la de la venta (la distinta se ignora, sin 422), y
  *     una venta con pagos de comisión no cambia de moneda (422 en `moneda`).
+ *  3. Una venta en pesos sin importe es 422 (los precios de lista son en dólares), en el panel y
+ *     en claude/*.
  */
 class RevisionDeVentasYComisionesTest extends BaseDeVentas
 {
@@ -116,5 +118,37 @@ class RevisionDeVentasYComisionesTest extends BaseDeVentas
 
         // Mandar la MISMA moneda no es un cambio: pasa.
         $this->putJson('/api/admin/client/' . $client->id . '/ventas/' . $venta_id, ['moneda' => 'USD', 'observacion' => 'ok'])->assertStatus(200);
+    }
+
+    /**
+     * 3. Una venta en ARS de productos de lista sin `monto_total` (ni cuotas) es 422 en el panel y
+     * en claude/*, sin escribir nada. Con importe, o con cuotas explícitas, pasa.
+     *
+     * @return void
+     */
+    public function test_una_venta_en_pesos_sin_importe_es_422(): void
+    {
+        $this->admin_logueado();
+        $client = $this->crear_cliente(['name' => 'Ferretería en pesos']);
+
+        $panel = $this->alta_de_venta($client, ['productos' => ['gestion'], 'moneda' => 'ARS']);
+        $panel->assertStatus(422);
+        $panel->assertJsonValidationErrors(['monto_total']);
+        $this->assertSame(0, Venta::where('client_id', $client->id)->count());
+
+        config(['services.claude_task_ingest.key' => 'clave-revision-ventas']);
+        $headers = ['X-Claude-Task-Key' => 'clave-revision-ventas', 'Accept' => 'application/json'];
+
+        $claude = $this->postJson('/api/claude/clients/' . $client->id . '/ventas', [
+            'productos' => ['gestion', 'ecommerce', 'agentes'],
+            'moneda'    => 'ARS',
+        ], $headers);
+        $claude->assertStatus(422);
+        $this->assertNotEmpty($claude->json('detalles'));
+
+        // Con importe, o con las cuotas escritas, sí.
+        $this->alta_de_venta($client, ['productos' => ['gestion'], 'moneda' => 'ARS', 'monto_total' => 1200000])->assertStatus(201);
+        $this->alta_de_venta($client, ['productos' => ['gestion'], 'moneda' => 'ARS', 'cuotas' => [['monto' => 500000]]])->assertStatus(201);
+        $this->assertSame(2, Venta::where('client_id', $client->id)->where('moneda', 'ARS')->count());
     }
 }

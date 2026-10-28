@@ -889,7 +889,7 @@ return [
                 ['nombre' => 'productos', 'obligatorio' => true, 'validacion' => 'array, al menos uno, sin repetidos; cada uno en gestion|ecommerce|agentes|desarrollo|otro', 'que_es' => 'Lo que se vende.'],
                 ['nombre' => 'descripcion', 'obligatorio' => false, 'validacion' => 'texto, hasta 255', 'que_es' => 'Qué se vendió, en palabras. Mandala siempre para desarrollo y otro.'],
                 ['nombre' => 'fecha', 'obligatorio' => false, 'validacion' => 'fecha', 'que_es' => 'Fecha de la venta; default hoy.'],
-                ['nombre' => 'monto_total', 'obligatorio' => false, 'validacion' => 'número >= 0', 'que_es' => 'Total de la venta. Sin él, el precio de lista; obligatorio con desarrollo u otro. Si vienen `cuotas`, tiene que coincidir con su suma.'],
+                ['nombre' => 'monto_total', 'obligatorio' => false, 'validacion' => 'número >= 0', 'que_es' => 'Total de la venta. Sin él, el precio de lista (en USD); obligatorio con desarrollo u otro y en cualquier venta en ARS (los precios de lista son en dólares). Si vienen `cuotas`, tiene que coincidir con su suma.'],
                 ['nombre' => 'moneda', 'obligatorio' => false, 'validacion' => 'USD|ARS', 'que_es' => 'Moneda de la venta y de su comisión; default USD.'],
                 ['nombre' => 'contado', 'obligatorio' => false, 'validacion' => 'booleano', 'que_es' => 'Pago de contado: 10 % de descuento sobre el precio de lista y una sola cuota.'],
                 ['nombre' => 'cuotas', 'obligatorio' => false, 'validacion' => 'array de {monto, vencimiento?}, 1 a 60', 'que_es' => 'Las cuotas una por una. Si vienen, su suma es el total.'],

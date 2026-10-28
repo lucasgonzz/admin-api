@@ -156,7 +156,8 @@ class VentaService
      *  - Con `cuotas` explícitas: la suma de sus montos es el total. Si además vino `monto_total` y
      *    no coincide (tolerancia de un centavo) → 422.
      *  - Sin `cuotas`: el total es `monto_total` o, si no vino, `precio_sugerido()`; si no hay precio
-     *    (desarrollo/otro) → 422. Se reparte en `cantidad_cuotas` cuotas iguales y mensuales desde
+     *    (desarrollo/otro) → 422. En una moneda que no es USD el precio de lista no aplica (está en
+     *    dólares): sin `monto_total` → 422. Se reparte en `cantidad_cuotas` cuotas iguales y mensuales desde
      *    `primer_vencimiento` (default: la fecha de la venta); la última absorbe el redondeo.
      *    `cantidad_cuotas` por defecto es 1, salvo los tres sistemas sin contado: 3.
      *  - El total tiene que ser mayor a cero.
@@ -212,6 +213,14 @@ class VentaService
 
             $total = $suma;
         } else {
+            /* Los precios de lista son en DÓLARES: precargarlos en una venta en pesos daría una venta
+               de $1.500 por los tres sistemas. En pesos, el importe se escribe siempre. */
+            if (! $this->viene_con_valor($datos, 'monto_total') && $moneda !== 'USD') {
+                throw ValidationException::withMessages([
+                    'monto_total' => 'Los precios de lista son en dólares: para una venta en ' . $moneda . ' indicá el importe de la venta.',
+                ]);
+            }
+
             $total = $this->viene_con_valor($datos, 'monto_total')
                 ? round((float) $datos['monto_total'], 2)
                 : $this->precio_sugerido($productos, $contado);
