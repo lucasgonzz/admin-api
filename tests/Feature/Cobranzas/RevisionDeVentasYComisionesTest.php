@@ -5,6 +5,7 @@ namespace Tests\Feature\Cobranzas;
 use App\Models\ComisionPago;
 use App\Models\LicenciaCuota;
 use App\Models\Venta;
+use Laravel\Sanctum\Sanctum;
 
 /**
  * Los arreglos que pidió la revisión independiente de la misión ventas-y-comisiones (28/10/2026).
@@ -18,6 +19,8 @@ use App\Models\Venta;
  *     en claude/*.
  *  4. En `cobranzas/ventas`, las cifras de comisión del resumen por moneda suman solo ventas con
  *     vendedor.
+ *  5. Después de cambiar de vendedor, `pagada` cuenta solo los pagos al vendedor actual, y "Mis
+ *     comisiones" usa el mismo criterio para "Ya cobrado" y la lista de pagos.
  */
 class RevisionDeVentasYComisionesTest extends BaseDeVentas
 {
@@ -182,5 +185,58 @@ class RevisionDeVentasYComisionesTest extends BaseDeVentas
         $this->assertEqualsWithDelta(120.0, $usd['comision_total'], 0.001, '…pero no entra en lo que hay que pagarle a los vendedores.');
         $this->assertEqualsWithDelta(120.0, $usd['comision_por_liberar'], 0.001);
         $this->assertEqualsWithDelta(0.0, $usd['comision_a_pagar'], 0.001);
+    }
+
+    /**
+     * 5. Una venta pagada al vendedor A pasa al vendedor B: para B no hay nada pagado (le toca la
+     * comisión liberada entera), y en "Mis comisiones" de cada uno "Ya cobrado" es la suma de la
+     * lista de pagos.
+     *
+     * @return void
+     */
+    public function test_los_pagos_cuentan_solo_para_el_vendedor_actual(): void
+    {
+        $lucas = $this->admin_logueado('Lucas');
+        $a = $this->crear_vendedor('Vendedor A');
+        $b = $this->crear_vendedor('Vendedor B');
+        $client = $this->crear_cliente();
+
+        $venta_id = (int) $this->alta_de_venta($client, ['productos' => ['gestion'], 'vendedor_admin_id' => $a->id])->json('venta.id');
+        $this->pagar_cuota($client->id, $this->cuotas_de($venta_id)->first()->id, 800);
+        $this->postJson('/api/admin/ventas/' . $venta_id . '/comision/pagos', ['monto' => 100])->assertStatus(201);
+
+        $antes = $this->venta_de_la_lista($client, $venta_id);
+        $this->assertEqualsWithDelta(100.0, $antes['comision']['pagada'], 0.001);
+        $this->assertEqualsWithDelta(20.0, $antes['comision']['a_pagar'], 0.001);
+
+        // La venta pasa a B: lo pagado a A no descuenta de lo de B.
+        $this->putJson('/api/admin/client/' . $client->id . '/ventas/' . $venta_id, ['vendedor_admin_id' => $b->id])->assertStatus(200);
+        $despues = $this->venta_de_la_lista($client, $venta_id);
+        $this->assertEqualsWithDelta(0.0, $despues['comision']['pagada'], 0.001);
+        $this->assertEqualsWithDelta(120.0, $despues['comision']['a_pagar'], 0.001);
+        $this->assertSame(1, ComisionPago::where('venta_id', $venta_id)->count(), 'El pago a A sigue existiendo.');
+
+        // "Mis comisiones" de B: la venta, nada cobrado, lista vacía.
+        Sanctum::actingAs($b);
+        $mias_b = $this->getJson('/api/admin/comisiones/mias');
+        $this->assertSame([$venta_id], collect($mias_b->json('comisiones'))->pluck('id')->all());
+        $this->assertEqualsWithDelta(0.0, $mias_b->json('resumen.por_moneda.USD.pagada'), 0.001);
+        $this->assertCount(0, $mias_b->json('resumen.pagos'));
+
+        // "Mis comisiones" de A: ya no tiene la venta, y "Ya cobrado" y la lista cierran (los dos vacíos).
+        Sanctum::actingAs($a);
+        $mias_a = $this->getJson('/api/admin/comisiones/mias');
+        $this->assertCount(0, $mias_a->json('comisiones'));
+        $this->assertSame([], (array) $mias_a->json('resumen.por_moneda'));
+        $this->assertCount(0, $mias_a->json('resumen.pagos'));
+
+        // B cobra 50: figura en su lista y en su "Ya cobrado".
+        Sanctum::actingAs($lucas);
+        $this->postJson('/api/admin/ventas/' . $venta_id . '/comision/pagos', ['monto' => 50])->assertStatus(201);
+        Sanctum::actingAs($b);
+        $mias_b = $this->getJson('/api/admin/comisiones/mias');
+        $this->assertEqualsWithDelta(50.0, $mias_b->json('resumen.por_moneda.USD.pagada'), 0.001);
+        $this->assertCount(1, $mias_b->json('resumen.pagos'));
+        $this->assertEqualsWithDelta(50.0, $mias_b->json('resumen.pagos.0.monto'), 0.001);
     }
 }

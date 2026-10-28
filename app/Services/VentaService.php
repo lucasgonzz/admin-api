@@ -617,7 +617,8 @@ class VentaService
      *  - `liberada`: `total × min(1, cobrado / monto_total)`, con `cobrado` según
      *    `cobrado_para_comision()`: una cuota `pagada` cuenta su monto completo, y lo cobrado de
      *    cada cuota se topa en su monto.
-     *  - `pagada`: lo que ya se le pagó al vendedor por esta venta.
+     *  - `pagada`: lo que ya se le pagó por esta venta al vendedor ACTUAL (los pagos a un vendedor
+     *    anterior no cuentan).
      *  - `a_pagar`: lo liberado que todavía no se le pagó (nunca negativo).
      *  - `por_liberar`: lo que se libera cuando el cliente termine de pagar.
      *
@@ -637,7 +638,13 @@ class VentaService
         $fraccion = $monto_total > 0 ? min(1.0, $cobrado / $monto_total) : 0.0;
         $liberada = round($total * $fraccion, 2);
 
-        $pagada = round((float) $venta->comision_pagos->sum(function (ComisionPago $pago) {
+        /* Solo los pagos al vendedor ACTUAL de la venta (revisión, 28/10/2026). Si la venta cambió de
+           vendedor, lo que se le pagó al anterior no descuenta de lo que le toca al nuevo: el nuevo
+           arranca sin cobrado. Esos pagos siguen existiendo (y frenan la baja de la venta). */
+        $vendedor_actual = $venta->vendedor_admin_id !== null ? (int) $venta->vendedor_admin_id : null;
+        $pagada = round((float) $venta->comision_pagos->filter(function (ComisionPago $pago) use ($vendedor_actual) {
+            return $vendedor_actual !== null && (int) $pago->vendedor_admin_id === $vendedor_actual;
+        })->sum(function (ComisionPago $pago) {
             return (float) $pago->monto;
         }), 2);
 

@@ -177,8 +177,10 @@ class ComisionService
      * Lo de UN vendedor ("Mis comisiones"): los totales por moneda (para cobrar, ya cobrado, se
      * libera cuando paguen los clientes) y la lista de pagos recibidos, del más nuevo al más viejo.
      *
-     * Los pagos salen por `vendedor_admin_id` del pago, no de la venta: si una venta cambió de
-     * vendedor, lo cobrado sigue figurando en quien lo cobró.
+     * Los pagos de la lista son los que cuentan en `pagada` (`VentaService::comision_de()`): los
+     * hechos a ESTE vendedor sobre ventas que hoy son suyas. Así "Ya cobrado" es exactamente la
+     * suma de la lista; un pago sobre una venta que después pasó a otro vendedor no figura en
+     * ninguno de los dos lados (revisión, 28/10/2026).
      *
      * @param int $vendedor_admin_id
      *
@@ -193,6 +195,7 @@ class ComisionService
         }
 
         $pagos = ComisionPago::where('vendedor_admin_id', $vendedor_admin_id)
+            ->whereIn('venta_id', Venta::where('vendedor_admin_id', $vendedor_admin_id)->select('id'))
             ->with(['venta.client'])
             ->orderByDesc('fecha')->orderByDesc('id')
             ->get()
