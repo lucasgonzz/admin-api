@@ -138,11 +138,12 @@ class SupportTicket extends Model
         $case = $this->support_codex_case;
         $mission = $case ? $case->mission_lifecycle() : null;
         $human_reply_pause = $case !== null && $case->is_human_reply_pause();
-        $needs_human = ! $human_reply_pause && (($case !== null && $case->state === 'manual_review')
+        $needs_human = ! $human_reply_pause && (($case !== null && ($case->state === 'manual_review'
+                || $case->is_agent_requested_review()))
             || ($mission === null && $this->escalated_at !== null));
         $reason = null;
         if ($needs_human) {
-            $reason = $case !== null && $case->state === 'manual_review'
+            $reason = $case !== null && ($case->state === 'manual_review' || $case->is_agent_requested_review())
                 ? (trim((string) $case->review_reason) !== '' ? $case->review_reason : 'La atención necesita revisión humana.')
                 : $this->escalation_reason;
         }

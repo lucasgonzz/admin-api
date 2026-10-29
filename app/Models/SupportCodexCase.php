@@ -37,6 +37,13 @@ class SupportCodexCase extends Model
     /** La cesión de un turno ya contestado no es un error que Lucas deba resolver. */
     public function is_human_reply_pause(): bool
     {
-        return $this->state === 'manual_review' && $this->review_reason === self::HUMAN_REPLY_REVIEW_REASON;
+        return $this->review_requested_message_id === null && $this->state === 'manual_review'
+            && $this->review_reason === self::HUMAN_REPLY_REVIEW_REASON;
+    }
+
+    /** La respuesta del cliente puede despejar un pedido del agente, nunca un bloqueo técnico. */
+    public function is_agent_requested_review(): bool
+    {
+        return $this->review_requested_message_id !== null && trim((string) $this->review_reason) !== '';
     }
 }
