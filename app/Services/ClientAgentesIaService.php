@@ -235,6 +235,10 @@ class ClientAgentesIaService
             $mensaje = $activa_ahora
                 ? 'Agentes de IA quedó activa en el sistema del cliente.'
                 : 'Agentes de IA quedó quitada en el sistema del cliente.';
+
+            if ($activa_ahora) {
+                $this->inicializar_memoria_y_directorio($client);
+            }
         } else {
             $mensaje = $activa_ahora
                 ? 'El cliente tiene Agentes de IA activa.'
@@ -242,6 +246,35 @@ class ClientAgentesIaService
         }
 
         return $this->resultado(self::ESTADO_OK, $mensaje, $activa_ahora);
+    }
+
+    /**
+     * Con la extensión recién confirmada activa, encola la creación de la memoria de contexto del dueño y su
+     * alta en el directorio de la app `ia.comerciocity.com` (misión cruzada `app-ia-y-memoria`, 29/10/2026,
+     * plan §4 A.3).
+     *
+     * 🔴 Best-effort: NUNCA rompe la activación. Si la cola no está (o el despacho falla por lo que sea), se
+     * anota y la activación sigue contestando `ok`; el barrido nocturno `ia:directorio-sincronizar` y la
+     * creación perezosa del lado del empresa-api cubren lo que no se hizo acá.
+     *
+     * @param Client $client
+     *
+     * @return void
+     */
+    protected function inicializar_memoria_y_directorio(Client $client)
+    {
+        try {
+            /* El despachador explícito y no `Job::dispatch()`: ese encola recién en el destructor de su
+               PendingDispatch, y un fallo ahí no es tan claro que caiga adentro de este try. */
+            app(\Illuminate\Contracts\Bus\Dispatcher::class)->dispatch(
+                (new \App\Jobs\InicializarAgenteIaJob((int) $client->id))->onConnection('database')
+            );
+        } catch (\Throwable $e) {
+            Log::warning('ClientAgentesIaService: no se pudo encolar la inicialización del agente.', [
+                'client_id' => (int) $client->id,
+                'error'     => mb_substr($e->getMessage(), 0, 300),
+            ]);
+        }
     }
 
     /**

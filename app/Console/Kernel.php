@@ -135,6 +135,20 @@ class Kernel extends ConsoleKernel
             ->dailyAt('03:30')
             ->withoutOverlapping(30);
 
+        /* El directorio de dueños del login de la app `ia.comerciocity.com` (misión cruzada app-ia-y-memoria,
+         * 29/10/2026): le pregunta a cada cliente activo quién es su dueño (`admin-sync/ia-app/dueno`).
+         *
+         * 04:15, después de `ai-planes:sincronizar` (03:45): es otro barrido en serie contra el `empresa-api`
+         * de cada cliente, y separarlos evita sumar ráfagas sobre el shared. 🔴 En segundo plano y sin heredar
+         * el candado del cron (`artisan_sin_el_lock_del_cron()`): con ~100 clientes y un timeout de 15 s, en
+         * primer plano clavaría `schedule:run` varios minutos y dejaría sin correr los comandos de cada minuto.
+         * `withoutOverlapping(60)` con el número a mano: el default son 24 HORAS y un proceso que muera sin
+         * soltarlo dejaría el directorio sin actualizar al otro día. */
+        $schedule->exec(self::artisan_sin_el_lock_del_cron('ia:directorio-sincronizar'))
+            ->dailyAt('04:15')
+            ->withoutOverlapping(60)
+            ->runInBackground();
+
         $schedule->command('leads:check-followups')->everyTwoHours();
 
         /* Estado de las plantillas de WhatsApp en Meta (misión plantillas-meta-y-leads-humano,
