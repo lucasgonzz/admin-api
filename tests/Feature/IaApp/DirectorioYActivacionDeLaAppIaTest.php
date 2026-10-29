@@ -194,4 +194,77 @@ class DirectorioYActivacionDeLaAppIaTest extends BaseDeLaAppIa
         $this->assertStringEndsWith('/agente-contexto/inicializar', $rutas[0]);
         $this->assertNull(IaDirectorio::where('client_id', $client->id)->first());
     }
+
+    /* -------------------------------------------------------------------- Correcciones del revisor */
+
+    /**
+     * 🔴 Un login aprendido no pisa al dueño sincronizado: son dos filas del mismo cliente.
+     */
+    public function test_aprender_no_pisa_al_dueno_sincronizado(): void
+    {
+        $client = $this->crear_cliente('nopisa');
+        $this->fakear([$this->base($client) . '/api/admin-sync/ia-app/dueno' => Http::response([
+            'doc_number' => '20111222', 'nombre' => 'Dueña', 'negocio' => 'X', 'extension_activa' => true,
+        ], 200)]);
+        $servicio = app(IaDirectorioService::class);
+        $servicio->sincronizar($client);
+
+        $servicio->aprender($client, 'otro.usuario', 'Encargado');
+
+        $filas = IaDirectorio::where('client_id', $client->id)->orderBy('id')->get();
+        $this->assertCount(2, $filas);
+        $this->assertSame('sincronizado', $filas[0]->origen);
+        $this->assertSame(IaDirectorioService::hash_usuario('20111222'), $filas[0]->usuario_hash);
+        $this->assertSame('Dueña', $filas[0]->nombre_dueno);
+        $this->assertSame('aprendido', $filas[1]->origen);
+        $this->assertSame(IaDirectorioService::hash_usuario('otrousuario'), $filas[1]->usuario_hash);
+
+        // Aprender al MISMO usuario del dueño solo refresca la sincronizada: no la duplica ni le cambia el nombre.
+        $servicio->aprender($client, '20.111.222', 'Otro nombre');
+        $this->assertSame(2, IaDirectorio::where('client_id', $client->id)->count());
+        $this->assertSame('Dueña', IaDirectorio::where('client_id', $client->id)->where('origen', 'sincronizado')->value('nombre_dueno'));
+
+        // Y una nueva sincronización deja la aprendida donde está.
+        $servicio->sincronizar($client);
+        $this->assertSame(2, IaDirectorio::where('client_id', $client->id)->count());
+    }
+
+    public function test_sincronizar_reemplaza_la_aprendida_del_mismo_usuario_y_actualiza_la_suya(): void
+    {
+        $client = $this->crear_cliente('reemplaza');
+        $servicio = app(IaDirectorioService::class);
+        $servicio->aprender($client, 'pablo', 'Pablo');
+
+        $this->fakear([$this->base($client) . '/api/admin-sync/ia-app/dueno' => Http::sequence()
+            ->push(['doc_number' => 'pablo', 'nombre' => 'Pablo', 'negocio' => 'X', 'extension_activa' => true], 200)
+            ->push(['doc_number' => 'nuevo.dueno', 'nombre' => 'Nuevo', 'negocio' => 'X', 'extension_activa' => false], 200),
+        ]);
+
+        $servicio->sincronizar($client);
+        $filas = IaDirectorio::where('client_id', $client->id)->get();
+        $this->assertCount(1, $filas, 'La aprendida del mismo usuario la reemplaza la sincronizada.');
+        $this->assertSame('sincronizado', $filas[0]->origen);
+
+        // El dueño cambió en su sistema: se actualiza la misma fila sincronizada, no se suma otra.
+        $servicio->sincronizar($client);
+        $filas = IaDirectorio::where('client_id', $client->id)->get();
+        $this->assertCount(1, $filas);
+        $this->assertSame(IaDirectorioService::hash_usuario('nuevodueno'), $filas[0]->usuario_hash);
+        $this->assertFalse($filas[0]->extension_activa);
+    }
+
+    public function test_la_busqueda_por_hash_devuelve_todos_los_clientes_que_coinciden(): void
+    {
+        $a = $this->crear_cliente('busca-a');
+        $b = $this->crear_cliente('busca-b');
+        $c = $this->crear_cliente('busca-c');
+        IaDirectorio::create(['client_id' => $a->id, 'usuario_hash' => IaDirectorioService::hash_usuario('maria'), 'origen' => 'sincronizado', 'extension_activa' => true]);
+        IaDirectorio::create(['client_id' => $b->id, 'usuario_hash' => IaDirectorioService::hash_usuario('maria'), 'origen' => 'aprendido', 'extension_activa' => true]);
+        IaDirectorio::create(['client_id' => $b->id, 'usuario_hash' => IaDirectorioService::hash_usuario('otra'), 'origen' => 'sincronizado', 'extension_activa' => true]);
+        IaDirectorio::create(['client_id' => $c->id, 'usuario_hash' => IaDirectorioService::hash_usuario('otra'), 'origen' => 'sincronizado', 'extension_activa' => true]);
+
+        $ids = app(IaDirectorioService::class)->candidatos('Maria')->pluck('id')->all();
+
+        $this->assertSame([(int) $a->id, (int) $b->id], array_map('intval', $ids), 'La sincronizada primero, después la aprendida; sin el cliente que no coincide.');
+    }
 }

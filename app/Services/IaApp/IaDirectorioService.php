@@ -5,7 +5,9 @@ namespace App\Services\IaApp;
 use App\Models\Client;
 use App\Models\IaDirectorio;
 use App\Services\ClientCatalogoPuenteService;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -18,6 +20,8 @@ use Illuminate\Support\Facades\Log;
  *    (`GET api/admin-sync/ia-app/dueno`, contrato C1.2). Lo corre el barrido nocturno
  *    (`ia:directorio-sincronizar`) y la activación de «Agentes de IA» (`InicializarAgenteIaJob`).
  *  - `aprender($client, $usuario, $nombre)`: cuando alguien entra por `negocio` y su sistema lo acepta.
+ * Son filas distintas (`origen` sincronizado | aprendido, único `client_id + usuario_hash`): lo aprendido
+ * nunca pisa al dueño sincronizado.
  *
  * 🔴 Del usuario se guarda SOLO un hash: HMAC-SHA256 del usuario normalizado con la APP_KEY del admin como
  * clave. El plan pedía `sha256` pelado; el HMAC es lo más cercano y no se puede revertir probando todos los
@@ -150,22 +154,52 @@ class IaDirectorioService
         $doc_number = isset($json['doc_number']) && is_scalar($json['doc_number']) ? (string) $json['doc_number'] : null;
         $nombre     = isset($json['nombre']) && is_scalar($json['nombre']) ? trim((string) $json['nombre']) : null;
 
-        IaDirectorio::updateOrCreate(
-            ['client_id' => (int) $client->id],
-            [
-                'usuario_hash'     => self::hash_usuario($doc_number),
-                'nombre_dueno'     => $nombre === null || $nombre === '' ? null : mb_substr($nombre, 0, 150),
-                'extension_activa' => (bool) $json['extension_activa'],
-                'sincronizado_en'  => now(),
-            ]
-        );
+        $hash  = self::hash_usuario($doc_number);
+        $datos = [
+            'usuario_hash'     => $hash,
+            'nombre_dueno'     => $nombre === null || $nombre === '' ? null : mb_substr($nombre, 0, 150),
+            'extension_activa' => (bool) $json['extension_activa'],
+            'sincronizado_en'  => now(),
+        ];
+
+        DB::transaction(function () use ($client, $hash, $datos) {
+            // La fila del dueño según su sistema: una por cliente, y solo esta se toca acá.
+            $fila = IaDirectorio::where('client_id', (int) $client->id)
+                ->where('origen', IaDirectorio::ORIGEN_SINCRONIZADO)
+                ->lockForUpdate()
+                ->first();
+
+            /* Si el login ya había aprendido a este mismo usuario en este cliente, esa fila se va: el dueño
+               sincronizado la reemplaza (si no, chocaría con el único client_id + usuario_hash). Las otras
+               filas aprendidas del cliente quedan como están. */
+            if ($hash !== null) {
+                IaDirectorio::where('client_id', (int) $client->id)
+                    ->where('usuario_hash', $hash)
+                    ->where('origen', '!=', IaDirectorio::ORIGEN_SINCRONIZADO)
+                    ->delete();
+            }
+
+            if ($fila === null) {
+                IaDirectorio::create(array_merge($datos, [
+                    'client_id' => (int) $client->id,
+                    'origen'    => IaDirectorio::ORIGEN_SINCRONIZADO,
+                ]));
+
+                return;
+            }
+
+            $fila->fill($datos)->save();
+        });
 
         return $this->resultado(self::ESTADO_OK, 'Directorio actualizado.');
     }
 
     /**
-     * El login entró por `negocio` y el sistema del cliente lo aceptó: se anota que ese usuario es el dueño
-     * de ese cliente (contrato C4.1, paso 5).
+     * El login entró por `negocio` y el sistema del cliente lo aceptó: se anota que ese usuario entra a ese
+     * cliente (contrato C4.1, paso 5).
+     *
+     * 🔴 Nunca pisa al dueño sincronizado: si el usuario ya tiene fila en ese cliente (sincronizada o
+     * aprendida) solo se refresca; si no, se crea una fila `aprendido` propia.
      *
      * @param Client      $client
      * @param string      $usuario Lo que tipeó la persona (se guarda solo su hash).
@@ -181,17 +215,45 @@ class IaDirectorioService
             return;
         }
 
-        $datos = ['usuario_hash' => $hash, 'extension_activa' => true];
+        $nombre = is_string($nombre) && trim($nombre) !== '' ? mb_substr(trim($nombre), 0, 150) : null;
 
-        if (is_string($nombre) && trim($nombre) !== '') {
-            $datos['nombre_dueno'] = mb_substr(trim($nombre), 0, 150);
+        $existente = IaDirectorio::where('client_id', (int) $client->id)->where('usuario_hash', $hash)->first();
+
+        if ($existente === null) {
+            try {
+                IaDirectorio::create([
+                    'client_id'        => (int) $client->id,
+                    'usuario_hash'     => $hash,
+                    'origen'           => IaDirectorio::ORIGEN_APRENDIDO,
+                    'nombre_dueno'     => $nombre,
+                    'extension_activa' => true,
+                ]);
+
+                return;
+            } catch (QueryException $e) {
+                // Dos logins a la vez: la otra ya la creó (único client_id + usuario_hash).
+                $existente = IaDirectorio::where('client_id', (int) $client->id)->where('usuario_hash', $hash)->first();
+
+                if ($existente === null) {
+                    throw $e;
+                }
+            }
         }
 
-        IaDirectorio::updateOrCreate(['client_id' => (int) $client->id], $datos);
+        // El sistema lo acaba de aceptar: la extensión está activa. El nombre de la sincronizada no se toca.
+        $existente->extension_activa = true;
+
+        if ($nombre !== null && $existente->origen === IaDirectorio::ORIGEN_APRENDIDO) {
+            $existente->nombre_dueno = $nombre;
+        }
+
+        $existente->save();
     }
 
     /**
-     * Los clientes activos cuyo dueño es ese usuario, los que tienen la extensión activa primero.
+     * TODOS los clientes activos donde ese usuario tiene fila (sincronizada o aprendida), hasta `$maximo`:
+     * los que tienen la extensión activa primero, después la sincronizada antes que la aprendida y la más
+     * reciente primero.
      *
      * @param mixed $usuario
      * @param int   $maximo
@@ -206,12 +268,16 @@ class IaDirectorioService
             return collect();
         }
 
-        $ids = IaDirectorio::where('usuario_hash', $hash)
+        $ids = array_values(array_unique(IaDirectorio::where('usuario_hash', $hash)
             ->orderByDesc('extension_activa')
+            ->orderByRaw('CASE WHEN origen = ? THEN 0 ELSE 1 END', [IaDirectorio::ORIGEN_SINCRONIZADO])
             ->orderByDesc('updated_at')
             ->orderByDesc('id')
             ->pluck('client_id')
-            ->all();
+            ->map(function ($id) {
+                return (int) $id;
+            })
+            ->all()));
 
         if ($ids === []) {
             return collect();
