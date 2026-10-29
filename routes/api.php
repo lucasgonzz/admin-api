@@ -664,6 +664,9 @@ Route::middleware('claude.task.key')
         Route::post('ia-imagenes/{id}/reservar', 'Api\IaImagenesController@reservar')->whereNumber('id');
         Route::post('ia-imagenes/{id}/resultado', 'Api\IaImagenesController@resultado')->whereNumber('id');
         Route::post('ia-imagenes/{id}/fallo', 'Api\IaImagenesController@fallo')->whereNumber('id');
+        Route::get('ia/versions', 'Api\ClaudeIaAppVersionsController@index');
+        Route::post('ia/versions', 'Api\ClaudeIaAppVersionsController@store');
+        Route::patch('ia/versions/{id}', 'Api\ClaudeIaAppVersionsController@update');
 
         /* Plantillas de CLIENTE (soporte). Idempotentes por `template_name`: reenviar la misma
            plantilla actualiza la fila, nunca crea una segunda, y nunca borra las que no vinieron

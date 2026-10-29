@@ -1553,6 +1553,48 @@ return [
                 ['nombre' => 'error', 'obligatorio' => false, 'validacion' => 'nullable|string|max:500', 'que_es' => 'Qué pasó (lo ve el dueño si el pedido queda fallido).'],
             ],
         ],
+        'GET api/claude/ia/versions' => [
+            'para_que'     => 'Versiones de la app ia-spa (ia.comerciocity.com), de la más nueva a la más vieja por orden semántico. status=all por defecto (o published / draft). Trae ultima_publicada y ultima_desplegada (la de deployed_at más reciente).',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+        ],
+        'POST api/claude/ia/versions' => [
+            'para_que'     => 'Da de alta una versión de ia-spa: el puntero al asset ia-spa-v{V}-dist.zip del release del tag v{V} de lucasgonzz/ia-spa. Es el paso que sigue al commit vacío [release:X.Y.Z] en master de ia-spa, con el workflow de GitHub Actions verde (lo hace ia-release.py publicar).',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'version con el formato de VersionNumberComparator (1.0.0) y única en ia_app_versions.',
+                '🔴 Si queda published (el default) y verify_artifacts no es false, verifica en GitHub el asset: si falta, 422 {code: artefacto_faltante}; si GitHub falla de otra manera, 502 {code: github_no_responde}. En los dos casos NO se escribe nada.',
+                'Es una fila del admin: no toca ningún servidor. El deploy lo hace ia-release.py desplegar.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'version', 'obligatorio' => true, 'validacion' => 'required|string|max:30|regex:VersionNumberComparator::VALID_REGEX|unique:ia_app_versions,version', 'que_es' => 'El código, igual al del commit [release:X.Y.Z].'],
+                ['nombre' => 'title', 'obligatorio' => false, 'validacion' => 'nullable|string|max:200', 'que_es' => 'Título corto.'],
+                ['nombre' => 'description', 'obligatorio' => false, 'validacion' => 'nullable|string|max:5000', 'que_es' => 'Qué trae la versión.'],
+                ['nombre' => 'status', 'obligatorio' => false, 'validacion' => 'nullable|string|in:draft,published — default published', 'que_es' => 'Un borrador no se verifica.'],
+                ['nombre' => 'verify_artifacts', 'obligatorio' => false, 'validacion' => 'nullable|boolean — default true', 'que_es' => 'false publica sin mirar GitHub (solo si ya lo verificaste a mano).'],
+            ],
+        ],
+        'PATCH api/claude/ia/versions/{id}' => [
+            'para_que'     => 'Edita título, descripción, estado y/o deployed_at de una versión de ia-spa. Al pasarla a published estampa published_at. deployed_at lo manda ia-release.py desplegar cuando https://ia.comerciocity.com/version.json ya devuelve esa versión (null lo borra).',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                '🔴 El código (version) NO se edita: 422 {code: version_no_editable}.',
+                'Al pasar a published una versión que no lo estaba, verifica el asset igual que el alta (salvo verify_artifacts=false): 422 o 502 y no se cambia nada.',
+                'deployed_at con fecha solo en una versión published: si no, 422 {code: no_publicada}. Sin ningún campo editable, 422 {code: sin_campos}.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'La versión.'],
+                ['nombre' => 'title', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|max:200', 'que_es' => 'Título corto.'],
+                ['nombre' => 'description', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|max:5000', 'que_es' => 'Qué trae la versión.'],
+                ['nombre' => 'status', 'obligatorio' => false, 'validacion' => 'sometimes|required|string|in:draft,published', 'que_es' => 'Nuevo estado.'],
+                ['nombre' => 'deployed_at', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|date', 'que_es' => 'Cuándo quedó servida en el VPS (ISO 8601).'],
+                ['nombre' => 'verify_artifacts', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|boolean', 'que_es' => 'Default true. Solo cuenta al pasar a published.'],
+            ],
+        ],
+
         /* ---------------------------------------------------------- Implementaciones de clientes nuevos (misión implementar-cliente, 5/10/2026) */
 
         'GET api/claude/implementations/{id}' => [
