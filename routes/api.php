@@ -260,6 +260,16 @@ Route::middleware('admin.inbound.key')
 
 /*
 |--------------------------------------------------------------------------
+| La app del agente del dueño: `ia.comerciocity.com` (misión cruzada app-ia-y-memoria, 29/10/2026)
+|--------------------------------------------------------------------------
+| Login PÚBLICO (contrato C4.1): con el usuario y la contraseña del sistema del dueño, el admin encuentra su
+| sistema (por `negocio` o por el directorio) y le pide el token de la app. Topes propios adentro del
+| controlador (10/min por IP, 5/min por usuario). 🔴 La contraseña no se guarda ni se loguea.
+*/
+Route::post('ia/login', 'Api\IaAppLoginController@login');
+
+/*
+|--------------------------------------------------------------------------
 | Centro de recursos para clientes (misión centro-de-recursos-clientes, 13/10/2026)
 |--------------------------------------------------------------------------
 | La API de la página pública `recursos.comerciocity.com` (contrato C2 del plan de la misión). Sin
