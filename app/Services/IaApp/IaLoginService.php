@@ -132,7 +132,7 @@ class IaLoginService
      * @param string $dispositivo
      *
      * @return array{desenlace: string, cuerpo: array<string, mixed>|null}
-     *         desenlace: ok | credenciales | no_es_dueno | sin_extension | version_vieja | falla
+     *         desenlace: ok | credenciales | no_es_dueno | sin_extension | configuracion | version_vieja | falla
      */
     protected function probar(Client $client, $usuario, CredencialDeLogin $credencial, $dispositivo)
     {
@@ -167,6 +167,12 @@ class IaLoginService
 
         if ($status === 401 && $codigo === 'credenciales_invalidas') {
             return ['desenlace' => 'credenciales', 'cuerpo' => null];
+        }
+
+        /* La instalación del cliente está mal configurada (no es la contraseña): la clave del admin no es la
+           que tiene su .env, o la base es compartida y le falta USER_ID para saber quién es el dueño. */
+        if (($status === 401 && $codigo === 'clave_invalida') || ($status === 409 && $codigo === 'dueno_no_resoluble')) {
+            return ['desenlace' => 'configuracion', 'cuerpo' => null];
         }
 
         if ($status === 422) {
@@ -237,7 +243,10 @@ class IaLoginService
      *     por el presupuesto de tiempo): `502 sistema_no_disponible`, aunque otro haya dado 401. Su sistema
      *     puede ser justo el que no contestó, y decirle «contraseña incorrecta» lo mandaría a cambiarla.
      *  3. `401 credenciales_invalidas` solo si TODOS los candidatos dijeron credenciales inválidas.
-     *  4. Lo demás (todos 404, o 404 mezclados con 401): `409 version_vieja`; uno de sus sistemas no tiene la
+     *  4. Si alguno contestó que su instalación está mal configurada (401 `clave_invalida`: la clave del admin
+     *     no es la de su .env; 409 `dueno_no_resoluble`: base compartida sin USER_ID): `503
+     *     sistema_no_configurado`. No es la contraseña ni la red: lo arregla ComercioCity.
+     *  5. Lo demás (todos 404, o 404 mezclados con 401): `409 version_vieja`; uno de sus sistemas no tiene la
      *     ruta y puede ser el suyo.
      *
      * @param array<string, int> $desenlaces
@@ -261,6 +270,10 @@ class IaLoginService
 
         if (isset($desenlaces['credenciales']) && $desenlaces['credenciales'] === (int) $total) {
             return $this->credenciales_invalidas();
+        }
+
+        if (isset($desenlaces['configuracion'])) {
+            return $this->error(503, 'sistema_no_configurado', 'Tu sistema todavía no está listo para la app. Avisale a ComercioCity.');
         }
 
         if (isset($desenlaces['version_vieja'])) {

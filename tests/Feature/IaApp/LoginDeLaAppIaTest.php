@@ -570,4 +570,73 @@ class LoginDeLaAppIaTest extends BaseDeLaAppIa
 
         Http::assertNothingSent();
     }
+
+    /* -------------------------------------------------------------------- Ajustes del verificador del contrato */
+
+    /**
+     * La instalación del cliente mal configurada (no la contraseña ni la red): 503 sistema_no_configurado.
+     */
+    public function test_una_instalacion_mal_configurada_da_503_sistema_no_configurado(): void
+    {
+        $sin_clave  = $this->crear_cliente('malclave');
+        $sin_dueno  = $this->crear_cliente('maldueno');
+        $this->fakear([
+            $this->base($sin_clave) . '/*' => Http::response(['code' => 'clave_invalida', 'message' => 'x'], 401),
+            $this->base($sin_dueno) . '/*' => Http::response(['code' => 'dueno_no_resoluble', 'message' => 'x'], 409),
+        ]);
+
+        foreach ([$sin_clave, $sin_dueno] as $client) {
+            $this->login(['usuario' => 'pablo-' . $client->id, 'password' => self::PASSWORD, 'negocio' => $client->slug])
+                ->assertStatus(503)
+                ->assertExactJson([
+                    'code'    => 'sistema_no_configurado',
+                    'message' => 'Tu sistema todavía no está listo para la app. Avisale a ComercioCity.',
+                ]);
+        }
+    }
+
+    /**
+     * Prioridad: si alguno no respondió, 502 aunque otro esté mal configurado; mal configurado + credenciales
+     * inválidas (no TODOS dijeron credenciales) es 503.
+     */
+    public function test_la_mala_configuracion_va_despues_de_la_falla_y_antes_del_resto(): void
+    {
+        $mal    = $this->crear_cliente('mal');
+        $caido  = $this->crear_cliente('caido3');
+        $niega  = $this->crear_cliente('niega');
+        $this->en_el_directorio($mal, 'ana-maria', true);
+        $this->en_el_directorio($caido, 'ana-maria', false);
+        $this->en_el_directorio($niega, 'juana', true);
+        $this->en_el_directorio($mal, 'juana', false);
+        $this->fakear([
+            $this->base($mal) . '/*'   => Http::response(['code' => 'clave_invalida'], 401),
+            $this->base($caido) . '/*' => Http::response('error', 500),
+            $this->base($niega) . '/*' => Http::response(['code' => 'credenciales_invalidas'], 401),
+        ]);
+
+        $this->login(['usuario' => 'ana-maria', 'password' => self::PASSWORD])
+            ->assertStatus(502)->assertJsonPath('code', 'sistema_no_disponible');
+        $this->login(['usuario' => 'juana', 'password' => self::PASSWORD])
+            ->assertStatus(503)->assertJsonPath('code', 'sistema_no_configurado');
+    }
+
+    /**
+     * El 429 del login se puede leer desde la app: `Retry-After` va expuesto por CORS.
+     */
+    public function test_el_retry_after_del_429_esta_expuesto_por_cors(): void
+    {
+        $this->assertSame(['Retry-After'], config('cors.exposed_headers'));
+        $this->fakear([]);
+
+        $origen = ['Origin' => 'https://ia.comerciocity.com'];
+        for ($i = 0; $i < 10; $i++) {
+            $this->postJson('/api/ia/login', ['usuario' => 'cors' . $i, 'password' => self::PASSWORD], $origen);
+        }
+
+        $respuesta = $this->postJson('/api/ia/login', ['usuario' => 'cors-final', 'password' => self::PASSWORD], $origen);
+
+        $respuesta->assertStatus(429)->assertHeader('Retry-After');
+        $this->assertSame('https://ia.comerciocity.com', $respuesta->headers->get('Access-Control-Allow-Origin'));
+        $this->assertStringContainsString('Retry-After', (string) $respuesta->headers->get('Access-Control-Expose-Headers'));
+    }
 }

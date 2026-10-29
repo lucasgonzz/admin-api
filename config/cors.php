@@ -47,7 +47,9 @@ return [
 
     'allowed_headers' => ['*'],
 
-    'exposed_headers' => [],
+    /* `Retry-After` para que la app `ia.comerciocity.com` lea cuánto esperar en el 429 del login (`POST
+       api/ia/login`): sin exponerlo, el navegador no se lo deja leer a un origen cruzado. */
+    'exposed_headers' => ['Retry-After'],
 
     'max_age' => 0,
 
