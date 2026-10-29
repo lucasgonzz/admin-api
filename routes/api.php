@@ -256,6 +256,11 @@ Route::middleware('admin.inbound.key')
         Route::post('support/messages', 'Api\InboundSupportMessageController@store');
         Route::post('support/messages/read', 'Api\InboundSupportMessageController@mark_read');
         Route::post('support/typing', 'Api\InboundSupportMessageController@typing');
+
+        /* La app del agente del dueño (misión cruzada app-ia-y-memoria, 29/10/2026, contrato C2.1): el
+           empresa-api del cliente da de alta un pedido de imagen para que lo genere la PC de Lucas.
+           Idempotente por uuid; el client_uuid del body tiene que ser el del sistema que resolvió la clave. */
+        Route::post('ia-imagenes', 'Api\IaImagenesController@alta');
     });
 
 /*
@@ -650,6 +655,15 @@ Route::middleware('claude.task.key')
         Route::get('ecommerce/versions', 'Api\ClaudeEcommerceVersionsController@versions_json');
         Route::post('ecommerce/versions', 'Api\ClaudeEcommerceVersionsController@versions_store_json');
         Route::patch('ecommerce/versions/{id}', 'Api\ClaudeEcommerceVersionsController@versions_update_json');
+
+        /* La app del agente del dueño (misión cruzada app-ia-y-memoria, 29/10/2026).
+           Imágenes (contrato C3): la PC de Lucas lista, reserva (lease de 15 min) y devuelve la imagen o el
+           fallo; el admin se la entrega al empresa-api del cliente (EntregarImagenIaJob).
+           Versiones de ia-spa (plan §4 A.5): publicar verifica el asset ia-spa-v{V}-dist.zip del release v{V}. */
+        Route::get('ia-imagenes/pendientes', 'Api\IaImagenesController@pendientes');
+        Route::post('ia-imagenes/{id}/reservar', 'Api\IaImagenesController@reservar')->whereNumber('id');
+        Route::post('ia-imagenes/{id}/resultado', 'Api\IaImagenesController@resultado')->whereNumber('id');
+        Route::post('ia-imagenes/{id}/fallo', 'Api\IaImagenesController@fallo')->whereNumber('id');
 
         /* Plantillas de CLIENTE (soporte). Idempotentes por `template_name`: reenviar la misma
            plantilla actualiza la fila, nunca crea una segunda, y nunca borra las que no vinieron

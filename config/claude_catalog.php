@@ -1501,6 +1501,58 @@ return [
             ],
         ],
 
+        /* ---------------------------------------------------------- App del agente del dueño: imágenes y versiones (misión cruzada app-ia-y-memoria, 29/10/2026) */
+
+        'GET api/claude/ia-imagenes/pendientes' => [
+            'para_que'     => 'Los pedidos de imagen de la app ia.comerciocity.com para que la PC de Lucas los genere con su cuenta de ChatGPT: estado pendiente, o reservado con el lease vencido y con intentos por gastar; hasta 20, el más viejo primero. Responde {pedidos: [{id, uuid, client: {id, slug, nombre}, prompt, tamano (cuadrada|vertical|horizontal), estilo, intentos, created_at}]}. Antes de listar da por fallidos los colgados (lease vencido sin intentos, o más viejos que IA_IMAGENES_VENCE_HORAS, default 6) y se lo avisa al cliente.',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+        ],
+        'POST api/claude/ia-imagenes/{id}/reservar' => [
+            'para_que'     => 'Reserva un pedido de imagen para un worker por 15 minutos. Responde 200 {lease_token (64 caracteres, en claro solo esta vez), lease_expires_at, pedido}. Con el lease_token vigente del mismo worker_id, RENUEVA la reserva (mismo token, sin gastar un intento).',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Todo bajo lockForUpdate; el lease se guarda como sha256, nunca en claro.',
+                '423 {code: reservado} si otro worker tiene la reserva vigente; 409 {code: no_pendiente} si ya no está pendiente (lista, fallida, entregada) o gastó sus 2 intentos; 404 {code: pedido_inexistente}.',
+                'Cada reserva nueva suma un intento: con 2 gastados el pedido no se vuelve a reservar.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'El pedido (ia_imagen_pedidos.id).'],
+                ['nombre' => 'worker_id', 'obligatorio' => true, 'validacion' => 'required|string|max:150', 'que_es' => 'Identificador del proceso de la PC.'],
+                ['nombre' => 'lease_token', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|min:32|max:128', 'que_es' => 'Para renovar la reserva vigente propia.'],
+            ],
+        ],
+        'POST api/claude/ia-imagenes/{id}/resultado' => [
+            'para_que'     => 'Multipart: la PC entrega la imagen generada (png, jpg, jpeg o webp, hasta 15 MB). El admin la guarda en su disco privado (storage/app/ia_imagenes/{client_id}/{uuid}.{ext}), deja el pedido en lista y encola EntregarImagenIaJob, que se la manda al empresa-api del cliente (POST api/admin-sync/ia-imagenes/{uuid}/resultado, 1 vuelta + 5 reintentos a 1/5/15/60/240 min). Responde 200 {estado: lista}.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Exige la reserva vigente (lease_token del pedido, sin vencer): si no, 423 {code: lease_invalido}.',
+                'Idempotente: la misma entrega otra vez con el mismo lease devuelve 200 {estado: lista, estado_actual, duplicado: true} sin guardar ni encolar de nuevo.',
+                'El tipo se valida por el contenido del archivo (mimes), no por la extensión del nombre.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'El pedido.'],
+                ['nombre' => 'lease_token', 'obligatorio' => true, 'validacion' => 'required|string|min:32|max:128', 'que_es' => 'El token de la reserva.'],
+                ['nombre' => 'imagen', 'obligatorio' => true, 'validacion' => 'required|file|mimes:png,jpg,jpeg,webp|max:15360', 'que_es' => 'La imagen generada.'],
+            ],
+        ],
+        'POST api/claude/ia-imagenes/{id}/fallo' => [
+            'para_que'     => 'La PC no pudo generar la imagen. Con menos de 2 intentos gastados el pedido vuelve a pendiente (200 {estado: pendiente}); si no, queda fallido y se le avisa al empresa-api del cliente como estado=fallida con el error (200 {estado: fallida}).',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Exige la reserva vigente: si no, 423 {code: lease_invalido}.',
+                'Idempotente: el mismo fallo otra vez con el mismo lease devuelve 200 con el estado actual y duplicado: true.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'El pedido.'],
+                ['nombre' => 'lease_token', 'obligatorio' => true, 'validacion' => 'required|string|min:32|max:128', 'que_es' => 'El token de la reserva.'],
+                ['nombre' => 'error', 'obligatorio' => false, 'validacion' => 'nullable|string|max:500', 'que_es' => 'Qué pasó (lo ve el dueño si el pedido queda fallido).'],
+            ],
+        ],
         /* ---------------------------------------------------------- Implementaciones de clientes nuevos (misión implementar-cliente, 5/10/2026) */
 
         'GET api/claude/implementations/{id}' => [

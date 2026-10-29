@@ -149,6 +149,14 @@ class Kernel extends ConsoleKernel
             ->withoutOverlapping(60)
             ->runInBackground();
 
+        /* Los pedidos de imagen de la app del agente que quedaron colgados (la PC de Lucas apagada, o caída
+         * dos veces con la reserva tomada) se dan por fallidos y se le avisa al sistema del cliente, para que
+         * el dueño no vea su imagen «generándose» para siempre (misión cruzada app-ia-y-memoria, 29/10/2026).
+         * Es un UPDATE contra la base del admin y, si hay algo vencido, un job de entrega: barato. */
+        $schedule->command('ia:imagenes-vencer')
+            ->everyTenMinutes()
+            ->withoutOverlapping(10);
+
         $schedule->command('leads:check-followups')->everyTwoHours();
 
         /* Estado de las plantillas de WhatsApp en Meta (misión plantillas-meta-y-leads-humano,
