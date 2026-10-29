@@ -28,12 +28,17 @@ return [
      | de producción, así que un origen nuevo ahí nunca llegaría y la página quedaría sin poder hablarle
      | al admin. Se lee con `require` y no con `config()` porque acá la configuración todavía se está
      | cargando. Si `ADMIN_SPA_URL` está vacío, sigue `['*']` como siempre (abre todo, incluido el centro).
+     |
+     | Y los de la app del agente del dueño (`config/ia_app.php` → `cors_origenes`, variable
+     | `IA_APP_ORIGENES`, default `https://ia.comerciocity.com`; misión cruzada app-ia-y-memoria,
+     | 29/10/2026): el login público `POST api/ia/login` lo llama el navegador desde ese origen.
      */
     'allowed_origins' => env('ADMIN_SPA_URL')
         ? array_values(array_unique(array_merge(
             array_values(array_filter(array_map('trim', explode(',', env('ADMIN_SPA_URL'))))),
             (array) ((require __DIR__ . '/recursos.php')['cors_origenes'] ?? []),
-            (array) ((require __DIR__ . '/atribucion.php')['cors_origenes'] ?? [])
+            (array) ((require __DIR__ . '/atribucion.php')['cors_origenes'] ?? []),
+            (array) ((require __DIR__ . '/ia_app.php')['cors_origenes'] ?? [])
         )))
         : ['*'],
 
