@@ -160,6 +160,75 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         $this->assertSame(['needs_human' => false, 'reason' => null, 'mission' => null], $attention);
     }
 
+    public function test_pedir_revision_sin_mision_envia_una_respuesta_y_deja_la_revision_pendiente(): void
+    {
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        $this->getJson($this->base . '/tickets/' . $ticket->id, $this->headers)
+            ->assertOk()->assertJsonPath('ticket.capabilities.human_review_action', true);
+        $payload = ['action' => 'pedir_revision', 'body' => 'Le avisé a Lucas para que revise el acceso.',
+            'review_reason' => 'Urgente: Mariel no puede utilizar el sistema.'];
+        $this->reply($ticket, $claim, $payload)->assertOk()->assertJsonPath('ticket.state', 'manual_review');
+        $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->firstOrFail();
+        $this->assertNull($case->mission);
+        $this->assertSame($payload['review_reason'], $case->review_reason);
+        $attention = $ticket->fresh()->load('support_codex_case')->support_attention;
+        $this->assertTrue($attention['needs_human']);
+        $this->assertNull($attention['mission']);
+        $this->reply($ticket, $claim, $payload)->assertOk();
+        $this->assertCount(1, $this->deliveries->bodies);
+        $this->reply($ticket, $claim, array_merge($payload, ['review_reason' => 'Otro motivo.']))->assertStatus(409);
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
+    }
+
+    public function test_pedir_revision_conserva_la_mision_pendiente_y_su_inicio(): void
+    {
+        $ticket = $this->ticket();
+        $case = $this->prepare_mission($ticket);
+        $this->register_mission($ticket, $case)->assertOk();
+        $this->inbound($ticket, 'Ahora no puedo entrar al sistema.');
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim, ['action' => 'pedir_revision', 'review_reason' => 'Revisar el acceso urgente.'])
+            ->assertOk()->assertJsonPath('ticket.state', 'manual_review');
+        $after = $case->fresh();
+        $this->assertSame($case->mission, $after->mission);
+        $this->assertSame('tarea-mision-18', $after->mission_thread_id);
+        $attention = $ticket->fresh()->load('support_codex_case')->support_attention;
+        $this->assertTrue($attention['needs_human']);
+        $this->assertSame('started', $attention['mission']['status']);
+        $this->assertCount(2, $this->deliveries->bodies);
+    }
+
+    public function test_pedir_revision_rechaza_motivo_ausente_y_reserva_o_mensaje_obsoletos_sin_enviar(): void
+    {
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        foreach ([[], ['review_reason' => '   '], ['review_reason' => str_repeat('x', 501)]] as $extra) {
+            $this->reply($ticket, $claim, array_merge(['action' => 'pedir_revision'], $extra))->assertStatus(422);
+        }
+        $this->reply($ticket, $claim, ['action' => 'pedir_revision', 'review_reason' => 'Revisar.',
+            'lease_token' => str_repeat('x', 64)])->assertStatus(423);
+        $this->inbound($ticket, 'Llegó nueva información.');
+        $this->reply($ticket, $claim, ['action' => 'pedir_revision', 'review_reason' => 'Revisar.'])->assertStatus(409);
+        $this->assertCount(0, $this->deliveries->bodies);
+        $this->assertSame('ready', SupportCodexCase::where('support_ticket_id', $ticket->id)->firstOrFail()->state);
+    }
+
+    public function test_replay_de_operacion_anterior_conserva_su_hash_sin_review_reason(): void
+    {
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        $expected = (int) $claim['ticket']['expected_message_id'];
+        SupportCodexOperation::create([
+            'operation_id' => 'op-' . $ticket->id . '-' . $expected,
+            'support_ticket_id' => $ticket->id, 'expected_message_id' => $expected,
+            'action' => 'responder', 'status' => 'sent',
+            'request_hash' => hash('sha256', json_encode([(int) $ticket->id, $expected, 'responder', 'Probá abrir Ventas.', null, null])),
+        ]);
+        $this->reply($ticket, $claim)->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->assertCount(0, $this->deliveries->bodies);
+    }
+
     public function test_registrar_mision_iniciada_es_idempotente_y_no_atiende_ni_resuelve(): void
     {
         $ticket = $this->ticket();
@@ -699,6 +768,15 @@ class SoporteAutomaticoEnCodexTest extends TestCase
             'normal con agradecimiento' => ['¿Quedó resuelto?', 'Sí, todo normal. Muchas gracias.'],
             'sí a verificar venta' => ['¿Me confirmás si ahora podés vender?', 'Sí, gracias'],
             'confirmación breve' => ['¿Quedó resuelto?', 'Sí'],
+            'Golden Brace ticket 25 literal' => ['Inés, te consulto para completar el seguimiento: ¿pudiste ver los cheques emitidos o te quedó alguna dificultad?', 'Hola! Pude verlos perfectos , disculpa q me olvide de avisarte'],
+            'Golden Brace dictado' => ['Pudiste ver los cheques emitidos o te quedó alguna dificultad?', 'Hola, pude verlos perfecto, disculpá que me olvidé de avisarte.'],
+            'ingreso ya realizado' => ['Probá ingresar al sistema y avisame si podés trabajar.', 'Perfecto, pude ingresar bien. gracias'],
+            'sí a resultado de tarea' => ['Pudiste ver los cheques?', 'Sí, gracias'],
+            'presente logrado' => ['Pudiste ver los cheques?', 'Ahora los veo'],
+            'capacidad actual lograda' => ['Pudiste ver los cheques?', 'Ahora puedo verlos bien'],
+            'tarea habilitada' => ['Probá guardar el artículo y avisame si funciona.', 'Me dejó hacerlo'],
+            'resultado implícito de tarea' => ['Pudiste ver los cheques?', 'Pude hacerlo'],
+            'resultado implícito breve' => ['Pudiste ver los cheques?', 'Listo, ya pude'],
         ];
     }
 
@@ -740,6 +818,20 @@ class SoporteAutomaticoEnCodexTest extends TestCase
             'afirmación con futuro' => ['solicitar_confirmacion', '¿Quedó resuelto?', 'Todo normal, lo voy a probar mañana'],
             'pregunta del cliente' => ['solicitar_confirmacion', '¿Quedó resuelto?', '¿Todo normal?'],
             'pregunta sobre arreglo' => ['solicitar_confirmacion', '¿Quedó resuelto?', '¿Ya lo arreglamos?'],
+            'tarea negada' => ['solicitar_confirmacion', 'Pudiste ver los cheques?', 'No pude verlos'],
+            'tarea con dificultad' => ['solicitar_confirmacion', 'Pudiste ver los cheques?', 'Pude verlos pero falta uno'],
+            'tarea dudosa' => ['solicitar_confirmacion', 'Pudiste ver los cheques?', 'Creo que pude verlos bien'],
+            'tarea a medias' => ['solicitar_confirmacion', 'Pudiste ver los cheques?', 'Pude verlos a medias'],
+            'tarea parcialmente' => ['solicitar_confirmacion', 'Pudiste ver los cheques?', 'Pude verlos parcialmente'],
+            'tarea futura' => ['solicitar_confirmacion', 'Pudiste ver los cheques?', 'Mañana voy a verlos'],
+            'tarea diferente' => ['solicitar_confirmacion', 'Pudiste ver los cheques?', 'Pude ingresar bien'],
+            'ver no significa version' => ['solicitar_confirmacion', 'Qué versión usás?', 'Pude verlos bien'],
+            'sí a dificultad ambigua' => ['solicitar_confirmacion', 'Pudiste ver los cheques o quedó alguna dificultad?', 'Sí, gracias'],
+            'tarea habilitada negada' => ['solicitar_confirmacion', 'Probá guardar el artículo.', 'No me dejó hacerlo'],
+            'implícito a pedido futuro' => ['solicitar_confirmacion', 'Podés probar mañana si se ven los cheques?', 'Listo, ya pude'],
+            'implícito a saludo social' => ['solicitar_confirmacion', 'Hola, todo bien?', 'Pude hacerlo'],
+            'implícito parcial' => ['solicitar_confirmacion', 'Pudiste ver los cheques?', 'Pude hacerlo a medias'],
+            'implícito con problema' => ['solicitar_confirmacion', 'Pudiste ver los cheques?', 'Listo, ya pude pero falta uno'],
         ];
     }
 
@@ -781,19 +873,21 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         $this->assertCount(1, $this->deliveries->bodies);
     }
 
-    public function test_seguimiento_unico_pide_confirmacion_y_silencio_no_cierra(): void
+    public function test_una_pregunta_de_confirmacion_no_genera_recordatorios_y_silencio_no_cierra(): void
     {
         $ticket = $this->ticket();
         $claim = $this->claim($ticket);
         $this->reply($ticket, $claim, ['action' => 'solicitar_confirmacion', 'body' => '¿Quedó resuelto?'])->assertOk();
+        $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->firstOrFail();
+        $this->assertNull($case->confirmation_due_at);
+        // También se ignoran los vencimientos guardados por versiones anteriores del agente.
+        $case->update(['confirmation_due_at' => now()->addHours(4), 'follow_up_sent' => false]);
         Carbon::setTestNow(now()->addHours(4)->addMinute());
-        $this->getJson($this->base . '/pending', $this->headers)->assertOk()->assertJsonPath('tickets.0.reason', 'follow_up');
-        $claim = $this->claim($ticket);
-        $this->reply($ticket, $claim, ['action' => 'solicitar_confirmacion', 'body' => '¿Pudiste comprobar si quedó resuelto?'])->assertOk();
+        $this->getJson($this->base . '/pending', $this->headers)->assertOk()->assertJsonCount(0, 'tickets');
         Carbon::setTestNow(now()->addHours(5));
         $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
         $this->assertSame('open', $ticket->fresh()->status);
-        $this->assertCount(2, $this->deliveries->bodies);
+        $this->assertCount(1, $this->deliveries->bodies);
     }
 
     public function test_mision_se_guarda_y_no_anuncia_una_correccion_sin_ejecutar(): void

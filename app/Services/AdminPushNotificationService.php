@@ -28,26 +28,33 @@ class AdminPushNotificationService
      */
     public static function send_to_admin(int $admin_id, string $title, string $body, array $data = []): void
     {
+        static::send_to_admin_with_result($admin_id, $title, $body, $data);
+    }
+
+    /** Confirma aceptación del push service; no implica que el teléfono lo haya mostrado. */
+    public static function send_to_admin_with_result(int $admin_id, string $title, string $body, array $data = [], array $accepted_hashes = []): array
+    {
+        $result = ['accepted_endpoint_hashes' => [], 'failed_endpoint_hashes' => [], 'complete' => false];
         // Devices registrados del admin. Si no hay ninguno, no-op silencioso.
         $subscriptions = AdminPushSubscription::where('admin_id', $admin_id)->get();
         if ($subscriptions->isEmpty()) {
-            return;
+            return $result;
         }
 
         // Cliente Web Push firmado con las claves VAPID del backend.
-        $web_push = new WebPush([
-            'VAPID' => [
-                'subject'    => config('services.vapid.subject'),
-                'publicKey'  => config('services.vapid.public_key'),
-                'privateKey' => config('services.vapid.private_key'),
-            ],
-        ]);
+        $web_push = static::make_web_push();
 
         // Payload JSON que recibe el service worker del navegador.
         $payload = json_encode(array_merge(['title' => $title, 'body' => $body], $data));
 
         // Encolar una notificación por cada device del admin.
+        $queued = [];
         foreach ($subscriptions as $sub) {
+            $endpoint_hash = AdminPushSubscription::hash_endpoint($sub->endpoint);
+            if (in_array($endpoint_hash, $accepted_hashes, true)) {
+                continue;
+            }
+            $queued[] = $endpoint_hash;
             $web_push->queueNotification(
                 Subscription::create([
                     'endpoint' => $sub->endpoint,
@@ -59,8 +66,30 @@ class AdminPushNotificationService
 
         // Enviar todo el lote; cada report corresponde a un device.
         foreach ($web_push->flush() as $report) {
+            $endpoint_hash = AdminPushSubscription::hash_endpoint($report->getEndpoint());
+            if (in_array($endpoint_hash, $queued, true)) {
+                $key = $report->isSuccess() ? 'accepted_endpoint_hashes' : 'failed_endpoint_hashes';
+                $result[$key][] = $endpoint_hash;
+            }
             self::handle_send_report($admin_id, $report);
         }
+        // Un lote sin report para algún endpoint también queda pendiente, nunca se presume éxito.
+        $result['failed_endpoint_hashes'] = array_values(array_unique(array_merge(
+            $result['failed_endpoint_hashes'], array_diff($queued, $result['accepted_endpoint_hashes'])
+        )));
+        $result['complete'] = empty($result['failed_endpoint_hashes']);
+        return $result;
+    }
+
+    protected static function make_web_push(): WebPush
+    {
+        return new WebPush([
+            'VAPID' => [
+                'subject' => config('services.vapid.subject'),
+                'publicKey' => config('services.vapid.public_key'),
+                'privateKey' => config('services.vapid.private_key'),
+            ],
+        ]);
     }
 
     /**
@@ -91,7 +120,7 @@ class AdminPushNotificationService
         if ($report->isSubscriptionExpired()) {
             Log::channel('daily')->warning('Web Push: suscripción expirada, se elimina el device.', [
                 'admin_id' => $admin_id,
-                'endpoint' => $endpoint,
+                'endpoint_hash' => AdminPushSubscription::hash_endpoint($endpoint),
                 'reason'   => $report->getReason(),
             ]);
 
@@ -107,7 +136,7 @@ class AdminPushNotificationService
          * ningún aviso — la pantalla de Cuenta le seguía mostrando el badge verde. */
         Log::channel('daily')->warning('Web Push: envío fallido transitorio, se conserva la suscripción.', [
             'admin_id' => $admin_id,
-            'endpoint' => $endpoint,
+            'endpoint_hash' => AdminPushSubscription::hash_endpoint($endpoint),
             'reason'   => $report->getReason(),
         ]);
     }

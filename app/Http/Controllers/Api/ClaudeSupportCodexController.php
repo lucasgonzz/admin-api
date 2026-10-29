@@ -103,9 +103,10 @@ class ClaudeSupportCodexController extends Controller
             'lease_token' => 'required|string|min:32|max:128',
             'expected_message_id' => 'required|integer|min:1',
             'operation_id' => 'required|string|max:120|regex:/^[a-zA-Z0-9_-]+$/',
-            'action' => 'required|in:responder,solicitar_confirmacion,cerrar,escalar',
+            'action' => 'required|in:responder,solicitar_confirmacion,cerrar,escalar,pedir_revision',
             'body' => 'required|string|max:3500',
             'mission' => 'sometimes|nullable|string|max:30000',
+            'review_reason' => 'required_if:action,pedir_revision|nullable|string|max:500',
             'thread_id' => 'sometimes|string|max:150',
             'confirmation_message_id' => 'sometimes|nullable|integer|min:1',
         ]);
