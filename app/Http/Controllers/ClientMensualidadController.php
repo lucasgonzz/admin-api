@@ -84,6 +84,9 @@ class ClientMensualidadController extends Controller
                Opcional a propósito: el SPA anterior no manda la clave y no tiene por qué apagar un
                tilde que alguien prendió (ver `ClientMensualidadService::guardar()`). */
             'facturar_consumidor_final' => ['nullable', 'boolean'],
+            /* Cliente que no paga mensualidad (misión no-paga-mensualidad, 29/10/2026). Opcional por
+               la misma razón: un SPA anterior no manda la clave y no tiene por qué apagar la marca. */
+            'no_paga_mensualidad' => ['nullable', 'boolean'],
         ]);
 
         $service->guardar($client, $validated);

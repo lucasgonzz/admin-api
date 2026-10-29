@@ -161,6 +161,18 @@ class ClientMensualidadService
             }
         }
 
+        /* «No paga mensualidad» (misión no-paga-mensualidad, 29/10/2026). Mismo criterio que el
+         * tilde de consumidor final: solo si la clave VIENE y no es null, y solo se asigna si el
+         * valor CAMBIA, para que un código nuevo que llegue antes que la migración no intente
+         * escribir una columna que todavía no existe en cada Guardar de la tarjeta. */
+        if (array_key_exists('no_paga_mensualidad', $payload) && $payload['no_paga_mensualidad'] !== null) {
+            $no_paga_nuevo = (bool) $payload['no_paga_mensualidad'];
+
+            if ((bool) $client->no_paga_mensualidad !== $no_paga_nuevo) {
+                $client->no_paga_mensualidad = $no_paga_nuevo;
+            }
+        }
+
         $client->save();
 
         return $client;
@@ -220,6 +232,8 @@ class ClientMensualidadService
             'afip_domicilio' => $client->afip_domicilio,
             // Tilde de Consumidor Final (sin CUIT). Siempre bool; un front anterior ignora la clave.
             'facturar_consumidor_final' => (bool) $client->facturar_consumidor_final,
+            // Cliente que no usa el sistema y no paga mensualidad. Siempre bool; un front anterior ignora la clave.
+            'no_paga_mensualidad' => (bool) $client->no_paga_mensualidad,
             'desglose' => $desglose,
             /* Cobranzas (misión modulo-cobranzas, 18/9/2026). `mensualidad_inicio` como 'YYYY-MM-DD'
              * o null (el cast lo trae como Carbon y el front quiere un string para el input). La

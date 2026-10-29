@@ -256,6 +256,13 @@ class CobranzasMensualidadService
             return $afirmado;
         }
 
+        /* 3 bis (misión no-paga-mensualidad, 29/10/2026): un cliente que no usa el sistema y no paga
+         * mensualidad no debe nada, ni rojo ni facturado. Lo afirmado (un pago que sí entró) sigue
+         * ganando, así que si alguna vez pagó, ese mes se ve pagado; todo lo demás es «no aplica». */
+        if ($client->no_paga_mensualidad) {
+            return self::ESTADO_NO_APLICA;
+        }
+
         // 4: hay Factura C autorizada por AFIP y nadie registró el pago.
         if ($factura !== null && $this->factura_autorizada($factura)) {
             return self::ESTADO_FACTURADO;
@@ -771,6 +778,9 @@ class CobranzasMensualidadService
                 'name'                    => $client->name,
                 'company_name'            => $client->company_name,
                 'is_active'               => (bool) $client->is_active,
+                // Cliente que no usa el sistema y no paga mensualidad: la fila se ve apagada y sus
+                // meses no cuentan como deuda (misión no-paga-mensualidad, 29/10/2026).
+                'no_paga_mensualidad'     => (bool) $client->no_paga_mensualidad,
                 'mensualidad_inicio'      => $client->mensualidad_inicio ? Carbon::parse($client->mensualidad_inicio)->toDateString() : null,
                 'total_mensualidad'       => $client->total_mensualidad !== null ? (float) $client->total_mensualidad : null,
                 'cantidad_empleados'      => (int) $client->cantidad_empleados,
@@ -1042,7 +1052,14 @@ class CobranzasMensualidadService
             ->whereNotNull('mensualidad_inicio')
             ->where('mensualidad_inicio', '<', $inicio_del_mes_siguiente)
             ->orderBy('id')
-            ->get();
+            ->get()
+            // Los que no pagan mensualidad no deben nada, aunque tengan inicio cargado (misión
+            // no-paga-mensualidad, 29/10/2026). Se filtra acá, en memoria, y no con un `where`: si el
+            // código llega antes que la migración, la consulta no pide una columna que no existe.
+            ->reject(function (Client $client) {
+                return (bool) $client->no_paga_mensualidad;
+            })
+            ->values();
 
         if ($clientes->isNotEmpty()) {
             /** El inicio más viejo de todos: desde ahí hasta R se cargan filas, facturas y pagos, una sola vez. */

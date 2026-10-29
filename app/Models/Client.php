@@ -116,6 +116,8 @@ class Client extends Model
         'contract_copiado_desde_lead_at'     => 'datetime',
         // Primer mes que se cobra la mensualidad (siempre el día 1). Nulo = todavía no arrancó.
         'mensualidad_inicio'                 => 'date',
+        // true = no usa el sistema y no se le cobra: queda fuera de lo que hay que cobrar en Cobranzas.
+        'no_paga_mensualidad'                => 'boolean',
     ];
 
     /**
