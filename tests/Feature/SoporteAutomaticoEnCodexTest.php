@@ -199,6 +199,192 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         $this->assertCount(2, $this->deliveries->bodies);
     }
 
+    private function own_error_guidance(): string
+    {
+        return 'Revisé la venta 9349. El dato está guardado en "Observaciones ocultas". Ese campo es interno y no se imprime; "Observaciones" está vacío. Para que salga en el remito, abrí "Actualizar venta" y copiá el texto en "Observaciones". Guardá el cambio y volvé a generar el remito.';
+    }
+
+    public function test_error_propio_tras_orientacion_cierra_y_quita_revision_solo_despues_del_envio(): void
+    {
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), ['action' => 'pedir_revision',
+            'body' => $this->own_error_guidance(), 'review_reason' => 'Revisar el cambio que informa en su remito.'])->assertOk();
+        $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->firstOrFail();
+        $this->assertSame((int) $case->last_reply_id, (int) $case->review_requested_message_id);
+        $message = $this->inbound($ticket, 'Sí, sí, sí, sí. Error nuestro, error nuestro');
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonPath('tickets.0.reason', 'inbound');
+        $claim = $this->claim($ticket);
+        // Leer el entrante no resuelve la urgencia: la bandeja mantiene el aviso hasta el envío final.
+        $this->assertTrue($ticket->fresh()->load('support_codex_case')->support_attention['needs_human']);
+        $payload = ['action' => 'cerrar', 'confirmation_message_id' => $message->id, 'body' => 'De nada, no hay problema!'];
+        $this->reply($ticket, $claim, $payload)->assertOk()->assertJsonPath('ticket.status', 'closed');
+        $this->assertNull($case->fresh()->review_reason);
+        $this->assertNull($case->fresh()->review_requested_message_id);
+        $this->assertFalse($ticket->fresh()->load('support_codex_case')->support_attention['needs_human']);
+        $this->assertCount(2, $this->deliveries->bodies);
+        $this->reply($ticket, $claim, $payload)->assertOk();
+        $this->assertCount(2, $this->deliveries->bodies);
+    }
+
+    public function test_agradecimiento_u_otra_consulta_no_borran_la_revision_y_puede_continuar(): void
+    {
+        foreach (['Gracias', 'Otra consulta: cómo veo el stock?'] as $answer) {
+            $ticket = $this->ticket();
+            $this->reply($ticket, $this->claim($ticket), ['action' => 'pedir_revision',
+                'body' => $this->own_error_guidance(), 'review_reason' => 'Todavía requiere revisar el remito.'])->assertOk();
+            $this->inbound($ticket, $answer);
+            $this->reply($ticket, $this->claim($ticket), ['body' => 'De nada!'])->assertOk();
+            $attention = $ticket->fresh()->load('support_codex_case')->support_attention;
+            $this->assertTrue($attention['needs_human']);
+            $this->assertSame('Todavía requiere revisar el remito.', $attention['reason']);
+            $this->inbound($ticket, 'Sigo con una dificultad.');
+            $this->getJson($this->base . '/pending', $this->headers)->assertJsonFragment(['id' => $ticket->id, 'reason' => 'inbound']);
+        }
+    }
+
+    /** @dataProvider admisiones_sin_resolucion */
+    public function test_error_propio_con_duda_o_pendiente_no_cierra(string $answer, bool $guidance): void
+    {
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), ['body' => $guidance ? $this->own_error_guidance() : 'Hola, todo bien?'])->assertOk();
+        $message = $this->inbound($ticket, $answer);
+        $this->reply($ticket, $this->claim($ticket), ['action' => 'cerrar', 'confirmation_message_id' => $message->id])->assertStatus(422);
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->assertCount(1, $this->deliveries->bodies);
+    }
+
+    public function admisiones_sin_resolucion(): array
+    {
+        return [
+            ['Error nuestro, todavía no lo probé', true],
+            ['Error nuestro pero sigue sin imprimir', true],
+            ['Creo que fue error nuestro', true],
+            ['Era error nuestro?', true],
+            ['No fue error nuestro', true],
+            ['Error nuestro', false],
+            ['Error nuestro, mañana lo pruebo', true],
+            ['Error nuestro, falta otra cosa', true],
+        ];
+    }
+
+    public function test_reconocer_la_explicacion_no_exige_que_el_cliente_haya_editado_la_venta(): void
+    {
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), ['body' => 'El dato está en Observaciones ocultas. Ese campo es interno y por eso no se imprime.'])->assertOk();
+        $message = $this->inbound($ticket, 'Sí, error nuestro');
+        $this->reply($ticket, $this->claim($ticket), ['action' => 'cerrar', 'confirmation_message_id' => $message->id])
+            ->assertOk()->assertJsonPath('ticket.status', 'closed');
+    }
+
+    public function test_confirmacion_de_error_propio_no_sirve_si_luego_llego_otro_adjunto(): void
+    {
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), ['body' => $this->own_error_guidance()])->assertOk();
+        $confirmation = $this->inbound($ticket, 'Sí, error nuestro');
+        $claim = $this->claim($ticket);
+        $video = $this->inbound($ticket, '');
+        $video->update(['kind' => 'video']);
+        $this->reply($ticket, $claim, ['action' => 'cerrar', 'confirmation_message_id' => $confirmation->id])->assertStatus(409);
+        // La reserva vieja no se apropia ni se reemplaza: el mismo worker renueva con su token.
+        $claim = $this->postJson($this->base . '/tickets/' . $ticket->id . '/claim', [
+            'worker_id' => 'pc-lucas', 'expected_message_id' => $video->id, 'lease_token' => $claim['lease_token'],
+        ], $this->headers)->assertOk()->json();
+        $this->reply($ticket, $claim, ['action' => 'cerrar', 'confirmation_message_id' => $confirmation->id])->assertStatus(422);
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->assertCount(1, $this->deliveries->bodies);
+    }
+
+    public function test_derivar_con_un_porque_no_equivale_a_explicar_la_causa(): void
+    {
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), ['body' => 'Lucas va a revisar tu remito porque todavía no sabemos qué está pasando.'])->assertOk();
+        $message = $this->inbound($ticket, 'Sí, error nuestro');
+        $this->reply($ticket, $this->claim($ticket), ['action' => 'cerrar', 'confirmation_message_id' => $message->id])->assertStatus(422);
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->assertCount(1, $this->deliveries->bodies);
+    }
+
+    public function test_revision_tecnica_posterior_no_se_recupera_por_la_procedencia_anterior(): void
+    {
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), ['action' => 'pedir_revision',
+            'body' => $this->own_error_guidance(), 'review_reason' => 'Revisar el remito.'])->assertOk();
+        $this->inbound($ticket, 'Tengo otra duda.');
+        $claim = $this->claim($ticket);
+        $this->postJson($this->base . '/tickets/' . $ticket->id . '/release', [
+            'lease_token' => $claim['lease_token'], 'manual_review' => true, 'reason' => 'Falla técnica posterior.',
+        ], $this->headers)->assertOk();
+        $this->assertNull(SupportCodexCase::where('support_ticket_id', $ticket->id)->first()->review_requested_message_id);
+        $this->inbound($ticket, 'Sí, error nuestro');
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
+    }
+
+    public function test_entrante_durante_atencion_de_revision_renueva_sin_perder_el_aviso(): void
+    {
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), ['action' => 'pedir_revision',
+            'body' => $this->own_error_guidance(), 'review_reason' => 'Revisar el remito.'])->assertOk();
+        $this->inbound($ticket, 'Tengo una duda.');
+        $claim = $this->claim($ticket);
+        $last = $this->inbound($ticket, 'Te mando otro dato.');
+        $this->postJson($this->base . '/tickets/' . $ticket->id . '/claim', [
+            'worker_id' => 'pc-lucas', 'expected_message_id' => $last->id, 'lease_token' => $claim['lease_token'],
+        ], $this->headers)->assertOk()->assertJsonPath('lease_token', $claim['lease_token']);
+        $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->first();
+        $this->assertNotNull($case->review_requested_message_id);
+        $this->assertTrue($ticket->fresh()->load('support_codex_case')->support_attention['needs_human']);
+    }
+
+    public function test_la_procedencia_de_revision_no_depende_de_parecerse_al_texto_de_pausa_humana(): void
+    {
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), ['action' => 'pedir_revision',
+            'body' => $this->own_error_guidance(), 'review_reason' => SupportCodexCase::HUMAN_REPLY_REVIEW_REASON])->assertOk();
+        $this->assertTrue($ticket->fresh()->load('support_codex_case')->support_attention['needs_human']);
+        $this->inbound($ticket, 'Gracias.');
+        $this->claim($ticket);
+        $this->assertSame(SupportCodexCase::HUMAN_REPLY_REVIEW_REASON,
+            SupportCodexCase::where('support_ticket_id', $ticket->id)->first()->review_reason);
+        $this->assertTrue($ticket->fresh()->load('support_codex_case')->support_attention['needs_human']);
+    }
+
+    public function test_respuesta_humana_tras_revision_del_agente_conserva_la_pausa_humana_y_frontera(): void
+    {
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), ['action' => 'pedir_revision',
+            'body' => $this->own_error_guidance(), 'review_reason' => 'Revisar el remito.'])->assertOk();
+        $this->human_reply($ticket);
+        $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->first();
+        $this->assertTrue($case->is_human_reply_pause());
+        $this->assertNull($case->review_requested_message_id);
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
+        $this->inbound($ticket, 'Llegó información nueva.');
+        $this->claim($ticket);
+    }
+
+    public function test_error_propio_no_elude_mision_ni_cierra_con_entrega_incierta(): void
+    {
+        $ticket = $this->ticket();
+        $case = $this->prepare_mission($ticket);
+        $this->inbound($ticket, 'Otro problema en el remito.');
+        $this->reply($ticket, $this->claim($ticket), ['action' => 'pedir_revision',
+            'body' => $this->own_error_guidance(), 'review_reason' => 'Revisar el remito.'])->assertOk();
+        $message = $this->inbound($ticket, 'Sí, error nuestro');
+        $this->reply($ticket, $this->claim($ticket), ['action' => 'cerrar', 'confirmation_message_id' => $message->id])->assertStatus(409);
+        $this->assertNotNull($case->fresh()->mission);
+
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), ['action' => 'pedir_revision',
+            'body' => $this->own_error_guidance(), 'review_reason' => 'Revisar el remito.'])->assertOk();
+        $message = $this->inbound($ticket, 'Sí, era error nuestro.');
+        $this->deliveries->success = false;
+        $this->reply($ticket, $this->claim($ticket), ['action' => 'cerrar', 'confirmation_message_id' => $message->id])
+            ->assertOk()->assertJsonPath('operation.status', 'unknown')->assertJsonPath('ticket.status', 'open');
+        $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->first();
+        $this->assertNull($case->review_requested_message_id);
+        $this->assertSame('manual_review', $case->state);
+    }
+
     public function test_pedir_revision_rechaza_motivo_ausente_y_reserva_o_mensaje_obsoletos_sin_enviar(): void
     {
         $ticket = $this->ticket();

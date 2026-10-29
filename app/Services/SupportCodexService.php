@@ -98,10 +98,13 @@ class SupportCodexService
             }
             $token = $renewing ? $token : Str::random(64);
             if ($case->state === 'manual_review') {
-                // pending_reason solo admite acá una pausa por respuesta humana y un entrante
-                // posterior. El turno viejo sigue inválido; esta atención usa una reserva nueva.
+                // Una revisión pedida por el propio agente admite información nueva. Tomar el
+                // turno no la resuelve: su marcador y el aviso a Lucas se conservan hasta cerrar.
+                $human_reply_pause = $this->is_human_reply_pause($case);
                 $case->state = trim((string) $case->mission) !== '' ? 'mission_pending' : 'ready';
-                $case->review_reason = null;
+                if ($human_reply_pause) {
+                    $case->review_reason = null;
+                }
                 $case->confirmation_due_at = null;
             }
             $case->worker_id = $input['worker_id'];
@@ -598,6 +601,7 @@ class SupportCodexService
                 $operation->detail = 'Entrega no confirmada. Revisá WhatsApp antes de reintentar manualmente.';
                 $case->state = 'manual_review';
                 $case->review_reason = $operation->detail;
+                $case->review_requested_message_id = null;
             } else {
                 $operation->status = 'sent';
                 $case->handled_message_id = (int) $input['expected_message_id'];
@@ -633,6 +637,8 @@ class SupportCodexService
             $case->follow_up_sent = false;
         } elseif ($input['action'] === 'cerrar') {
             $case->state = 'closed';
+            $case->review_reason = null;
+            $case->review_requested_message_id = null;
             $case->confirmation_due_at = null;
             $ticket->status = 'closed';
             $ticket->closed_at = now();
@@ -643,6 +649,7 @@ class SupportCodexService
             // Una urgencia humana no exige inventar una misión; si ya existe, se conserva.
             $case->state = 'manual_review';
             $case->review_reason = trim($input['review_reason']);
+            $case->review_requested_message_id = $case->last_reply_id;
             $case->confirmation_due_at = null;
         } elseif ($input['action'] === 'escalar') {
             $mission = trim($input['mission']);
@@ -676,6 +683,7 @@ class SupportCodexService
             if (! empty($input['manual_review'])) {
                 $case->state = 'manual_review';
                 $case->review_reason = mb_substr((string) ($input['reason'] ?? 'Atención humana requerida.'), 0, 500);
+                $case->review_requested_message_id = null;
             }
             $case->lease_hash = null;
             $case->lease_expires_at = null;
@@ -694,12 +702,13 @@ class SupportCodexService
             $case = SupportCodexCase::firstOrCreate(['support_ticket_id' => $ticket->id]);
             // Una respuesta manual no convierte una revisión por error o conciliación en una
             // pausa recuperable. Solo cedemos este turno; el próximo entrante puede volver a Martín.
-            if ($case->state !== 'manual_review' || $this->is_human_reply_pause($case)) {
+            if ($case->state !== 'manual_review' || $this->is_human_reply_pause($case) || $case->is_agent_requested_review()) {
                 $case->state = 'manual_review';
                 $case->review_reason = SupportCodexCase::HUMAN_REPLY_REVIEW_REASON;
                 $last = $this->last_real_message($ticket->id);
                 $case->expected_message_id = $last ? (int) $last->id : null;
             }
+            $case->review_requested_message_id = null;
             $case->lease_hash = null;
             $case->lease_expires_at = null;
             $case->save();
@@ -794,6 +803,7 @@ class SupportCodexService
                 // Tampoco consume el entrante: pending/claim deben poder ofrecérselo a Martín.
                 $case->state = trim((string) $case->mission) !== '' ? 'mission_pending' : 'ready';
                 $case->review_reason = mb_substr('Retomado por Lucas: ' . $input['reason'], 0, 500);
+                $case->review_requested_message_id = null;
                 $case->lease_hash = null;
                 $case->lease_expires_at = null;
                 $case->confirmation_due_at = null;
@@ -803,6 +813,7 @@ class SupportCodexService
             $case->state = ! empty($input['request_confirmation']) ? 'ready_to_confirm' : 'ready';
             $case->handled_message_id = (int) $last->id;
             $case->review_reason = mb_substr('Retomado por Lucas: ' . $input['reason'], 0, 500);
+            $case->review_requested_message_id = null;
             $case->lease_hash = null;
             $case->lease_expires_at = null;
             $case->confirmation_due_at = null;
@@ -918,6 +929,7 @@ class SupportCodexService
             if ($case !== null) {
                 $case->state = 'manual_review';
                 $case->review_reason = $operation->detail;
+                $case->review_requested_message_id = null;
                 $case->handled_message_id = max((int) $case->handled_message_id, (int) $operation->expected_message_id);
                 $case->save();
             }
@@ -947,9 +959,9 @@ class SupportCodexService
             return null;
         }
         if ($case !== null && $case->state === 'manual_review') {
-            // Panchito (26/10): un mensaje de Lucas no debe apagar para siempre un agente
-            // que sigue encendido. Las revisiones técnicas conservan su bloqueo explícito.
-            return $this->is_human_reply_pause($case) && $last->sender_type === 'user'
+            // La procedencia durable distingue pedir_revision de errores de envío, conciliación
+            // o pausas técnicas. Un entrante no borra el motivo: solo permite que Martín lo lea.
+            return ($this->is_human_reply_pause($case) || $case->is_agent_requested_review()) && $last->sender_type === 'user'
                 && (int) $last->id > max((int) $case->expected_message_id, (int) $case->handled_message_id)
                 ? 'inbound' : null;
         }
@@ -1093,9 +1105,30 @@ class SupportCodexService
             && preg_match('/^si([,.! ]+(muchas )?gracias)?[!. ]*$/', $body));
         $implicit_completed = ($task_question || $answer_to_resolution)
             && preg_match('/^(?:(?:listo|perfecto|si)[,.! ]+)?(?:ya )?pude(?: hacerlo)?(?:[,.! ]+(?:muchas )?gracias)?[!. ]*$/', $body);
-        if ($negative || (! $resolved && ! $short_answer && ! $task_completed && ! $implicit_completed)) {
+        $own_error = $question !== null && $question->id < $message->id
+            && $this->acknowledges_own_error_after_guidance($body, $question_body);
+        if ((! $own_error && $negative) || (! $resolved && ! $short_answer && ! $task_completed && ! $implicit_completed && ! $own_error)) {
             $this->fail(422, 'confirmation_required', 'El mensaje no confirma de forma suficiente que el caso quedó resuelto.');
         }
+    }
+
+    /**
+     * Masquito #30: «error nuestro» confirma la explicación del campo oculto, no una falla
+     * pendiente. Se exige la orientación concreta anterior de ESTE ticket y una admisión
+     * completa: una duda, una prueba futura u otra dificultad no pasan por tener esas palabras.
+     */
+    private function acknowledges_own_error_after_guidance(string $body, string $guidance): bool
+    {
+        $admission = '(?:(?:(?:fue|era|es|habia sido)\s+)?(?:un\s+)?error\s+(?:nuestro|mio|de nuestra parte)|nos equivocamos|me equivoque)';
+        $complete_admission = preg_match('/^(?:(?:si|claro|perfecto|ah|ok|listo)[,.!\s]+)*' . $admission
+            . '(?:[,.!\s]+' . $admission . ')*(?:[,.!\s]+(?:muchas\s+)?gracias)?[.!\s]*$/', $body);
+        if (! $complete_admission) {
+            return false;
+        }
+        // Alcanza una causa concreta; reconocerla no exige haber editado ya la venta. Un
+        // saludo o «lo verá Lucas» no son una explicación que pueda confirmar el cliente.
+        return ! preg_match('/\b(?:no sabemos|no pude verificar|no pude comprobar|podria ser|puede que|quizas)\b/', $guidance)
+            && preg_match('/\b(?:campo|opcion|dato|observaciones|filtro|fecha|caja|sucursal|cliente|remito|venta|cuota|permiso|configuracion)\b[^.!?\n]{0,160}\b(?:esta|estan|quedo|quedaron|figura|aparece|es|son) (?:intern[oa]s?|ocult[oa]s?|vaci[oa]s?|guardad[oa]s?|cargad[oa]s?|seleccionad[oa]s?|marcad[oa]s?|tildad[oa]s?|activad[oa]s?|desactivad[oa]s?|apagad[oa]s?|encendid[oa]s?|incorrect[oa]s?|en)\b/', $guidance);
     }
 
     private function fail(int $status, string $code, string $message): void
