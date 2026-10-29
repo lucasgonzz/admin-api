@@ -366,4 +366,208 @@ class LoginDeLaAppIaTest extends BaseDeLaAppIa
 
         $this->assertSame('https://ia.comerciocity.com', $preflight->headers->get('Access-Control-Allow-Origin'));
     }
+
+    /* -------------------------------------------------------------------- Correcciones del revisor */
+
+    /**
+     * Lo que se escribió en laravel.log desde `$desde` (bytes).
+     *
+     * @param int $desde
+     *
+     * @return string
+     */
+    private function log_desde(int $desde): string
+    {
+        $ruta = storage_path('logs/laravel.log');
+        clearstatcache(true, $ruta);
+
+        if (! is_file($ruta)) {
+            return '';
+        }
+
+        $contenido = (string) file_get_contents($ruta);
+
+        return (string) substr($contenido, min($desde, strlen($contenido)));
+    }
+
+    /**
+     * @return int Tamaño actual de laravel.log.
+     */
+    private function tamano_del_log(): int
+    {
+        $ruta = storage_path('logs/laravel.log');
+        clearstatcache(true, $ruta);
+
+        return is_file($ruta) ? (int) filesize($ruta) : 0;
+    }
+
+    /**
+     * 🔴 Una excepción en el medio del login (la tabla del directorio no está: una migración que falta) no deja
+     * la contraseña en laravel.log, y la persona ve el 502 de siempre.
+     */
+    public function test_una_excepcion_en_el_medio_del_login_no_deja_la_contrasena_en_el_log(): void
+    {
+        $this->app->instance(IaDirectorioService::class, new class extends IaDirectorioService {
+            public function candidatos($usuario, $maximo = 5)
+            {
+                // Migración ausente simulada: la consulta va a una tabla que no existe.
+                return collect(DB::table('ia_directorio_que_no_existe')->where('usuario_hash', 'x')->get());
+            }
+        });
+        $this->fakear([]);
+        $desde = $this->tamano_del_log();
+
+        $respuesta = $this->login(['usuario' => 'pablo', 'password' => self::PASSWORD]);
+
+        $respuesta->assertStatus(502)->assertJsonPath('code', 'sistema_no_disponible');
+        $this->assertStringNotContainsString(self::PASSWORD, (string) $respuesta->getContent());
+
+        $log = $this->log_desde($desde);
+        $this->assertStringContainsString('el login se cortó por un error inesperado', $log, 'El error se anota (sin la contraseña).');
+        $this->assertStringContainsString('QueryException', $log);
+        $this->assertStringNotContainsString(self::PASSWORD, $log);
+    }
+
+    /**
+     * 🔴 La excepción sale justo donde la contraseña está en claro (armando el pedido al sistema del cliente), y
+     * hasta con la contraseña en el mensaje: el log la tapa, la traza no lleva argumentos y el ini vuelve a
+     * su valor al terminar.
+     */
+    public function test_la_excepcion_con_la_contrasena_a_mano_tampoco_la_deja_en_el_log(): void
+    {
+        $client = $this->crear_cliente('explota');
+        $espia  = new class extends \App\Services\IaApp\IaEmpresaCliente {
+            /** @var array<string, mixed> */
+            public $visto = [];
+
+            public function pedir(\App\Models\Client $client, $metodo, $ruta, array $cuerpo = [], $timeout = 15, $adjunto = null)
+            {
+                $frame = (new \Exception())->getTrace()[0];
+                $this->visto = [
+                    'ignore_args'      => (string) ini_get('zend.exception_ignore_args'),
+                    'traza_con_args'   => array_key_exists('args', $frame),
+                ];
+
+                throw new \RuntimeException('falló armando el pedido con password=' . $cuerpo['password']);
+            }
+        };
+        $this->app->instance(\App\Services\IaApp\IaEmpresaCliente::class, $espia);
+        $antes = (string) ini_get('zend.exception_ignore_args');
+        $desde = $this->tamano_del_log();
+
+        $this->login(['usuario' => 'pablo', 'password' => self::PASSWORD, 'negocio' => $client->slug])
+            ->assertStatus(502)->assertJsonPath('code', 'sistema_no_disponible');
+
+        $this->assertSame('1', $espia->visto['ignore_args'], 'Durante el login las trazas no llevan argumentos.');
+        $this->assertFalse($espia->visto['traza_con_args']);
+        $this->assertSame($antes, (string) ini_get('zend.exception_ignore_args'), 'Al salir, el ini vuelve a su valor.');
+
+        $log = $this->log_desde($desde);
+        $this->assertStringContainsString('[oculta]', $log);
+        $this->assertStringNotContainsString(self::PASSWORD, $log);
+    }
+
+    public function test_la_credencial_no_se_muestra_ni_se_serializa(): void
+    {
+        $credencial = new \App\Services\IaApp\CredencialDeLogin(self::PASSWORD);
+
+        $this->assertSame(self::PASSWORD, $credencial->valor());
+        $this->assertSame('[oculta]', (string) $credencial);
+        $this->assertStringNotContainsString(self::PASSWORD, print_r($credencial, true));
+        $this->assertStringNotContainsString(self::PASSWORD, json_encode(['c' => $credencial]));
+        ob_start();
+        var_dump($credencial);
+        $this->assertStringNotContainsString(self::PASSWORD, (string) ob_get_clean());
+
+        $this->expectException(\LogicException::class);
+        serialize($credencial);
+    }
+
+    /**
+     * 🔴 Si algún candidato no respondió, es 502 aunque otro haya dado 401: el suyo puede ser el que no contestó.
+     */
+    public function test_un_401_y_un_sistema_caido_dan_502(): void
+    {
+        $rechaza = $this->crear_cliente('rechaza');
+        $caido   = $this->crear_cliente('caido');
+        $this->en_el_directorio($rechaza, 'lucia', true);
+        $this->en_el_directorio($caido, 'lucia', false);
+        $this->fakear([
+            $this->base($rechaza) . '/*' => Http::response(['code' => 'credenciales_invalidas'], 401),
+            $this->base($caido) . '/*'   => Http::response('error', 500),
+        ]);
+
+        $this->login(['usuario' => 'lucia', 'password' => self::PASSWORD])
+            ->assertStatus(502)->assertJsonPath('code', 'sistema_no_disponible');
+    }
+
+    public function test_un_candidato_que_queda_afuera_por_el_presupuesto_da_502(): void
+    {
+        config(['ia_app.login.presupuesto_segundos' => 0]);
+        $primero = $this->crear_cliente('primero');
+        $segundo = $this->crear_cliente('segundo');
+        $this->en_el_directorio($primero, 'tomas', true);
+        $this->en_el_directorio($segundo, 'tomas', false);
+        $this->fakear([
+            $this->base($primero) . '/*' => Http::response(['code' => 'credenciales_invalidas'], 401),
+            $this->base($segundo) . '/*' => $this->token_ok(),
+        ]);
+
+        // Con presupuesto 0 alcanza para el primero (el timeout manda) y el segundo ya no entra.
+        config(['ia_app.login.timeout' => 15]);
+        $this->login(['usuario' => 'tomas', 'password' => self::PASSWORD])
+            ->assertStatus(502)->assertJsonPath('code', 'sistema_no_disponible');
+
+        Http::assertSentCount(1);
+    }
+
+    public function test_un_401_y_un_404_dan_version_vieja(): void
+    {
+        $nuevo = $this->crear_cliente('nuevo');
+        $viejo = $this->crear_cliente('viejo2');
+        $this->en_el_directorio($nuevo, 'sofia', true);
+        $this->en_el_directorio($viejo, 'sofia', false);
+        $this->fakear([
+            $this->base($nuevo) . '/*' => Http::response(['code' => 'credenciales_invalidas'], 401),
+            $this->base($viejo) . '/*' => Http::response('', 404),
+        ]);
+
+        $this->login(['usuario' => 'sofia', 'password' => self::PASSWORD])
+            ->assertStatus(409)->assertJsonPath('code', 'version_vieja');
+    }
+
+    public function test_un_3xx_del_sistema_no_se_sigue(): void
+    {
+        $client   = $this->crear_cliente('redirige');
+        $opciones = [];
+        $this->fakear([
+            $this->base($client) . '/*' => function ($pedido, $opts) use (&$opciones) {
+                $opciones[] = $opts;
+
+                return Http::response('', 302, ['Location' => 'https://servidor-ajeno.test/token']);
+            },
+            'https://servidor-ajeno.test/*' => $this->token_ok('1|robado'),
+        ]);
+
+        $this->login(['usuario' => 'pablo', 'password' => self::PASSWORD, 'negocio' => $client->slug])
+            ->assertStatus(502)->assertJsonPath('code', 'sistema_no_disponible');
+
+        $this->assertCount(1, $opciones);
+        $this->assertFalse($opciones[0]['allow_redirects'], 'El login no sigue redirecciones: la contraseña y la clave viajarían.');
+        Http::assertNotSent(function (Request $pedido) {
+            return Str::contains($pedido->url(), 'servidor-ajeno.test');
+        });
+    }
+
+    public function test_un_negocio_con_un_host_desconocido_es_404_sin_salir_a_la_red(): void
+    {
+        $this->fakear([]);
+
+        $this->login(['usuario' => 'pablo', 'password' => self::PASSWORD, 'negocio' => 'https://host-que-nadie-tiene-' . Str::random(6) . '.test/'])
+            ->assertStatus(404)->assertJsonPath('code', 'negocio_no_encontrado');
+        $this->login(['usuario' => 'pablo2', 'password' => self::PASSWORD, 'negocio' => 'sistema-desconocido-' . Str::random(6)])
+            ->assertStatus(404);
+
+        Http::assertNothingSent();
+    }
 }

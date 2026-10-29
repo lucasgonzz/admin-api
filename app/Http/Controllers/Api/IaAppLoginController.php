@@ -3,9 +3,11 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Services\IaApp\CredencialDeLogin;
 use App\Services\IaApp\IaDirectorioService;
 use App\Services\IaApp\IaLoginService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Validator;
 
@@ -32,6 +34,29 @@ class IaAppLoginController extends Controller
      * @return \Illuminate\Http\JsonResponse
      */
     public function login(Request $request, IaLoginService $login)
+    {
+        /* 🔴 Sin argumentos en las trazas mientras dura el login: una excepción en el medio copiaría en su traza
+           los argumentos de cada función (PHP 7.4 muestra tal cual los strings de hasta 15 caracteres) y la
+           traza termina en laravel.log. Se vuelve al valor de antes al salir. */
+        $ignorar_antes = ini_get('zend.exception_ignore_args');
+        @ini_set('zend.exception_ignore_args', '1');
+
+        try {
+            return $this->login_sin_argumentos_en_las_trazas($request, $login);
+        } finally {
+            if ($ignorar_antes !== false) {
+                @ini_set('zend.exception_ignore_args', (string) $ignorar_antes);
+            }
+        }
+    }
+
+    /**
+     * @param Request        $request
+     * @param IaLoginService $login
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    protected function login_sin_argumentos_en_las_trazas(Request $request, IaLoginService $login)
     {
         $cubeta_ip = 'ia-login|ip|' . sha1((string) $request->ip());
 
@@ -71,12 +96,27 @@ class IaAppLoginController extends Controller
             return $this->demasiados_intentos($cubeta_usuario);
         }
 
-        $resultado = $login->resolver(
-            $usuario,
-            (string) $request->input('password'),
-            $request->input('negocio'),
-            $this->dispositivo($request)
-        );
+        // La contraseña viaja envuelta desde acá (ver CredencialDeLogin).
+        $credencial = new CredencialDeLogin((string) $request->input('password'));
+
+        try {
+            $resultado = $login->resolver(
+                $usuario,
+                $credencial,
+                $request->input('negocio'),
+                $this->dispositivo($request)
+            );
+        } catch (\Throwable $e) {
+            /* 🔴 Un error inesperado (la base caída, una tabla que falta) NO sigue al Handler: se anota acá, sin
+               traza y con la contraseña tapada por si el mensaje la trajera, y la persona ve el 502 de siempre. */
+            Log::error('IaAppLoginController: el login se cortó por un error inesperado.', [
+                'clase'   => get_class($e),
+                'mensaje' => mb_substr(str_replace($credencial->valor() === '' ? [] : [$credencial->valor()], CredencialDeLogin::TAPADA, (string) $e->getMessage()), 0, 500),
+                'donde'   => basename((string) $e->getFile()) . ':' . (int) $e->getLine(),
+            ]);
+
+            $resultado = $login->sistema_no_disponible();
+        }
 
         return response()->json($resultado['cuerpo'], $resultado['http']);
     }

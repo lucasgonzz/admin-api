@@ -52,13 +52,14 @@ class IaLoginService
      * Resuelve el login.
      *
      * @param string      $usuario
-     * @param string      $password    🔴 Solo se reenvía al sistema del cliente.
+     * @param CredencialDeLogin $credencial 🔴 La contraseña, envuelta: solo se abre para el body al sistema del
+     *                                       cliente (ver `CredencialDeLogin`).
      * @param string|null $negocio
      * @param string      $dispositivo Nombre corto del dispositivo (para el nombre del token).
      *
      * @return array{http: int, cuerpo: array<string, mixed>}
      */
-    public function resolver($usuario, $password, $negocio, $dispositivo)
+    public function resolver($usuario, CredencialDeLogin $credencial, $negocio, $dispositivo)
     {
         $por_negocio = is_string($negocio) && trim($negocio) !== '';
         $maximo      = (int) config('ia_app.login.max_candidatos', 5);
@@ -104,7 +105,7 @@ class IaLoginService
                 break;
             }
 
-            $intento = $this->probar($client, $usuario, $password, $dispositivo);
+            $intento = $this->probar($client, $usuario, $credencial, $dispositivo);
 
             if ($intento['desenlace'] === 'ok') {
                 if ($por_negocio) {
@@ -127,19 +128,20 @@ class IaLoginService
      *
      * @param Client $client
      * @param string $usuario
-     * @param string $password
+     * @param CredencialDeLogin $credencial
      * @param string $dispositivo
      *
      * @return array{desenlace: string, cuerpo: array<string, mixed>|null}
      *         desenlace: ok | credenciales | no_es_dueno | sin_extension | version_vieja | falla
      */
-    protected function probar(Client $client, $usuario, $password, $dispositivo)
+    protected function probar(Client $client, $usuario, CredencialDeLogin $credencial, $dispositivo)
     {
         $respuesta = $this->empresa->pedir(
             $client,
             'POST',
             self::RUTA_TOKEN,
-            ['doc_number' => (string) $usuario, 'password' => (string) $password, 'dispositivo' => (string) $dispositivo],
+            // Único lugar donde la contraseña sale en claro: el body del POST al sistema del cliente.
+            ['doc_number' => (string) $usuario, 'password' => $credencial->valor(), 'dispositivo' => (string) $dispositivo],
             (int) config('ia_app.login.timeout', 15)
         );
 
@@ -228,8 +230,15 @@ class IaLoginService
     /**
      * Ningún sistema aceptó: qué se le dice a la persona.
      *
-     * Orden: no_es_dueno → sin_extension (los dos solo salen DESPUÉS de que el sistema validó la contraseña)
-     * → credenciales_invalidas → version_vieja (si TODOS contestaron 404) → sistema_no_disponible.
+     * Orden:
+     *  1. `no_es_dueno` y `sin_extension` (403): los dos solo salen DESPUÉS de que el sistema validó la
+     *     contraseña, así que son la respuesta verdadera.
+     *  2. 🔴 Si algún candidato NO respondió (red, timeout, 5xx, 3xx, clave del admin rechazada, o quedó afuera
+     *     por el presupuesto de tiempo): `502 sistema_no_disponible`, aunque otro haya dado 401. Su sistema
+     *     puede ser justo el que no contestó, y decirle «contraseña incorrecta» lo mandaría a cambiarla.
+     *  3. `401 credenciales_invalidas` solo si TODOS los candidatos dijeron credenciales inválidas.
+     *  4. Lo demás (todos 404, o 404 mezclados con 401): `409 version_vieja`; uno de sus sistemas no tiene la
+     *     ruta y puede ser el suyo.
      *
      * @param array<string, int> $desenlaces
      * @param int                $total
@@ -246,14 +255,28 @@ class IaLoginService
             return $this->error(403, 'sin_extension', 'Tu sistema todavía no tiene Agentes de IA activo.');
         }
 
-        if (isset($desenlaces['credenciales'])) {
+        if (isset($desenlaces['falla'])) {
+            return $this->sistema_no_disponible();
+        }
+
+        if (isset($desenlaces['credenciales']) && $desenlaces['credenciales'] === (int) $total) {
             return $this->credenciales_invalidas();
         }
 
-        if (isset($desenlaces['version_vieja']) && $desenlaces['version_vieja'] === $total) {
+        if (isset($desenlaces['version_vieja'])) {
             return $this->error(409, 'version_vieja', 'Tu sistema necesita actualizarse para usar la app del agente.');
         }
 
+        return $this->sistema_no_disponible();
+    }
+
+    /**
+     * El 502 de «no pudimos hablar con tu sistema».
+     *
+     * @return array{http: int, cuerpo: array<string, mixed>}
+     */
+    public function sistema_no_disponible()
+    {
         return $this->error(502, 'sistema_no_disponible', 'No pudimos conectarnos con tu sistema. Probá de nuevo en un momento.');
     }
 
