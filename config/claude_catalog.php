@@ -1525,7 +1525,7 @@ return [
             ],
         ],
         'POST api/claude/ia-imagenes/{id}/resultado' => [
-            'para_que'     => 'Multipart: la PC entrega la imagen generada (png, jpg, jpeg o webp, hasta 15 MB). El admin la guarda en su disco privado (storage/app/ia_imagenes/{client_id}/{uuid}.{ext}), deja el pedido en lista y encola EntregarImagenIaJob, que se la manda al empresa-api del cliente (POST api/admin-sync/ia-imagenes/{uuid}/resultado, 1 vuelta + 5 reintentos a 1/5/15/60/240 min). Responde 200 {estado: lista}.',
+            'para_que'     => 'Multipart: la PC entrega la imagen generada (png, jpg, jpeg o webp, hasta 15 MB). El admin la guarda en su disco privado (storage/app/ia_imagenes/{client_id}/{uuid}.{ext}; ia:imagenes-vencer la borra del disco a los 7 días de entregada), deja el pedido en lista y encola EntregarImagenIaJob, que se la manda al empresa-api del cliente (POST api/admin-sync/ia-imagenes/{uuid}/resultado, 1 vuelta + 5 reintentos a 1/5/15/60/240 min). Responde 200 {estado: lista}.',
             'escribe'      => true,
             'peligrosidad' => 'baja',
             'frenos'       => [

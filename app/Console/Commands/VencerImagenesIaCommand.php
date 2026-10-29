@@ -12,6 +12,10 @@ use Illuminate\Console\Command;
  *
  * Sin esto, con la PC apagada, el dueño vería su imagen «generándose» para siempre. `pendientes()` hace lo
  * mismo cada vez que la PC pregunta; este comando cubre justamente el caso en que la PC no pregunta.
+ *
+ * Además: reencola las entregas que se perdieron (con resultado y sin entregar, con el próximo intento
+ * vencido hace más de 15 minutos) y borra del disco las imágenes entregadas hace más de 7 días (la fila
+ * queda, con `imagen_path` en null).
  */
 class VencerImagenesIaCommand extends Command
 {
@@ -23,7 +27,7 @@ class VencerImagenesIaCommand extends Command
     /**
      * @var string
      */
-    protected $description = 'Da por fallidos los pedidos de imagen de la app del agente que quedaron colgados y avisa al cliente';
+    protected $description = 'Vence los pedidos de imagen colgados, reencola entregas perdidas y borra las imágenes entregadas hace más de 7 días';
 
     /**
      * @param IaImagenesService $imagenes
@@ -32,9 +36,12 @@ class VencerImagenesIaCommand extends Command
      */
     public function handle(IaImagenesService $imagenes): int
     {
-        $vencidos = $imagenes->vencer_colgados();
+        $vencidos    = $imagenes->vencer_colgados();
+        $reencolados = $imagenes->reencolar_entregas_perdidas(15);
+        $borradas    = $imagenes->borrar_imagenes_entregadas(7);
 
-        $this->info('Pedidos de imagen vencidos: ' . $vencidos . '.');
+        $this->info('Pedidos de imagen vencidos: ' . $vencidos . '. Entregas perdidas reencoladas: ' . $reencolados
+            . '. Imágenes entregadas borradas del disco: ' . $borradas . '.');
 
         return 0;
     }

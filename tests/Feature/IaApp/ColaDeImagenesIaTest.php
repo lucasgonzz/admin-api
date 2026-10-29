@@ -100,6 +100,18 @@ class ColaDeImagenesIaTest extends BaseDeLaAppIa
         ], $this->headers_claude());
     }
 
+    /**
+     * El header de la clave del sistema (`clients.inbound_api_key`), que C2.1 exige siempre.
+     *
+     * @param Client $client
+     *
+     * @return array<string, string>
+     */
+    private function clave(Client $client): array
+    {
+        return ['X-Admin-Api-Key' => (string) $client->inbound_api_key];
+    }
+
     /* -------------------------------------------------------------------- C2.1 */
 
     public function test_el_alta_es_201_y_el_mismo_uuid_otra_vez_es_200(): void
@@ -107,9 +119,9 @@ class ColaDeImagenesIaTest extends BaseDeLaAppIa
         $client = $this->crear_cliente('alta');
         $cuerpo = $this->alta($client);
 
-        $this->postJson('/api/inbound/ia-imagenes', $cuerpo)
+        $this->postJson('/api/inbound/ia-imagenes', $cuerpo, $this->clave($client))
             ->assertStatus(201)->assertExactJson(['ok' => true, 'estado' => 'pendiente']);
-        $this->postJson('/api/inbound/ia-imagenes', $cuerpo)
+        $this->postJson('/api/inbound/ia-imagenes', $cuerpo, $this->clave($client))
             ->assertStatus(200)->assertExactJson(['ok' => true, 'estado' => 'pendiente']);
 
         $this->assertSame(1, IaImagenPedido::where('uuid', $cuerpo['uuid'])->count());
@@ -117,6 +129,33 @@ class ColaDeImagenesIaTest extends BaseDeLaAppIa
         $this->assertSame((int) $client->id, $pedido->client_id);
         $this->assertSame('cuadrada', $pedido->tamano);
         $this->assertSame(501, $pedido->ai_message_id);
+    }
+
+    /**
+     * 🔴 Con el middleware en el modo SIN clave (resuelve por client_uuid), C2.1 exige la clave igual.
+     */
+    public function test_sin_la_clave_exigida_por_el_middleware_la_clave_se_exige_igual(): void
+    {
+        config(['services.admin_inbound_integration.require_api_key' => false]);
+        $client = $this->crear_cliente('sinexigir');
+
+        $this->postJson('/api/inbound/ia-imagenes', $this->alta($client))
+            ->assertStatus(401)->assertJsonPath('code', 'clave_invalida');
+        $this->postJson('/api/inbound/ia-imagenes', $this->alta($client), ['X-Admin-Api-Key' => 'otra-clave'])
+            ->assertStatus(401)->assertJsonPath('code', 'clave_invalida');
+
+        // Un cliente sin inbound_api_key cargada no entra con ninguna clave.
+        $sin_clave = $this->crear_cliente('sinclave');
+        $sin_clave->inbound_api_key = null;
+        $sin_clave->save();
+        $this->postJson('/api/inbound/ia-imagenes', $this->alta($sin_clave), ['X-Admin-Api-Key' => 'cualquiera'])
+            ->assertStatus(401)->assertJsonPath('code', 'clave_invalida');
+        $this->postJson('/api/inbound/ia-imagenes', $this->alta($sin_clave), ['X-Admin-Api-Key' => ''])
+            ->assertStatus(401);
+
+        $this->assertSame(0, IaImagenPedido::whereIn('client_id', [$client->id, $sin_clave->id])->count());
+
+        $this->postJson('/api/inbound/ia-imagenes', $this->alta($client), $this->clave($client))->assertStatus(201);
     }
 
     public function test_con_la_clave_exigida_un_sistema_no_pide_a_nombre_de_otro(): void
@@ -137,15 +176,15 @@ class ColaDeImagenesIaTest extends BaseDeLaAppIa
     {
         $client = $this->crear_cliente('tope');
 
-        $this->postJson('/api/inbound/ia-imagenes', $this->alta($client, ['tamano' => 'gigante']))
+        $this->postJson('/api/inbound/ia-imagenes', $this->alta($client, ['tamano' => 'gigante']), $this->clave($client))
             ->assertStatus(422)->assertJsonPath('code', 'validacion');
-        $this->postJson('/api/inbound/ia-imagenes', $this->alta($client, ['prompt' => str_repeat('a', 4001)]))
+        $this->postJson('/api/inbound/ia-imagenes', $this->alta($client, ['prompt' => str_repeat('a', 4001)]), $this->clave($client))
             ->assertStatus(422);
 
         config(['ia_app.imagenes.tope_diario_por_cliente' => 2]);
-        $this->postJson('/api/inbound/ia-imagenes', $this->alta($client))->assertStatus(201);
-        $this->postJson('/api/inbound/ia-imagenes', $this->alta($client))->assertStatus(201);
-        $this->postJson('/api/inbound/ia-imagenes', $this->alta($client))
+        $this->postJson('/api/inbound/ia-imagenes', $this->alta($client), $this->clave($client))->assertStatus(201);
+        $this->postJson('/api/inbound/ia-imagenes', $this->alta($client), $this->clave($client))->assertStatus(201);
+        $this->postJson('/api/inbound/ia-imagenes', $this->alta($client), $this->clave($client))
             ->assertStatus(429)->assertJsonPath('code', 'tope_diario');
     }
 
@@ -370,5 +409,156 @@ class ColaDeImagenesIaTest extends BaseDeLaAppIa
         app()->call([new EntregarImagenIaJob($pedido->id), 'handle']);
 
         Http::assertNothingSent();
+    }
+
+    /* -------------------------------------------------------------------- Correcciones del revisor */
+
+    public function test_un_archivo_que_no_es_imagen_renombrado_a_png_es_422(): void
+    {
+        $client = $this->crear_cliente('falsa');
+        $pedido = $this->pedido($client);
+        $token  = $this->reservar($pedido->id)->json('lease_token');
+
+        $ruta = tempnam(sys_get_temp_dir(), 'falsa');
+        file_put_contents($ruta, "esto no es una imagen, es texto con extension png\n");
+        $falsa = new UploadedFile($ruta, 'generada.png', null, null, true);
+
+        $this->post('/api/claude/ia-imagenes/' . $pedido->id . '/resultado', ['lease_token' => $token, 'imagen' => $falsa], $this->headers_claude())
+            ->assertStatus(422)->assertJsonPath('code', 'validacion');
+
+        $this->assertSame('reservado', $pedido->fresh()->estado);
+        @unlink($ruta);
+    }
+
+    public function test_una_imagen_de_mas_de_15_mb_es_422(): void
+    {
+        $client = $this->crear_cliente('grande');
+        $pedido = $this->pedido($client);
+        $token  = $this->reservar($pedido->id)->json('lease_token');
+
+        $grande = UploadedFile::fake()->create('generada.png', 15361, 'image/png');
+
+        $this->post('/api/claude/ia-imagenes/' . $pedido->id . '/resultado', ['lease_token' => $token, 'imagen' => $grande], $this->headers_claude())
+            ->assertStatus(422)->assertJsonPath('code', 'validacion');
+
+        $this->assertNull($pedido->fresh()->imagen_path);
+    }
+
+    public function test_en_el_ultimo_intento_la_entrega_queda_fallida_sin_reencolar(): void
+    {
+        $client = $this->crear_cliente('ultimo');
+        $pedido = $this->pedido_listo($client);
+        $this->fakear([$this->base($client) . '/*' => Http::response('caido', 503)]);
+
+        $cola = \Mockery::mock(\Illuminate\Contracts\Queue\Job::class);
+        $cola->shouldReceive('attempts')->andReturn(6);
+        $cola->shouldNotReceive('release');
+
+        $job = new EntregarImagenIaJob($pedido->id);
+        $job->setJob($cola);
+        app()->call([$job, 'handle']);
+
+        $this->assertSame('entrega_fallida', $pedido->fresh()->estado);
+        $this->assertStringContainsString('6 intentos', (string) $pedido->fresh()->entrega_error);
+    }
+
+    public function test_un_intento_intermedio_reencola_con_su_espera(): void
+    {
+        $client = $this->crear_cliente('intermedio');
+        $pedido = $this->pedido_listo($client);
+        $this->fakear([$this->base($client) . '/*' => Http::response('caido', 503)]);
+
+        $cola = \Mockery::mock(\Illuminate\Contracts\Queue\Job::class);
+        $cola->shouldReceive('attempts')->andReturn(3);
+        // Tercer intento: el próximo, a los 15 minutos.
+        $cola->shouldReceive('release')->once()->with(900);
+
+        $job = new EntregarImagenIaJob($pedido->id);
+        $job->setJob($cola);
+        app()->call([$job, 'handle']);
+
+        $this->assertSame('lista', $pedido->fresh()->estado);
+        $this->assertTrue($pedido->fresh()->entrega_proxima_en->greaterThan(now()->addMinutes(14)));
+    }
+
+    public function test_failed_deja_la_entrega_fallida(): void
+    {
+        $client = $this->crear_cliente('failed');
+        $pedido = $this->pedido_listo($client);
+
+        (new EntregarImagenIaJob($pedido->id))->failed(new \RuntimeException('se cayó el worker'));
+
+        $this->assertSame('entrega_fallida', $pedido->fresh()->estado);
+        $this->assertStringContainsString('RuntimeException', (string) $pedido->fresh()->entrega_error);
+
+        // Uno ya entregado no se toca.
+        $entregado = $this->pedido_listo($client);
+        $entregado->update(['estado' => 'entregada']);
+        (new EntregarImagenIaJob($entregado->id))->failed(new \RuntimeException('x'));
+        $this->assertSame('entregada', $entregado->fresh()->estado);
+    }
+
+    public function test_vencer_reencola_las_entregas_perdidas_y_no_las_que_esperan_su_reintento(): void
+    {
+        Queue::fake();
+        $client   = $this->crear_cliente('perdida');
+        $perdida  = $this->pedido_listo($client);
+        $espera   = $this->pedido_listo($client);
+        $reciente = $this->pedido_listo($client);
+        IaImagenPedido::where('id', $perdida->id)->update(['entrega_proxima_en' => now()->subMinutes(20), 'updated_at' => now()->subMinutes(20)]);
+        IaImagenPedido::where('id', $espera->id)->update(['entrega_proxima_en' => now()->addMinutes(40), 'updated_at' => now()->subMinutes(20)]);
+        IaImagenPedido::where('id', $reciente->id)->update(['entrega_proxima_en' => now()->subMinutes(3), 'updated_at' => now()->subMinutes(3)]);
+
+        $this->artisan('ia:imagenes-vencer')->assertExitCode(0);
+
+        Queue::assertPushed(EntregarImagenIaJob::class, 1);
+        Queue::assertPushed(EntregarImagenIaJob::class, function (EntregarImagenIaJob $job) use ($perdida) {
+            return $job->pedido_id() === (int) $perdida->id;
+        });
+        $this->assertTrue($perdida->fresh()->entrega_proxima_en->greaterThan(now()->subMinute()));
+    }
+
+    public function test_vencer_borra_del_disco_las_imagenes_entregadas_hace_mas_de_7_dias(): void
+    {
+        Queue::fake();
+        $client = $this->crear_cliente('borrar');
+        $vieja  = $this->pedido_listo($client);
+        $nueva  = $this->pedido_listo($client);
+        IaImagenPedido::where('id', $vieja->id)->update(['estado' => 'entregada', 'entregado_en' => now()->subDays(8)]);
+        IaImagenPedido::where('id', $nueva->id)->update(['estado' => 'entregada', 'entregado_en' => now()->subDays(2)]);
+        $ruta_vieja = $vieja->imagen_path;
+
+        $this->artisan('ia:imagenes-vencer')->assertExitCode(0);
+
+        Storage::disk('local')->assertMissing($ruta_vieja);
+        Storage::disk('local')->assertExists($nueva->imagen_path);
+        $this->assertNull($vieja->fresh()->imagen_path);
+        $this->assertSame('entregada', $vieja->fresh()->estado, 'La fila queda.');
+        Queue::assertNothingPushed();
+    }
+
+    public function test_una_respuesta_3xx_de_empresa_no_se_sigue_y_se_reintenta(): void
+    {
+        $client   = $this->crear_cliente('redirige');
+        $pedido   = $this->pedido_listo($client);
+        $opciones = [];
+        $this->fakear([
+            $this->base($client) . '/*' => function ($pedido_http, $opts) use (&$opciones) {
+                $opciones[] = $opts;
+
+                return Http::response('', 302, ['Location' => 'https://otro-host.test/robar']);
+            },
+            'https://otro-host.test/*' => Http::response(['ok' => true], 200),
+        ]);
+
+        app()->call([new EntregarImagenIaJob($pedido->id), 'handle']);
+
+        $this->assertCount(1, $opciones);
+        $this->assertFalse($opciones[0]['allow_redirects'], 'La entrega no sigue redirecciones (la clave del cliente viajaría).');
+        Http::assertNotSent(function (Request $pedido_http) {
+            return Str::contains($pedido_http->url(), 'otro-host.test');
+        });
+        $this->assertSame('lista', $pedido->fresh()->estado);
+        $this->assertStringContainsString('302', (string) $pedido->fresh()->entrega_error);
     }
 }

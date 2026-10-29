@@ -54,6 +54,9 @@ class CreateIaImagenPedidosTable extends Migration
             $table->unsignedTinyInteger('entrega_intentos')->default(0);
             $table->string('entrega_error', 500)->nullable();
             $table->timestamp('entregado_en')->nullable();
+            // Cuándo se encoló (o se reencoló con su espera) el próximo intento de entrega. Sirve para que
+            // `ia:imagenes-vencer` reencole solo una entrega perdida y no una que está esperando su reintento.
+            $table->dateTime('entrega_proxima_en')->nullable();
 
             $table->timestamps();
         });

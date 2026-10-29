@@ -14,7 +14,8 @@ use Illuminate\Support\Facades\Validator;
  * puertas, un solo servicio (`IaImagenesService`):
  *
  *  - `POST api/inbound/ia-imagenes` (contrato C2.1): el `empresa-api` del cliente da de alta un pedido.
- *    Middleware `admin.inbound.key`, el mismo que los mensajes de soporte (`SupportSyncHelper`).
+ *    Middleware `admin.inbound.key`, el mismo que los mensajes de soporte (`SupportSyncHelper`), y ADEMÁS la
+ *    clave `X-Admin-Api-Key` = `clients.inbound_api_key` exigida siempre adentro del controlador.
  *  - `api/claude/ia-imagenes/*` (contrato C3): la PC de Lucas lista, reserva y devuelve imagen o fallo.
  *    Middleware `claude.task.key`.
  *
@@ -38,6 +39,17 @@ class IaImagenesController extends Controller
 
         if (! $client instanceof Client) {
             return $this->error(401, 'clave_invalida', 'No se pudo identificar el sistema que pide la imagen.');
+        }
+
+        /* 🔴 La clave SIEMPRE, aunque el middleware esté en el modo sin clave (ADMIN_INBOUND_REQUIRE_API_KEY=false,
+           que resuelve el cliente por el client_uuid del body): la cola de imágenes gasta la cuenta personal de
+           ChatGPT de Lucas y no puede quedar abierta a quien conozca un uuid. Un cliente sin inbound_api_key
+           cargada tampoco entra: se le carga con la exigencia de admin-sync (escribe ADMIN_API_OUTBOUND_KEY). */
+        $esperada = trim((string) $client->inbound_api_key);
+        $recibida = trim((string) $request->header('X-Admin-Api-Key'));
+
+        if ($esperada === '' || $recibida === '' || ! hash_equals($esperada, $recibida)) {
+            return $this->error(401, 'clave_invalida', 'Falta la clave del sistema o no es la que tiene el admin.');
         }
 
         $invalido = $this->validar($request, [

@@ -152,7 +152,9 @@ class Kernel extends ConsoleKernel
         /* Los pedidos de imagen de la app del agente que quedaron colgados (la PC de Lucas apagada, o caída
          * dos veces con la reserva tomada) se dan por fallidos y se le avisa al sistema del cliente, para que
          * el dueño no vea su imagen «generándose» para siempre (misión cruzada app-ia-y-memoria, 29/10/2026).
-         * Es un UPDATE contra la base del admin y, si hay algo vencido, un job de entrega: barato. */
+         * De paso reencola las entregas perdidas (resultado sin entregar, próximo intento vencido hace más de
+         * 15 min) y borra del disco las imágenes entregadas hace más de 7 días. Son UPDATE contra la base del
+         * admin y, si hay algo, un job de entrega: barato. */
         $schedule->command('ia:imagenes-vencer')
             ->everyTenMinutes()
             ->withoutOverlapping(10);

@@ -116,7 +116,9 @@ class EntregarImagenIaJob implements ShouldQueue
             $cuerpo['error'] = mb_substr((string) ($pedido->error !== null ? $pedido->error : 'No se pudo generar la imagen.'), 0, 500);
         }
 
-        $pedido->entrega_intentos = (int) $pedido->entrega_intentos + 1;
+        // `entrega_proxima_en` = ahora: este intento está en curso (ia:imagenes-vencer no lo reencola).
+        $pedido->entrega_intentos   = (int) $pedido->entrega_intentos + 1;
+        $pedido->entrega_proxima_en = now();
         $pedido->save();
 
         $respuesta = $empresa->pedir(
@@ -163,10 +165,13 @@ class EntregarImagenIaJob implements ShouldQueue
             : 'HTTP ' . $status;
 
         if ($this->attempts() < $this->tries) {
-            $pedido->entrega_error = mb_substr('Reintentando: ' . $detalle, 0, 500);
+            $espera = self::ESPERAS_EN_SEGUNDOS[min(max($this->attempts(), 1) - 1, count(self::ESPERAS_EN_SEGUNDOS) - 1)];
+
+            $pedido->entrega_error      = mb_substr('Reintentando: ' . $detalle, 0, 500);
+            $pedido->entrega_proxima_en = now()->addSeconds($espera);
             $pedido->save();
 
-            $this->release(self::ESPERAS_EN_SEGUNDOS[min(max($this->attempts(), 1) - 1, count(self::ESPERAS_EN_SEGUNDOS) - 1)]);
+            $this->release($espera);
 
             return;
         }

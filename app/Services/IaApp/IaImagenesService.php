@@ -369,7 +369,76 @@ class IaImagenesService
     }
 
     /**
-     * Encola la entrega al empresa-api. Si la cola falla, el pedido queda en `lista`/`fallida` y se anota:
+     * Reencola la entrega de los pedidos con resultado (`lista`/`fallida`) cuyo encolado se perdió: el próximo
+     * intento estaba previsto hace más de `$minutos` y nadie lo hizo (la cola falló al encolar, o un worker
+     * murió con el job). Un pedido que está esperando su reintento (backoff de 1 a 240 min) tiene su
+     * `entrega_proxima_en` en el futuro y no se toca.
+     *
+     * @param int $minutos
+     *
+     * @return int Cuántos se reencolaron.
+     */
+    public function reencolar_entregas_perdidas($minutos = 15)
+    {
+        $limite = now()->subMinutes(max(1, (int) $minutos));
+
+        $pedidos = IaImagenPedido::whereIn('estado', [IaImagenPedido::ESTADO_LISTA, IaImagenPedido::ESTADO_FALLIDA])
+            ->where(function ($q) use ($limite) {
+                $q->whereNull('entrega_proxima_en')->orWhere('entrega_proxima_en', '<=', $limite);
+            })
+            ->where('updated_at', '<=', $limite)
+            ->orderBy('id')
+            ->limit(200)
+            ->get();
+
+        foreach ($pedidos as $pedido) {
+            Log::info('IaImagenesService: se reencola una entrega perdida.', ['pedido_id' => (int) $pedido->id]);
+            $this->despachar_entrega($pedido);
+        }
+
+        return $pedidos->count();
+    }
+
+    /**
+     * Borra del disco las imágenes ya entregadas hace más de `$dias` (el sistema del cliente tiene su copia);
+     * la fila queda, con `imagen_path` en null.
+     *
+     * @param int $dias
+     *
+     * @return int Cuántas se borraron.
+     */
+    public function borrar_imagenes_entregadas($dias = 7)
+    {
+        $disco   = (string) config('ia_app.imagenes.disco', 'local');
+        $pedidos = IaImagenPedido::where('estado', IaImagenPedido::ESTADO_ENTREGADA)
+            ->whereNotNull('imagen_path')
+            ->where('entregado_en', '<=', now()->subDays(max(1, (int) $dias)))
+            ->orderBy('id')
+            ->limit(500)
+            ->get();
+
+        foreach ($pedidos as $pedido) {
+            try {
+                Storage::disk($disco)->delete($pedido->imagen_path);
+            } catch (\Throwable $e) {
+                Log::warning('IaImagenesService: no se pudo borrar una imagen entregada.', [
+                    'pedido_id' => (int) $pedido->id,
+                    'error'     => mb_substr($e->getMessage(), 0, 300),
+                ]);
+
+                continue;
+            }
+
+            $pedido->imagen_path = null;
+            $pedido->save();
+        }
+
+        return $pedidos->count();
+    }
+
+    /**
+     * Encola la entrega al empresa-api. Si la cola falla, el pedido queda en `lista`/`fallida` con
+     * `entrega_proxima_en` = ahora, y `reencolar_entregas_perdidas()` lo vuelve a encolar a los 15 minutos:
      * el resultado de la PC ya está guardado y no se pierde.
      *
      * @param IaImagenPedido $pedido
@@ -378,6 +447,9 @@ class IaImagenesService
      */
     protected function despachar_entrega(IaImagenPedido $pedido)
     {
+        $pedido->entrega_proxima_en = now();
+        $pedido->save();
+
         try {
             /* Sin `afterCommit()`: la cola `database` escribe en la misma base y adentro de la misma
                transacción que el cambio de estado, así que el worker no ve el job antes que el estado. */

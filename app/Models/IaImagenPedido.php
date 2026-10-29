@@ -27,6 +27,7 @@ use Illuminate\Database\Eloquent\Model;
  * @property int                 $entrega_intentos
  * @property string|null         $entrega_error
  * @property \Carbon\Carbon|null $entregado_en
+ * @property \Carbon\Carbon|null $entrega_proxima_en
  */
 class IaImagenPedido extends Model
 {
@@ -51,6 +52,7 @@ class IaImagenPedido extends Model
         'entrega_intentos' => 'integer',
         'lease_expires_at' => 'datetime',
         'entregado_en'     => 'datetime',
+        'entrega_proxima_en' => 'datetime',
     ];
 
     /**
