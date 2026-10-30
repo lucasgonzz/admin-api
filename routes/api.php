@@ -561,6 +561,8 @@ Route::middleware('claude.task.key')
             ->whereNumber('id')->whereNumber('cuotaId');
         Route::post('clients/{id}/cuotas/{cuotaId}/eliminar', 'Api\ClaudeCobranzasVentasController@eliminar_cuota_json')
             ->whereNumber('id')->whereNumber('cuotaId');
+        Route::post('clients/{id}/ventas/{ventaId}/cuotas', 'Api\ClaudeCobranzasVentasController@agregar_cuota_json')
+            ->whereNumber('id')->whereNumber('ventaId');
         Route::post('ventas/{ventaId}/comision/pagos', 'Api\ClaudeCobranzasVentasController@pago_de_comision_json')
             ->whereNumber('ventaId');
         Route::post('clients/{id}/cobro-dudoso', 'Api\ClaudeCobranzasVentasController@cobro_dudoso_json')
