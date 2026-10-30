@@ -26,6 +26,8 @@ use Illuminate\Validation\ValidationException;
  *    pendiente y se aplica sola cuando el lead se promueve. El freno de nombre es el del LEAD
  *    (`confirm_lead_name` = `leads.contact_name`).
  *  - `GET claude/leads/{id}/senas` — las señas del lead (pendientes y ya aplicadas) y su total.
+ *  - `POST claude/leads/{leadId}/senas/{senaId}/anular` — anula una seña PENDIENTE del lead (borra la
+ *    fila; no toca plata). Es la salida de una seña que quedó sin aplicar. Una ya aplicada es 422.
  *
  * Los frenos son los del bloque `claude/*` (el patrón de `ClaudeCobranzasVentasController`):
  *  1. `dry_run` por defecto true: se corre EL MISMO servicio que después escribe —adentro de una
@@ -286,6 +288,97 @@ class ClaudeSenasController extends Controller
             ['lead' => $this->lead_json($lead)],
             $senas->senas_del_lead_para_json($lead)
         ), 200);
+    }
+
+    /**
+     * Anula una seña PENDIENTE de un lead (borra la fila, sin tocar plata). Sirve para una seña que
+     * quedó sin aplicar para siempre: la promoción no generó venta, era de otra moneda que la venta o
+     * la venta no tenía nada pendiente. Una seña ya aplicada a una venta es 422 (se corrige en el pago
+     * de la cuota), igual que una seña que no es de ese lead.
+     *
+     * @param Request     $request {dry_run?, confirm_lead_name?}
+     * @param int|string  $leadId  Lead.
+     * @param int|string  $senaId  Seña pendiente del lead.
+     * @param SenaService $senas
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function anular_lead_json(Request $request, $leadId, $senaId, SenaService $senas)
+    {
+        $lead = Lead::find((int) $leadId);
+        if ($lead === null) {
+            return $this->error_404('no existe el lead ' . $leadId);
+        }
+
+        $sena = Sena::find((int) $senaId);
+        if ($sena === null) {
+            return $this->error_404('no existe la seña ' . $senaId);
+        }
+
+        $invalido = $this->validar_o_422($request, [
+            'dry_run'           => ['nullable', 'boolean'],
+            'confirm_lead_name' => ['nullable', 'string', 'max:190'],
+        ]);
+        if ($invalido !== null) {
+            return $invalido;
+        }
+
+        $antes = $senas->senas_del_lead_para_json($lead);
+        $sena_json = $senas->sena_para_json($sena);
+
+        /* Freno 1: sin `dry_run=false` explícito esto no escribe nada. */
+        $dry_run = $request->filled('dry_run') ? $request->boolean('dry_run') : true;
+        if ($dry_run) {
+            try {
+                $despues = $this->simular(function () use ($senas, $lead, $sena) {
+                    $senas->anular_pendiente_de_lead($sena, null, (int) $lead->id);
+
+                    return $senas->senas_del_lead_para_json($lead);
+                });
+            } catch (ValidationException $e) {
+                return $this->error_422($this->mensaje_de($e, 'La seña no se puede anular') . ' No se escribió nada.', [
+                    'lead_id'  => (int) $lead->id,
+                    'sena_id'  => (int) $sena->id,
+                    'sena'     => $sena_json,
+                    'detalles' => $e->validator->errors()->all(),
+                ]);
+            }
+
+            return response()->json([
+                'dry_run'                  => true,
+                'escribio'                 => false,
+                'lead'                     => $this->lead_json($lead),
+                'sena'                     => $sena_json,
+                'senas_pendientes_antes'   => $antes['total'],
+                'senas_pendientes_despues' => $despues['total'],
+                'nota'                     => 'No se escribió NADA. Así quedaría el lead sin esta seña pendiente. Para anularla de verdad, '
+                    . 'repetí la misma llamada con dry_run=false y confirm_lead_name con el nombre exacto del lead.',
+            ], 200);
+        }
+
+        /* Freno 2: el nombre del lead. */
+        $rechazo = $this->rechazar_si_el_nombre_del_lead_no_confirma($request, $lead, 'No se escribió nada.');
+        if ($rechazo !== null) {
+            return $rechazo;
+        }
+
+        try {
+            $senas->anular_pendiente_de_lead($sena, null, (int) $lead->id);
+        } catch (ValidationException $e) {
+            return $this->error_422($this->mensaje_de($e, 'La seña no se puede anular') . ' No se escribió nada.', [
+                'lead_id'  => (int) $lead->id,
+                'sena_id'  => (int) $sena->id,
+                'sena'     => $sena_json,
+                'detalles' => $e->validator->errors()->all(),
+            ]);
+        }
+
+        return response()->json(array_merge([
+            'dry_run'       => false,
+            'escribio'      => true,
+            'lead'          => $this->lead_json($lead),
+            'sena_anulada'  => $sena_json,
+        ], $senas->senas_del_lead_para_json($lead)), 200);
     }
 
     /**

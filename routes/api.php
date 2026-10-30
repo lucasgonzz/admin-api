@@ -582,6 +582,10 @@ Route::middleware('claude.task.key')
             ->whereNumber('id');
         Route::get('leads/{id}/senas', 'Api\ClaudeSenasController@index_lead_json')
             ->whereNumber('id');
+        /* Anular una seña PENDIENTE de un lead (la que quedó sin aplicar). dry_run por defecto true y
+           confirm_lead_name para escribir. Una seña ya aplicada no se anula. */
+        Route::post('leads/{leadId}/senas/{senaId}/anular', 'Api\ClaudeSenasController@anular_lead_json')
+            ->whereNumber('leadId')->whereNumber('senaId');
         /* 🔴 El acceso del motor de `/categorizar` al catálogo de UN cliente SIN que su clave pase por
            la máquina de Lucas (misión `implementacion-dos-sistemas`, 6/10/2026). Los dos viven en
            ClaudeClientCatalogoController y no llevan nunca el valor de `clients.api_key` en una
@@ -1096,6 +1100,9 @@ Route::prefix('admin')->group(function () {
             ->where('leadId', '[0-9]+');
         Route::get('leads/{leadId}/senas', [SenaController::class, 'index_del_lead_json'])
             ->where('leadId', '[0-9]+');
+        // Anular una seña PENDIENTE de un lead (la que quedó sin aplicar): borra la fila, sin tocar plata.
+        Route::delete('leads/{leadId}/senas/{senaId}', [SenaController::class, 'destroy_del_lead_json'])
+            ->where('leadId', '[0-9]+')->where('senaId', '[0-9]+');
 
         Route::get('lead/atribucion/metricas', [\App\Http\Controllers\LeadAtribucionController::class, 'metricas']);
         Route::get('lead/{id}/atribucion', [\App\Http\Controllers\LeadAtribucionController::class, 'detalle'])->where('id', '[0-9]+');

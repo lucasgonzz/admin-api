@@ -10,6 +10,7 @@ use App\Models\Venta;
 use App\Services\ClientContratoService;
 use App\Services\RunUserSetupService;
 use App\Services\SenaService;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\Storage;
 
 /**
@@ -734,5 +735,160 @@ class SenasTest extends BaseDeVentas
         $venta = Venta::where('client_id', $client->id)->firstOrFail();
         $this->assertNull($venta->lead_id);
         $this->assertSame(0, Sena::count());
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | Antiduplicado, anulación de señas pendientes y baja de la venta
+     |------------------------------------------------------------------------------------------ */
+
+    /**
+     * 🔴 Dos llamadas idénticas seguidas (mismo monto, fecha y nota): la segunda es 422 «seña
+     * repetida» y no cambia NADA. Una seña distinta (otro monto, otra fecha u otra nota) sí pasa, y
+     * pasados los diez minutos la misma seña vuelve a ser válida.
+     *
+     * @return void
+     */
+    public function test_una_sena_repetida_por_reintento_es_422_y_no_cambia_nada(): void
+    {
+        $this->crear_vendedor();
+        $client = $this->crear_cliente(['name' => 'Cliente del reintento']);
+        $venta_id = $this->venta_de_cuatro_cuotas($client);
+        $cuerpo = ['monto' => 100, 'fecha' => '2026-09-12', 'nota' => 'Transferencia'];
+
+        $this->sena_en_venta($venta_id, $cuerpo)->assertStatus(201);
+        $foto = $this->cuotas_de($venta_id)->map(function ($cuota) { return [$cuota->id, $cuota->estado, $cuota->monto_pagado, $cuota->fecha_pago ? $cuota->fecha_pago->toDateString() : null, $cuota->observacion]; })->all();
+
+        $repetida = $this->sena_en_venta($venta_id, $cuerpo);
+        $repetida->assertStatus(422);
+        $this->assertStringContainsString('Parece una seña repetida', $repetida->json('errors.monto.0'));
+        $this->assertSame(1, Sena::count(), 'La repetida no deja otra seña.');
+        $this->assertSame($foto, $this->cuotas_de($venta_id)->map(function ($cuota) { return [$cuota->id, $cuota->estado, $cuota->monto_pagado, $cuota->fecha_pago ? $cuota->fecha_pago->toDateString() : null, $cuota->observacion]; })->all(), 'Ni cobra de más.');
+
+        // Distinta en el monto, en la fecha o en la nota: pasa.
+        $this->sena_en_venta($venta_id, ['monto' => 50] + $cuerpo)->assertStatus(201);
+        $this->sena_en_venta($venta_id, ['fecha' => '2026-09-13'] + $cuerpo)->assertStatus(201);
+        $this->sena_en_venta($venta_id, ['nota' => 'Efectivo'] + $cuerpo)->assertStatus(201);
+        $this->sena_en_venta($venta_id, ['nota' => null] + $cuerpo)->assertStatus(201);
+        $this->assertSame(5, Sena::count());
+
+        // Pasados diez minutos, la misma seña ya no se toma por un reintento.
+        Carbon::setTestNow(Carbon::now()->addMinutes(11));
+        $this->sena_en_venta($venta_id, $cuerpo)->assertStatus(201);
+        $this->assertSame(6, Sena::count());
+    }
+
+    /**
+     * El antiduplicado vale también para las señas de un lead sin promover, y es por lead: el mismo
+     * monto en otro lead pasa.
+     *
+     * @return void
+     */
+    public function test_una_sena_repetida_en_un_lead_es_422(): void
+    {
+        $lead = $this->crear_lead_con_contrato();
+        $otro = $this->crear_lead_con_contrato();
+        $cuerpo = ['monto' => 100, 'fecha' => '2026-09-14', 'nota' => 'Al cerrar'];
+
+        $this->sena_en_lead($lead->id, $cuerpo)->assertStatus(201);
+        $repetida = $this->sena_en_lead($lead->id, $cuerpo);
+        $repetida->assertStatus(422);
+        $this->assertStringContainsString('Parece una seña repetida', $repetida->json('errors.monto.0'));
+        $this->assertSame(1, Sena::count());
+
+        $this->sena_en_lead($lead->id, ['monto' => 101] + $cuerpo)->assertStatus(201);
+        $this->sena_en_lead($otro->id, $cuerpo)->assertStatus(201);
+        $this->assertSame(3, Sena::count());
+    }
+
+    /**
+     * 🔴 Una seña pendiente que quedó huérfana (el lead se promovió sin generar venta) se puede ver y
+     * ANULAR: el GET anda con un lead YA promovido, el DELETE borra la fila y devuelve el mismo JSON
+     * que el GET, y no se toca ninguna cuota.
+     *
+     * @return void
+     */
+    public function test_se_puede_anular_una_sena_pendiente_de_un_lead_ya_promovido(): void
+    {
+        $this->crear_vendedor();
+        $client = $this->crear_cliente(['name' => 'Cliente sin venta']);
+        $lead = $this->crear_lead_promovido($client);
+        $huerfana = Sena::create(['lead_id' => $lead->id, 'monto' => 100, 'moneda' => 'USD', 'fecha' => '2026-09-14', 'origen' => 'manual']);
+        $otra = Sena::create(['lead_id' => $lead->id, 'monto' => 30, 'moneda' => 'USD', 'fecha' => '2026-09-15', 'origen' => 'manual']);
+
+        // El GET de un lead ya promovido devuelve sus señas pendientes.
+        $lista = $this->getJson('/api/admin/leads/' . $lead->id . '/senas');
+        $lista->assertStatus(200);
+        $this->assertCount(2, $lista->json('senas'));
+        $this->assertFalse($lista->json('senas.0.aplicada'));
+        $this->assertEqualsWithDelta(130.0, $lista->json('total'), 0.001);
+
+        $anulada = $this->deleteJson('/api/admin/leads/' . $lead->id . '/senas/' . $huerfana->id);
+        $anulada->assertStatus(200);
+        $this->assertCount(1, $anulada->json('senas'));
+        $this->assertSame($otra->id, $anulada->json('senas.0.id'));
+        $this->assertEqualsWithDelta(30.0, $anulada->json('total'), 0.001);
+        $this->assertEqualsWithDelta(0.0, $anulada->json('total_aplicado'), 0.001);
+        $this->assertNull(Sena::find($huerfana->id), 'La fila se borró.');
+        $this->assertNotNull(Sena::find($otra->id), 'La otra queda.');
+    }
+
+    /**
+     * 🔴 Lo que NO se anula: una seña ya aplicada a una venta (422, y sigue ahí con sus cuotas
+     * cobradas), una seña de otro lead (422) y una seña que no existe (404).
+     *
+     * @return void
+     */
+    public function test_no_se_anula_una_sena_aplicada_ni_la_de_otro_lead(): void
+    {
+        $this->crear_vendedor();
+        $lead = $this->crear_lead_con_contrato();
+        $this->sena_en_lead($lead->id, ['monto' => 100])->assertStatus(201);
+        $client = app(RunUserSetupService::class)->ensure_production_client($lead, '');
+        $aplicada = Sena::firstOrFail();
+        $this->assertNotNull($aplicada->aplicada_at);
+
+        $r = $this->deleteJson('/api/admin/leads/' . $lead->id . '/senas/' . $aplicada->id);
+        $r->assertStatus(422);
+        $this->assertArrayHasKey('sena_id', $r->json('errors'));
+        $this->assertNotNull(Sena::find($aplicada->id), 'La seña aplicada sigue.');
+        $venta = Venta::where('client_id', $client->id)->firstOrFail();
+        $this->assertEqualsWithDelta(100.0, (float) $this->cuotas_de($venta->id)->first()->monto_pagado, 0.001, 'Las cuotas no se tocan.');
+
+        // Una pendiente de OTRO lead no se anula por la ruta de este.
+        $otro_lead = $this->crear_lead_con_contrato();
+        $ajena = Sena::create(['lead_id' => $otro_lead->id, 'monto' => 10, 'moneda' => 'USD', 'fecha' => '2026-09-14', 'origen' => 'manual']);
+        $this->deleteJson('/api/admin/leads/' . $lead->id . '/senas/' . $ajena->id)->assertStatus(422);
+        $this->assertNotNull(Sena::find($ajena->id));
+
+        // Una seña registrada directo en una venta (sin lead) tampoco.
+        $de_venta = $this->sena_en_venta($venta->id, ['monto' => 5])->json('sena.id');
+        $this->deleteJson('/api/admin/leads/' . $lead->id . '/senas/' . $de_venta)->assertStatus(422);
+
+        $this->deleteJson('/api/admin/leads/' . $lead->id . '/senas/99999999')->assertStatus(404);
+        $this->deleteJson('/api/admin/leads/99999999/senas/' . $ajena->id)->assertStatus(404);
+    }
+
+    /**
+     * Borrar la venta se lleva sus señas: no quedan filas de `senas` colgando de una venta que ya no
+     * existe, y las señas de otras ventas no se tocan.
+     *
+     * @return void
+     */
+    public function test_borrar_la_venta_borra_sus_senas(): void
+    {
+        $this->crear_vendedor();
+        $client = $this->crear_cliente(['name' => 'Cliente que borra']);
+        $venta_id = $this->venta_de_cuatro_cuotas($client);
+        $otra_id = $this->venta_de_cuatro_cuotas($client);
+        $this->sena_en_venta($venta_id, ['monto' => 100])->assertStatus(201);
+        $this->sena_en_venta($venta_id, ['monto' => 200])->assertStatus(201);
+        $this->sena_en_venta($otra_id, ['monto' => 100])->assertStatus(201);
+        $this->assertSame(3, Sena::count());
+
+        $this->deleteJson('/api/admin/client/' . $client->id . '/ventas/' . $venta_id)->assertStatus(200);
+
+        $this->assertSame(0, Sena::where('venta_id', $venta_id)->count(), 'Las señas de la venta se borraron con ella.');
+        $this->assertSame(1, Sena::where('venta_id', $otra_id)->count(), 'Las de otra venta quedan.');
+        $this->assertSame(0, LicenciaCuota::where('venta_id', $venta_id)->count());
     }
 }

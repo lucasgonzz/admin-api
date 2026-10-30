@@ -21,7 +21,11 @@ use Illuminate\Http\Request;
  *  - `POST leads/{leadId}/senas`    — registra una seña en un lead que todavía no se promovió. Queda
  *    pendiente y se aplica sola cuando el lead se promueve. 201 con `{sena}` y el estado de las
  *    señas del lead (`senas`, `total`).
- *  - `GET  leads/{leadId}/senas`    — las señas del lead: `{senas, total, total_aplicado}`.
+ *  - `GET  leads/{leadId}/senas`    — las señas del lead: `{senas, total, total_aplicado}`. Anda también
+ *    con un lead YA promovido (devuelve sus señas con `aplicada`), para poder ver las que quedaron
+ *    pendientes sin camino de salida.
+ *  - `DELETE leads/{leadId}/senas/{senaId}` — anula una seña PENDIENTE del lead (borra la fila, sin
+ *    tocar plata). 200 con el mismo JSON que el GET. Una seña ya aplicada es 422.
  *
  * Toda la lógica y las reglas (monto > 0, no pasar lo pendiente, lead ya promovido) viven en
  * `SenaService`; acá solo se valida la FORMA del request. Los errores de negocio salen como el 422
@@ -107,6 +111,28 @@ class SenaController extends Controller
             ['sena' => $senas->sena_para_json($sena)],
             $senas->senas_del_lead_para_json($lead)
         ), 201);
+    }
+
+    /**
+     * Anula una seña pendiente de un lead: es la salida de una seña que quedó sin aplicar (la
+     * promoción no generó venta, era de otra moneda…). No toca plata. Una seña ya aplicada, o que no
+     * es de este lead, es 422. Devuelve el mismo JSON que el GET, ya sin la seña.
+     *
+     * @param Request     $request
+     * @param int|string  $leadId
+     * @param int|string  $senaId
+     * @param SenaService $senas
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function destroy_del_lead_json(Request $request, $leadId, $senaId, SenaService $senas)
+    {
+        $lead = Lead::findOrFail((int) $leadId);
+        $sena = Sena::findOrFail((int) $senaId);
+
+        $senas->anular_pendiente_de_lead($sena, $request->user(), (int) $lead->id);
+
+        return response()->json($senas->senas_del_lead_para_json($lead));
     }
 
     /**

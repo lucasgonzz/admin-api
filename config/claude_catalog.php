@@ -1043,6 +1043,23 @@ return [
                 ['nombre' => 'confirm_lead_name', 'obligatorio' => false, 'validacion' => 'texto; obligatorio con dry_run=false', 'que_es' => 'El nombre de contacto del lead (leads.contact_name), para confirmar contra quién se escribe.'],
             ],
         ],
+        'POST api/claude/leads/{leadId}/senas/{senaId}/anular' => [
+            'para_que'     => 'Anula una seña PENDIENTE de un lead (borra su fila; no toca plata ni ninguna cuota). Es la salida de una seña que quedó sin aplicar para siempre: el lead se promovió sin generar venta (cliente ya existente, contrato sin financiación ni precio), la seña era de otra moneda que la venta, o la venta no tenía nada pendiente. Funciona también con un lead ya promovido. Una seña YA APLICADA a una venta es 422: se corrige desde el pago de la cuota. Las pendientes se ven en GET claude/leads/{id}/senas (`aplicada: false`).',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'dry_run por defecto true: simula la baja adentro de una transacción que se deshace y muestra el total pendiente antes y después; no borra nada.',
+                'confirm_lead_name obligatorio cuando dry_run es false: tiene que coincidir con leads.contact_name (recorte y minúsculas) y el error no revela el nombre correcto.',
+                'Solo se anula una seña PENDIENTE: una ya aplicada, o que no es de ese lead, es 422.',
+                'No toca ninguna venta ni cuota ni le manda nada a nadie: borra solo una fila de senas.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{leadId} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'El lead dueño de la seña.'],
+                ['nombre' => '{senaId} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'La seña pendiente a anular (GET claude/leads/{id}/senas → senas[].id).'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'booleano; default true', 'que_es' => 'true = solo muestra cómo quedaría.'],
+                ['nombre' => 'confirm_lead_name', 'obligatorio' => false, 'validacion' => 'texto; obligatorio con dry_run=false', 'que_es' => 'El nombre de contacto del lead (leads.contact_name), para confirmar contra quién se escribe.'],
+            ],
+        ],
         'GET api/claude/leads/{id}/senas' => [
             'para_que'     => 'Las señas registradas en un lead: cada una con su monto, moneda, fecha, nota, origen, si ya está aplicada (`aplicada`), a qué venta y a qué cuotas se aplicó. `total` es lo PENDIENTE (señas que esperan a que el lead se promueva) y `total_aplicado` lo que ya entró en las cuotas de una venta. Solo lectura.',
             'escribe'      => false,

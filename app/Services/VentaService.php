@@ -8,6 +8,7 @@ use App\Models\Client;
 use App\Models\ComisionPago;
 use App\Models\Lead;
 use App\Models\LicenciaCuota;
+use App\Models\Sena;
 use App\Models\Venta;
 use Carbon\Carbon;
 use Illuminate\Support\Collection;
@@ -447,7 +448,7 @@ class VentaService
     }
 
     /**
-     * Borra la venta con sus cuotas. Si ya se le pagó comisión al vendedor por esta venta, NO se
+     * Borra la venta con sus cuotas y sus señas. Si ya se le pagó comisión al vendedor por esta venta, NO se
      * borra (422): esos pagos son plata que salió, y borrar la venta los dejaría colgando de nada.
      * Para borrarla hay que eliminar antes los pagos de comisión.
      *
@@ -468,6 +469,9 @@ class VentaService
         DB::transaction(function () use ($venta) {
             LicenciaCuota::where('venta_id', $venta->id)->delete();
             ComisionPago::where('venta_id', $venta->id)->delete();
+            // Las señas de la venta (misión senas-en-ventas) se borran con ella: sus pagos eran de
+            // sus cuotas, que ya no están, y dejarlas contaría una seña de una venta que no existe.
+            Sena::where('venta_id', $venta->id)->delete();
             $venta->delete();
         });
     }

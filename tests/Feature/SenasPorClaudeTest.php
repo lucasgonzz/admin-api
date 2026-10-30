@@ -486,4 +486,119 @@ class SenasPorClaudeTest extends BaseDeVentas
         $this->claude('ventas/' . $venta->id . '/senas', ['monto' => 50, 'dry_run' => false, 'confirm_client_name' => $client->name])
             ->assertStatus(201);
     }
+
+    /* ------------------------------------------------------------------------------------------
+     | Anular una seña pendiente de un lead
+     |------------------------------------------------------------------------------------------ */
+
+    /**
+     * 🔴 El dry_run por defecto de la anulación no borra nada y muestra el pendiente antes y después;
+     * el real exige `confirm_lead_name` (que el error no revela), borra la fila y devuelve el estado
+     * del lead. Anda con un lead ya promovido.
+     *
+     * @return void
+     */
+    public function test_anular_una_sena_pendiente_con_sus_frenos(): void
+    {
+        $this->crear_vendedor();
+        $client = $this->crear_cliente(['name' => self::NOMBRE]);
+        $lead = $this->crear_lead_promovido($client);
+        $lead->contact_name = self::NOMBRE_LEAD;
+        $lead->save();
+        $sena = Sena::create(['lead_id' => $lead->id, 'monto' => 100, 'moneda' => 'USD', 'fecha' => '2026-09-14', 'origen' => 'claude']);
+        $ruta = 'leads/' . $lead->id . '/senas/' . $sena->id . '/anular';
+
+        $dry = $this->claude($ruta);
+        $dry->assertStatus(200);
+        $this->assertTrue($dry->json('dry_run'));
+        $this->assertFalse($dry->json('escribio'));
+        $this->assertEqualsWithDelta(100.0, $dry->json('senas_pendientes_antes'), 0.001);
+        $this->assertEqualsWithDelta(0.0, $dry->json('senas_pendientes_despues'), 0.001);
+        $this->assertNotNull(Sena::find($sena->id), 'El dry_run no borra nada.');
+        $this->claude($ruta, ['dry_run' => true])->assertStatus(200);
+        $this->assertNotNull(Sena::find($sena->id));
+
+        $sin = $this->claude($ruta, ['dry_run' => false]);
+        $sin->assertStatus(422);
+        $this->assertArrayHasKey('error', $sin->json());
+        $this->assertStringNotContainsString('Sebastián', (string) json_encode($sin->json(), JSON_UNESCAPED_UNICODE), 'El error no revela el nombre.');
+        $this->claude($ruta, ['dry_run' => false, 'confirm_lead_name' => 'Otra persona'])->assertStatus(422);
+        $this->assertNotNull(Sena::find($sena->id), 'Sin confirmar no se borra.');
+
+        $real = $this->claude($ruta, ['dry_run' => false, 'confirm_lead_name' => ' SEBASTIÁN prospecto ']);
+        $real->assertStatus(200);
+        $this->assertTrue($real->json('escribio'));
+        $this->assertSame($sena->id, $real->json('sena_anulada.id'));
+        $this->assertSame([], $real->json('senas'));
+        $this->assertEqualsWithDelta(0.0, $real->json('total'), 0.001);
+        $this->assertNull(Sena::find($sena->id));
+    }
+
+    /**
+     * Lo que no se anula: una seña ya aplicada (422 en el dry_run y en el real), una seña de otro lead
+     * (422), y los 404 de lead o seña inexistente. Nada se borra. Sin la clave, 401.
+     *
+     * @return void
+     */
+    public function test_no_se_anula_una_sena_aplicada_ni_ajena_ni_inexistente(): void
+    {
+        $this->crear_vendedor();
+        $lead = $this->crear_lead_sin_promover();
+        $this->claude('leads/' . $lead->id . '/senas', ['monto' => 100, 'dry_run' => false, 'confirm_lead_name' => self::NOMBRE_LEAD])->assertStatus(201);
+        app(RunUserSetupService::class)->ensure_production_client($lead, '');
+        $aplicada = Sena::firstOrFail();
+        $this->assertNotNull($aplicada->aplicada_at);
+        $ruta = 'leads/' . $lead->id . '/senas/' . $aplicada->id . '/anular';
+
+        $dry = $this->claude($ruta);
+        $dry->assertStatus(422);
+        $this->assertArrayHasKey('error', $dry->json());
+        $this->assertStringContainsString('ya está aplicada', $dry->json('error'));
+        $this->claude($ruta, ['dry_run' => false, 'confirm_lead_name' => self::NOMBRE_LEAD])->assertStatus(422);
+        $this->assertNotNull(Sena::find($aplicada->id));
+
+        $otro = $this->crear_lead_sin_promover();
+        $ajena = Sena::create(['lead_id' => $otro->id, 'monto' => 10, 'moneda' => 'USD', 'fecha' => '2026-09-14', 'origen' => 'claude']);
+        $this->claude('leads/' . $lead->id . '/senas/' . $ajena->id . '/anular', ['dry_run' => false, 'confirm_lead_name' => self::NOMBRE_LEAD])->assertStatus(422);
+        $this->assertNotNull(Sena::find($ajena->id));
+
+        $this->claude('leads/99999999/senas/' . $ajena->id . '/anular')->assertStatus(404);
+        $this->claude('leads/' . $lead->id . '/senas/99999999/anular')->assertStatus(404);
+
+        $this->postJson('/api/claude/leads/' . $otro->id . '/senas/' . $ajena->id . '/anular', ['dry_run' => false])->assertStatus(401);
+        $this->assertNotNull(Sena::find($ajena->id));
+    }
+
+    /**
+     * 🔴 Una seña repetida por reintento es 422 (en el dry_run también), y no escribe; con una
+     * distinta sigue andando.
+     *
+     * @return void
+     */
+    public function test_una_sena_repetida_por_reintento_es_422(): void
+    {
+        [, $venta_id] = $this->cliente_con_venta();
+        $ruta = 'ventas/' . $venta_id . '/senas';
+        $real = ['monto' => 100, 'dry_run' => false, 'confirm_client_name' => self::NOMBRE, 'fecha' => '2026-09-12'];
+
+        $this->claude($ruta, $real)->assertStatus(201);
+        $antes = $this->foto_de_las_cuotas($venta_id);
+
+        $repetida = $this->claude($ruta, $real);
+        $repetida->assertStatus(422);
+        $this->assertStringContainsString('seña repetida', $repetida->json('error'));
+        $this->assertStringContainsString('seña repetida', $this->claude($ruta, ['dry_run' => true] + $real)->json('error'), 'El dry_run también la avisa.');
+        $this->assertSame(1, Sena::count());
+        $this->assertSame($antes, $this->foto_de_las_cuotas($venta_id));
+
+        $this->claude($ruta, ['monto' => 101] + $real)->assertStatus(201);
+        $this->assertSame(2, Sena::count());
+
+        // Y en el lead.
+        $lead = $this->crear_lead_sin_promover();
+        $de_lead = ['monto' => 50, 'dry_run' => false, 'confirm_lead_name' => self::NOMBRE_LEAD];
+        $this->claude('leads/' . $lead->id . '/senas', $de_lead)->assertStatus(201);
+        $this->claude('leads/' . $lead->id . '/senas', $de_lead)->assertStatus(422);
+        $this->assertSame(3, Sena::count());
+    }
 }

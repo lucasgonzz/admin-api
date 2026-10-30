@@ -56,6 +56,12 @@ class SenaService
     const TOLERANCIA = 0.009;
 
     /**
+     * Ventana (en minutos) en la que una seña idéntica a otra ya registrada se rechaza como repetida:
+     * es la mitigación simple contra el doble clic y el reintento de una llamada que ya había entrado.
+     */
+    const MINUTOS_ANTIDUPLICADO = 10;
+
+    /**
      * @var LicenciaCuotaService
      */
     protected $cuotas;
@@ -101,6 +107,10 @@ class SenaService
             $cuotas = LicenciaCuota::where('venta_id', $venta->id)
                 ->lockForUpdate()
                 ->get();
+
+            /* Antiduplicado: con las cuotas ya bloqueadas, una seña idéntica reciente es casi seguro un
+               reintento. Se mira ANTES que el tope para que el mensaje sea el de «repetida». */
+            $this->rechazar_si_es_repetida('venta_id', $venta->id, $monto, $fecha_de_la_sena, $nota);
 
             $pendiente = $this->pendiente_de($cuotas);
 
@@ -175,6 +185,9 @@ class SenaService
                 ]);
             }
 
+            /* Antiduplicado: con el lead bloqueado, una seña idéntica reciente es casi seguro un reintento. */
+            $this->rechazar_si_es_repetida('lead_id', $actual->id, $monto, $fecha_de_la_sena, $nota);
+
             return Sena::create([
                 'venta_id'                => null,
                 'lead_id'                 => $actual->id,
@@ -188,6 +201,60 @@ class SenaService
                 'aplicaciones'            => null,
                 'aplicada_at'             => null,
             ]);
+        });
+    }
+
+    /**
+     * Anula una seña PENDIENTE de un lead: borra la fila. Es la salida para una seña que se quedó sin
+     * aplicar para siempre (la promoción no generó venta, la seña era de otra moneda que la venta,
+     * la venta no tenía nada pendiente…) y que de otro modo quedaría huérfana en el lead.
+     *
+     * 🔴 No toca plata: una seña pendiente todavía no pasó por ninguna cuota. Por eso una seña YA
+     * APLICADA no se anula (422): deshacerla exigiría revertir pagos de cuotas, y eso se corrige
+     * desde el pago de la cuota, no desde acá.
+     *
+     * @param Sena       $sena    La seña a anular.
+     * @param Admin|null $autor   Quién la anula (solo para el log).
+     * @param int|null   $lead_id Si viene, la seña tiene que ser de ESE lead (422 si no).
+     *
+     * @return Sena La seña borrada (con los datos que tenía, para mostrarla en la respuesta).
+     *
+     * @throws ValidationException Si la seña ya está aplicada o no es de ese lead (422).
+     */
+    public function anular_pendiente_de_lead(Sena $sena, ?Admin $autor = null, ?int $lead_id = null): Sena
+    {
+        return DB::transaction(function () use ($sena, $autor, $lead_id) {
+            /* Se relee con bloqueo: si justo se está aplicando, la anulación ve el estado final. */
+            $actual = Sena::whereKey($sena->id)->lockForUpdate()->first();
+
+            if ($actual === null) {
+                throw ValidationException::withMessages([
+                    'sena_id' => 'La seña ya no existe.',
+                ]);
+            }
+
+            if ($actual->lead_id === null || ($lead_id !== null && (int) $actual->lead_id !== (int) $lead_id)) {
+                throw ValidationException::withMessages([
+                    'sena_id' => 'Esa seña no es de este lead.',
+                ]);
+            }
+
+            if ($actual->esta_aplicada()) {
+                throw ValidationException::withMessages([
+                    'sena_id' => 'La seña ya está aplicada a las cuotas de una venta: no se anula desde el lead. Si el cobro está mal, corregilo en el pago de la cuota.',
+                ]);
+            }
+
+            $actual->delete();
+
+            Log::info('SenaService: se anuló una seña pendiente de un lead.', [
+                'sena_id'  => $actual->id,
+                'lead_id'  => $actual->lead_id,
+                'monto'    => (string) $actual->monto,
+                'admin_id' => $autor ? $autor->id : null,
+            ]);
+
+            return $actual;
         });
     }
 
@@ -342,6 +409,44 @@ class SenaService
             'aplicaciones'            => is_array($sena->aplicaciones) ? array_values($sena->aplicaciones) : [],
             'registrada_por_admin_id' => $sena->registrada_por_admin_id !== null ? (int) $sena->registrada_por_admin_id : null,
         ];
+    }
+
+    /**
+     * Rechaza con 422 una seña idéntica a otra registrada hace pocos minutos: misma venta (o lead),
+     * mismo monto, misma fecha y misma nota, creada en los últimos `MINUTOS_ANTIDUPLICADO`. Es la
+     * mitigación simple contra el reintento o el doble clic (la segunda llamada se parece tanto a la
+     * primera que casi seguro es la misma). Se llama adentro de la transacción y con el bloqueo ya
+     * tomado, así dos llamadas simultáneas no se cuelan a la vez.
+     *
+     * @param string      $columna `venta_id` o `lead_id`.
+     * @param int         $id      Id de la venta o del lead.
+     * @param float       $monto
+     * @param Carbon      $fecha
+     * @param string|null $nota
+     *
+     * @return void
+     *
+     * @throws ValidationException Si ya hay una igual reciente (422).
+     */
+    protected function rechazar_si_es_repetida(string $columna, int $id, float $monto, Carbon $fecha, ?string $nota): void
+    {
+        $consulta = Sena::where($columna, $id)
+            ->where('monto', $monto)
+            ->whereDate('fecha', $fecha->toDateString())
+            ->where('created_at', '>=', Carbon::now()->subMinutes(self::MINUTOS_ANTIDUPLICADO));
+
+        $nota = $this->nota_o_null($nota);
+        if ($nota === null) {
+            $consulta->whereNull('nota');
+        } else {
+            $consulta->where('nota', $nota);
+        }
+
+        if ($consulta->exists()) {
+            throw ValidationException::withMessages([
+                'monto' => 'Parece una seña repetida: ya hay una igual registrada hace pocos minutos (mismo monto, fecha y nota). No se registró otra.',
+            ]);
+        }
     }
 
     /**
