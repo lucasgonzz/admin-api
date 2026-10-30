@@ -290,4 +290,45 @@ class ClienteQueNoPagaMensualidadTest extends BaseDeCobranzas
         $this->assertTrue((bool) Client::find($exacto->id)->no_paga_mensualidad);
         $this->assertFalse((bool) Client::find($parecido->id)->no_paga_mensualidad);
     }
+
+    /**
+     * «#id» apunta a un cliente exacto, aunque su nombre sea idéntico al de otro.
+     *
+     * @return void
+     */
+    public function test_el_comando_acepta_el_id_con_numeral(): void
+    {
+        $mismo_nombre = 'Zzigual ' . uniqid();
+        $uno = $this->crear_cliente(['company_name' => $mismo_nombre]);
+        $dos = $this->crear_cliente(['company_name' => $mismo_nombre]);
+
+        $this->artisan('cobranzas:marcar-no-paga', ['nombres' => [$mismo_nombre]])->assertExitCode(1);
+
+        $this->artisan('cobranzas:marcar-no-paga', ['nombres' => ['#' . $dos->id]])->assertExitCode(0);
+        $this->assertTrue((bool) Client::find($dos->id)->no_paga_mensualidad);
+        $this->assertFalse((bool) Client::find($uno->id)->no_paga_mensualidad);
+
+        $this->artisan('cobranzas:marcar-no-paga', ['nombres' => ['#999999999']])->assertExitCode(1);
+    }
+
+    /**
+     * Un mes `parcial` afirmado de un cliente marcado tampoco lo hace deudor: la tabla y la tarjeta
+     * «Falta cobrar» tienen que decir lo mismo.
+     *
+     * @return void
+     */
+    public function test_un_mes_parcial_de_un_cliente_marcado_no_es_deuda_ni_en_la_tabla_ni_en_la_tarjeta(): void
+    {
+        $this->admin_logueado();
+
+        $client = $this->crear_cliente(['mensualidad_inicio' => '2026-09-01', 'no_paga_mensualidad' => true]);
+        $this->sembrar_periodo($client, '2026-09', 'parcial', 12000);
+        $this->sembrar_pago($client, '2026-09', 4000);
+
+        $respuesta = $this->pedir();
+
+        $this->assertSame('no_aplica', $this->fila($respuesta, $client)['meses']['2026-09']['estado']);
+        $this->assertEqualsWithDelta(0.0, $respuesta->json('resumen.falta_cobrar.total'), 0.001);
+        $this->assertEqualsWithDelta(4000.0, $respuesta->json('resumen.cobrado.del_mes'), 0.001, 'Lo que entró sigue contando.');
+    }
 }

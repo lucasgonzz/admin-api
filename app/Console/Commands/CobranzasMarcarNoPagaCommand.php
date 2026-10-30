@@ -27,7 +27,7 @@ class CobranzasMarcarNoPagaCommand extends Command
      * @var string
      */
     protected $signature = 'cobranzas:marcar-no-paga
-        {nombres* : Nombre (o parte del nombre) de cada cliente, entre comillas si lleva espacios}
+        {nombres* : Nombre (o parte del nombre) de cada cliente, entre comillas si lleva espacios; «#123» apunta a un cliente por su id}
         {--quitar : Saca la marca en vez de ponerla (vuelven a contar como deuda)}
         {--simular : Muestra a quién tocaría sin escribir nada}';
 
@@ -44,6 +44,12 @@ class CobranzasMarcarNoPagaCommand extends Command
         $nombres = array_values(array_filter(array_map('trim', (array) $this->argument('nombres')), function ($nombre) {
             return $nombre !== '';
         }));
+        if (count($nombres) === 0) {
+            $this->error('Indicá al menos un nombre de cliente.');
+
+            return 1;
+        }
+
         $valor = ! $this->option('quitar');
         $simular = (bool) $this->option('simular');
 
@@ -105,6 +111,11 @@ class CobranzasMarcarNoPagaCommand extends Command
      */
     protected function buscar(string $nombre)
     {
+        // «#123» apunta a un cliente por su id: sin ambigüedad posible.
+        if (preg_match('/^#(\d+)$/', $nombre, $coincidencia)) {
+            return Client::query()->where('id', (int) $coincidencia[1])->get();
+        }
+
         $minuscula = mb_strtolower($nombre);
 
         $exactos = Client::query()

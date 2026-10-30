@@ -241,6 +241,10 @@ class CobranzasMensualidadService
      * Las siete reglas, en orden. Separado de `estado_de()` para que se lea como la tabla del
      * docblock y no como un `if` de veinte líneas.
      *
+     * Una regla «3 bis» se cuela entre la 3 y la 4 (misión no-paga-mensualidad, 29/10/2026): un
+     * cliente marcado «no paga mensualidad» no debe nada y queda en `no_aplica`, salvo un mes que
+     * se afirmó `pagado` o `sin_cargo`. Un `parcial` afirmado de ese cliente también cae a `no_aplica`.
+     *
      * @param Client                  $client
      * @param string                  $periodo
      * @param MensualidadPeriodo|null $fila
@@ -252,14 +256,19 @@ class CobranzasMensualidadService
     {
         // 1 a 3: lo afirmado gana a todo lo demás.
         $afirmado = $this->estado_afirmado($fila);
-        if ($afirmado !== null) {
+
+        /* Cliente que no usa el sistema y no paga mensualidad (misión no-paga-mensualidad,
+         * 29/10/2026): no debe nada, así que ni siquiera un mes `parcial` afirmado lo hace deudor
+         * (si no, la tabla lo pintaría amarillo mientras «Falta cobrar» lo excluye). Un mes
+         * `pagado` o `sin_cargo` sí se respeta: es plata que entró o una decisión explícita. */
+        $no_paga = (bool) $client->no_paga_mensualidad;
+
+        if ($afirmado !== null && ! ($no_paga && $afirmado === MensualidadPeriodo::ESTADO_PARCIAL)) {
             return $afirmado;
         }
 
-        /* 3 bis (misión no-paga-mensualidad, 29/10/2026): un cliente que no usa el sistema y no paga
-         * mensualidad no debe nada, ni rojo ni facturado. Lo afirmado (un pago que sí entró) sigue
-         * ganando, así que si alguna vez pagó, ese mes se ve pagado; todo lo demás es «no aplica». */
-        if ($client->no_paga_mensualidad) {
+        // 3 bis: todo lo demás de un cliente que no paga es «no aplica» (ni rojo ni facturado).
+        if ($no_paga) {
             return self::ESTADO_NO_APLICA;
         }
 
@@ -778,8 +787,7 @@ class CobranzasMensualidadService
                 'name'                    => $client->name,
                 'company_name'            => $client->company_name,
                 'is_active'               => (bool) $client->is_active,
-                // Cliente que no usa el sistema y no paga mensualidad: la fila se ve apagada y sus
-                // meses no cuentan como deuda (misión no-paga-mensualidad, 29/10/2026).
+                // Cliente que no usa el sistema y no paga mensualidad: sus meses no cuentan como deuda (misión no-paga-mensualidad, 29/10/2026).
                 'no_paga_mensualidad'     => (bool) $client->no_paga_mensualidad,
                 'mensualidad_inicio'      => $client->mensualidad_inicio ? Carbon::parse($client->mensualidad_inicio)->toDateString() : null,
                 'total_mensualidad'       => $client->total_mensualidad !== null ? (float) $client->total_mensualidad : null,
