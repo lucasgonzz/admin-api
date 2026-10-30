@@ -8,4 +8,6 @@ use Illuminate\Database\Eloquent\Model;
 class SupportCodexOperation extends Model
 {
     protected $guarded = [];
+
+    protected $casts = ['approval_payload' => 'array'];
 }

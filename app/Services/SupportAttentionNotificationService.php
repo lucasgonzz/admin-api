@@ -88,17 +88,21 @@ class SupportAttentionNotificationService
         }
         $human = (bool) $attention['needs_human'];
         $mission = $attention['mission'] !== null && $attention['mission']['status'] === 'pending';
-        if (! $human && ! $mission) {
+        $approval = \App\Models\SupportCodexOperation::where('support_ticket_id', $ticket->id)
+            ->where('status', 'awaiting_approval')->orderByDesc('id')->first();
+        if (! $human && ! $mission && $approval === null) {
             return null;
         }
         $case = $ticket->support_codex_case;
         return [
             'human' => $human,
             'mission' => $mission,
+            'approval' => $approval !== null,
             // El diagnóstico solo participa del hash; nunca sale en el push ni en un evento público.
             'fingerprint' => hash('sha256', json_encode([
                 $human, $human ? $attention['reason'] : null,
                 $mission, $mission ? $case->mission : null,
+                $approval !== null ? $approval->operation_id : null,
                 $ticket->assigned_admin_id,
             ])),
         ];
@@ -144,9 +148,9 @@ class SupportAttentionNotificationService
         $failed = false;
         $without_device = array_values(array_diff($ids, $with_device));
         $title = 'Soporte #' . $ticket_id . ': ' . $ticket->resolve_contact_display_name();
-        $body = $state['human'] && $state['mission']
+        $body = $state['approval'] ? 'Hay una respuesta lista que espera tu aprobación.' : ($state['human'] && $state['mission']
             ? 'Necesita tu revisión y tiene una misión pendiente de iniciar.'
-            : ($state['human'] ? 'Este ticket necesita tu revisión.' : 'Hay una misión pendiente de iniciar.');
+            : ($state['human'] ? 'Este ticket necesita tu revisión.' : 'Hay una misión pendiente de iniciar.'));
         foreach ($ids as $admin_id) {
             if (in_array($admin_id, $dispatched, true) || ! in_array($admin_id, $with_device)) {
                 continue;
@@ -163,6 +167,7 @@ class SupportAttentionNotificationService
                     'ticket_id' => $ticket_id,
                     'needs_review' => $state['human'],
                     'mission_pending' => $state['mission'],
+                    'approval_pending' => $state['approval'],
                 ], $accepted_hashes);
                 $accepted_hashes = array_values(array_unique(array_merge($accepted_hashes, $result['accepted_endpoint_hashes'])));
                 if ($result['complete']) {

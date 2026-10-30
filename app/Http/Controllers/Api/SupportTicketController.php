@@ -541,7 +541,7 @@ class SupportTicketController extends BaseController
     /**
      * Prende o apaga la verificación humana obligatoria para un ticket puntual.
      *
-     * Con esto prendido —que es como nace un ticket si la config global de Cuenta lo pide—
+     * Con esto prendido por el operador en este ticket —los nuevos nacen sin verificación—
      * ninguna sugerencia del agente sale sola: queda como borrador esperando que una persona
      * la mande, con o sin ajustes.
      *
@@ -549,6 +549,18 @@ class SupportTicketController extends BaseController
      *
      * @return \Illuminate\Http\JsonResponse
      */
+    public function attention(Request $request, $id)
+    {
+        $data = $request->validate(['needs_human' => 'required|boolean']);
+        \Illuminate\Support\Facades\DB::transaction(function () use ($id, $data) {
+            $ticket = SupportTicket::lockForUpdate()->findOrFail($id);
+            $ticket->support_attention_enabled = (bool) $data['needs_human'];
+            $ticket->save();
+        });
+        SupportTicketUpdated::dispatch((int) $id);
+        return response()->json(['model' => $this->ticketQueryForInbox()->where('id', $id)->first()]);
+    }
+
     public function toggle_requiere_verificacion($id)
     {
         $ticket = SupportTicket::findOrFail($id);

@@ -157,7 +157,7 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         $this->assertSame('pending', $attention['mission']['status']);
         $ticket->update(['status' => 'closed']);
         $attention = $ticket->fresh()->load('support_codex_case')->support_attention;
-        $this->assertSame(['needs_human' => false, 'reason' => null, 'mission' => null], $attention);
+        $this->assertSame(['needs_human' => false, 'reason' => null, 'mission' => null, 'can_toggle' => true], $attention);
     }
 
     public function test_pedir_revision_sin_mision_envia_una_respuesta_y_deja_la_revision_pendiente(): void
@@ -563,9 +563,9 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         $admin = Admin::firstOrCreate(['email' => 'misiones-bandeja@test.local'], ['name' => 'Lucas', 'password' => bcrypt('prueba')]);
         DB::enableQueryLog();
         $this->actingAs($admin, 'sanctum')->getJson('/api/admin/support-ticket?assigned_filter=all')->assertOk()
-            ->assertJsonFragment(['support_attention' => ['needs_human' => false, 'reason' => null,
+            ->assertJsonFragment(['support_attention' => ['needs_human' => false, 'reason' => null, 'can_toggle' => true,
                 'mission' => ['status' => 'pending', 'thread_id' => null, 'started_at' => null]]])
-            ->assertJsonFragment(['support_attention' => ['needs_human' => true, 'reason' => 'Necesita que Lucas revise el contrato.', 'mission' => null]]);
+            ->assertJsonFragment(['support_attention' => ['needs_human' => true, 'reason' => 'Necesita que Lucas revise el contrato.', 'mission' => null, 'can_toggle' => true]]);
         $case_queries = array_filter(DB::getQueryLog(), function ($query) {
             return stripos($query['query'], 'support_codex_cases') !== false;
         });

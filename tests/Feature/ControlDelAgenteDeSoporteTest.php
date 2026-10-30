@@ -93,7 +93,7 @@ class ControlDelAgenteDeSoporteTest extends TestCase
      *
      * @return SupportTicket
      */
-    private function crear_ticket(Client $client): SupportTicket
+    private function crear_ticket(Client $client, bool $verificar = false): SupportTicket
     {
         $ticket = SupportTicket::create([
             'client_id'        => $client->id,
@@ -104,6 +104,12 @@ class ControlDelAgenteDeSoporteTest extends TestCase
             'whatsapp_phone'   => '+5493416660001',
             'opened_at'        => now()->subHours(2),
         ]);
+
+        if ($verificar) {
+            // Fixture de un ticket cuya aprobación ya fue habilitada individualmente.
+            $ticket->requiere_verificacion_mensajes = true;
+            $ticket->save();
+        }
 
         SupportMessage::create([
             'support_ticket_id' => $ticket->id,
@@ -216,21 +222,13 @@ class ControlDelAgenteDeSoporteTest extends TestCase
         app(SupportAiSuggestionScheduler::class)->schedule_after_client_inbound((int) $ticket->id);
     }
 
-    /**
-     * Con la config global de Cuenta prendida, el ticket nuevo nace exigiendo verificación.
-     *
-     * Antes esto probaba una constante del modelo; ahora prueba que el hook `creating` copie el
-     * valor de la config global —que el setUp() deja en '1'— sobre el ticket recién nacido. El
-     * interruptor del agente sí sigue siendo un default de clase.
-     *
-     * @return void
-     */
-    public function test_un_ticket_nuevo_exige_verificacion_por_defecto()
+    /** Los tickets nuevos nacen automáticos aunque Cuenta conserve una preferencia anterior. */
+    public function test_un_ticket_nuevo_responde_automatico_por_defecto()
     {
         $client = $this->crear_cliente();
         $ticket = $this->crear_ticket($client);
 
-        $this->assertTrue((bool) $ticket->requiere_verificacion_mensajes, 'La verificación no viene prendida de fábrica.');
+        $this->assertFalse((bool) $ticket->requiere_verificacion_mensajes, 'El ticket nuevo debe contestar automáticamente.');
         $this->assertTrue((bool) $ticket->claude_auto_reply, 'El agente no viene prendido de fábrica.');
     }
 
@@ -242,7 +240,7 @@ class ControlDelAgenteDeSoporteTest extends TestCase
     public function test_con_verificacion_la_sugerencia_no_sale_sola()
     {
         $client = $this->crear_cliente();
-        $ticket = $this->crear_ticket($client);
+        $ticket = $this->crear_ticket($client, true);
         $espia  = $this->espiar_sender();
         $this->espiar_claude($this->respuesta_del_agente('Se carga desde Ventas, botón Nota de crédito.'));
 
@@ -318,7 +316,7 @@ class ControlDelAgenteDeSoporteTest extends TestCase
     {
         $admin  = $this->crear_admin('aprueba-sin-editar@test.local');
         $client = $this->crear_cliente();
-        $ticket = $this->crear_ticket($client);
+        $ticket = $this->crear_ticket($client, true);
         $espia  = $this->espiar_sender();
         $this->espiar_claude($this->respuesta_del_agente('Se carga desde Ventas.'));
 
@@ -352,7 +350,7 @@ class ControlDelAgenteDeSoporteTest extends TestCase
     {
         $admin  = $this->crear_admin('aprueba-editando@test.local');
         $client = $this->crear_cliente();
-        $ticket = $this->crear_ticket($client);
+        $ticket = $this->crear_ticket($client, true);
         $espia  = $this->espiar_sender();
         $this->espiar_claude($this->respuesta_del_agente('Se carga desde Ventas.'));
 
@@ -393,7 +391,7 @@ class ControlDelAgenteDeSoporteTest extends TestCase
     {
         $admin  = $this->crear_admin('descarta@test.local');
         $client = $this->crear_cliente();
-        $ticket = $this->crear_ticket($client);
+        $ticket = $this->crear_ticket($client, true);
         $espia  = $this->espiar_sender();
         $this->espiar_claude($this->respuesta_del_agente('Una respuesta que no sirve.'));
 
@@ -433,7 +431,7 @@ class ControlDelAgenteDeSoporteTest extends TestCase
             ->postJson('/api/admin/support-ticket/' . $ticket->id . '/toggle-requiere-verificacion')
             ->assertStatus(200);
 
-        $this->assertFalse((bool) SupportTicket::find($ticket->id)->requiere_verificacion_mensajes);
+        $this->assertTrue((bool) SupportTicket::find($ticket->id)->requiere_verificacion_mensajes);
     }
 
     /**
@@ -575,7 +573,7 @@ class ControlDelAgenteDeSoporteTest extends TestCase
     public function test_el_autoenvio_no_manda_un_borrador_que_espera_aprobacion()
     {
         $client = $this->crear_cliente();
-        $ticket = $this->crear_ticket($client);
+        $ticket = $this->crear_ticket($client, true);
         $espia  = $this->espiar_sender();
         $this->espiar_claude($this->respuesta_del_agente('Una respuesta que nadie aprobó.'));
 
@@ -613,7 +611,7 @@ class ControlDelAgenteDeSoporteTest extends TestCase
     public function test_el_agente_no_cierra_el_ticket_si_falta_aprobar_la_despedida()
     {
         $client = $this->crear_cliente();
-        $ticket = $this->crear_ticket($client);
+        $ticket = $this->crear_ticket($client, true);
         $this->espiar_sender();
 
         $this->espiar_claude([
@@ -648,7 +646,7 @@ class ControlDelAgenteDeSoporteTest extends TestCase
     {
         $admin  = $this->crear_admin('apaga-con-pendiente@test.local');
         $client = $this->crear_cliente();
-        $ticket = $this->crear_ticket($client);
+        $ticket = $this->crear_ticket($client, true);
         $this->espiar_sender();
         $this->espiar_claude($this->respuesta_del_agente('Una respuesta a medio camino.'));
 
@@ -669,7 +667,7 @@ class ControlDelAgenteDeSoporteTest extends TestCase
     {
         AdminSetting::set(\App\Services\SupportCodexSettings::KEY_ENABLED, '0');
         $admin = $this->crear_admin('prende-con-pendiente@test.local');
-        $ticket = $this->crear_ticket($this->crear_cliente());
+        $ticket = $this->crear_ticket($this->crear_cliente(), true);
         $ticket->claude_auto_reply = false;
         $ticket->save();
         $sender = $this->espiar_sender();
@@ -706,7 +704,7 @@ class ControlDelAgenteDeSoporteTest extends TestCase
     {
         $admin  = $this->crear_admin('sello@test.local');
         $client = $this->crear_cliente();
-        $ticket = $this->crear_ticket($client);
+        $ticket = $this->crear_ticket($client, true);
         $this->espiar_sender();
         $this->espiar_claude($this->respuesta_del_agente('Se carga desde Ventas.'));
 
@@ -907,7 +905,7 @@ class ControlDelAgenteDeSoporteTest extends TestCase
     {
         $admin  = $this->crear_admin('doble-aprobacion@test.local');
         $client = $this->crear_cliente();
-        $ticket = $this->crear_ticket($client);
+        $ticket = $this->crear_ticket($client, true);
         $espia  = $this->espiar_sender();
         $this->espiar_claude($this->respuesta_del_agente('Se carga desde Ventas.'));
 
@@ -951,6 +949,10 @@ class ControlDelAgenteDeSoporteTest extends TestCase
             'whatsapp_phone'   => '+5493416660001',
             'opened_at'        => now()->subDays(4),
         ]);
+
+        // Este escenario prueba aprobar un borrador fuera de ventana, no el default de alta.
+        $ticket->requiere_verificacion_mensajes = true;
+        $ticket->save();
 
         SupportMessage::create([
             'support_ticket_id' => $ticket->id,

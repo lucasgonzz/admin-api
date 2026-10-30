@@ -247,23 +247,14 @@ class VerificacionGlobalDelAgenteDeSoporteTest extends TestCase
      * La clave en el panel de Cuenta
      * ================================================================================== */
 
-    /**
-     * Sin fila en admin_settings, el GET dice que la verificación está prendida.
-     *
-     * @return void
-     */
-    public function test_el_get_devuelve_la_verificacion_prendida_cuando_nadie_toco_la_config()
+    /** La Cuenta informa el default automático del pedido del 30/10/2026. */
+    public function test_el_get_informa_tickets_nuevos_automaticos()
     {
         $admin = $this->crear_admin('get-verificacion-global@test.local');
         $this->borrar_verificacion_global();
-
-        $response = $this->actingAs($admin, 'sanctum')->getJson('/api/admin/settings/support-ai');
-
-        $response->assertStatus(200);
-        $response->assertJsonPath('require_verification', true);
-
-        // Las tres claves viejas tienen que seguir viajando: el panel las lee del mismo payload.
-        $response->assertJsonStructure(['suggestions_enabled', 'suggestion_delay', 'auto_send_delay', 'require_verification']);
+        $this->actingAs($admin, 'sanctum')->getJson('/api/admin/settings/support-ai')
+            ->assertOk()->assertJsonPath('require_verification', false)
+            ->assertJsonStructure(['suggestions_enabled', 'suggestion_delay', 'auto_send_delay', 'require_verification']);
     }
 
     /**
@@ -294,80 +285,25 @@ class VerificacionGlobalDelAgenteDeSoporteTest extends TestCase
         $this->assertTrue(SupportAiSettings::is_suggestions_enabled());
     }
 
-    /**
-     * Un PUT sin el campo nuevo no da vuelta el régimen, en NINGUNA de las dos direcciones.
-     *
-     * Es el `nullable` del controller: un build viejo del SPA, cacheado en el navegador de un
-     * operador, guarda las demoras sin mandar `require_verification`. Con `required` no podría
-     * guardar nada; sin la guarda, guardar las demoras movería el régimen sin que nadie lo pida.
-     *
-     * 🔴 Las dos direcciones, y la que importa es la SEGUNDA. Con la fila en '1' el test pasa
-     * igual con una implementación equivocada como `(bool) ($validated['require_verification'] ??
-     * true)`, porque el valor esperado coincide con el default de la clase: la aserción no
-     * distingue "respetó lo que había" de "cayó en el default". Con la fila en '0' se separan, y
-     * además es el caso de la vida real — la instalación donde Lucas ya apagó el régimen a
-     * propósito y un SPA cacheado no lo tiene que volver a prender solo.
-     *
-     * @return void
-     */
-    public function test_un_put_viejo_sin_el_campo_no_da_vuelta_el_regimen()
+    /** Un SPA anterior puede guardar demoras, sin restaurar la herencia global retirada. */
+    public function test_put_anterior_no_reactiva_la_verificacion_global()
     {
         $admin = $this->crear_admin('put-viejo-verificacion@test.local');
-
-        $put_viejo = function () use ($admin) {
-            return $this->actingAs($admin, 'sanctum')->putJson('/api/admin/settings/support-ai', [
-                'suggestions_enabled' => true,
-                'suggestion_delay'    => 10,
-                'auto_send_delay'     => 20,
-            ]);
-        };
-
-        $this->fijar_verificacion_global(true);
-
-        $response = $put_viejo();
-        $response->assertStatus(200);
-        $response->assertJsonPath('require_verification', true);
-        $this->assertSame(
-            '1',
-            AdminSetting::get(SupportAiSettings::KEY_REQUIRE_VERIFICATION),
-            'Un PUT sin el campo apagó un régimen que estaba prendido.'
-        );
-
-        $this->fijar_verificacion_global(false);
-
-        $response = $put_viejo();
-        $response->assertStatus(200);
-        $response->assertJsonPath('require_verification', false);
-        $this->assertSame(
-            '0',
-            AdminSetting::get(SupportAiSettings::KEY_REQUIRE_VERIFICATION),
-            'Un PUT sin el campo volvió a prender un régimen que Lucas había apagado a propósito.'
-        );
+        foreach ([true, false] as $previous) {
+            $this->fijar_verificacion_global($previous);
+            $this->actingAs($admin, 'sanctum')->putJson('/api/admin/settings/support-ai', [
+                'suggestions_enabled' => true, 'suggestion_delay' => 10, 'auto_send_delay' => 20,
+            ])->assertOk()->assertJsonPath('require_verification', false);
+            $this->assertSame('0', AdminSetting::get(SupportAiSettings::KEY_REQUIRE_VERIFICATION));
+        }
     }
 
-    /**
-     * 🔴 Un valor raro en la fila deja la verificación PRENDIDA, nunca apagada.
-     *
-     * Es la guarda del fail-safe del getter. El escritor normal es el controller, que normaliza a
-     * '1'/'0', así que estos valores solo aparecen si una persona escribió la fila a mano en un
-     * incidente: un UPDATE por consola, una remediación por SSH, un import. Un
-     * `filter_var($raw, FILTER_VALIDATE_BOOLEAN)` pelado manda todos estos a false —o sea, a
-     * "contestale solo al cliente"—, que es el error que no se puede deshacer. Si alguien
-     * "simplifica" el getter a filter_var(), este test se pone rojo.
-     *
-     * @return void
-     */
-    public function test_un_valor_raro_en_la_fila_deja_la_verificacion_prendida()
+    /** Ningún residuo de configuración global habilita verificación en otro chat. */
+    public function test_valores_anteriores_no_cambian_el_default_automatico()
     {
-        $ambiguos = [' ', "	", '', 'si', 'yes', '2', '-1', 'null', 'basura'];
-
-        foreach ($ambiguos as $valor) {
-            AdminSetting::set(SupportAiSettings::KEY_REQUIRE_VERIFICATION, $valor);
-
-            $this->assertTrue(
-                SupportAiSettings::new_ticket_requires_verification(),
-                'El valor ' . var_export($valor, true) . ' apagó la verificación: un valor que nadie sabe leer tiene que caer para el lado seguro.'
-            );
+        foreach (['1', 'true', ' ', 'si', '2', '-1', 'null', 'basura'] as $value) {
+            AdminSetting::set(SupportAiSettings::KEY_REQUIRE_VERIFICATION, $value);
+            $this->assertFalse(SupportAiSettings::new_ticket_requires_verification());
         }
     }
 
@@ -397,18 +333,8 @@ class VerificacionGlobalDelAgenteDeSoporteTest extends TestCase
      * El sello al nacer
      * ================================================================================== */
 
-    /**
-     * 🔴 El ticket recién creado lee true sobre la MISMA instancia que devolvió create().
-     *
-     * Este es el test del agujero de `(bool) null`: la base tiene default true, pero `create()`
-     * devuelve el modelo con lo que se le pasó, no con lo que la base rellenó. Si el hook se
-     * "simplificara" volviendo temprano sin escribir el atributo, el flag quedaría en null, el
-     * casteo lo daría vuelta a false y el agente le contestaría al cliente sin que nadie lea.
-     * Si este test se rompe, no se mergea.
-     *
-     * @return void
-     */
-    public function test_un_ticket_nuevo_lee_true_en_la_misma_instancia_que_devuelve_create()
+    /** La instancia devuelta por create debe expresar inmediatamente el default automático. */
+    public function test_un_ticket_nuevo_lee_false_en_la_misma_instancia_que_devuelve_create()
     {
         $client = $this->crear_cliente();
         $this->fijar_verificacion_global(true);
@@ -423,7 +349,7 @@ class VerificacionGlobalDelAgenteDeSoporteTest extends TestCase
             'opened_at'        => now(),
         ]);
 
-        $this->assertTrue(
+        $this->assertFalse(
             $ticket->requiere_verificacion_mensajes,
             'La instancia que devolvió create() no trae el régimen sellado.'
         );
@@ -433,20 +359,16 @@ class VerificacionGlobalDelAgenteDeSoporteTest extends TestCase
         );
     }
 
-    /**
-     * Sin fila en admin_settings, el ticket nace pidiendo verificación.
-     *
-     * @return void
-     */
-    public function test_sin_fila_en_admin_settings_el_ticket_nace_verificado()
+    /** La ausencia de configuración también crea tickets automáticos. */
+    public function test_sin_fila_en_admin_settings_el_ticket_nace_automatico()
     {
         $client = $this->crear_cliente();
         $this->borrar_verificacion_global();
 
         $ticket = $this->crear_ticket($client);
 
-        $this->assertTrue($ticket->requiere_verificacion_mensajes, 'Sin config, el ticket no nació verificado.');
-        $this->assertTrue((bool) $ticket->fresh()->requiere_verificacion_mensajes, 'En la base quedó otra cosa.');
+        $this->assertFalse($ticket->requiere_verificacion_mensajes, 'Sin config, el ticket tiene que nacer automático.');
+        $this->assertFalse((bool) $ticket->fresh()->requiere_verificacion_mensajes, 'En la base quedó otra cosa.');
     }
 
     /**
@@ -495,6 +417,9 @@ class VerificacionGlobalDelAgenteDeSoporteTest extends TestCase
         $this->fijar_verificacion_global(true);
 
         $ticket = $this->crear_ticket($client);
+        $admin = $this->crear_admin('verificado-individual@test.local');
+        $this->actingAs($admin, 'sanctum')->postJson('/api/admin/support-ticket/' . $ticket->id . '/toggle-requiere-verificacion')->assertOk();
+        $ticket->refresh();
 
         $this->fijar_verificacion_global(false);
 
@@ -581,15 +506,8 @@ class VerificacionGlobalDelAgenteDeSoporteTest extends TestCase
         $this->assertNotNull($borrador, 'No quedó borrador esperando aprobación.');
     }
 
-    /**
-     * Un create que elige el régimen a mano no lo pisa la config global.
-     *
-     * Cubre la rama `array_key_exists` del hook, de la que depende el montaje explícito de
-     * AgentesSoloLoExplicitoTest.
-     *
-     * @return void
-     */
-    public function test_un_create_con_el_flag_explicito_no_lo_pisa_la_config()
+    /** Un alta heredada no sustituye el botón que activa aprobación en cada ticket. */
+    public function test_un_create_heredado_con_flag_true_tambien_nace_automatico()
     {
         $client = $this->crear_cliente();
         $this->fijar_verificacion_global(false);
@@ -605,21 +523,12 @@ class VerificacionGlobalDelAgenteDeSoporteTest extends TestCase
             'requiere_verificacion_mensajes' => true,
         ]);
 
-        $this->assertTrue($ticket->requiere_verificacion_mensajes, 'La config global pisó una elección explícita.');
-        $this->assertTrue((bool) $ticket->fresh()->requiere_verificacion_mensajes, 'En la base quedó otra cosa.');
+        $this->assertFalse($ticket->requiere_verificacion_mensajes, 'La creación no puede reemplazar el botón del ticket.');
+        $this->assertFalse((bool) $ticket->fresh()->requiere_verificacion_mensajes, 'En la base quedó otra cosa.');
     }
 
-    /**
-     * Una conversación abierta desde la bandeja hereda la config vigente al momento de abrirla.
-     *
-     * Es el único de punta a punta por HTTP: los otros puntos de creación (webhook, inbound del
-     * ERP) pasan por el mismo `SupportTicket::create()` y quedan cubiertos a nivel modelo. Este
-     * verifica que el camino real —ruta, validación, resolución de contacto y opener— no se saltee
-     * el hook.
-     *
-     * @return void
-     */
-    public function test_una_conversacion_abierta_desde_el_admin_hereda_la_config_vigente()
+    /** Las aperturas HTTP nunca heredan aprobación de la configuración de Cuenta. */
+    public function test_todas_las_aperturas_http_nacen_automaticas()
     {
         $admin = $this->crear_admin('apertura-hereda-la-global@test.local');
 
@@ -655,9 +564,9 @@ class VerificacionGlobalDelAgenteDeSoporteTest extends TestCase
         ])->assertStatus(201);
 
         $ticket_verificado = SupportTicket::where('client_id', $cliente_verificado->id)->firstOrFail();
-        $this->assertTrue(
+        $this->assertFalse(
             (bool) $ticket_verificado->requiere_verificacion_mensajes,
-            'La conversación abierta desde la bandeja no heredó la config prendida.'
+            'La conversación nueva heredó indebidamente la configuración global.'
         );
     }
 }

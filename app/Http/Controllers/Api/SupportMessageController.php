@@ -375,6 +375,20 @@ class SupportMessageController extends BaseController
      */
     public function approve_ai_draft(Request $request, $id)
     {
+        $codex = \App\Models\SupportCodexOperation::where('message_id', $id)->first();
+        if ($codex !== null) {
+            $request->validate(['body' => 'sometimes|string|max:3500']);
+            $result = app(\App\Services\SupportCodexService::class)->approve_draft(
+                (int) $id, $request->has('body') ? (string) $request->input('body') : null, (int) Auth::id()
+            );
+            $sent = $result['operation']['status'] === 'sent';
+            return response()->json([
+                'model' => SupportMessage::whereKey($id)->withAll()->first(),
+                'delivered' => $sent,
+                'operation' => $result['operation'],
+                'error' => $sent ? null : $result['operation']['detail'],
+            ], $sent ? 200 : 409);
+        }
         $message = SupportMessage::with('ticket')->findOrFail($id);
 
         $ticket = $message->ticket;
@@ -470,6 +484,11 @@ class SupportMessageController extends BaseController
      */
     public function discard_ai_draft($id)
     {
+        $codex = \App\Models\SupportCodexOperation::where('message_id', $id)->first();
+        if ($codex !== null) {
+            app(\App\Services\SupportCodexService::class)->discard_draft((int) $id);
+            return response()->json(['ok' => true]);
+        }
         $message = SupportMessage::with('ticket')->findOrFail($id);
 
         if (! (bool) $message->is_ai_suggestion_draft) {

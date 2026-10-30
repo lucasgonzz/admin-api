@@ -22,9 +22,15 @@ class SupportAiSuggestionDraftService
      */
     public function delete_drafts_for_ticket(int $ticket_id): void
     {
+        // Cancelar aprobación no confirma envío y libera el próximo entrante para el monitor.
+        \App\Models\SupportCodexOperation::where('support_ticket_id', $ticket_id)
+            ->where('status', 'awaiting_approval')->update(['status' => 'cancelled', 'detail' => 'Borrador descartado o reemplazado.', 'approval_payload' => null]);
         $drafts = SupportMessage::query()
             ->where('support_ticket_id', $ticket_id)
             ->where('is_ai_suggestion_draft', true)
+            ->whereNotExists(function ($query) {
+                $query->selectRaw('1')->from('support_codex_operations')->whereColumn('support_codex_operations.message_id', 'support_messages.id')->where('status', 'sending');
+            })
             ->get();
 
         if ($drafts->isEmpty()) {
@@ -97,7 +103,12 @@ class SupportAiSuggestionDraftService
 
         $loaded = SupportMessage::query()->where('id', $message->id)->withAll()->first();
         if ($loaded !== null) {
-            event(new SupportMessageReceived($loaded->id));
+            try {
+                event(new SupportMessageReceived($loaded->id));
+            } catch (\Throwable $exception) {
+                // La conversación se puede recargar; no se pierde un borrador ya persistido por Pusher.
+                Log::channel('daily')->warning('Soporte: borrador guardado sin aviso realtime.', ['ticket_id' => $ticket->id]);
+            }
         }
 
         return $message;

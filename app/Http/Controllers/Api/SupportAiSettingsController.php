@@ -97,10 +97,7 @@ class SupportAiSettingsController extends Controller
             (string) $auto_send_delay
         );
 
-        $require_verification = array_key_exists('require_verification', $validated)
-            && $validated['require_verification'] !== null
-            ? (bool) $validated['require_verification']
-            : SupportAiSettings::new_ticket_requires_verification();
+        $require_verification = false;
 
         AdminSetting::set(
             SupportAiSettings::KEY_REQUIRE_VERIFICATION,

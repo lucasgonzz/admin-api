@@ -42,15 +42,14 @@ class SupportTicket extends Model
      * enseguida lee el flag sobre esa misma instancia lee null, y `(bool) null` es false — o sea,
      * el default se daría vuelta justo en el camino más peligroso.
      *
-     * `requiere_verificacion_mensajes` NO está en esta lista y no es un olvido: su valor dejó de
-     * ser una constante, lo decide la config global de Cuenta en el momento de crear el ticket, y
-     * un array estático de propiedad de clase no puede consultar la base. Lo sella el hook
-     * `creating` de abajo, que escribe SIEMPRE un booleano por exactamente el mismo motivo.
+     * Los tickets nuevos contestan automáticamente. La aprobación se habilita solo con el
+     * botón de ese ticket, nunca por configuración de Cuenta ni por un alta heredada.
      *
      * @var array<string, mixed>
      */
     protected $attributes = [
         'claude_auto_reply' => true,
+        'requiere_verificacion_mensajes' => false,
     ];
 
     /**
@@ -71,6 +70,7 @@ class SupportTicket extends Model
         /* Interruptores del agente por ticket, espejo de los que ya tiene `leads`. */
         'claude_auto_reply' => 'boolean',
         'requiere_verificacion_mensajes' => 'boolean',
+        'support_attention_enabled' => 'boolean',
         /* Columnas CALCULADAS por scopeWithIndicadoresDeInicio(), no columnas reales de la tabla.
            El cast esta aca para que lleguen al JSON como true/false y no como el 1/0 que devuelve
            MySQL: el SPA filtra la bandeja por estas dos claves. Si el scope no corrio, el atributo
@@ -79,35 +79,11 @@ class SupportTicket extends Model
         'abierto_hoy' => 'boolean',
     ];
 
-    /**
-     * Sella el régimen de verificación con el que nace cada ticket.
-     *
-     * @return void
-     */
+    /** Cada ticket nace automático; solo su botón habilita la aprobación (Lucas, 30/10/2026). */
     protected static function booted()
     {
         static::creating(function (SupportTicket $ticket) {
-            // El régimen del ticket se estampa al nacer con lo que diga la config global en ese
-            // momento y no se relee nunca más: si se leyera en runtime, apagar el interruptor en
-            // Cuenta dejaría contestando solos a tickets que un operador ya venía verificando a
-            // mano. Después de nacer, solo lo cambia el botón del encabezado (decisión de Lucas).
-            //
-            // Va acá y no en los cuatro puntos de creación (webhook, inbound del ERP, alta manual
-            // y apertura por WhatsApp) para que el quinto que se agregue no se lo olvide.
-            $atributos = $ticket->getAttributes();
-            if (array_key_exists('requiere_verificacion_mensajes', $atributos)
-                && $atributos['requiere_verificacion_mensajes'] !== null
-            ) {
-                // Quien crea el ticket ya eligió el régimen a mano: la config global no lo pisa.
-                //
-                // Se mira la presencia de la clave en getAttributes() y no isDirty() ni filled():
-                // con la clave sacada de $attributes, que esté presente significa exactamente
-                // "alguien la eligió", mientras que isDirty() daría false cuando el valor pasado
-                // coincide con el default y el hook terminaría pisando una elección explícita.
-                return;
-            }
-
-            $ticket->requiere_verificacion_mensajes = SupportAiSettings::new_ticket_requires_verification();
+            $ticket->requiere_verificacion_mensajes = false;
         });
     }
 
@@ -133,7 +109,7 @@ class SupportTicket extends Model
             return null;
         }
         if ($this->status !== self::STATUS_ABIERTO) {
-            return ['needs_human' => false, 'reason' => null, 'mission' => null];
+            return ['needs_human' => false, 'reason' => null, 'mission' => null, 'can_toggle' => true];
         }
         $case = $this->support_codex_case;
         $mission = $case ? $case->mission_lifecycle() : null;
@@ -141,13 +117,18 @@ class SupportTicket extends Model
         $needs_human = ! $human_reply_pause && (($case !== null && ($case->state === 'manual_review'
                 || $case->is_agent_requested_review()))
             || ($mission === null && $this->escalated_at !== null));
+        // null conserva la lectura de casos anteriores al despliegue; false es el acuse
+        // explícito de Lucas. Una nueva necesidad vuelve a fijarlo en true desde el servicio.
+        if ($this->support_attention_enabled !== null) {
+            $needs_human = (bool) $this->support_attention_enabled;
+        }
         $reason = null;
         if ($needs_human) {
             $reason = $case !== null && ($case->state === 'manual_review' || $case->is_agent_requested_review())
                 ? (trim((string) $case->review_reason) !== '' ? $case->review_reason : 'La atención necesita revisión humana.')
-                : $this->escalation_reason;
+                : ($this->escalation_reason ?: 'Marcado para intervención desde el admin.');
         }
-        return ['needs_human' => $needs_human, 'reason' => $reason, 'mission' => $mission];
+        return ['needs_human' => $needs_human, 'reason' => $reason, 'mission' => $mission, 'can_toggle' => true];
     }
 
     /**

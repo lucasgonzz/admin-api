@@ -35,8 +35,8 @@ class SupportAiSettings
     /** Demora por defecto antes del envío automático de la sugerencia (0 = sin espera humana). */
     private const DEFAULT_AUTO_SEND_DELAY_SECONDS = 0;
 
-    /** Régimen por defecto de los tickets nuevos: verificación humana prendida. */
-    private const DEFAULT_REQUIRE_VERIFICATION = true;
+    /** Régimen inicial: automático, con aprobación opcional solo desde cada ticket. */
+    private const DEFAULT_REQUIRE_VERIFICATION = false;
 
     /** Mínimo y máximo para demora antes de pedir sugerencia IA (segundos). */
     public const SUGGESTION_DELAY_MIN_SECONDS = 0;
@@ -95,44 +95,11 @@ class SupportAiSettings
         return self::clamp_auto_send_delay($value);
     }
 
-    /**
-     * Régimen con el que nace un ticket de soporte nuevo.
-     *
-     * El nombre dice `new_ticket` a propósito. Esta clave se puede leer todas las veces que haga
-     * falta para PINTAR el panel de Cuenta (`to_array()`, el fallback del PUT), pero en el camino
-     * de un ticket se lee UNA sola vez: al crearlo, para estampar el régimen. Lo que el nombre
-     * tiene que frenar es una llamada desde el camino de envío —un job, o cualquier lugar que
-     * decida si un mensaje sale—: leerla ahí dejaría contestando solos a tickets que un operador
-     * ya venía verificando a mano, que es justo lo que esta decisión de producto prohíbe. Si
-     * aparece una llamada desde `app/Jobs/` o desde el envío, está mal.
-     *
-     * @return bool
-     */
+    /** Compatibilidad con el panel anterior: los tickets nuevos siempre nacen sin aprobación. */
     public static function new_ticket_requires_verification(): bool
     {
-        $raw = AdminSetting::get(self::KEY_REQUIRE_VERIFICATION, null);
-
-        $normalizado = $raw === null ? '' : strtolower(trim((string) $raw));
-
-        // Fila ausente, o presente pero vacía / con puros espacios: nadie dijo nada, y "nadie dijo
-        // nada" no es "apagala". Una fila vacía es una escritura a medias, no una decisión.
-        if ($normalizado === '') {
-            return self::DEFAULT_REQUIRE_VERIFICATION;
-        }
-
-        // Se listan los valores que APAGAN, y todo lo demás deja la verificación prendida. Es al
-        // revés de lo obvio —un `filter_var($raw, FILTER_VALIDATE_BOOLEAN)` pelado— y es a
-        // propósito: filter_var() manda a false todo lo que no reconoce (' ', 'si', '2', '-1',
-        // 'null'), o sea que cualquier valor raro caería para el lado peligroso, que es justo lo
-        // que este método existe para evitar.
-        //
-        // Los dos errores posibles acá no valen lo mismo: hacer esperar de más un mensaje lo
-        // arregla un operador aprobándolo desde la conversación; mandarle al cliente algo que
-        // nadie leyó no se deshace. Por eso apagar la verificación tiene que decirse sin
-        // ambigüedad. El único escritor normal es el controller, que ya normaliza a '1'/'0'; esta
-        // lista está para lo que escribe una persona en un incidente: un UPDATE a mano, una
-        // remediación por SSH, un import.
-        return ! in_array($normalizado, ['0', 'false', 'off', 'no'], true);
+        // La preferencia global quedó retirada: nunca se hereda aprobación a otro chat.
+        return false;
     }
 
     /**

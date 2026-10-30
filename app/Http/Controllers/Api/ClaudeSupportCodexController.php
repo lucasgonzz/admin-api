@@ -39,6 +39,8 @@ class ClaudeSupportCodexController extends Controller
             'expected_message_id' => 'required|integer|min:1',
             'lease_token' => 'sometimes|string|min:32|max:128',
             'thread_id' => 'sometimes|string|max:150',
+            'dispatch_recovery' => 'sometimes|boolean',
+            'execution_id' => 'required_if:dispatch_recovery,true|uuid',
         ]);
         return response()->json($service->claim((int) $id, $data));
     }
@@ -100,6 +102,7 @@ class ClaudeSupportCodexController extends Controller
     public function reply(Request $request, $id, SupportCodexService $service)
     {
         $data = $request->validate([
+            'supports_human_approval' => 'sometimes|boolean',
             'lease_token' => 'required|string|min:32|max:128',
             'expected_message_id' => 'required|integer|min:1',
             'operation_id' => 'required|string|max:120|regex:/^[a-zA-Z0-9_-]+$/',
