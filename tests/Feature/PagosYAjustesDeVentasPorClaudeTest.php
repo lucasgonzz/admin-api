@@ -299,6 +299,41 @@ class PagosYAjustesDeVentasPorClaudeTest extends BaseDeVentas
     }
 
     /**
+     * 🔴 Un pago no puede superar lo que falta de la cuota (un importe en la moneda equivocada o un cero
+     * de más no queda como «cobrado»), y un `monto` presente pero vacío NO paga la cuota entera.
+     * Ninguna de las dos escribe, ni en dry_run ni en el real.
+     *
+     * @return void
+     */
+    public function test_el_pago_de_cuota_rechaza_el_exceso_y_el_monto_vacio(): void
+    {
+        $this->crear_vendedor();
+        $client = $this->cliente();
+        $venta_id = $this->venta_de_tres_cuotas($client);
+        $cuota = $this->cuota($venta_id, 1);
+        $ruta = 'clients/' . $client->id . '/cuotas/' . $cuota->id . '/pago';
+        $real = ['dry_run' => false, 'confirm_client_name' => self::NOMBRE];
+
+        // Cuota de 300: 436000 (pesos sobre una cuota en dólares) se rechaza, con dry_run y sin él.
+        $this->claude($ruta, ['monto' => 436000])->assertStatus(422);
+        $exceso = $this->claude($ruta, $real + ['monto' => 436000]);
+        $exceso->assertStatus(422);
+        $this->assertArrayHasKey('error', $exceso->json());
+        $this->assertEqualsWithDelta(300.0, $exceso->json('pendiente'), 0.001);
+
+        // Un monto vacío no es «pagá todo»: se rechaza.
+        $this->claude($ruta, $real + ['monto' => ''])->assertStatus(422);
+        $this->claude($ruta, $real + ['monto' => null])->assertStatus(422);
+
+        $this->assertSame('pendiente', $cuota->fresh()->estado);
+        $this->assertEqualsWithDelta(0.0, (float) $cuota->fresh()->monto_pagado, 0.001, 'Nada se escribió.');
+
+        // El importe exacto de lo que falta sí pasa.
+        $this->claude($ruta, $real + ['monto' => 300])->assertStatus(200);
+        $this->assertSame('pagada', $cuota->fresh()->estado);
+    }
+
+    /**
      * `completa=true` da la cuota por pagada aunque lo cobrado no llegue a su monto.
      *
      * @return void

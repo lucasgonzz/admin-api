@@ -113,6 +113,16 @@ class ClaudeCobranzasVentasController extends Controller
             return $invalido;
         }
 
+        /* Un `monto` que viene en el request pero vacío NO significa «pagá todo lo que falta»: es casi
+           seguro un error del que llama (el middleware de strings vacíos lo convierte en null y
+           `filled()` lo tomaría por ausente, cobrando la cuota entera). Para pagar lo que falta se
+           omite la clave. */
+        if ($request->exists('monto') && ! $request->filled('monto')) {
+            return $this->error_422('El parámetro monto vino vacío. Omitilo para pagar lo que falta de la cuota, o mandá el importe. No se escribió nada.', [
+                'client_id' => (int) $client->id,
+            ]);
+        }
+
         $pendiente = $cuota->monto_pendiente();
         if ($pendiente <= 0) {
             return $this->error_422('La cuota ya está pagada: no se le registra otro pago. No se escribió nada.', [
@@ -124,6 +134,20 @@ class ClaudeCobranzasVentasController extends Controller
 
         /* Sin `monto`: lo que falta de esa cuota. Con `monto`: lo que entró AHORA (se suma a lo ya pagado). */
         $monto = $request->filled('monto') ? round((float) $request->input('monto'), 2) : $pendiente;
+
+        /* Tope: un pago no puede superar lo que falta de la cuota. Sin este freno, un importe en la
+           moneda equivocada (pesos sobre una cuota en dólares) o un cero de más queda como «cobrado»
+           y infla Cobranzas. Si el cliente pagó de más de verdad, se corrige desde el panel. */
+        if ($monto - $pendiente > 0.009) {
+            return $this->error_422('El monto supera lo que falta de la cuota. No se escribió nada.', [
+                'client_id' => (int) $client->id,
+                'monto'     => $monto,
+                'pendiente' => $pendiente,
+                'moneda'    => (string) $cuota->moneda,
+                'ayuda'     => 'Revisá el importe y la moneda de la cuota. Para pagar lo que falta, omití monto.',
+            ]);
+        }
+
         $fecha_pago = $this->texto_o_null($request->input('fecha_pago'));
         $observacion = $this->texto_o_null($request->input('observacion'));
         $completa = $request->boolean('completa');
