@@ -205,4 +205,15 @@ class Venta extends Model
     {
         return $this->hasMany(ComisionPago::class, 'venta_id')->orderBy('fecha')->orderBy('id');
     }
+
+    /**
+     * Señas de la venta (misión senas-en-ventas, 30/10/2026), de la más vieja a la más nueva.
+     * Son pagos a cuenta ya aplicados a las cuotas: solo se muestran, no suman a nada.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function senas()
+    {
+        return $this->hasMany(Sena::class, 'venta_id')->orderBy('fecha')->orderBy('id');
+    }
 }
