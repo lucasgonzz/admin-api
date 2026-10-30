@@ -291,6 +291,12 @@ class ClientContratoService
      * Nunca tira: un error se loguea y las cuotas quedan sueltas (las agrupa
      * `ventas:migrar-licencias`).
      *
+     * 🔴 SEÑAS DEL LEAD (misión senas-en-ventas, 30/10/2026). Apenas existe la venta se aplican a sus
+     * cuotas las señas que el lead había registrado antes de promoverse (`SenaService::
+     * aplicar_pendientes_del_lead()`). Es un paso aparte, con su propio try/catch: si falla, la venta
+     * ya creada se devuelve igual y la seña queda pendiente en el lead. Una seña nunca puede romper
+     * la promoción de un lead.
+     *
      * @param Client     $client
      * @param Collection $cuotas LicenciaCuota recién creadas.
      *
@@ -308,7 +314,7 @@ class ClientContratoService
 
             $fecha = $this->parsear_fecha($client->contract_fecha_emision) ?: AppTime::now()->copy()->startOfDay();
 
-            return $ventas->crear_desde_cuotas(
+            $venta = $ventas->crear_desde_cuotas(
                 $client,
                 $cuotas,
                 Venta::ORIGEN_CONTRATO,
@@ -323,6 +329,38 @@ class ClientContratoService
             ]);
 
             return null;
+        }
+
+        /* Las señas que el lead dejó antes de promoverse se aplican a la venta recién creada. */
+        $this->aplicar_senas_del_lead($venta);
+
+        return $venta;
+    }
+
+    /**
+     * Aplica a la venta del contrato las señas pendientes de su lead de origen (misión
+     * senas-en-ventas, 30/10/2026). Nunca tira: `SenaService::aplicar_pendientes_del_lead()` ya
+     * atrapa sus errores, y el try/catch de acá cubre lo que quede (por ejemplo que el servicio no
+     * se pueda ni resolver), porque la promoción de un lead no se puede romper por una seña.
+     *
+     * @param Venta $venta Recién creada.
+     *
+     * @return void
+     */
+    private function aplicar_senas_del_lead(Venta $venta): void
+    {
+        if ($venta->lead_id === null) {
+            return;
+        }
+
+        try {
+            app(SenaService::class)->aplicar_pendientes_del_lead((int) $venta->lead_id, $venta);
+        } catch (\Throwable $error) {
+            Log::error('ClientContratoService: no se pudieron aplicar las señas del lead a la venta del contrato; la promoción sigue.', [
+                'venta_id' => $venta->id,
+                'lead_id'  => $venta->lead_id,
+                'error'    => $error->getMessage(),
+            ]);
         }
     }
 

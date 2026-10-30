@@ -110,7 +110,7 @@ class ComisionService
     {
         $query = Venta::query()
             ->whereNotNull('vendedor_admin_id')
-            ->with(['cuotas', 'comision_pagos', 'vendedor', 'client'])
+            ->with(['cuotas', 'comision_pagos', 'vendedor', 'client', 'senas'])
             ->orderByDesc('fecha')->orderByDesc('id');
 
         if ($vendedor_admin_id !== null) {

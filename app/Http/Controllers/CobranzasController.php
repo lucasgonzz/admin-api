@@ -185,7 +185,7 @@ class CobranzasController extends Controller
     public function ventas_json(VentaService $service)
     {
         $ventas = Venta::query()
-            ->with(['cuotas', 'comision_pagos', 'vendedor', 'client'])
+            ->with(['cuotas', 'comision_pagos', 'vendedor', 'client', 'senas'])
             ->orderBy('client_id')->orderBy('fecha')->orderBy('id')
             ->get();
 
