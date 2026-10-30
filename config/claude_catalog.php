@@ -944,6 +944,27 @@ return [
                 ['nombre' => 'confirm_client_name', 'obligatorio' => false, 'validacion' => 'texto; obligatorio con dry_run=false', 'que_es' => 'El nombre del cliente (clients.name), para confirmar contra quién se escribe.'],
             ],
         ],
+        'POST api/claude/clients/{id}/ventas/{ventaId}/cuotas' => [
+            'para_que'     => 'Agrega UNA cuota a una venta existente del cliente (lo que hace «agregar cuota» en la pestaña Ventas). El total de la venta es siempre la suma de sus cuotas: sube en el monto de la cuota nueva y la comisión del vendedor se recalcula. La moneda es la de la venta. Sirve, por ejemplo, para completar una venta armada desde un contrato al que le faltó el pago inicial. Después se le registra el pago con POST clients/{id}/cuotas/{cuotaId}/pago. El dry_run devuelve {dry_run:true, escribio:false, client, venta_antes, venta_despues, nota}; el real devuelve 201 con {dry_run:false, escribio:true, venta} más la lista entera del cliente.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'dry_run por defecto true: simula el alta adentro de una transacción que se deshace y muestra la venta antes y después (total y comisión).',
+                'confirm_client_name obligatorio cuando dry_run es false: tiene que coincidir con clients.name (recorte y minúsculas) y el error no revela el nombre correcto.',
+                'La venta se busca dentro del cliente: una venta de otro cliente es 404.',
+                'No toca el sistema del cliente: escribe solo una fila de licencia_cuotas y recalcula la venta con el mismo servicio del panel.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'El cliente dueño de la venta.'],
+                ['nombre' => '{ventaId} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'La venta a la que se agrega la cuota (GET clients/{id}/ventas → ventas[].id).'],
+                ['nombre' => 'monto', 'obligatorio' => true, 'validacion' => 'número entre 0,01 y 999999999', 'que_es' => 'Importe de la cuota, en la moneda de la venta.'],
+                ['nombre' => 'vencimiento', 'obligatorio' => false, 'validacion' => 'fecha', 'que_es' => 'Cuándo vence; si falta, queda sin vencimiento.'],
+                ['nombre' => 'periodo', 'obligatorio' => false, 'validacion' => 'texto AAAA-MM', 'que_es' => 'Mes de la cuota; sale del vencimiento si no viene.'],
+                ['nombre' => 'observacion', 'obligatorio' => false, 'validacion' => 'texto, hasta 1000', 'que_es' => 'Nota libre de la cuota.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'booleano; default true', 'que_es' => 'true = solo muestra cómo quedaría la venta.'],
+                ['nombre' => 'confirm_client_name', 'obligatorio' => false, 'validacion' => 'texto; obligatorio con dry_run=false', 'que_es' => 'El nombre del cliente (clients.name), para confirmar contra quién se escribe.'],
+            ],
+        ],
         'POST api/claude/ventas/{ventaId}/comision/pagos' => [
             'para_que'     => 'Registra un pago al vendedor de una venta, a cuenta de su comisión (lo que hace el botón de pagar comisión de Cobranzas → Comisiones). La comisión se libera a medida que el cliente paga; sin `monto` se paga TODO lo que está a pagar hoy (`comision.a_pagar` de GET clients/{id}/ventas). Con `monto` explícito se puede pagar más de lo liberado (un adelanto): se registra igual y la respuesta marca `excede: true`. El cliente se saca de la venta: `confirm_client_name` es el nombre del cliente de la venta. El dry_run devuelve {dry_run:true, escribio:false, client, venta_id, pago, excede, comision_antes, comision_despues, nota}; el real devuelve 201 con {dry_run:false, escribio:true, pago, excede, venta} más la lista entera del cliente.',
             'escribe'      => true,

@@ -385,6 +385,84 @@ class PagosYAjustesDeVentasPorClaudeTest extends BaseDeVentas
     }
 
     /* ------------------------------------------------------------------------------------------
+     | Agregar una cuota a una venta
+     |------------------------------------------------------------------------------------------ */
+
+    /**
+     * El caso real (Ferretería Plazoleta): a una venta de USD 900 en tres cuotas le falta el pago
+     * inicial. Agregar una cuota de 300 sube el total a 1.200 y la comisión a lo que corresponde. El
+     * dry_run por defecto muestra el antes y el después sin escribir; el real exige el nombre.
+     *
+     * @return void
+     */
+    public function test_agregar_cuota_sube_el_total_y_la_comision_y_respeta_los_frenos(): void
+    {
+        $this->crear_vendedor();
+        $client = $this->cliente();
+        $venta_id = $this->venta_de_tres_cuotas($client);
+        $ruta = 'clients/' . $client->id . '/ventas/' . $venta_id . '/cuotas';
+        $cuerpo = ['monto' => 300, 'vencimiento' => '2026-10-26', 'observacion' => 'Pago inicial'];
+
+        // dry_run por defecto: antes y después, y no se agrega nada.
+        $simulado = $this->claude($ruta, $cuerpo);
+        $simulado->assertStatus(200);
+        $this->assertTrue($simulado->json('dry_run'));
+        $this->assertFalse($simulado->json('escribio'));
+        $this->assertEqualsWithDelta(900.0, $simulado->json('venta_antes.monto_total'), 0.001);
+        $this->assertEqualsWithDelta(1200.0, $simulado->json('venta_despues.monto_total'), 0.001);
+        $this->assertEqualsWithDelta(180.0, $simulado->json('venta_despues.comision_monto'), 0.001);
+        $this->assertSame(3, LicenciaCuota::where('venta_id', $venta_id)->count());
+
+        // Sin el nombre, o con otro, no escribe y el error no lo revela.
+        $this->claude($ruta, $cuerpo + ['dry_run' => false])->assertStatus(422);
+        $mal = $this->claude($ruta, $cuerpo + ['dry_run' => false, 'confirm_client_name' => 'Otro nombre']);
+        $mal->assertStatus(422);
+        $this->assertStringNotContainsString(self::NOMBRE, json_encode($mal->json()));
+        $this->assertSame(3, LicenciaCuota::where('venta_id', $venta_id)->count());
+
+        // El real: la cuota queda en la venta, en su moneda, y el total y la comisión suben.
+        $real = $this->claude($ruta, $cuerpo + ['dry_run' => false, 'confirm_client_name' => self::NOMBRE]);
+        $real->assertStatus(201);
+        $this->assertTrue($real->json('escribio'));
+        $this->assertSame(4, LicenciaCuota::where('venta_id', $venta_id)->count());
+        $this->assertEqualsWithDelta(1200.0, $real->json('venta.monto_total'), 0.001);
+        $this->assertEqualsWithDelta(180.0, (float) Venta::find($venta_id)->comision_monto, 0.001);
+        $nueva = LicenciaCuota::where('venta_id', $venta_id)->where('monto', 300)->where('vencimiento', '2026-10-26')->first();
+        $this->assertNotNull($nueva);
+        $this->assertSame('USD', $nueva->moneda);
+        $this->assertSame('pendiente', $nueva->estado);
+    }
+
+    /**
+     * Una venta de OTRO cliente es 404, un monto inválido es 422, y nada se escribe.
+     *
+     * @return void
+     */
+    public function test_agregar_cuota_rechaza_la_venta_ajena_y_el_monto_invalido(): void
+    {
+        $this->crear_vendedor();
+        $client = $this->cliente();
+        $otro = $this->crear_cliente(['name' => 'Otro cliente']);
+        $venta_ajena = $this->venta_de_tres_cuotas($otro);
+        $propia = $this->venta_de_tres_cuotas($client);
+        $real = ['dry_run' => false, 'confirm_client_name' => self::NOMBRE, 'monto' => 100];
+
+        $this->claude('clients/' . $client->id . '/ventas/' . $venta_ajena . '/cuotas', $real)->assertStatus(404);
+        $this->claude('clients/' . $client->id . '/ventas/999999999/cuotas', $real)->assertStatus(404);
+        $this->claude('clients/999999999/ventas/' . $propia . '/cuotas', $real)->assertStatus(404);
+
+        $ruta = 'clients/' . $client->id . '/ventas/' . $propia . '/cuotas';
+        $this->claude($ruta, ['dry_run' => false, 'confirm_client_name' => self::NOMBRE])->assertStatus(422);
+        $this->claude($ruta, array_merge($real, ['monto' => 0]))->assertStatus(422);
+        $this->claude($ruta, array_merge($real, ['monto' => -5]))->assertStatus(422);
+        $this->claude($ruta, array_merge($real, ['monto' => 'mucho']))->assertStatus(422);
+        $this->postJson('/api/claude/' . $ruta, $real)->assertStatus(401);
+
+        $this->assertSame(3, LicenciaCuota::where('venta_id', $propia)->count());
+        $this->assertSame(3, LicenciaCuota::where('venta_id', $venta_ajena)->count());
+    }
+
+    /* ------------------------------------------------------------------------------------------
      | Eliminar una cuota
      |------------------------------------------------------------------------------------------ */
 

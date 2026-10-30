@@ -25,6 +25,7 @@ use Illuminate\Validation\ValidationException;
  *  - `POST claude/clients/{id}/cuotas/{cuotaId}/eliminar` — borra una cuota; el total de la venta y
  *    su comisión bajan en lo que valía. Se RECHAZA (422) una cuota con plata cobrada: borrar un
  *    cobro real no es un «ajuste».
+ *  - `POST claude/clients/{id}/ventas/{ventaId}/cuotas` — agrega una cuota a una venta; el total y la comisión suben.
  *  - `POST claude/ventas/{ventaId}/comision/pagos` — registra un pago al vendedor a cuenta de su
  *    comisión. Sin `monto`, paga TODO LO QUE ESTÁ A PAGAR hoy (`comision_de().a_pagar`). El cliente
  *    se saca de la venta.
@@ -62,6 +63,7 @@ class ClaudeCobranzasVentasController extends Controller
             'required' => 'El parámetro :attribute es obligatorio.',
             'date'     => 'El parámetro :attribute tiene que ser una fecha válida.',
             'numeric'  => 'El parámetro :attribute tiene que ser un número.',
+            'regex'    => 'El parámetro :attribute tiene que venir como AAAA-MM.',
             'boolean'  => 'El parámetro :attribute tiene que ser booleano (1, 0, true o false).',
             'string'   => 'El parámetro :attribute tiene que ser texto.',
             'min'      => 'El parámetro :attribute está por debajo del mínimo permitido.',
@@ -475,6 +477,90 @@ class ClaudeCobranzasVentasController extends Controller
             'dry_run'  => false,
             'escribio' => true,
         ], $ventas->lista_del_cliente($client->fresh())), 200);
+    }
+
+    /**
+     * Agrega una cuota a una venta del cliente (el botón «agregar cuota» de la pestaña Ventas).
+     *
+     * El total de la venta pasa a ser la suma de sus cuotas, así que sube en el monto de la cuota
+     * nueva y la comisión se recalcula (lo hace `VentaService::agregar_cuota()`, el mismo servicio
+     * del panel). La moneda es SIEMPRE la de la venta. Sirve, por ejemplo, para completar una venta
+     * armada desde un contrato al que le faltó el pago inicial.
+     *
+     * @param Request      $request {monto, vencimiento?, periodo?, observacion?, dry_run?, confirm_client_name?}
+     * @param int|string   $id       Cliente.
+     * @param int|string   $ventaId  Venta DEL cliente (404 si es de otro).
+     * @param VentaService $ventas
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function agregar_cuota_json(Request $request, $id, $ventaId, VentaService $ventas)
+    {
+        $client = Client::find((int) $id);
+        if ($client === null) {
+            return $this->error_404('no existe el cliente ' . $id);
+        }
+
+        /* La venta se busca DENTRO del cliente: una venta de otro cliente es 404. */
+        $venta = Venta::where('client_id', $client->id)->find((int) $ventaId);
+        if ($venta === null) {
+            return $this->error_404('no existe la venta ' . $ventaId . ' en el cliente ' . $client->id);
+        }
+
+        $invalido = $this->validar_o_422($request, [
+            'monto'               => ['required', 'numeric', 'min:0.01', 'max:999999999'],
+            'vencimiento'         => ['nullable', 'date'],
+            'periodo'             => ['nullable', 'string', 'regex:/^\d{4}-(0[1-9]|1[0-2])$/'],
+            'observacion'         => ['nullable', 'string', 'max:1000'],
+            'dry_run'             => ['nullable', 'boolean'],
+            'confirm_client_name' => ['nullable', 'string', 'max:190'],
+        ]);
+        if ($invalido !== null) {
+            return $invalido;
+        }
+
+        $datos = [
+            'monto'       => round((float) $request->input('monto'), 2),
+            'vencimiento' => $this->texto_o_null($request->input('vencimiento')),
+            'periodo'     => $this->texto_o_null($request->input('periodo')),
+            'observacion' => $this->texto_o_null($request->input('observacion')),
+        ];
+
+        $venta_antes = $this->venta_json($ventas, $venta->id);
+
+        /* Freno 1: sin `dry_run=false` explícito esto no escribe nada. */
+        $dry_run = $request->filled('dry_run') ? $request->boolean('dry_run') : true;
+        if ($dry_run) {
+            $venta_despues = $this->simular(function () use ($ventas, $venta, $datos) {
+                $ventas->agregar_cuota($venta, $datos);
+
+                return $this->venta_json($ventas, $venta->id);
+            });
+
+            return response()->json([
+                'dry_run'       => true,
+                'escribio'      => false,
+                'client'        => $this->client_json($client),
+                'venta_antes'   => $venta_antes,
+                'venta_despues' => $venta_despues,
+                'nota'          => 'No se escribió NADA. Así quedaría la venta (total, cuotas y comisión) con la cuota nueva. Para agregarla '
+                    . 'de verdad, repetí la misma llamada con dry_run=false y confirm_client_name con el nombre exacto del cliente.',
+            ], 200);
+        }
+
+        /* Freno 2: el nombre. */
+        $rechazo = $this->rechazar_si_el_nombre_del_cliente_no_confirma($request, $client, 'No se escribió nada.');
+        if ($rechazo !== null) {
+            return $rechazo;
+        }
+
+        $ventas->agregar_cuota($venta, $datos);
+
+        return response()->json(array_merge([
+            'dry_run'  => false,
+            'escribio' => true,
+            'venta'    => $this->venta_json($ventas, $venta->id),
+        ], $ventas->lista_del_cliente($client)), 201);
     }
 
     /**
