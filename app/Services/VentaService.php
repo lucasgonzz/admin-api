@@ -8,6 +8,7 @@ use App\Models\Client;
 use App\Models\ComisionPago;
 use App\Models\Lead;
 use App\Models\LicenciaCuota;
+use App\Models\Sena;
 use App\Models\Venta;
 use Carbon\Carbon;
 use Illuminate\Support\Collection;
@@ -447,7 +448,7 @@ class VentaService
     }
 
     /**
-     * Borra la venta con sus cuotas. Si ya se le pagó comisión al vendedor por esta venta, NO se
+     * Borra la venta con sus cuotas y sus señas. Si ya se le pagó comisión al vendedor por esta venta, NO se
      * borra (422): esos pagos son plata que salió, y borrar la venta los dejaría colgando de nada.
      * Para borrarla hay que eliminar antes los pagos de comisión.
      *
@@ -468,6 +469,9 @@ class VentaService
         DB::transaction(function () use ($venta) {
             LicenciaCuota::where('venta_id', $venta->id)->delete();
             ComisionPago::where('venta_id', $venta->id)->delete();
+            // Las señas de la venta (misión senas-en-ventas) se borran con ella: sus pagos eran de
+            // sus cuotas, que ya no están, y dejarlas contaría una seña de una venta que no existe.
+            Sena::where('venta_id', $venta->id)->delete();
             $venta->delete();
         });
     }
@@ -688,6 +692,12 @@ class VentaService
      *  - `cobro_dudoso` (en la raíz de la venta): la marca del cliente.
      * La comisión del vendedor NO mira la marca: se libera por lo que el cliente paga de verdad.
      *
+     * 🔴 SEÑAS (misión senas-en-ventas, 30/10/2026). Se suman dos claves, sin cambiar ninguna otra:
+     *  - `senas`: la lista de señas de la venta (`SenaService::sena_para_json()`: id, monto, moneda,
+     *    fecha, nota, origen…). Una venta sin señas o sin guardar trae `[]`.
+     *  - `resumen.sena_total`: lo que suman esas señas. La seña ya está DENTRO de `resumen.cobrado`
+     *    (se aplicó a las cuotas como un pago más): `sena_total` solo dice cuánto de lo cobrado fue seña.
+     *
      * @param Venta $venta
      *
      * @return array<string, mixed>
@@ -733,12 +743,14 @@ class VentaService
             'cuotas'              => $cuotas->map(function (LicenciaCuota $cuota) {
                 return $this->cuotas->cuota_para_json($cuota);
             })->values()->all(),
+            'senas'               => $this->senas()->senas_de_la_venta_para_json($venta),
             'resumen'             => [
                 'total'      => (float) $venta->monto_total,
                 'cobrado'    => $cobrado,
                 'pendiente'  => $pendiente,
                 'en_espera'  => $en_espera,
                 'por_cobrar' => round($pendiente - $en_espera, 2),
+                'sena_total' => $this->senas()->total_de_la_venta($venta),
             ],
             'comision'            => $this->comision_de($venta),
         ];
@@ -764,7 +776,7 @@ class VentaService
     public function lista_del_cliente(Client $client): array
     {
         $ventas = Venta::where('client_id', $client->id)
-            ->with(['cuotas', 'comision_pagos', 'vendedor'])
+            ->with(['cuotas', 'comision_pagos', 'vendedor', 'senas'])
             ->orderBy('fecha')->orderBy('id')
             ->get();
 
@@ -1130,7 +1142,19 @@ class VentaService
      */
     protected function recargar(Venta $venta): Venta
     {
-        return $venta->fresh(['cuotas', 'comision_pagos', 'vendedor']);
+        return $venta->fresh(['cuotas', 'comision_pagos', 'vendedor', 'senas']);
+    }
+
+    /**
+     * El servicio de señas, resuelto a demanda (misión senas-en-ventas, 30/10/2026). No se inyecta
+     * por constructor para no cambiar la firma de `VentaService`, que se arma a mano en varios
+     * lugares y en las pruebas.
+     *
+     * @return SenaService
+     */
+    protected function senas(): SenaService
+    {
+        return app(SenaService::class);
     }
 
     /**

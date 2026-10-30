@@ -18,6 +18,7 @@ use App\Http\Controllers\ClientModelosIaController;
 use App\Http\Controllers\ClientLicenciaController;
 use App\Http\Controllers\ClientVentaController;
 use App\Http\Controllers\ComisionController;
+use App\Http\Controllers\SenaController;
 use App\Http\Controllers\ClientMensualidadController;
 use App\Http\Controllers\CobranzasController;
 use App\Http\Controllers\ClientScheduleController;
@@ -568,6 +569,23 @@ Route::middleware('claude.task.key')
             ->whereNumber('ventaId');
         Route::post('clients/{id}/cobro-dudoso', 'Api\ClaudeCobranzasVentasController@cobro_dudoso_json')
             ->whereNumber('id');
+        /* Señas (misión senas-en-ventas, 30/10/2026): un pago a cuenta que se aplica solo a las cuotas
+           pendientes más próximas de la venta. Los tres viven en ClaudeSenasController, con los frenos
+           del bloque (dry_run por defecto true; confirm_client_name para la venta y confirm_lead_name
+           para el lead cuando dry_run es false) y reusan SenaService, el mismo del panel.
+             - ventas/{ventaId}/senas: registra la seña en una venta y la reparte entre sus cuotas.
+             - leads/{id}/senas (POST): la registra en un lead sin promover; se aplica sola al promoverlo.
+             - leads/{id}/senas (GET): las señas del lead, pendientes y ya aplicadas. */
+        Route::post('ventas/{ventaId}/senas', 'Api\ClaudeSenasController@store_venta_json')
+            ->whereNumber('ventaId');
+        Route::post('leads/{id}/senas', 'Api\ClaudeSenasController@store_lead_json')
+            ->whereNumber('id');
+        Route::get('leads/{id}/senas', 'Api\ClaudeSenasController@index_lead_json')
+            ->whereNumber('id');
+        /* Anular una seña PENDIENTE de un lead (la que quedó sin aplicar). dry_run por defecto true y
+           confirm_lead_name para escribir. Una seña ya aplicada no se anula. */
+        Route::post('leads/{leadId}/senas/{senaId}/anular', 'Api\ClaudeSenasController@anular_lead_json')
+            ->whereNumber('leadId')->whereNumber('senaId');
         /* 🔴 El acceso del motor de `/categorizar` al catálogo de UN cliente SIN que su clave pase por
            la máquina de Lucas (misión `implementacion-dos-sistemas`, 6/10/2026). Los dos viven en
            ClaudeClientCatalogoController y no llevan nunca el valor de `clients.api_key` en una
@@ -1079,6 +1097,20 @@ Route::prefix('admin')->group(function () {
             ->where('ventaId', '[0-9]+');
         Route::delete('comision-pagos/{pagoId}', [ComisionController::class, 'eliminar_pago_json'])
             ->where('pagoId', '[0-9]+');
+
+        /* Señas (misión senas-en-ventas, 30/10/2026): un pago a cuenta que se aplica solo a las cuotas
+           pendientes más próximas de la venta. En una venta se aplica en el momento; en un lead que
+           todavía no se promovió queda pendiente y se aplica sola cuando el lead se promueve. Lo que
+           se calcula vive en SenaService (el mismo que usa Claude). */
+        Route::post('ventas/{ventaId}/senas', [SenaController::class, 'store_en_venta_json'])
+            ->where('ventaId', '[0-9]+');
+        Route::post('leads/{leadId}/senas', [SenaController::class, 'store_en_lead_json'])
+            ->where('leadId', '[0-9]+');
+        Route::get('leads/{leadId}/senas', [SenaController::class, 'index_del_lead_json'])
+            ->where('leadId', '[0-9]+');
+        // Anular una seña PENDIENTE de un lead (la que quedó sin aplicar): borra la fila, sin tocar plata.
+        Route::delete('leads/{leadId}/senas/{senaId}', [SenaController::class, 'destroy_del_lead_json'])
+            ->where('leadId', '[0-9]+')->where('senaId', '[0-9]+');
 
         Route::get('lead/atribucion/metricas', [\App\Http\Controllers\LeadAtribucionController::class, 'metricas']);
         Route::get('lead/{id}/atribucion', [\App\Http\Controllers\LeadAtribucionController::class, 'detalle'])->where('id', '[0-9]+');
