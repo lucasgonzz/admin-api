@@ -181,3 +181,22 @@ El contexto incluye `can_query_system`. Un empleado sin ese permiso recibe 403 e
 ## Errores
 
 401: clave ausente/incorrecta. 404: recurso inexistente o adjunto de otro ticket. 409: mensaje viejo, ticket ineligible/atendido, misión pendiente o conflicto idempotente. 422: validación, confirmación insuficiente, ventana vencida. 423: reserva ocupada/vencida/incorrecta. 502: diagnóstico remoto no disponible. El worker relee ante 409 y no publica resultados de un contexto viejo.
+
+
+## Automatización, aprobación y avisos por ticket (30/10/2026)
+
+Cada ticket nuevo nace con `requiere_verificacion_mensajes=false`, incluso si una Cuenta o un consumidor anterior manda `true` al crearlo. La decisión posterior se toma únicamente con el botón de ese ticket. No se modifican los tickets existentes al desplegar. `SupportAiSettings.require_verification` se conserva en el JSON por compatibilidad, siempre `false`.
+
+El contexto agrega `requires_verification` y las capacidades `human_approval=true` y `recover_dispatch=true`. El helper que entiende aprobación incluye `supports_human_approval:true` en `/reply`. Si el ticket exige verificar, se crea un `SupportMessage` con `is_ai_suggestion_draft=true` sin timer y una operación `awaiting_approval`; no se toca WhatsApp ni se marca el entrante como atendido. Un helper anterior sin esa negociación recibe 422 `verification_required` antes de persistir o enviar.
+
+El operador usa los endpoints existentes `POST /api/admin/support-message/{id}/approve-ai-draft` con `body` opcional (hasta 3500 caracteres), y `POST .../discard-ai-draft`. Aprobar revalida ticket abierto, agente prendido, mensaje actual, misión, confirmación y ventana de WhatsApp, y reserva un solo intento antes de tocar la red. Repetir la aprobación de una operación ya enviada no vuelve a enviar. Descartar reconoce ese entrante como decisión humana, conserva la misión y no regenera el mismo texto: el próximo entrante vuelve a ser elegible. Una intervención humana, apagar el agente o un entrante nuevo invalidan el borrador anterior; no se reutiliza texto obsoleto.
+
+Apagar verificación no envía el borrador que ya esperaba aprobación: sigue visible para enviarlo o descartarlo explícitamente. Las próximas respuestas son automáticas; si llega otro mensaje, la aprobación anterior se cancela y el nuevo se atiende con el modo vigente.
+
+`operation.status` agrega `awaiting_approval` y `not_sent`. `raw_status=cancelled` significa rechazo determinado antes del envío, distinto de `unknown` posterior a un intento de entrega. Solo una atención con reserva vigente y mismo ticket/mensaje puede reformular una operación cancelada; los hashes de operaciones `sending`, `unknown` y `sent` conservan su inmutabilidad. El payload de aprobación es durable y nunca guarda la reserva.
+
+`PATCH /api/admin/support-ticket/{id}/attention` exige `{needs_human:boolean}` y devuelve `{model:ticket}`. `support_attention.can_toggle=true` anuncia el control. Apagar el aviso reconoce la señal visual, sin cerrar el ticket, borrar misión, atender un entrante ni autorizar una entrega incierta. Una nueva revisión del agente lo vuelve a encender. El motivo operativo se conserva aunque Lucas apague la señal. Los casos previos conservan su cálculo heredado hasta un cambio explícito.
+
+La push durable informa tanto intervención como aprobación pendiente, agrega `approval_pending` y enlaza `/soporte/ticket/{id}`. Se deduplica por generación y dispositivo, reintenta fallas y suprime avisos obsoletos al aprobar, descartar o apagar la alerta. La aceptación del proveedor no demuestra recepción física en el teléfono.
+
+Una apertura incierta puede recuperar `/claim` con `dispatch_recovery:true`, `execution_id` UUID, `thread_id` y el mensaje original. Solo se admite el motivo técnico exacto de apertura sin confirmar, con el mismo mensaje esperado y sin respuesta humana posterior, reserva ajena ni operación sin terminar. Los claims nuevos pueden guardar `execution_id`; una recuperación debe coincidir con el UUID ya registrado. Para casos anteriores sin UUID, el monitor tiene que verificar en las herramientas oficiales de la app el ticket y el UUID exacto de su disparador. No usa `/resume`, no borra una misión ni reenvía una respuesta.

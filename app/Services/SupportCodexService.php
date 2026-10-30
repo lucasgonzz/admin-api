@@ -49,6 +49,7 @@ class SupportCodexService
                 if (! SupportCodexSettings::manages($ticket)) {
                     continue;
                 }
+                $this->invalidate_stale_approval($ticket);
                 $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->first();
                 if ($case !== null && $case->lease_expires_at !== null && $case->lease_expires_at->isFuture()) {
                     continue;
@@ -86,8 +87,24 @@ class SupportCodexService
             $token = $input['lease_token'] ?? null;
             $renewing = $token !== null && $case->worker_id === $input['worker_id']
                 && $case->lease_hash !== null && hash_equals($case->lease_hash, hash('sha256', $token));
+            if ($renewing && ! empty($input['execution_id']) && $case->dispatch_execution_id !== null
+                && $case->dispatch_execution_id !== $input['execution_id']) {
+                $this->fail(409, 'operation_conflict', 'La renovación pertenece a otra ejecución.');
+            }
             if (! $renewing && $case->lease_expires_at !== null && $case->lease_expires_at->isFuture()) {
                 $this->fail(423, 'lease_busy', 'Otro proceso está atendiendo este ticket.');
+            }
+            $recover_dispatch = ! empty($input['dispatch_recovery']);
+            if ($recover_dispatch) {
+                if ($case->state !== 'manual_review'
+                    || $case->review_reason !== 'Disparo de conversación sin confirmar; conciliar en Codex'
+                    || (int) $case->expected_message_id !== (int) $input['expected_message_id']
+                    || ($case->dispatch_execution_id !== null && $case->dispatch_execution_id !== ($input['execution_id'] ?? null))
+                    || $this->has_unfinished_operation($id)) {
+                    $this->fail(409, 'not_pending', 'La recuperación no corresponde a una apertura de chat sin confirmar.');
+                }
+                $case->state = trim((string) $case->mission) !== '' ? 'mission_pending' : 'ready';
+                $case->review_reason = null;
             }
             if ($this->pending_reason($ticket, $case) === null) {
                 $this->fail(409, 'not_pending', 'El ticket ya fue atendido o necesita revisión humana.');
@@ -106,6 +123,13 @@ class SupportCodexService
                     $case->review_reason = null;
                 }
                 $case->confirmation_due_at = null;
+            }
+            if ($recover_dispatch) {
+                $ticket->support_attention_enabled = false;
+                $ticket->save();
+            }
+            if (! empty($input['execution_id'])) {
+                $case->dispatch_execution_id = $input['execution_id'];
             }
             $case->worker_id = $input['worker_id'];
             $case->lease_hash = hash('sha256', $token);
@@ -157,7 +181,8 @@ class SupportCodexService
             'reason' => $this->pending_reason($ticket, $case),
             // El helper debe verificar esta capacidad ANTES de pedir el modo nuevo: un admin
             // anterior ignoraría el campo y ejecutaría el resume que consume la consulta.
-            'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'human_review_action' => true],
+            'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true],
+            'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
             'window' => app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone),
             'client_context' => app(SupportClientContextService::class)->bloque_para_el_prompt($ticket),
@@ -526,13 +551,19 @@ class SupportCodexService
         $operation = DB::transaction(function () use ($id, $input, $hash) {
             $ticket = SupportTicket::lockForUpdate()->findOrFail($id);
             $old = SupportCodexOperation::where('operation_id', $input['operation_id'])->first();
-            if ($old !== null) {
+            if ($old !== null && $old->status !== 'cancelled') {
                 if (! hash_equals($old->request_hash, $hash)) {
                     $this->fail(409, 'operation_conflict', 'La clave idempotente ya se usó con otro contenido.');
                 }
                 return $old;
             }
+            if ($old !== null && ((int) $old->support_ticket_id !== $id || (int) $old->expected_message_id !== (int) $input['expected_message_id'])) {
+                $this->fail(409, 'operation_conflict', 'La operación cancelada corresponde a otro ticket o mensaje.');
+            }
             $case = $this->assert_current($ticket, $input);
+            if ($ticket->requiere_verificacion_mensajes && empty($input['supports_human_approval'])) {
+                $this->fail(422, 'verification_required', 'Este ticket exige aprobación. Actualizá el monitor para preparar el borrador.');
+            }
             if ($input['action'] === 'cerrar') {
                 $this->assert_confirmation($ticket, $case, $input);
             }
@@ -550,16 +581,26 @@ class SupportCodexService
                 $this->bind_thread($case, $input['thread_id']);
                 $case->save();
             }
-            return SupportCodexOperation::create([
+            // cancelled demuestra que jamás se tocó la red; una atención vigente puede reformular.
+            // Los intentos sending/unknown/sent conservan su hash y jamás pasan por este camino.
+            $operation = $old ?: new SupportCodexOperation();
+            $operation->fill([
                 'operation_id' => $input['operation_id'],
                 'support_ticket_id' => $id,
                 'expected_message_id' => $input['expected_message_id'],
                 'action' => $input['action'],
                 'request_hash' => $hash,
                 'status' => 'sending',
+                'message_id' => null, 'detail' => null, 'approval_payload' => null,
             ]);
+            $operation->save();
+            $operation->wasRecentlyCreated = true;
+            if ($ticket->requiere_verificacion_mensajes) {
+                $this->prepare_approval($ticket, $case, $operation, $input);
+            }
+            return $operation;
         });
-        if (! $operation->wasRecentlyCreated) {
+        if (! $operation->wasRecentlyCreated || $operation->status === 'awaiting_approval') {
             return $this->operation_result($operation);
         }
 
@@ -569,7 +610,26 @@ class SupportCodexService
             if ($operation->status !== 'sending') {
                 return $this->operation_result($operation);
             }
-            $case = $this->assert_current($ticket, $input, false);
+            try {
+                $case = $this->assert_current($ticket, $input, false);
+            } catch (HttpException $exception) {
+                // El envío aún no empezó: un entrante o una toma humana no son resultado incierto.
+                $operation->status = 'cancelled';
+                $operation->detail = 'La conversación o el agente cambió antes del envío; no se envió.';
+                $operation->save();
+                return $this->operation_result($operation);
+            }
+            // El operador pudo encender la verificación después de la primera transacción.
+            if ($ticket->requiere_verificacion_mensajes) {
+                if (empty($input['supports_human_approval'])) {
+                    $operation->status = 'cancelled';
+                    $operation->detail = 'La verificación fue activada; no se envió con el monitor anterior.';
+                    $operation->save();
+                    return $this->operation_result($operation);
+                }
+                $this->prepare_approval($ticket, $case, $operation, $input);
+                return $this->operation_result($operation);
+            }
             // sending ya existe fuera de la transacción: una caída deja un intento ambiguo.
             $input['_follow_up'] = $this->is_follow_up($case, (int) $input['expected_message_id']);
             $body = trim($input['body']);
@@ -602,6 +662,7 @@ class SupportCodexService
                 $case->state = 'manual_review';
                 $case->review_reason = $operation->detail;
                 $case->review_requested_message_id = null;
+                $this->request_attention($ticket);
             } else {
                 $operation->status = 'sent';
                 $case->handled_message_id = (int) $input['expected_message_id'];
@@ -622,6 +683,189 @@ class SupportCodexService
         });
     }
 
+    private function request_attention(SupportTicket $ticket): void
+    {
+        $ticket->support_attention_enabled = true;
+        $ticket->save();
+    }
+
+    private function prepare_approval(SupportTicket $ticket, SupportCodexCase $case, SupportCodexOperation $operation, array $input): void
+    {
+        $draft = app(SupportAiSuggestionDraftService::class)->create_draft($ticket, trim($input['body']), 0);
+        $operation->message_id = (int) $draft->id;
+        $operation->status = 'awaiting_approval';
+        // No se guarda la reserva: la aprobación es humana y revalida el mensaje actual.
+        unset($input['lease_token']);
+        $operation->approval_payload = $input;
+        $operation->detail = 'La respuesta está lista y espera tu aprobación en este ticket.';
+        $operation->save();
+        $case->lease_hash = null;
+        $case->lease_expires_at = null;
+        $case->save();
+        try {
+            app(SupportAttentionNotificationService::class)->registrar((int) $ticket->id);
+        } catch (\Throwable $exception) {
+            // El conciliador recupera la push; nunca se pierde el borrador por la cola.
+            \Illuminate\Support\Facades\Log::warning('Soporte: aviso de aprobación pendiente de recuperación.', ['ticket_id' => $ticket->id]);
+        }
+        SupportTicketUpdated::dispatch((int) $ticket->id);
+    }
+
+    public function invalidate_stale_approval(SupportTicket $ticket): void
+    {
+        $last = $this->last_real_message((int) $ticket->id);
+        $pending = SupportCodexOperation::where('support_ticket_id', $ticket->id)->where('status', 'awaiting_approval')->first();
+        if ($pending !== null && ($last === null || (int) $last->id !== (int) $pending->expected_message_id || $ticket->status !== 'open')) {
+            $this->cancel_approvals($ticket, 'La conversación cambió; se descartó la respuesta anterior.');
+        }
+    }
+
+    public function cancel_approvals(SupportTicket $ticket, string $reason): void
+    {
+        SupportCodexOperation::where('support_ticket_id', $ticket->id)->where('status', 'awaiting_approval')
+            ->update(['status' => 'cancelled', 'detail' => $reason, 'approval_payload' => null]);
+        app(SupportAiSuggestionDraftService::class)->clear_ticket_pending_state($ticket);
+    }
+
+    public function discard_draft(int $message_id): void
+    {
+        DB::transaction(function () use ($message_id) {
+            $found = SupportCodexOperation::where('message_id', $message_id)->firstOrFail();
+            $ticket = SupportTicket::whereKey($found->support_ticket_id)->lockForUpdate()->firstOrFail();
+            $operation = SupportCodexOperation::whereKey($found->id)->lockForUpdate()->first();
+            if ($operation->status !== 'awaiting_approval') {
+                $this->fail(409, 'operation_conflict', 'Ese borrador ya fue tomado o descartado.');
+            }
+            $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->lockForUpdate()->firstOrFail();
+            // Descartar es la decisión humana sobre ese entrante, no una orden de generar lo mismo otra vez.
+            $case->handled_message_id = max((int) $case->handled_message_id, (int) $operation->expected_message_id);
+            $case->save();
+            $this->cancel_approvals($ticket, 'Lucas descartó el borrador sin enviarlo.');
+            SupportTicketUpdated::dispatch((int) $ticket->id);
+        });
+    }
+
+    private function assert_approval_action(SupportTicket $ticket, SupportCodexCase $case, array $input): void
+    {
+        if (in_array($input['action'], ['cerrar', 'solicitar_confirmacion'], true) && trim((string) $case->mission) !== '') {
+            $this->fail(409, 'mission_pending', 'La misión sigue pendiente; no se anuncia resuelta.');
+        }
+        if ($input['action'] === 'cerrar') {
+            $this->assert_confirmation($ticket, $case, $input);
+        }
+    }
+
+    public function approve_draft(int $message_id, ?string $body, int $admin_id): array
+    {
+        // El primer commit reserva el único intento antes de tocar WhatsApp: dos clics no envían dos veces.
+        $operation = DB::transaction(function () use ($message_id, $body, $admin_id) {
+            $found = SupportCodexOperation::where('message_id', $message_id)->firstOrFail();
+            $ticket = SupportTicket::whereKey($found->support_ticket_id)->lockForUpdate()->firstOrFail();
+            $operation = SupportCodexOperation::whereKey($found->id)->lockForUpdate()->first();
+            if ($operation->status !== 'awaiting_approval') {
+                return $operation;
+            }
+            $last = $this->last_real_message((int) $ticket->id);
+            if ($ticket->status !== 'open' || ! $ticket->claude_auto_reply || $last === null
+                || (int) $last->id !== (int) $operation->expected_message_id) {
+                $this->fail(409, 'stale_message', 'Cambió la conversación o el agente está apagado; no se envió el borrador.');
+            }
+            if (! app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone)['open']) {
+                $this->fail(422, 'window_expired', 'Venció la ventana de WhatsApp; el borrador no se envió.');
+            }
+            $message = SupportMessage::whereKey($message_id)->where('is_ai_suggestion_draft', true)->firstOrFail();
+            $input = $operation->approval_payload;
+            $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->lockForUpdate()->firstOrFail();
+            $this->assert_approval_action($ticket, $case, $input);
+            $final = $body === null ? trim($message->body) : trim($body);
+            if ($final === '') {
+                $this->fail(422, 'invalid_body', 'El mensaje no puede quedar vacío.');
+            }
+            if ($message->body !== $final) {
+                $message->ai_original_body = $message->body;
+            }
+            $message->body = $final;
+            $message->sender_admin_id = $admin_id;
+            $message->ai_auto_send_at = null;
+            $message->save();
+            $input['body'] = $final;
+            $operation->approval_payload = $input;
+            $operation->status = 'sending';
+            $operation->detail = null;
+            $operation->save();
+            return $operation;
+        });
+        if ($operation->status !== 'sending' || ! $operation->wasChanged('status')) {
+            return $this->operation_result($operation);
+        }
+        return DB::transaction(function () use ($operation) {
+            $ticket = SupportTicket::whereKey($operation->support_ticket_id)->lockForUpdate()->firstOrFail();
+            $operation = SupportCodexOperation::whereKey($operation->id)->lockForUpdate()->first();
+            if ($operation->status !== 'sending') {
+                return $this->operation_result($operation);
+            }
+            $last = $this->last_real_message((int) $ticket->id);
+            $message = SupportMessage::findOrFail($operation->message_id);
+            // La fila sigue siendo borrador hasta completar todas las validaciones del envío.
+            if ($ticket->status !== 'open' || ! $ticket->claude_auto_reply || $last === null
+                || (int) $last->id !== (int) $operation->expected_message_id
+                || ! app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone)['open']) {
+                $operation->status = 'cancelled';
+                $operation->detail = 'La conversación cambió antes del envío aprobado; no se envió.';
+                $operation->save();
+                return $this->operation_result($operation);
+            }
+            $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->lockForUpdate()->firstOrFail();
+            $input = $operation->approval_payload;
+            try {
+                $this->assert_approval_action($ticket, $case, $input);
+            } catch (HttpException $exception) {
+                // Un rechazo conocido previo a la red no es una entrega incierta.
+                $operation->status = 'cancelled';
+                $operation->detail = 'La acción dejó de ser válida antes del envío; no se envió.';
+                $operation->save();
+                return $this->operation_result($operation);
+            }
+            $message->is_ai_suggestion_draft = false;
+            $message->save();
+            $result = null;
+            try {
+                $result = app(SupportWhatsappOpenerService::class)->deliver_follow_up($ticket, $message, 'Martín, asistente técnico');
+            } catch (\Throwable $exception) {
+                $message->remote_delivery_status = 'not_received';
+                $message->save();
+            }
+            if ($result !== null && ($result['delivery'] ?? '') === 'sent') {
+                $operation->status = 'sent';
+                $case->handled_message_id = (int) $operation->expected_message_id;
+                $case->last_reply_id = (int) $message->id;
+                $this->apply_action($ticket, $case, $input);
+            } else {
+                $operation->status = 'unknown';
+                $operation->detail = 'Entrega no confirmada. Revisá WhatsApp antes de reintentar manualmente.';
+                $case->state = 'manual_review';
+                $case->review_reason = $operation->detail;
+                $case->review_requested_message_id = null;
+                $this->request_attention($ticket);
+            }
+            $message->delivered_at = now();
+            $message->save();
+            $case->save();
+            $operation->approval_payload = null;
+            $operation->save();
+            $ticket->ai_pending_suggestion = null;
+            $ticket->ai_suggestion_send_at = null;
+            $ticket->save();
+            try {
+                SupportMessageReceived::dispatch((int) $message->id);
+                SupportTicketUpdated::dispatch((int) $ticket->id);
+            } catch (\Throwable $exception) {
+                // El envío ya fue aceptado: realtime no puede revertir el resultado durable.
+            }
+            return $this->operation_result($operation);
+        });
+    }
+
     private function apply_action(SupportTicket $ticket, SupportCodexCase $case, array $input): void
     {
         if (! empty($input['_follow_up']) && in_array($input['action'], ['responder', 'solicitar_confirmacion'], true)) {
@@ -636,6 +880,7 @@ class SupportCodexService
             $case->confirmation_due_at = null;
             $case->follow_up_sent = false;
         } elseif ($input['action'] === 'cerrar') {
+            $ticket->support_attention_enabled = false;
             $case->state = 'closed';
             $case->review_reason = null;
             $case->review_requested_message_id = null;
@@ -646,6 +891,7 @@ class SupportCodexService
             $ticket->escalation_reason = null;
             $ticket->save();
         } elseif ($input['action'] === 'pedir_revision') {
+            $this->request_attention($ticket);
             // Una urgencia humana no exige inventar una misión; si ya existe, se conserva.
             $case->state = 'manual_review';
             $case->review_reason = trim($input['review_reason']);
@@ -684,6 +930,7 @@ class SupportCodexService
                 $case->state = 'manual_review';
                 $case->review_reason = mb_substr((string) ($input['reason'] ?? 'Atención humana requerida.'), 0, 500);
                 $case->review_requested_message_id = null;
+                $this->request_attention($ticket);
             }
             $case->lease_hash = null;
             $case->lease_expires_at = null;
@@ -699,10 +946,12 @@ class SupportCodexService
         }
         DB::transaction(function () use ($ticket) {
             SupportTicket::where('id', $ticket->id)->lockForUpdate()->first();
+            $this->cancel_approvals($ticket, 'Lucas respondió desde el admin.');
             $case = SupportCodexCase::firstOrCreate(['support_ticket_id' => $ticket->id]);
-            // Una respuesta manual no convierte una revisión por error o conciliación en una
-            // pausa recuperable. Solo cedemos este turno; el próximo entrante puede volver a Martín.
-            if ($case->state !== 'manual_review' || $this->is_human_reply_pause($case) || $case->is_agent_requested_review()) {
+            // Una respuesta humana cede este turno. Solo la apertura fallida conocida admite
+            // recuperación; una entrega incierta o una conciliación mantienen su bloqueo.
+            if ($case->state !== 'manual_review' || $this->is_human_reply_pause($case) || $case->is_agent_requested_review()
+                || ($this->is_dispatch_review($case) && ! $this->has_unfinished_operation((int) $ticket->id))) {
                 $case->state = 'manual_review';
                 $case->review_reason = SupportCodexCase::HUMAN_REPLY_REVIEW_REASON;
                 $last = $this->last_real_message($ticket->id);
@@ -883,7 +1132,8 @@ class SupportCodexService
         return [
             'operation' => [
                 'id' => $operation->operation_id,
-                'status' => in_array($operation->status, ['sent', 'reconciled_sent'], true) ? 'sent' : ($operation->status === 'reconciled_not_sent' ? 'not_sent' : 'unknown'),
+                'status' => in_array($operation->status, ['sent', 'reconciled_sent'], true) ? 'sent' : (in_array($operation->status, ['reconciled_not_sent', 'cancelled'], true) ? 'not_sent' : ($operation->status === 'awaiting_approval' ? 'awaiting_approval' : 'unknown')),
+                'raw_status' => $operation->status,
                 'message_id' => $operation->message_id ? (int) $operation->message_id : null,
                 'action' => $operation->action,
                 'detail' => $operation->detail,
@@ -961,7 +1211,7 @@ class SupportCodexService
         if ($case !== null && $case->state === 'manual_review') {
             // La procedencia durable distingue pedir_revision de errores de envío, conciliación
             // o pausas técnicas. Un entrante no borra el motivo: solo permite que Martín lo lea.
-            return ($this->is_human_reply_pause($case) || $case->is_agent_requested_review()) && $last->sender_type === 'user'
+            return ($this->is_human_reply_pause($case) || $case->is_agent_requested_review() || $this->is_dispatch_review($case)) && $last->sender_type === 'user'
                 && (int) $last->id > max((int) $case->expected_message_id, (int) $case->handled_message_id)
                 ? 'inbound' : null;
         }
@@ -981,6 +1231,13 @@ class SupportCodexService
         return null;
     }
 
+    private function is_dispatch_review(SupportCodexCase $case): bool
+    {
+        // Solo un rechazo de apertura conocido: un envío desconocido sigue exigiendo conciliación.
+        return $case->state === 'manual_review'
+            && $case->review_reason === 'Disparo de conversación sin confirmar; conciliar en Codex';
+    }
+
     private function is_human_reply_pause(SupportCodexCase $case): bool
     {
         return $case->is_human_reply_pause();
@@ -995,7 +1252,7 @@ class SupportCodexService
     private function has_unfinished_operation(int $id): bool
     {
         return SupportCodexOperation::where('support_ticket_id', $id)
-            ->whereNotIn('status', ['sent', 'reconciled_sent', 'reconciled_not_sent'])->exists();
+            ->whereNotIn('status', ['sent', 'reconciled_sent', 'reconciled_not_sent', 'cancelled'])->exists();
     }
 
     private function last_real_message(int $id): ?SupportMessage
