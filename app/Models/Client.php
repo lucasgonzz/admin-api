@@ -118,6 +118,11 @@ class Client extends Model
         'mensualidad_inicio'                 => 'date',
         // true = no usa el sistema y no se le cobra: queda fuera de lo que hay que cobrar en Cobranzas.
         'no_paga_mensualidad'                => 'boolean',
+        /* Cliente de dudoso cobro futuro (misión cobro-dudoso-y-pagos-ventas, 30/10/2026): su deuda de
+         * ventas (cuotas pendientes) no cuenta como «a cobrar» ni se da por perdida: va a «En stand-by».
+         * `desde` es la fecha en que se encendió la marca; `motivo`, la nota libre (sin cast: es texto). */
+        'cobro_dudoso'                       => 'boolean',
+        'cobro_dudoso_desde'                 => 'date',
     ];
 
     /**

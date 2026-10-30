@@ -680,6 +680,14 @@ class VentaService
      * Funciona también sobre una venta SIN guardar (la del dry_run de Claude): `id` va null y las
      * cuotas salen con `id` null.
      *
+     * 🔴 COBRO DUDOSO (misión cobro-dudoso-y-pagos-ventas, 30/10/2026). `resumen.pendiente` sigue
+     * siendo la deuda pendiente TOTAL de la venta, sin cambiar de significado. Lo que se suma es su
+     * partición según la marca del CLIENTE (`clients.cobro_dudoso`):
+     *  - `resumen.en_espera`: el pendiente si el cliente es de dudoso cobro; si no, 0.
+     *  - `resumen.por_cobrar`: el resto (`pendiente - en_espera`), la plata que de verdad hay que cobrar.
+     *  - `cobro_dudoso` (en la raíz de la venta): la marca del cliente.
+     * La comisión del vendedor NO mira la marca: se libera por lo que el cliente paga de verdad.
+     *
      * @param Venta $venta
      *
      * @return array<string, mixed>
@@ -699,6 +707,11 @@ class VentaService
             return $cuota->monto_pendiente();
         }), 2);
 
+        /* La marca de dudoso cobro es del cliente: con ella, todo el pendiente de la venta está «en
+           espera» (stand-by) y nada «por cobrar». Sin ella, al revés. */
+        $cobro_dudoso = $this->cobro_dudoso_de($venta);
+        $en_espera = $cobro_dudoso ? $pendiente : 0.0;
+
         return [
             'id'                  => $venta->id,
             'client_id'           => (int) $venta->client_id,
@@ -716,13 +729,16 @@ class VentaService
             'observacion'         => $venta->observacion,
             'created_by_admin_id' => $venta->created_by_admin_id !== null ? (int) $venta->created_by_admin_id : null,
             'created_at'          => $venta->created_at ? $venta->created_at->toDateTimeString() : null,
+            'cobro_dudoso'        => $cobro_dudoso,
             'cuotas'              => $cuotas->map(function (LicenciaCuota $cuota) {
                 return $this->cuotas->cuota_para_json($cuota);
             })->values()->all(),
             'resumen'             => [
-                'total'     => (float) $venta->monto_total,
-                'cobrado'   => $cobrado,
-                'pendiente' => $pendiente,
+                'total'      => (float) $venta->monto_total,
+                'cobrado'    => $cobrado,
+                'pendiente'  => $pendiente,
+                'en_espera'  => $en_espera,
+                'por_cobrar' => round($pendiente - $en_espera, 2),
             ],
             'comision'            => $this->comision_de($venta),
         ];
@@ -737,6 +753,10 @@ class VentaService
      * claves agregadas, `es_suscripcion` y `porcentaje_con_gestion` (el que corresponde si se tilda
      * gestión).
      *
+     * 🔴 Cobro dudoso (misión cobro-dudoso-y-pagos-ventas, 30/10/2026): en la raíz salen además la
+     * marca del cliente (`cobro_dudoso`), desde cuándo (`cobro_dudoso_desde`, Y-m-d o null) y por
+     * qué (`cobro_dudoso_motivo`). Son claves nuevas: quien no las conoce las ignora.
+     *
      * @param Client $client
      *
      * @return array<string, mixed>
@@ -747,6 +767,12 @@ class VentaService
             ->with(['cuotas', 'comision_pagos', 'vendedor'])
             ->orderBy('fecha')->orderBy('id')
             ->get();
+
+        /* Todas las ventas son de este cliente: se le pasa el objeto que ya se tiene para que
+           `venta_para_json()` no vaya a buscarlo a la base una vez por venta. */
+        foreach ($ventas as $venta) {
+            $venta->setRelation('client', $client);
+        }
 
         $sueltas = LicenciaCuota::where('client_id', $client->id)
             ->whereNull('venta_id')
@@ -767,7 +793,58 @@ class VentaService
             'porcentaje_con_gestion' => $this->porcentaje_por_defecto($client, [Venta::PRODUCTO_GESTION]),
             'es_suscripcion'         => $this->es_suscripcion($client),
             'vendedor_por_defecto'   => $this->vendedor_por_defecto(),
+            'cobro_dudoso'           => (bool) $client->cobro_dudoso,
+            'cobro_dudoso_desde'     => $client->cobro_dudoso_desde ? Carbon::parse($client->cobro_dudoso_desde)->toDateString() : null,
+            'cobro_dudoso_motivo'    => $client->cobro_dudoso_motivo !== null ? (string) $client->cobro_dudoso_motivo : null,
         ];
+    }
+
+    /**
+     * Enciende o apaga la marca de «cliente de dudoso cobro» (misión cobro-dudoso-y-pagos-ventas,
+     * 30/10/2026). La usan el panel (`PUT client/{id}/cobro-dudoso`) y Claude
+     * (`POST claude/clients/{id}/cobro-dudoso`): una sola definición de qué hace la marca.
+     *
+     *  - Encender: `cobro_dudoso = true`. `cobro_dudoso_desde` se pone en hoy SOLO si la marca estaba
+     *    apagada: encender dos veces no corre la fecha. El motivo se guarda si viene (texto no vacío,
+     *    recortado); si no viene, se conserva el que había.
+     *  - Apagar: las tres columnas vuelven a `false / null / null`, venga o no un motivo.
+     *
+     * No toca ventas, cuotas ni comisiones: la marca solo cambia en qué balde se cuenta la deuda
+     * pendiente (`en_espera` en vez de `por_cobrar`).
+     *
+     * @param Client      $client
+     * @param bool        $encendido Si la marca queda encendida (true) o apagada (false).
+     * @param string|null $motivo    Nota libre (hasta 255); null o vacío = no cambiar el motivo.
+     *
+     * @return Client El mismo cliente, ya guardado.
+     */
+    public function cambiar_cobro_dudoso(Client $client, bool $encendido, ?string $motivo = null): Client
+    {
+        if (! $encendido) {
+            $client->cobro_dudoso = false;
+            $client->cobro_dudoso_desde = null;
+            $client->cobro_dudoso_motivo = null;
+            $client->save();
+
+            return $client;
+        }
+
+        $estaba_encendido = (bool) $client->cobro_dudoso;
+
+        $client->cobro_dudoso = true;
+
+        if (! $estaba_encendido || $client->cobro_dudoso_desde === null) {
+            $client->cobro_dudoso_desde = AppTime::now()->toDateString();
+        }
+
+        $motivo_limpio = $this->texto_o_null($motivo);
+        if ($motivo_limpio !== null) {
+            $client->cobro_dudoso_motivo = $motivo_limpio;
+        }
+
+        $client->save();
+
+        return $client;
     }
 
     /**
@@ -775,9 +852,14 @@ class VentaService
      * que hay que pagarle a los vendedores (solo las ventas CON vendedor). Lo usa la tabla del
      * módulo (por cliente) y sus cifras de arriba.
      *
+     * 🔴 Cobro dudoso (misión cobro-dudoso-y-pagos-ventas, 30/10/2026): `pendiente` sigue siendo la
+     * deuda pendiente total y se suman `en_espera` (la de clientes de dudoso cobro, en stand-by) y
+     * `por_cobrar` (la que de verdad hay que cobrar); `pendiente = en_espera + por_cobrar`. La
+     * comisión no mira la marca.
+     *
      * @param iterable<Venta> $ventas Con `cuotas` y `comision_pagos` cargadas.
      *
-     * @return array<string, array{total: float, cobrado: float, pendiente: float, comision_total: float, comision_liberada: float, comision_pagada: float, comision_a_pagar: float, comision_por_liberar: float}>
+     * @return array<string, array{total: float, cobrado: float, pendiente: float, en_espera: float, por_cobrar: float, comision_total: float, comision_liberada: float, comision_pagada: float, comision_a_pagar: float, comision_por_liberar: float}>
      */
     public function resumen_por_moneda($ventas): array
     {
@@ -792,6 +874,8 @@ class VentaService
                     'total'                => 0.0,
                     'cobrado'              => 0.0,
                     'pendiente'            => 0.0,
+                    'en_espera'            => 0.0,
+                    'por_cobrar'           => 0.0,
                     'comision_total'       => 0.0,
                     'comision_liberada'    => 0.0,
                     'comision_pagada'      => 0.0,
@@ -803,6 +887,8 @@ class VentaService
             $resumen[$moneda]['total'] = round($resumen[$moneda]['total'] + $json['resumen']['total'], 2);
             $resumen[$moneda]['cobrado'] = round($resumen[$moneda]['cobrado'] + $json['resumen']['cobrado'], 2);
             $resumen[$moneda]['pendiente'] = round($resumen[$moneda]['pendiente'] + $json['resumen']['pendiente'], 2);
+            $resumen[$moneda]['en_espera'] = round($resumen[$moneda]['en_espera'] + $json['resumen']['en_espera'], 2);
+            $resumen[$moneda]['por_cobrar'] = round($resumen[$moneda]['por_cobrar'] + $json['resumen']['por_cobrar'], 2);
 
             /* La comisión cuenta solo si la venta tiene vendedor: una venta sin vendedor puede tener
                porcentaje (y comision_monto), pero no hay a quién pagarle, y sumarla inflaría "lo que
@@ -849,6 +935,22 @@ class VentaService
         $id = Lead::where('promoted_client_id', $client->id)->orderBy('id')->value('id');
 
         return $id !== null ? (int) $id : null;
+    }
+
+    /**
+     * ¿El cliente de la venta está marcado como de dudoso cobro? Usa la relación `client` si ya está
+     * cargada (la tabla de Cobranzas la trae de una) y la consulta si no. Una venta sin cliente
+     * (no debería pasar) cuenta como NO dudosa: ante la duda, la deuda sigue siendo «por cobrar».
+     *
+     * @param Venta $venta
+     *
+     * @return bool
+     */
+    protected function cobro_dudoso_de(Venta $venta): bool
+    {
+        $client = $venta->client;
+
+        return $client !== null && (bool) $client->cobro_dudoso;
     }
 
     /**

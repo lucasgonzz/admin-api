@@ -139,6 +139,37 @@ class ClientVentaController extends Controller
     }
 
     /**
+     * Enciende o apaga la marca de «cliente de dudoso cobro» (stand-by): su deuda de ventas deja de
+     * contar como plata a cobrar sin darse por perdida. Encender fija `cobro_dudoso_desde` en hoy (si
+     * ya estaba encendido conserva la fecha) y guarda el motivo si viene; apagar deja las tres
+     * columnas en `false / null / null`. Devuelve la lista entera del cliente, ya con la marca.
+     *
+     * La lógica vive en `VentaService::cambiar_cobro_dudoso()`, la misma que usa Claude.
+     *
+     * @param  Request      $request  {cobro_dudoso: boolean (requerido), motivo?: string|null (hasta 255)}
+     * @param  int|string   $clientId
+     * @param  VentaService $service
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function cobro_dudoso_json(Request $request, $clientId, VentaService $service)
+    {
+        $client = Client::findOrFail($clientId);
+
+        $validated = $request->validate([
+            'cobro_dudoso' => ['required', 'boolean'],
+            'motivo'       => ['nullable', 'string', 'max:255'],
+        ]);
+
+        $service->cambiar_cobro_dudoso(
+            $client,
+            (bool) $validated['cobro_dudoso'],
+            $validated['motivo'] ?? null
+        );
+
+        return response()->json($service->lista_del_cliente($client->fresh()));
+    }
+
+    /**
      * La venta de la ruta, verificando que sea del cliente de la ruta: una venta de otro cliente es
      * 404, igual que una que no existe.
      *

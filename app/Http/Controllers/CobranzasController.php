@@ -198,6 +198,11 @@ class CobranzasController extends Controller
                 'client_id'          => (int) $client_id,
                 'nombre'             => $client ? $client->resolve_display_name() : null,
                 'is_active'          => $client ? (bool) $client->is_active : null,
+                /* Cobro dudoso (misión cobro-dudoso-y-pagos-ventas, 30/10/2026): la marca del cliente,
+                   desde cuándo (Y-m-d) y por qué. Son claves nuevas; las que ya había no cambian. */
+                'cobro_dudoso'        => $client ? (bool) $client->cobro_dudoso : false,
+                'cobro_dudoso_desde'  => $client && $client->cobro_dudoso_desde ? Carbon::parse($client->cobro_dudoso_desde)->toDateString() : null,
+                'cobro_dudoso_motivo' => $client && $client->cobro_dudoso_motivo !== null ? (string) $client->cobro_dudoso_motivo : null,
                 'ventas'             => $del_cliente->map(function (Venta $venta) use ($service) {
                     return $service->venta_para_json($venta);
                 })->values()->all(),
