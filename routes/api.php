@@ -590,6 +590,14 @@ Route::middleware('claude.task.key')
            activo (con la clave tiene que entrar, sin ella tiene que dar 401) y se DESHACE sola si la prueba con clave falla. */
         Route::post('clients/{id}/admin-sync/puente', 'Api\ClaudeClientAdminSyncController@puente_de_admin_sync_json');
         Route::post('clients/{id}/admin-sync/exigir-clave', 'Api\ClaudeClientAdminSyncController@exigir_clave_json');
+        /* 🔴 Acceso de soporte firmado al sistema de UN cliente (misión `acceso-soporte-firmado`, 30/10/2026). Vive en
+           ClaudeClientAccesoSoporteController (ClientAccesoSoporteService). Le pide al empresa-api del cliente, firmando con
+           `clients.api_key` en X-Admin-Api-Key, un token de UN SOLO USO de pocos minutos, y devuelve la URL de entrada del SPA del
+           MISMO frente (`<spa>/acceso-soporte#t=<token>`: el token va en el fragmento, que no viaja al servidor). Es lo que deja a un
+           agente entrar al sistema de un cliente sin que Lucas inicie sesión ni se escriba una contraseña.
+           `dry_run` es true por defecto y NO le pega al cliente (solo dice a qué frente se le pediría); con dry_run=false exige
+           confirm_client_name. NUNCA lleva la clave del cliente ni el token en un log, un mensaje de error ni una respuesta de error. */
+        Route::post('clients/{id}/acceso-soporte', 'Api\ClaudeClientAccesoSoporteController@acceso_soporte_json');
         Route::get('versions', 'Api\ClaudeClientOpsController@versions_json');
         Route::post('versions', 'Api\ClaudeClientOpsController@versions_store_json');
         Route::post('versions/{id}/status', 'Api\ClaudeClientOpsController@versions_status_json');
