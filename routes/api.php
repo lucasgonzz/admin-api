@@ -548,6 +548,23 @@ Route::middleware('claude.task.key')
             ->whereNumber('id');
         Route::post('clients/{id}/ventas', 'Api\ClaudeVentasController@store_json')
             ->whereNumber('id');
+        /* Pagos y ajustes de las ventas (misión cobro-dudoso-y-pagos-ventas, 30/10/2026): lo que hasta
+           ahora solo hacía el panel. Los cuatro viven en ClaudeCobranzasVentasController, con los frenos
+           del bloque (dry_run por defecto true y confirm_client_name para escribir), y reusan los
+           servicios del admin (LicenciaCuotaService, ComisionService, VentaService): ninguna cuenta de
+           plata está escrita acá.
+             - cuotas/{cuotaId}/pago:     registra el pago (entero o parcial) de una cuota del cliente.
+             - cuotas/{cuotaId}/eliminar: borra una cuota SIN cobros; baja el total y la comisión de su venta.
+             - ventas/{ventaId}/comision/pagos: registra un pago al vendedor a cuenta de su comisión.
+             - clients/{id}/cobro-dudoso: enciende/apaga la marca de dudoso cobro del cliente. */
+        Route::post('clients/{id}/cuotas/{cuotaId}/pago', 'Api\ClaudeCobranzasVentasController@pago_de_cuota_json')
+            ->whereNumber('id')->whereNumber('cuotaId');
+        Route::post('clients/{id}/cuotas/{cuotaId}/eliminar', 'Api\ClaudeCobranzasVentasController@eliminar_cuota_json')
+            ->whereNumber('id')->whereNumber('cuotaId');
+        Route::post('ventas/{ventaId}/comision/pagos', 'Api\ClaudeCobranzasVentasController@pago_de_comision_json')
+            ->whereNumber('ventaId');
+        Route::post('clients/{id}/cobro-dudoso', 'Api\ClaudeCobranzasVentasController@cobro_dudoso_json')
+            ->whereNumber('id');
         /* 🔴 El acceso del motor de `/categorizar` al catálogo de UN cliente SIN que su clave pase por
            la máquina de Lucas (misión `implementacion-dos-sistemas`, 6/10/2026). Los dos viven en
            ClaudeClientCatalogoController y no llevan nunca el valor de `clients.api_key` en una
@@ -1040,6 +1057,10 @@ Route::prefix('admin')->group(function () {
             ->where('ventaId', '[0-9]+');
         Route::post('client/{clientId}/ventas/{ventaId}/cuotas', [ClientVentaController::class, 'store_cuota_json'])
             ->where('ventaId', '[0-9]+');
+        /* Cobro dudoso (misión cobro-dudoso-y-pagos-ventas, 30/10/2026): marca del CLIENTE que manda
+           su deuda de ventas a «En stand-by» (ni a cobrar ni perdida). Afecta solo a ventas y cuotas
+           de licencia; no toca las mensualidades ni la comisión del vendedor. */
+        Route::put('client/{clientId}/cobro-dudoso', [ClientVentaController::class, 'cobro_dudoso_json']);
         // Comisiones: la tabla de Lucas, "Mis comisiones" del vendedor y los pagos al vendedor.
         Route::get('comisiones', [ComisionController::class, 'index_json']);
         Route::get('comisiones/mias', [ComisionController::class, 'mias_json']);

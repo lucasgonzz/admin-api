@@ -3116,7 +3116,7 @@ return [
                     'limite'      => 50,
                 ],
             ],
-            'nota' => 'Columnas crudas. La comisión liberada (según lo que pagó el cliente), lo pagado y lo que falta pagarle al vendedor, ya calculados, están en GET claude/clients/{id}/ventas. Para dar de alta una venta: POST claude/clients/{id}/ventas (dry_run por defecto).',
+            'nota' => 'Columnas crudas. La comisión liberada (según lo que pagó el cliente), lo pagado y lo que falta pagarle al vendedor, ya calculados, están en GET claude/clients/{id}/ventas. Para dar de alta una venta: POST claude/clients/{id}/ventas (dry_run por defecto). Para pagarle al vendedor: POST claude/ventas/{ventaId}/comision/pagos.',
         ],
 
         /* ---------------------------------------------------------------
@@ -3197,7 +3197,7 @@ return [
                     'columnas'    => ['id', 'productos', 'fecha', 'monto_total', 'moneda', 'origen', 'vendedor_admin_id'],
                 ],
             ],
-            'nota' => 'Una cuota `pagada` con monto_pagado null (las importadas de la planilla) se considera cobrada por su monto entero. Lo cobrado y lo pendiente ya calculados, por venta, están en GET claude/clients/{id}/ventas.',
+            'nota' => 'Una cuota `pagada` con monto_pagado null (las importadas de la planilla) se considera cobrada por su monto entero. Lo cobrado y lo pendiente ya calculados, por venta, están en GET claude/clients/{id}/ventas. Para registrar un pago o eliminar una cuota: POST claude/clients/{id}/cuotas/{cuotaId}/pago y .../eliminar (dry_run por defecto).',
         ],
     ],
 
