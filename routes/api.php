@@ -555,6 +555,7 @@ Route::middleware('claude.task.key')
            plata está escrita acá.
              - cuotas/{cuotaId}/pago:     registra el pago (entero o parcial) de una cuota del cliente.
              - cuotas/{cuotaId}/eliminar: borra una cuota SIN cobros; baja el total y la comisión de su venta.
+             - ventas/{ventaId}/cuotas:   agrega una cuota a una venta del cliente; sube el total y la comisión.
              - ventas/{ventaId}/comision/pagos: registra un pago al vendedor a cuenta de su comisión.
              - clients/{id}/cobro-dudoso: enciende/apaga la marca de dudoso cobro del cliente. */
         Route::post('clients/{id}/cuotas/{cuotaId}/pago', 'Api\ClaudeCobranzasVentasController@pago_de_cuota_json')

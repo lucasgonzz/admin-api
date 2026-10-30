@@ -25,6 +25,7 @@ use Illuminate\Validation\ValidationException;
  *  - `POST claude/clients/{id}/cuotas/{cuotaId}/eliminar` — borra una cuota; el total de la venta y
  *    su comisión bajan en lo que valía. Se RECHAZA (422) una cuota con plata cobrada: borrar un
  *    cobro real no es un «ajuste».
+ *  - `POST claude/clients/{id}/ventas/{ventaId}/cuotas` — agrega una cuota a una venta; el total y la comisión suben.
  *  - `POST claude/ventas/{ventaId}/comision/pagos` — registra un pago al vendedor a cuenta de su
  *    comisión. Sin `monto`, paga TODO LO QUE ESTÁ A PAGAR hoy (`comision_de().a_pagar`). El cliente
  *    se saca de la venta.
@@ -62,6 +63,7 @@ class ClaudeCobranzasVentasController extends Controller
             'required' => 'El parámetro :attribute es obligatorio.',
             'date'     => 'El parámetro :attribute tiene que ser una fecha válida.',
             'numeric'  => 'El parámetro :attribute tiene que ser un número.',
+            'regex'    => 'El parámetro :attribute tiene que venir como AAAA-MM.',
             'boolean'  => 'El parámetro :attribute tiene que ser booleano (1, 0, true o false).',
             'string'   => 'El parámetro :attribute tiene que ser texto.',
             'min'      => 'El parámetro :attribute está por debajo del mínimo permitido.',
