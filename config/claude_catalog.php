@@ -367,6 +367,7 @@ return [
                 'Edición parcial: lo que no viene en el body no se toca. La tarea se identifica solo por el {id} (admin_id/admin_name no se usan acá ni la cambian de dueño).',
                 '⚠️ «subtasks» presente REEMPLAZA el conjunto: los subpasos que no vengan se BORRAN (con id se actualiza, sin id se crea; un id de otra tarea es 422). subtasks: null = no tocarlos. Para agregar UNO, usá POST claude/agenda/{id}/subtasks.',
                 'Misma validación que el alta: un estado final incoherente (hora sin fecha, repetición sin fecha, fin antes del inicio) es 422 y no escribe nada.',
+                'Mover una repetida (date nueva) SIN mandar la clave repeat_until corre también su fin los mismos días que la base: una diaria del 01/11 al 07/11 corrida al 02/11 queda del 02/11 al 08/11, con sus 7 ocurrencias. Si el body trae repeat_until (aunque sea null), gana lo que vino.',
                 'En una repetida que se mueve o cambia de repetición, lo hecho acompaña a la serie: con el mismo tipo, la ocurrencia k hecha pasa a ser la k de la serie nueva (correr la base un día corre las hechas un día); si cambia el tipo, quedan solo las hechas que siguen siendo ocurrencias reales y el resto se borra.',
             ],
             'parametros'   => [
@@ -380,7 +381,7 @@ return [
                 ['nombre' => 'color', 'obligatorio' => false, 'validacion' => 'in:salmon,orange,yellow,green,sky,emerald,red,blue,white', 'que_es' => 'Color nuevo.'],
                 ['nombre' => 'icon', 'obligatorio' => false, 'validacion' => 'string|max:60|regex:/^[a-z0-9-]+$/', 'que_es' => 'Ícono nuevo (Bootstrap Icon sin «bi-»).'],
                 ['nombre' => 'repeat', 'obligatorio' => false, 'validacion' => 'in:none,daily,weekly,monthly', 'que_es' => 'Repetición nueva.'],
-                ['nombre' => 'repeat_until', 'obligatorio' => false, 'validacion' => 'nullable|date_format:Y-m-d', 'que_es' => 'Fin nuevo de la repetición.'],
+                ['nombre' => 'repeat_until', 'obligatorio' => false, 'validacion' => 'nullable|date_format:Y-m-d', 'que_es' => 'Fin nuevo de la repetición. Si no viene y se mueve la serie, el fin se corre solo los mismos días que la base.'],
                 ['nombre' => 'subtasks[]', 'obligatorio' => false, 'validacion' => 'nullable|array|max:100; cada ítem un string o {id?, title, done?}', 'que_es' => 'REEMPLAZA el conjunto de subpasos.'],
                 ['nombre' => 'sort_order', 'obligatorio' => false, 'validacion' => 'integer', 'que_es' => 'Orden en la bandeja.'],
             ],

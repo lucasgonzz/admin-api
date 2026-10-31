@@ -286,6 +286,70 @@ class AgendaRepetidasTest extends BaseDeAgenda
     }
 
     /**
+     * 🔴 Mover una serie corre también su FIN. Diaria del 01/11 al 07/11 con el 07/11 hecho, corrida
+     * +1 día: sigue teniendo 7 ocurrencias (02/11 al 08/11), el fin queda en el 08/11 y lo hecho pasa
+     * al 08/11. Antes quedaba con 6 y la marca del 07/11 se perdía. Hacia atrás corre igual.
+     *
+     * @return void
+     */
+    public function test_mover_la_serie_corre_tambien_su_fin(): void
+    {
+        $admin = $this->crear_admin();
+        $serie = $this->crear_por_panel($admin, ['title' => 'Semana de cierre', 'date' => '2026-11-01', 'repeat' => 'daily', 'repeat_until' => '2026-11-07']);
+        $id    = $serie['id'];
+
+        $this->como($admin)->postJson('/api/admin/agenda/' . $id . '/complete', ['date' => '2026-11-07'])->assertStatus(200);
+
+        $movida = $this->como($admin)->putJson('/api/admin/agenda/' . $id, ['date' => '2026-11-02'])->assertStatus(200)->json('model');
+        $this->assertSame('2026-11-02', $movida['date']);
+        $this->assertSame('2026-11-08', $movida['repeat_until']);
+        $this->assertSame('2026-11-08', (string) AgendaTask::find($id)->repeat_until);
+
+        $listado = $this->listar($admin, '2026-10-25', '2026-11-15');
+        $this->assertSame(
+            ['2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05', '2026-11-06', '2026-11-07', '2026-11-08'],
+            $this->fechas_de($listado, $id)
+        );
+        $this->assertSame(['2026-11-08'], $this->fechas_hechas($listado, $id));
+        $this->assertSame(['2026-11-08'], $this->filas_hechas($id), 'La marca del último día se perdió al mover la serie.');
+
+        /* Hacia atrás: −3 días corre base, fin y lo hecho −3 días. */
+        $this->como($admin)->putJson('/api/admin/agenda/' . $id, ['date' => '2026-10-30'])->assertStatus(200);
+        $this->assertSame('2026-11-05', (string) AgendaTask::find($id)->repeat_until);
+        $this->assertCount(7, $this->fechas_de($this->listar($admin, '2026-10-25', '2026-11-15'), $id));
+        $this->assertSame(['2026-11-05'], $this->filas_hechas($id));
+    }
+
+    /**
+     * Control positivo: si el mismo PUT trae `repeat_until`, gana lo que vino (también null = sin
+     * fin), y el fin NO se corre solo.
+     *
+     * @return void
+     */
+    public function test_un_repeat_until_explicito_al_mover_la_serie_se_respeta(): void
+    {
+        $admin = $this->crear_admin();
+
+        $serie = $this->crear_por_panel($admin, ['title' => 'Con fin pedido', 'date' => '2026-11-01', 'repeat' => 'daily', 'repeat_until' => '2026-11-07']);
+        $this->como($admin)->postJson('/api/admin/agenda/' . $serie['id'] . '/complete', ['date' => '2026-11-07'])->assertStatus(200);
+
+        $this->como($admin)->putJson('/api/admin/agenda/' . $serie['id'], ['date' => '2026-11-02', 'repeat_until' => '2026-11-05'])
+            ->assertStatus(200)->assertJsonPath('model.repeat_until', '2026-11-05');
+        $this->assertSame('2026-11-05', (string) AgendaTask::find($serie['id'])->repeat_until);
+        $this->assertSame(
+            ['2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05'],
+            $this->fechas_de($this->listar($admin, '2026-10-25', '2026-11-15'), $serie['id'])
+        );
+        /* La hecha del 07/11 (k = 6) caería el 08/11, fuera del fin pedido: se borra. */
+        $this->assertSame([], $this->filas_hechas($serie['id']));
+
+        $sin_fin = $this->crear_por_panel($admin, ['title' => 'Sin fin pedido', 'date' => '2026-11-01', 'repeat' => 'daily', 'repeat_until' => '2026-11-07']);
+        $this->como($admin)->putJson('/api/admin/agenda/' . $sin_fin['id'], ['date' => '2026-11-02', 'repeat_until' => null])
+            ->assertStatus(200)->assertJsonPath('model.repeat_until', null);
+        $this->assertNull(AgendaTask::find($sin_fin['id'])->repeat_until);
+    }
+
+    /**
      * Mismo tipo, mensual: el remapeo es por índice y respeta el sin-desborde. Base 15 → 31: la
      * del 15/11 pasa al 30/11 y la del 15/2 pasa al 28/2.
      *

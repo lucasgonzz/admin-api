@@ -304,6 +304,11 @@ class AgendaService
      *   hechas se reacomodan a la serie nueva ({@see reacomodar_hechas()}): sin esto, mover la
      *   serie dejaba filas huérfanas que no se veían y que reaparecían "hechas" solas el día que
      *   otro cambio volvía a hacer caer la serie en esa fecha (revisión independiente, 31/10/2026).
+     * - 🔴 Mover una serie corre también su FIN ({@see correr_fin_de_la_serie()}): si era y sigue
+     *   siendo repetida, cambia `date` y el body NO trae la clave `repeat_until`, el fin se corre los
+     *   mismos días que la base. Si no, una diaria del 01/11 al 07/11 corrida al 02/11 quedaba con 6
+     *   ocurrencias y perdía la marca del 07/11. Si el body trae `repeat_until` (aunque sea null),
+     *   gana lo que vino. El reacomodo de lo hecho corre con el fin ya corrido.
      * - Si pasa a la bandeja (desde una fecha) y no vino `sort_order`, va al final de la bandeja.
      *
      * @param AgendaTask $tarea La tarea a editar.
@@ -316,6 +321,7 @@ class AgendaService
     public function actualizar(AgendaTask $tarea, array $input): AgendaTask
     {
         $datos  = $this->validator->validar_campos($input, false);
+        $datos  = $this->correr_fin_de_la_serie($tarea, $datos);
         $estado = $this->validator->resolver_estado($this->estado_de($tarea), $datos);
 
         DB::transaction(function () use ($tarea, $datos, $estado) {
@@ -873,6 +879,47 @@ class AgendaService
         }
 
         return 0;
+    }
+
+    /**
+     * Si la edición mueve una serie, corre su fin (`repeat_until`) los mismos días que la base.
+     *
+     * Aplica solo cuando se cumplen TODAS: la tarea ya se repetía, sigue repitiéndose después del
+     * cambio (el `repeat` que vino o el que tenía), vino una `date` nueva distinta de la actual, el
+     * body NO trae la clave `repeat_until` y la serie tenía fin. Un `repeat_until` que vino en el body,
+     * aunque sea null, gana siempre: es lo que pidió quien llama. Se resuelve ANTES de la validación
+     * entre campos, así que una serie corrida más allá de su fin viejo ya no es 422 (su fin se corrió
+     * con ella), y el reacomodo de lo hecho ve la serie con el fin nuevo.
+     *
+     * @param AgendaTask $tarea La tarea, todavía con los datos de antes.
+     * @param array      $datos Campos presentes del request, ya validados campo por campo.
+     *
+     * @return array Los mismos campos, con `repeat_until` agregado si correspondía correrlo.
+     */
+    private function correr_fin_de_la_serie(AgendaTask $tarea, array $datos): array
+    {
+        if (! $tarea->is_recurring() || $tarea->date === null || $tarea->repeat_until === null) {
+            return $datos;
+        }
+
+        if (! array_key_exists('date', $datos) || $datos['date'] === null || array_key_exists('repeat_until', $datos)) {
+            return $datos;
+        }
+
+        $repeat_final = array_key_exists('repeat', $datos) ? (string) $datos['repeat'] : (string) $tarea->repeat;
+        if ($repeat_final === 'none') {
+            return $datos;
+        }
+
+        // Diferencia con signo: hacia adelante suma, hacia atrás resta.
+        $delta = (int) $this->dia((string) $tarea->date)->diffInDays($this->dia((string) $datos['date']), false);
+        if ($delta === 0) {
+            return $datos;
+        }
+
+        $datos['repeat_until'] = $this->dia((string) $tarea->repeat_until)->addDays($delta)->toDateString();
+
+        return $datos;
     }
 
     /**

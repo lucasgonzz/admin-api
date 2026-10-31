@@ -729,14 +729,20 @@ class AgendaDelPanelTest extends BaseDeAgenda
         $this->como($admin)->putJson('/api/admin/agenda/' . $modelo['id'], ['start_time' => '10:00', 'date' => '2026-11-04'])->assertStatus(200);
         $this->assertSame('10:00:00', (string) AgendaTask::find($modelo['id'])->start_time);
 
-        /* Mover la fecha de una serie más allá de su fin es 422 (la serie quedaría vacía). */
+        /* Un fin EXPLÍCITO anterior a la fecha nueva de una serie es 422 (la serie quedaría vacía).
+           Desde el 31/10/2026 el fin se corre solo cuando se mueve la serie sin mandar
+           `repeat_until` (ver AgendaRepetidasTest::test_mover_la_serie_corre_tambien_su_fin), así
+           que el 422 se arma mandándolo en el mismo PUT. */
         $serie = $this->crear_por_panel($admin, ['title' => 'Serie', 'date' => '2026-11-02', 'repeat' => 'daily', 'repeat_until' => '2026-11-10']);
-        $this->como($admin)->putJson('/api/admin/agenda/' . $serie['id'], ['date' => '2026-11-11'])
+        $this->como($admin)->putJson('/api/admin/agenda/' . $serie['id'], ['date' => '2026-11-11', 'repeat_until' => '2026-11-10'])
             ->assertStatus(422)->assertJsonValidationErrors(['repeat_until']);
         $this->assertSame('2026-11-02', (string) AgendaTask::find($serie['id'])->date);
+        $this->assertSame('2026-11-10', (string) AgendaTask::find($serie['id'])->repeat_until);
 
-        $this->como($admin)->putJson('/api/admin/agenda/' . $serie['id'], ['date' => '2026-11-10'])->assertStatus(200);
-        $this->assertSame('2026-11-10', (string) AgendaTask::find($serie['id'])->date);
+        /* Control: sin mandar el fin, la serie se mueve y su fin se corre con ella (+9 días). */
+        $this->como($admin)->putJson('/api/admin/agenda/' . $serie['id'], ['date' => '2026-11-11'])->assertStatus(200);
+        $this->assertSame('2026-11-11', (string) AgendaTask::find($serie['id'])->date);
+        $this->assertSame('2026-11-19', (string) AgendaTask::find($serie['id'])->repeat_until);
     }
 
     /**
