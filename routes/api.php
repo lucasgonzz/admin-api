@@ -1384,6 +1384,30 @@ Route::prefix('admin')->group(function () {
         // sin responder), una consulta por tarjeta.
         Route::get('inicio/tarjetas', [\App\Http\Controllers\Api\InicioController::class, 'tarjetas']);
 
+        /* Agenda personal tipo Structured (misión agenda-admin, 31/10/2026): la vista de abajo de
+           las tarjetas del Inicio y la pantalla /agenda. Cada admin ve y opera SOLO sus tareas: una
+           de otro admin es 404. Toda la lógica está en App\Services\Agenda\AgendaService, el mismo
+           que usa el bloque `claude/agenda…`. Todos los {id} con whereNumber, y los segmentos fijos
+           (`complete`, `uncomplete`, `duplicate`, `subtasks`) van DESPUÉS del {id}, así que ninguno
+           puede quedar tapado por otra ruta. */
+        Route::get('agenda', [\App\Http\Controllers\Api\AgendaController::class, 'index']);
+        Route::post('agenda', [\App\Http\Controllers\Api\AgendaController::class, 'store']);
+        Route::get('agenda/{id}', [\App\Http\Controllers\Api\AgendaController::class, 'show'])
+            ->whereNumber('id');
+        Route::put('agenda/{id}', [\App\Http\Controllers\Api\AgendaController::class, 'update'])
+            ->whereNumber('id');
+        Route::delete('agenda/{id}', [\App\Http\Controllers\Api\AgendaController::class, 'destroy'])
+            ->whereNumber('id');
+        Route::post('agenda/{id}/complete', [\App\Http\Controllers\Api\AgendaController::class, 'complete'])
+            ->whereNumber('id');
+        Route::post('agenda/{id}/uncomplete', [\App\Http\Controllers\Api\AgendaController::class, 'uncomplete'])
+            ->whereNumber('id');
+        Route::post('agenda/{id}/duplicate', [\App\Http\Controllers\Api\AgendaController::class, 'duplicate'])
+            ->whereNumber('id');
+        Route::put('agenda/{id}/subtasks/{subtask_id}', [\App\Http\Controllers\Api\AgendaController::class, 'update_subtask'])
+            ->whereNumber('id')
+            ->whereNumber('subtask_id');
+
         Route::get('support-ticket', [\App\Http\Controllers\Api\SupportTicketController::class, 'index']);
         Route::get('support-ticket/unread-badges', [\App\Http\Controllers\Api\SupportTicketController::class, 'unread_badges']);
         // Va antes de support-ticket/{id}: si no, {id} se come "whatsapp-contacts".
