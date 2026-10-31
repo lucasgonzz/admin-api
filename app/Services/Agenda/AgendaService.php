@@ -300,6 +300,10 @@ class AgendaService
      * - Si la tarea deja de repetirse, lo hecho en la fecha base pasa a `completed_at` y las
      *   ocurrencias hechas se borran; si empieza a repetirse estando hecha, lo hecho pasa a ser la
      *   ocurrencia de la fecha base. Así el estado "hecha" nunca queda en dos lugares a la vez.
+     * - 🔴 Si SIGUE repitiéndose pero cambia la fecha base o el tipo de repetición, las ocurrencias
+     *   hechas se reacomodan a la serie nueva ({@see reacomodar_hechas()}): sin esto, mover la
+     *   serie dejaba filas huérfanas que no se veían y que reaparecían "hechas" solas el día que
+     *   otro cambio volvía a hacer caer la serie en esa fecha (revisión independiente, 31/10/2026).
      * - Si pasa a la bandeja (desde una fecha) y no vino `sort_order`, va al final de la bandeja.
      *
      * @param AgendaTask $tarea La tarea a editar.
@@ -317,6 +321,10 @@ class AgendaService
         DB::transaction(function () use ($tarea, $datos, $estado) {
             $era_repetida = $tarea->is_recurring();
             $tenia_fecha  = $tarea->date !== null;
+
+            // La serie como era ANTES del cambio, para poder reacomodar sus ocurrencias hechas.
+            $base_vieja   = $tarea->date !== null ? (string) $tarea->date : null;
+            $repeat_viejo = (string) $tarea->repeat;
 
             $tarea->fill($this->columnas_de_estado($estado));
 
@@ -347,6 +355,11 @@ class AgendaService
                     ]);
                 }
                 $tarea->completed_at = null;
+            } elseif ($era_repetida && $es_repetida
+                && ($base_vieja !== (string) $tarea->date || $repeat_viejo !== (string) $tarea->repeat)
+            ) {
+                // Sigue siendo una serie, pero se movió o cambió de tipo: lo hecho acompaña a la serie.
+                $this->reacomodar_hechas($tarea, $base_vieja, $repeat_viejo);
             }
 
             $tarea->save();
@@ -703,11 +716,18 @@ class AgendaService
      * Marca o desmarca una tarea (o una ocurrencia). Lo comparten completar() y descompletar().
      *
      * - Repetida: `date` es obligatoria y tiene que ser una ocurrencia real (misma expansión que el
-     *   listado). Marcar crea la fila de la ocurrencia si no estaba; desmarcar borra la(s) fila(s).
-     *   Solo se toca ESA ocurrencia: las demás de la serie quedan como estaban.
-     * - No repetida: `date` es opcional; si vino y la tarea tiene fecha, tiene que ser esa (para no
-     *   marcar "otra" tarea por error). Marcar pone `completed_at` si estaba vacío; desmarcar lo
-     *   limpia.
+     *   listado). Marcar crea la fila de la ocurrencia si no estaba; desmarcar borra la(s) fila(s)
+     *   de ESA fecha. Las demás ocurrencias de la serie quedan como estaban.
+     * - No repetida: 🔴 el `date` del body SE IGNORA (cambio del 31/10/2026, revisión independiente).
+     *   Antes, una `date` distinta de la de la tarea era 422; pero el id ya identifica la tarea, y el
+     *   SPA puede mandar la fecha vieja después de mover una tarea sin refrescar: ese 422 dejaba al
+     *   operador sin poder tildarla. Marcar pone `completed_at` si estaba vacío; desmarcar lo limpia.
+     *
+     * 🔴 La escritura corre en una transacción que primero toma `lockForUpdate` sobre la fila de la
+     * tarea: dos `complete` simultáneos de la misma ocurrencia (doble clic, el panel y Claude a la
+     * vez) quedan en fila, y el segundo ve la fila que insertó el primero en vez de insertar otra.
+     * La migración no tiene índice único sobre (tarea, fecha) y ya corrió en bases locales, así que
+     * el freno es este lock y no la base.
      *
      * @param AgendaTask $tarea   La tarea.
      * @param array      $input   Body del request.
@@ -719,51 +739,72 @@ class AgendaService
      */
     private function marcar(AgendaTask $tarea, array $input, bool $hecha): array
     {
-        $fecha = $this->validator->validar_fecha_de_ocurrencia($input, $tarea->is_recurring());
-
         if ($tarea->is_recurring()) {
+            $fecha = $this->validator->validar_fecha_de_ocurrencia($input, true);
+
             if (! $this->es_ocurrencia($tarea, $fecha)) {
                 $this->validator->fallar(['date' => [
                     'La tarea «' . $tarea->title . '» no cae el ' . $fecha . ': esa fecha no es una de sus repeticiones.',
                 ]]);
             }
 
-            $existente = AgendaTaskCompletion::where('agenda_task_id', $tarea->id)
-                ->where('occurrence_date', $fecha)
-                ->orderBy('id')
-                ->first();
+            $existente = DB::transaction(function () use ($tarea, $fecha, $hecha) {
+                $this->bloquear($tarea);
 
-            if ($hecha && $existente === null) {
-                $existente = AgendaTaskCompletion::create([
-                    'agenda_task_id'  => $tarea->id,
-                    'occurrence_date' => $fecha,
-                    'completed_at'    => AppTime::now(self::ZONA),
-                ]);
-            } elseif (! $hecha && $existente !== null) {
-                AgendaTaskCompletion::where('agenda_task_id', $tarea->id)->where('occurrence_date', $fecha)->delete();
-                $existente = null;
-            }
+                $existente = AgendaTaskCompletion::where('agenda_task_id', $tarea->id)
+                    ->where('occurrence_date', $fecha)
+                    ->orderBy('id')
+                    ->first();
+
+                if ($hecha && $existente === null) {
+                    return AgendaTaskCompletion::create([
+                        'agenda_task_id'  => $tarea->id,
+                        'occurrence_date' => $fecha,
+                        'completed_at'    => AppTime::now(self::ZONA),
+                    ]);
+                }
+
+                if (! $hecha && $existente !== null) {
+                    AgendaTaskCompletion::where('agenda_task_id', $tarea->id)->where('occurrence_date', $fecha)->delete();
+
+                    return null;
+                }
+
+                return $existente;
+            });
 
             $tarea = $this->recargar($tarea);
 
             return $this->serializar_ocurrencia($tarea, $fecha, $hecha, $existente !== null ? $existente->completed_at : null);
         }
 
-        if ($fecha !== null && $tarea->date !== null && $fecha !== (string) $tarea->date) {
-            $this->validator->fallar(['date' => [
-                'La tarea «' . $tarea->title . '» es del ' . $tarea->date . ', no del ' . $fecha . '.',
-            ]]);
-        }
+        DB::transaction(function () use ($tarea, $hecha) {
+            // Se relee bajo el lock: el completed_at que manda es el de la base, no el del modelo en memoria.
+            $bloqueada = $this->bloquear($tarea);
 
-        if ($hecha && $tarea->completed_at === null) {
-            $tarea->completed_at = AppTime::now(self::ZONA);
-            $tarea->save();
-        } elseif (! $hecha && $tarea->completed_at !== null) {
-            $tarea->completed_at = null;
-            $tarea->save();
-        }
+            if ($hecha && $bloqueada->completed_at === null) {
+                $bloqueada->completed_at = AppTime::now(self::ZONA);
+                $bloqueada->save();
+            } elseif (! $hecha && $bloqueada->completed_at !== null) {
+                $bloqueada->completed_at = null;
+                $bloqueada->save();
+            }
+        });
 
         return $this->serializar($this->recargar($tarea));
+    }
+
+    /**
+     * Toma el lock de escritura (`SELECT … FOR UPDATE`) sobre la fila de la tarea y la devuelve
+     * releída. Solo tiene sentido adentro de una transacción: el lock dura hasta el commit.
+     *
+     * @param AgendaTask $tarea La tarea.
+     *
+     * @return AgendaTask La fila releída bajo el lock.
+     */
+    private function bloquear(AgendaTask $tarea): AgendaTask
+    {
+        return AgendaTask::where('id', $tarea->id)->lockForUpdate()->firstOrFail();
     }
 
     /**
@@ -832,6 +873,108 @@ class AgendaService
         }
 
         return 0;
+    }
+
+    /**
+     * Reacomoda las ocurrencias hechas de una serie que se movió o cambió de repetición.
+     *
+     * - **Mismo tipo de repetición** (solo cambió la fecha base): se remapea POR ÍNDICE. La
+     *   ocurrencia k de la serie vieja pasa a ser la ocurrencia k de la nueva, así que correr la base
+     *   un día corre todas las hechas un día, y en una mensual se respeta el sin-desborde (la k-ésima
+     *   de una base 31 cae el 30 o el 28, como en el listado).
+     * - **Cambió el tipo** (semanal → diaria, etc.): no hay una correspondencia razonable entre las
+     *   ocurrencias, así que se conservan solo las filas cuya fecha sigue siendo una ocurrencia REAL
+     *   de la serie nueva y se borra el resto.
+     *
+     * En los dos casos, una fila que no termina en una ocurrencia real de la serie nueva (o que ya
+     * no era una ocurrencia de la vieja) se borra: lo hecho nunca queda huérfano esperando que otro
+     * cambio la vuelva a hacer aparecer. Corre adentro de la transacción del update.
+     *
+     * @param AgendaTask  $tarea        La tarea, YA con los datos nuevos cargados (sin guardar).
+     * @param string|null $base_vieja   La fecha base anterior (Y-m-d).
+     * @param string      $repeat_viejo La repetición anterior.
+     *
+     * @return void
+     */
+    private function reacomodar_hechas(AgendaTask $tarea, ?string $base_vieja, string $repeat_viejo): void
+    {
+        $filas = AgendaTaskCompletion::where('agenda_task_id', $tarea->id)->orderBy('id')->get();
+
+        if ($filas->isEmpty()) {
+            return;
+        }
+
+        $mismo_tipo = $repeat_viejo === (string) $tarea->repeat;
+        $base_nueva = $this->dia((string) $tarea->date);
+        $vistas     = [];
+
+        foreach ($filas as $fila) {
+            $fecha_vieja = substr((string) $fila->occurrence_date, 0, 10);
+            $fecha_nueva = null;
+
+            if ($mismo_tipo) {
+                $k = $base_vieja === null ? null : $this->indice_de_ocurrencia($repeat_viejo, $this->dia($base_vieja), $fecha_vieja);
+                if ($k !== null) {
+                    $fecha_nueva = $this->fecha_de_ocurrencia((string) $tarea->repeat, $base_nueva, $k)->toDateString();
+                }
+            } else {
+                $fecha_nueva = $fecha_vieja;
+            }
+
+            /* Se conserva solo si cae en una ocurrencia real de la serie nueva (también corta en
+               repeat_until) y no repite una fecha ya conservada (filas duplicadas de un doble clic). */
+            if ($fecha_nueva === null || isset($vistas[$fecha_nueva]) || ! $this->es_ocurrencia($tarea, $fecha_nueva)) {
+                $fila->delete();
+                continue;
+            }
+
+            $vistas[$fecha_nueva] = true;
+
+            if ($fecha_nueva !== $fecha_vieja) {
+                $fila->occurrence_date = $fecha_nueva;
+                $fila->save();
+            }
+        }
+    }
+
+    /**
+     * El índice k de una fecha dentro de una serie (la base es k = 0), o null si la fecha no cae
+     * exactamente en el patrón (antes de la base, otro día de la semana, otro día del mes).
+     * Es la inversa de {@see fecha_de_ocurrencia()} y no mira `repeat_until`.
+     *
+     * @param string $repeat daily | weekly | monthly.
+     * @param Carbon $base   Fecha base (UTC, inicio del día).
+     * @param string $fecha  Fecha Y-m-d.
+     *
+     * @return int|null
+     */
+    private function indice_de_ocurrencia(string $repeat, Carbon $base, string $fecha): ?int
+    {
+        $dia = $this->dia($fecha);
+
+        if ($dia->lt($base)) {
+            return null;
+        }
+
+        switch ($repeat) {
+            case 'daily':
+                $k = (int) $base->diffInDays($dia);
+                break;
+            case 'weekly':
+                $dias = (int) $base->diffInDays($dia);
+                if ($dias % 7 !== 0) {
+                    return null;
+                }
+                $k = intdiv($dias, 7);
+                break;
+            case 'monthly':
+                $k = ($dia->year - $base->year) * 12 + ($dia->month - $base->month);
+                break;
+            default:
+                return null;
+        }
+
+        return $this->fecha_de_ocurrencia($repeat, $base, $k)->toDateString() === $dia->toDateString() ? $k : null;
     }
 
     /**

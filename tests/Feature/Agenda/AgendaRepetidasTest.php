@@ -232,6 +232,159 @@ class AgendaRepetidasTest extends BaseDeAgenda
     }
 
     /**
+     * Desmarcar una ocurrencia con DOS marcadas borra solo la pedida.
+     *
+     * @return void
+     */
+    public function test_desmarcar_una_ocurrencia_con_dos_marcadas_borra_solo_la_pedida(): void
+    {
+        $admin = $this->crear_admin();
+        $serie = $this->crear_por_panel($admin, ['title' => 'Caminar', 'date' => '2026-11-01', 'repeat' => 'daily']);
+        $id    = $serie['id'];
+
+        $this->como($admin)->postJson('/api/admin/agenda/' . $id . '/complete', ['date' => '2026-11-02'])->assertStatus(200);
+        $this->como($admin)->postJson('/api/admin/agenda/' . $id . '/complete', ['date' => '2026-11-04'])->assertStatus(200);
+        $this->assertSame(2, AgendaTaskCompletion::where('agenda_task_id', $id)->count());
+
+        $this->como($admin)->postJson('/api/admin/agenda/' . $id . '/uncomplete', ['date' => '2026-11-04'])
+            ->assertStatus(200)->assertJsonPath('model.completed', false);
+
+        $this->assertSame(
+            ['2026-11-02'],
+            AgendaTaskCompletion::where('agenda_task_id', $id)->pluck('occurrence_date')->map(function ($f) {
+                return substr((string) $f, 0, 10);
+            })->all()
+        );
+        $this->assertSame(['2026-11-02'], $this->fechas_hechas($this->listar($admin, '2026-11-01', '2026-11-05'), $id));
+    }
+
+    /**
+     * 🔴 El escenario medido por la revisión independiente (31/10/2026): semanal con base lunes
+     * 2026-11-02, marcado el 11-09. Correr la base al martes 11-03 tiene que correr lo hecho al
+     * 11-10 (misma ocurrencia, la segunda de la serie), sin dejar la fila del 11-09 huérfana; y
+     * pasar después a diaria NO puede hacer reaparecer el 11-09 como hecho sin que nadie lo marque.
+     *
+     * @return void
+     */
+    public function test_mover_la_serie_corre_lo_hecho_y_no_deja_huerfanas(): void
+    {
+        $admin = $this->crear_admin();
+        $serie = $this->crear_por_panel($admin, ['title' => 'Reunión semanal', 'date' => '2026-11-02', 'repeat' => 'weekly']);
+        $id    = $serie['id'];
+
+        $this->como($admin)->postJson('/api/admin/agenda/' . $id . '/complete', ['date' => '2026-11-09'])->assertStatus(200);
+
+        /* Base +1 día: lo hecho se corre +1 día. */
+        $this->como($admin)->putJson('/api/admin/agenda/' . $id, ['date' => '2026-11-03'])->assertStatus(200);
+        $this->assertSame(['2026-11-10'], $this->fechas_hechas($this->listar($admin, '2026-11-01', '2026-11-30'), $id));
+        $this->assertSame(['2026-11-10'], $this->filas_hechas($id), 'Quedó la fila vieja del 11-09.');
+
+        /* Cambiar a diaria: el 11-10 sigue siendo una ocurrencia real y queda; el 11-09 NO reaparece. */
+        $this->como($admin)->putJson('/api/admin/agenda/' . $id, ['repeat' => 'daily'])->assertStatus(200);
+        $this->assertSame(['2026-11-10'], $this->fechas_hechas($this->listar($admin, '2026-11-01', '2026-11-30'), $id));
+        $this->assertSame(['2026-11-10'], $this->filas_hechas($id));
+    }
+
+    /**
+     * Mismo tipo, mensual: el remapeo es por índice y respeta el sin-desborde. Base 15 → 31: la
+     * del 15/11 pasa al 30/11 y la del 15/2 pasa al 28/2.
+     *
+     * @return void
+     */
+    public function test_mover_una_mensual_remapea_por_indice_sin_desborde(): void
+    {
+        $admin = $this->crear_admin();
+        $serie = $this->crear_por_panel($admin, ['title' => 'Liquidar sueldos', 'date' => '2026-10-15', 'repeat' => 'monthly']);
+        $id    = $serie['id'];
+
+        $this->como($admin)->postJson('/api/admin/agenda/' . $id . '/complete', ['date' => '2026-11-15'])->assertStatus(200);
+        $this->como($admin)->postJson('/api/admin/agenda/' . $id . '/complete', ['date' => '2027-02-15'])->assertStatus(200);
+
+        $this->como($admin)->putJson('/api/admin/agenda/' . $id, ['date' => '2026-10-31'])->assertStatus(200);
+
+        $this->assertSame(['2026-11-30', '2027-02-28'], $this->filas_hechas($id));
+        $this->assertSame(['2027-02-28'], $this->fechas_hechas($this->listar($admin, '2027-02-01', '2027-02-28'), $id));
+        $this->assertSame(['2026-11-30'], $this->fechas_hechas($this->listar($admin, '2026-11-01', '2026-11-30'), $id));
+    }
+
+    /**
+     * Cambiar el TIPO de repetición conserva solo las hechas que siguen siendo ocurrencias reales
+     * de la serie nueva y borra el resto. Semanal desde el 2/11 → mensual: el 2/11 sigue (es la
+     * base), el 9/11 y el 16/11 no son del mes y se borran. Lo mismo al acortar la serie con un
+     * cambio de tipo y un fin: lo que queda fuera del fin se borra.
+     *
+     * @return void
+     */
+    public function test_cambiar_el_tipo_conserva_solo_las_ocurrencias_reales(): void
+    {
+        $admin = $this->crear_admin();
+        $serie = $this->crear_por_panel($admin, ['title' => 'Revisar stock', 'date' => '2026-11-02', 'repeat' => 'weekly']);
+        $id    = $serie['id'];
+
+        foreach (['2026-11-02', '2026-11-09', '2026-11-16'] as $fecha) {
+            $this->como($admin)->postJson('/api/admin/agenda/' . $id . '/complete', ['date' => $fecha])->assertStatus(200);
+        }
+
+        $this->como($admin)->putJson('/api/admin/agenda/' . $id, ['repeat' => 'monthly'])->assertStatus(200);
+        $this->assertSame(['2026-11-02'], $this->filas_hechas($id));
+
+        /* Control: si el nuevo tipo sí contiene las fechas (semanal → diaria), se conservan todas. */
+        $otra = $this->crear_por_panel($admin, ['title' => 'Otra', 'date' => '2026-11-02', 'repeat' => 'weekly']);
+        foreach (['2026-11-02', '2026-11-09'] as $fecha) {
+            $this->como($admin)->postJson('/api/admin/agenda/' . $otra['id'] . '/complete', ['date' => $fecha])->assertStatus(200);
+        }
+        $this->como($admin)->putJson('/api/admin/agenda/' . $otra['id'], ['repeat' => 'daily'])->assertStatus(200);
+        $this->assertSame(['2026-11-02', '2026-11-09'], $this->filas_hechas($otra['id']));
+
+        /* Y si el cambio de tipo viene con un fin, lo que queda fuera del fin se borra. */
+        $corta = $this->crear_por_panel($admin, ['title' => 'Corta', 'date' => '2026-11-02', 'repeat' => 'weekly']);
+        foreach (['2026-11-02', '2026-11-09'] as $fecha) {
+            $this->como($admin)->postJson('/api/admin/agenda/' . $corta['id'] . '/complete', ['date' => $fecha])->assertStatus(200);
+        }
+        $this->como($admin)->putJson('/api/admin/agenda/' . $corta['id'], ['repeat' => 'daily', 'repeat_until' => '2026-11-05'])->assertStatus(200);
+        $this->assertSame(['2026-11-02'], $this->filas_hechas($corta['id']), 'La del 11-09 quedó fuera del fin y no se borró.');
+    }
+
+    /**
+     * Las fechas de las ocurrencias HECHAS de una tarea en un listado.
+     *
+     * @param array $listado Respuesta de GET agenda.
+     * @param int   $id      Id de la tarea.
+     *
+     * @return array<int, string>
+     */
+    private function fechas_hechas(array $listado, int $id): array
+    {
+        $fechas = [];
+        foreach ((array) $listado['ocurrencias'] as $ocurrencia) {
+            if ((int) $ocurrencia['id'] === $id && $ocurrencia['completed']) {
+                $fechas[] = $ocurrencia['occurrence_date'];
+            }
+        }
+
+        return $fechas;
+    }
+
+    /**
+     * Las fechas de las filas de `agenda_task_completions` de una tarea, ordenadas.
+     *
+     * @param int $id Id de la tarea.
+     *
+     * @return array<int, string>
+     */
+    private function filas_hechas(int $id): array
+    {
+        return AgendaTaskCompletion::where('agenda_task_id', $id)
+            ->orderBy('occurrence_date')
+            ->pluck('occurrence_date')
+            ->map(function ($fecha) {
+                return substr((string) $fecha, 0, 10);
+            })
+            ->values()
+            ->all();
+    }
+
+    /**
      * Pasar de repetida a suelta conserva lo hecho en la fecha base (y limpia las ocurrencias);
      * pasar de suelta hecha a repetida deja hecha la ocurrencia de la base. "Hecha" nunca queda
      * en dos lugares.

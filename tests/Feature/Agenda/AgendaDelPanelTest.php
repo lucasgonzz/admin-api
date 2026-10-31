@@ -6,6 +6,7 @@ use App\Models\AgendaSubtask;
 use App\Models\AgendaTask;
 use App\Models\AgendaTaskCompletion;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\DB;
 
 /**
  * La Agenda del panel (`admin/agenda…` bajo `auth:sanctum`), contra el contrato del plan de la
@@ -403,11 +404,6 @@ class AgendaDelPanelTest extends BaseDeAgenda
         $this->como($admin)->postJson('/api/admin/agenda/' . $id . '/complete')->assertStatus(200)->assertJsonPath('model.completed', true);
         $this->assertSame(self::AHORA, AgendaTask::find($id)->completed_at->format('Y-m-d H:i:s'));
 
-        /* Una fecha que no es la de la tarea: 422 y no cambia nada. */
-        $this->como($admin)->postJson('/api/admin/agenda/' . $id . '/uncomplete', ['date' => '2026-11-03'])
-            ->assertStatus(422)->assertJsonValidationErrors(['date']);
-        $this->assertNotNull(AgendaTask::find($id)->completed_at);
-
         $no_hecha = $this->como($admin)->postJson('/api/admin/agenda/' . $id . '/uncomplete', ['date' => '2026-11-02'])->assertStatus(200)->json('model');
         $this->assertFalse($no_hecha['completed']);
         $this->assertNull($no_hecha['completed_at']);
@@ -416,10 +412,106 @@ class AgendaDelPanelTest extends BaseDeAgenda
         $this->como($admin)->postJson('/api/admin/agenda/' . $id . '/uncomplete')->assertStatus(200)->assertJsonPath('model.completed', false);
         $this->assertNull(AgendaTask::find($id)->completed_at);
 
+        /* 🔴 En una NO repetida el `date` del body se ignora (decisión del 31/10/2026): el id ya
+           identifica la tarea, y el SPA puede mandar la fecha vieja después de moverla sin
+           refrescar. Antes esto era 422 y el operador no podía tildarla. */
+        $con_fecha_vieja = $this->como($admin)->postJson('/api/admin/agenda/' . $id . '/complete', ['date' => '2026-11-03'])
+            ->assertStatus(200)->json('model');
+        $this->assertTrue($con_fecha_vieja['completed']);
+        $this->assertSame('2026-11-02', $con_fecha_vieja['occurrence_date'], 'La fecha del body se coló en la respuesta.');
+        $this->assertNotNull(AgendaTask::find($id)->completed_at);
+        $this->assertSame('2026-11-02', (string) AgendaTask::find($id)->date, 'La fecha del body movió la tarea.');
+
+        $this->como($admin)->postJson('/api/admin/agenda/' . $id . '/uncomplete', ['date' => '1999-99-99'])
+            ->assertStatus(200)->assertJsonPath('model.completed', false);
+        $this->assertNull(AgendaTask::find($id)->completed_at);
+
         /* incluir_completadas=false la saca del listado solo mientras está hecha. */
         $this->como($admin)->postJson('/api/admin/agenda/' . $id . '/complete')->assertStatus(200);
         $this->assertSame([], $this->fechas_de($this->listar($admin, '2026-11-01', '2026-11-07', ['incluir_completadas' => 'false']), $id));
         $this->assertSame(['2026-11-02'], $this->fechas_de($this->listar($admin, '2026-11-01', '2026-11-07', ['incluir_completadas' => 'true']), $id));
+    }
+
+    /**
+     * 🔴 `complete` toma `lockForUpdate` sobre la fila de la tarea antes de escribir, en una
+     * repetida y en una suelta. Es lo que serializa dos `complete` simultáneos de la misma
+     * ocurrencia para que no inserten dos filas (la tabla no tiene índice único y la migración ya
+     * corrió en bases locales). Dos requests concurrentes no se pueden armar adentro de un test de
+     * un solo proceso, así que se afirma el lock en el log de consultas; el resultado (una sola
+     * fila) se afirma igual.
+     *
+     * @return void
+     */
+    public function test_completar_toma_el_lock_de_la_tarea(): void
+    {
+        $admin  = $this->crear_admin();
+        $serie  = $this->crear_por_panel($admin, ['title' => 'Serie', 'date' => '2026-11-02', 'repeat' => 'daily']);
+        $suelta = $this->crear_por_panel($admin, ['title' => 'Suelta', 'date' => '2026-11-02']);
+
+        foreach ([[$serie['id'], ['date' => '2026-11-03']], [$suelta['id'], []]] as list($id, $body)) {
+            DB::flushQueryLog();
+            DB::enableQueryLog();
+
+            $this->como($admin)->postJson('/api/admin/agenda/' . $id . '/complete', $body)->assertStatus(200);
+
+            $bloqueos = array_filter(DB::getQueryLog(), function ($consulta) {
+                $sql = strtolower((string) $consulta['query']);
+
+                return strpos($sql, '`agenda_tasks`') !== false && strpos($sql, 'for update') !== false;
+            });
+
+            DB::disableQueryLog();
+
+            $this->assertNotEmpty($bloqueos, 'El complete de la tarea ' . $id . ' no tomó el lock de la fila de la tarea.');
+        }
+
+        $this->como($admin)->postJson('/api/admin/agenda/' . $serie['id'] . '/complete', ['date' => '2026-11-03'])->assertStatus(200);
+        $this->assertSame(1, AgendaTaskCompletion::where('agenda_task_id', $serie['id'])->count());
+    }
+
+    /**
+     * La bandeja también respeta `incluir_completadas=false` (control: con true aparece).
+     *
+     * @return void
+     */
+    public function test_la_bandeja_respeta_incluir_completadas(): void
+    {
+        $admin   = $this->crear_admin();
+        $hecha   = $this->crear_por_panel($admin, ['title' => 'Hecha en la bandeja']);
+        $abierta = $this->crear_por_panel($admin, ['title' => 'Abierta en la bandeja']);
+
+        $this->como($admin)->postJson('/api/admin/agenda/' . $hecha['id'] . '/complete')->assertStatus(200);
+        $this->assertNotNull(AgendaTask::find($hecha['id'])->completed_at);
+
+        $sin = $this->listar($admin, '2026-11-01', '2026-11-07', ['incluir_completadas' => 'false']);
+        $this->assertSame([$abierta['id']], array_column($sin['bandeja'], 'id'));
+
+        $con = $this->listar($admin, '2026-11-01', '2026-11-07', ['incluir_completadas' => '1']);
+        $this->assertSame([$hecha['id'], $abierta['id']], array_column($con['bandeja'], 'id'));
+        $this->assertTrue($con['bandeja'][0]['completed']);
+    }
+
+    /**
+     * Tope de 100 subpasos por tarea: 101 es 422 y no crea; 100 pasa.
+     *
+     * @return void
+     */
+    public function test_tope_de_cien_subpasos(): void
+    {
+        $admin = $this->crear_admin();
+
+        $ciento_uno = [];
+        for ($i = 1; $i <= 101; $i++) {
+            $ciento_uno[] = 'Paso ' . $i;
+        }
+
+        $this->como($admin)->postJson('/api/admin/agenda', ['title' => 'Demasiados', 'subtasks' => $ciento_uno])
+            ->assertStatus(422)->assertJsonValidationErrors(['subtasks']);
+        $this->assertSame(0, $this->cantidad_de_tareas($admin));
+
+        $modelo = $this->crear_por_panel($admin, ['title' => 'Justo cien', 'subtasks' => array_slice($ciento_uno, 0, 100)]);
+        $this->assertSame(100, $modelo['subtasks_total']);
+        $this->assertSame(100, AgendaSubtask::where('agenda_task_id', $modelo['id'])->count());
     }
 
     /* ------------------------------------------------------------------------------------------
@@ -460,6 +552,36 @@ class AgendaDelPanelTest extends BaseDeAgenda
         $this->assertNotNull(AgendaTask::find($modelo['id'])->completed_at, 'Duplicar desmarcó la original.');
         $this->assertSame(1, AgendaSubtask::where('agenda_task_id', $modelo['id'])->where('done', true)->count());
         $this->assertSame(0, AgendaSubtask::where('agenda_task_id', $copia['id'])->where('done', true)->count());
+    }
+
+    /**
+     * Duplicar una repetida copia la serie (misma repetición y fin) pero NO lo hecho: ninguna
+     * ocurrencia de la copia está hecha, y las de la original siguen igual.
+     *
+     * @return void
+     */
+    public function test_duplicar_una_repetida_copia_la_serie_sin_lo_hecho(): void
+    {
+        $admin = $this->crear_admin();
+        $serie = $this->crear_por_panel($admin, ['title' => 'Regar', 'date' => '2026-11-02', 'start_time' => '07:00', 'repeat' => 'weekly', 'repeat_until' => '2026-11-30']);
+
+        $this->como($admin)->postJson('/api/admin/agenda/' . $serie['id'] . '/complete', ['date' => '2026-11-09'])->assertStatus(200);
+
+        $copia = $this->como($admin)->postJson('/api/admin/agenda/' . $serie['id'] . '/duplicate')->assertStatus(201)->json('model');
+
+        $this->assertTrue($copia['is_recurring']);
+        $this->assertSame('weekly', $copia['repeat']);
+        $this->assertSame('2026-11-30', $copia['repeat_until']);
+        $this->assertSame('07:00', $copia['start_time']);
+        $this->assertSame(0, AgendaTaskCompletion::where('agenda_task_id', $copia['id'])->count());
+        $this->assertSame(1, AgendaTaskCompletion::where('agenda_task_id', $serie['id'])->count());
+
+        $listado = $this->listar($admin, '2026-11-01', '2026-11-30');
+        $this->assertSame(['2026-11-02', '2026-11-09', '2026-11-16', '2026-11-23', '2026-11-30'], $this->fechas_de($listado, $copia['id']));
+        foreach ($listado['ocurrencias'] as $ocurrencia) {
+            $esperado = (int) $ocurrencia['id'] === (int) $serie['id'] && $ocurrencia['occurrence_date'] === '2026-11-09';
+            $this->assertSame($esperado, $ocurrencia['completed'], 'Ocurrencia ' . $ocurrencia['id'] . ' del ' . $ocurrencia['occurrence_date']);
+        }
     }
 
     /**

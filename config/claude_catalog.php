@@ -367,6 +367,7 @@ return [
                 'Edición parcial: lo que no viene en el body no se toca. La tarea se identifica solo por el {id} (admin_id/admin_name no se usan acá ni la cambian de dueño).',
                 '⚠️ «subtasks» presente REEMPLAZA el conjunto: los subpasos que no vengan se BORRAN (con id se actualiza, sin id se crea; un id de otra tarea es 422). subtasks: null = no tocarlos. Para agregar UNO, usá POST claude/agenda/{id}/subtasks.',
                 'Misma validación que el alta: un estado final incoherente (hora sin fecha, repetición sin fecha, fin antes del inicio) es 422 y no escribe nada.',
+                'En una repetida que se mueve o cambia de repetición, lo hecho acompaña a la serie: con el mismo tipo, la ocurrencia k hecha pasa a ser la k de la serie nueva (correr la base un día corre las hechas un día); si cambia el tipo, quedan solo las hechas que siguen siendo ocurrencias reales y el resto se borra.',
             ],
             'parametros'   => [
                 ['nombre' => '{id}', 'obligatorio' => true, 'validacion' => 'whereNumber', 'que_es' => 'Id de la tarea.'],
@@ -402,11 +403,12 @@ return [
             'peligrosidad' => 'baja',
             'frenos'       => [
                 'Idempotente: marcar una que ya estaba hecha devuelve 200 sin cambiar nada (ni la hora en que se marcó).',
-                'En una repetida «date» es obligatoria y tiene que ser una ocurrencia REAL de la serie (si no, 422); las demás ocurrencias no se tocan. En una no repetida, una «date» distinta de la de la tarea es 422.',
+                'La escritura toma un lock (SELECT … FOR UPDATE) sobre la tarea: dos complete simultáneos de la misma ocurrencia no dejan dos filas.',
+                'En una repetida «date» es obligatoria y tiene que ser una ocurrencia REAL de la serie (si no, 422); las demás ocurrencias no se tocan. En una NO repetida «date» se ignora: el id ya identifica la tarea.',
             ],
             'parametros'   => [
                 ['nombre' => '{id}', 'obligatorio' => true, 'validacion' => 'whereNumber', 'que_es' => 'Id de la tarea.'],
-                ['nombre' => 'date', 'obligatorio' => false, 'validacion' => 'date_format:Y-m-d; required si la tarea se repite', 'que_es' => 'La ocurrencia que se marca.'],
+                ['nombre' => 'date', 'obligatorio' => false, 'validacion' => 'date_format:Y-m-d; required si la tarea se repite', 'que_es' => 'La ocurrencia que se marca. En una tarea no repetida se ignora.'],
             ],
         ],
         'POST api/claude/agenda/{id}/uncomplete' => [
@@ -419,7 +421,7 @@ return [
             ],
             'parametros'   => [
                 ['nombre' => '{id}', 'obligatorio' => true, 'validacion' => 'whereNumber', 'que_es' => 'Id de la tarea.'],
-                ['nombre' => 'date', 'obligatorio' => false, 'validacion' => 'date_format:Y-m-d; required si la tarea se repite', 'que_es' => 'La ocurrencia que se desmarca.'],
+                ['nombre' => 'date', 'obligatorio' => false, 'validacion' => 'date_format:Y-m-d; required si la tarea se repite', 'que_es' => 'La ocurrencia que se desmarca. En una tarea no repetida se ignora.'],
             ],
         ],
         'POST api/claude/agenda/{id}/subtasks' => [
