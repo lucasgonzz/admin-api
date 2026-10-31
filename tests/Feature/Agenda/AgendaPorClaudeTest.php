@@ -151,6 +151,134 @@ class AgendaPorClaudeTest extends BaseDeAgenda
     }
 
     /**
+     * 🔴 `admin_name` o `admin_id` como LISTA (`admin_name[]=x`, `"admin_name": ["x"]`) era un 500
+     * "Array to string conversion". Tiene que ser un 422 legible y no escribir nada. Control: el
+     * mismo nombre como texto resuelve.
+     *
+     * @return void
+     */
+    public function test_admin_name_o_admin_id_como_lista_es_422_y_no_500(): void
+    {
+        $marca = 'listita' . substr(md5(uniqid('', true)), 0, 8);
+        $admin = $this->crear_admin(ucfirst($marca));
+
+        $this->getJson('/api/claude/agenda?admin_name[]=' . $marca, $this->headers_claude())
+            ->assertStatus(422)->assertJsonValidationErrors(['admin_name']);
+
+        $this->postJson('/api/claude/agenda', ['title' => 'X', 'admin_name' => [$marca]], $this->headers_claude())
+            ->assertStatus(422)->assertJsonValidationErrors(['admin_name']);
+
+        $this->getJson('/api/claude/agenda?admin_id[]=' . $admin->id, $this->headers_claude())
+            ->assertStatus(422)->assertJsonValidationErrors(['admin_id']);
+
+        $this->postJson('/api/claude/agenda', ['title' => 'X', 'admin_id' => [$admin->id]], $this->headers_claude())
+            ->assertStatus(422)->assertJsonValidationErrors(['admin_id']);
+
+        $this->assertSame(0, $this->cantidad_de_tareas($admin));
+
+        /* Control positivo. */
+        $this->getJson('/api/claude/agenda?admin_name=' . $marca, $this->headers_claude())
+            ->assertStatus(200)->assertJsonPath('admin.id', (int) $admin->id);
+        $this->postJson('/api/claude/agenda', ['title' => 'X', 'admin_name' => $marca], $this->headers_claude())
+            ->assertStatus(201)->assertJsonPath('admin.id', (int) $admin->id);
+        $this->assertSame(1, $this->cantidad_de_tareas($admin));
+    }
+
+    /**
+     * Las rutas de Claude con `{id}` también piden la clave: sin ella 401 y nada cambia.
+     *
+     * @return void
+     */
+    public function test_las_rutas_con_id_sin_clave_son_401(): void
+    {
+        $admin = $this->crear_admin();
+        $tarea = $this->crear_por_panel($admin, ['title' => 'Intocable', 'date' => '2026-11-02', 'subtasks' => ['Paso']]);
+        $id    = $tarea['id'];
+        $sid   = $tarea['subtasks'][0]['id'];
+
+        $this->getJson('/api/claude/agenda/' . $id)->assertStatus(401);
+        $this->patchJson('/api/claude/agenda/' . $id, ['title' => 'Cambiada'])->assertStatus(401);
+        $this->postJson('/api/claude/agenda/' . $id . '/complete')->assertStatus(401);
+        $this->postJson('/api/claude/agenda/' . $id . '/subtasks', ['title' => 'Nuevo'])->assertStatus(401);
+        $this->patchJson('/api/claude/agenda/' . $id . '/subtasks/' . $sid, ['done' => true])->assertStatus(401);
+        $this->deleteJson('/api/claude/agenda/' . $id)->assertStatus(401);
+
+        $fila = AgendaTask::find($id);
+        $this->assertNotNull($fila);
+        $this->assertSame('Intocable', $fila->title);
+        $this->assertNull($fila->completed_at);
+        $this->assertSame(1, AgendaSubtask::where('agenda_task_id', $id)->count());
+        $this->assertFalse((bool) AgendaSubtask::find($sid)->done);
+
+        /* Control: con la clave contesta. */
+        $this->getJson('/api/claude/agenda/' . $id, $this->headers_claude())->assertStatus(200);
+    }
+
+    /**
+     * Un subpaso de OTRA tarea por Claude es 404 y no se toca (control: el propio se tilda).
+     * Y el tope de 100 subpasos vale también al agregar de a uno.
+     *
+     * @return void
+     */
+    public function test_subpaso_ajeno_es_404_y_tope_de_subpasos_por_claude(): void
+    {
+        $admin = $this->crear_admin();
+        $tarea = $this->crear_por_panel($admin, ['title' => 'Mía', 'subtasks' => ['Propio']]);
+        $otra  = $this->crear_por_panel($admin, ['title' => 'Otra', 'subtasks' => ['Ajeno']]);
+        $ajeno = $otra['subtasks'][0]['id'];
+
+        $this->patchJson('/api/claude/agenda/' . $tarea['id'] . '/subtasks/' . $ajeno, ['done' => true, 'title' => 'Robado'], $this->headers_claude())
+            ->assertStatus(404);
+        $fila = AgendaSubtask::find($ajeno);
+        $this->assertFalse((bool) $fila->done);
+        $this->assertSame('Ajeno', $fila->title);
+
+        $this->patchJson('/api/claude/agenda/' . $tarea['id'] . '/subtasks/' . $tarea['subtasks'][0]['id'], ['done' => true], $this->headers_claude())
+            ->assertStatus(200);
+
+        /* Tope: con 100 subpasos, el 101 es 422. */
+        $cien = [];
+        for ($i = 1; $i <= 100; $i++) {
+            $cien[] = 'Paso ' . $i;
+        }
+        $llena = $this->crear_por_panel($admin, ['title' => 'Llena', 'subtasks' => $cien]);
+
+        $this->postJson('/api/claude/agenda/' . $llena['id'] . '/subtasks', ['title' => 'El 101'], $this->headers_claude())
+            ->assertStatus(422)->assertJsonValidationErrors(['title']);
+        $this->assertSame(100, AgendaSubtask::where('agenda_task_id', $llena['id'])->count());
+    }
+
+    /**
+     * `buscar` escapa los comodines del LIKE: «50%» busca el texto «50%» (no «50» seguido de
+     * cualquier cosa) y «a_b» busca «a_b» (no «a», cualquier letra, «b»).
+     *
+     * @return void
+     */
+    public function test_buscar_escapa_los_comodines(): void
+    {
+        $admin = $this->crear_admin();
+
+        $cincuenta  = $this->crear_por_panel($admin, ['title' => 'Descuento del 50% en cables']);
+        $quinientos = $this->crear_por_panel($admin, ['title' => 'Descuento de 500 pesos']);
+        $guion      = $this->crear_por_panel($admin, ['title' => 'Clave a_b del servidor']);
+        $equis      = $this->crear_por_panel($admin, ['title' => 'Clave axb del servidor']);
+
+        $por_ciento = $this->getJson('/api/claude/agenda?admin_id=' . $admin->id . '&buscar=' . rawurlencode('50%'), $this->headers_claude())
+            ->assertStatus(200)->json('coincidencias');
+        $this->assertSame([$cincuenta['id']], array_column((array) $por_ciento, 'id'));
+
+        $guion_bajo = $this->getJson('/api/claude/agenda?admin_id=' . $admin->id . '&buscar=' . rawurlencode('a_b'), $this->headers_claude())
+            ->assertStatus(200)->json('coincidencias');
+        $this->assertSame([$guion['id']], array_column((array) $guion_bajo, 'id'));
+
+        /* Control: sin comodines, «Descuento» trae las dos y «Clave» las otras dos. */
+        $descuento = $this->getJson('/api/claude/agenda?admin_id=' . $admin->id . '&buscar=Descuento', $this->headers_claude())->json('coincidencias');
+        $this->assertEqualsCanonicalizing([$cincuenta['id'], $quinientos['id']], array_column((array) $descuento, 'id'));
+        $clave = $this->getJson('/api/claude/agenda?admin_id=' . $admin->id . '&buscar=Clave', $this->headers_claude())->json('coincidencias');
+        $this->assertEqualsCanonicalizing([$guion['id'], $equis['id']], array_column((array) $clave, 'id'));
+    }
+
+    /**
      * El listado de Claude: rango por defecto hoy..hoy+7, el `admin`, y `buscar` encuentra por
      * título o notas en TODAS las tareas de ESE admin (también fuera del rango y en la bandeja),
      * no en las de otro.

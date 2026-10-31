@@ -46,7 +46,9 @@ class AgendaAdminResolver
         if (array_key_exists('admin_id', $input) && $input['admin_id'] !== null && $input['admin_id'] !== '') {
             $crudo = $input['admin_id'];
 
-            if (! is_numeric($crudo) || (string) (int) $crudo !== (string) $crudo || (int) $crudo <= 0) {
+            /* `is_scalar` primero: `admin_id[]=1` llega como array, y castearlo a string da el
+               "Array to string conversion" que en Laravel es un 500. */
+            if (! is_scalar($crudo) || ! is_numeric($crudo) || (string) (int) $crudo !== (string) $crudo || (int) $crudo <= 0) {
                 $this->validator->fallar(['admin_id' => ['«admin_id» tiene que ser el id numérico de un admin. GET claude/admins los lista.']]);
             }
 
@@ -60,8 +62,17 @@ class AgendaAdminResolver
             }
         }
 
-        if (array_key_exists('admin_name', $input) && $input['admin_name'] !== null && trim((string) $input['admin_name']) !== '') {
-            $por_nombre = $this->por_nombre(trim((string) $input['admin_name']));
+        if (array_key_exists('admin_name', $input) && $input['admin_name'] !== null) {
+            /* 🔴 `admin_name[]=x` (o `"admin_name": ["x"]` en el body) llega como array: castearlo a
+               string era un 500 "Array to string conversion" (revisión independiente, 31/10/2026).
+               Un nombre que no es texto es un 422 legible, no un error del servidor. */
+            if (! is_string($input['admin_name']) && ! is_numeric($input['admin_name'])) {
+                $this->validator->fallar(['admin_name' => ['«admin_name» tiene que ser un texto con el nombre (o parte del nombre) de un admin, no una lista. GET claude/admins los lista.']]);
+            }
+
+            if (trim((string) $input['admin_name']) !== '') {
+                $por_nombre = $this->por_nombre(trim((string) $input['admin_name']));
+            }
         }
 
         if ($por_id !== null && $por_nombre !== null && (int) $por_id->id !== (int) $por_nombre->id) {
