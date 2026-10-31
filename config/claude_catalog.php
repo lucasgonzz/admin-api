@@ -198,6 +198,23 @@ return [
                 ['nombre' => 'request_confirmation', 'obligatorio' => false, 'validacion' => 'sometimes|boolean', 'que_es' => 'Pide prueba al cliente dentro de la ventana.'],
             ],
         ],
+        /* Estaba registrada desde el 26/10/2026 (commit e88d1bf) sin entrada acá, y eso tenía en rojo
+           CatalogoDeEndpointsDeClaudeTest en master. La describió la misión agenda-admin (31/10/2026)
+           leyendo ClaudeSupportCodexController::mission_started() y SupportCodexService::mission_started(). */
+        'POST api/claude/support-codex/tickets/{id}/mission-started' => [
+            'para_que' => 'Registra en el caso de soporte que Lucas ya creó la tarea (hilo de Codex) de la misión pendiente del ticket. Solo asienta el vínculo y deja en el ticket «Misión iniciada en Codex; pendiente de corrección verificada.»: no retoma, no atiende ni resuelve el ticket. Responde {ticket}.',
+            'escribe' => true, 'peligrosidad' => 'baja',
+            'frenos' => [
+                'Ticket cerrado: 409 disabled_or_ineligible. Sin misión pendiente en el caso: 409 mission_missing.',
+                'mission_hash tiene que ser el SHA-256 de la misión tal cual está guardada: si el diagnóstico cambió, 409 mission_changed y no vincula nada.',
+                'El hilo de atención no puede ser el de la misión, y una misión ya vinculada a otro hilo no se pisa: 409 mission_thread_conflict.',
+                'Idempotente: repetirlo con el mismo hilo no cambia la fecha de inicio. No consume la reserva ni cambia la revisión manual.',
+            ],
+            'parametros' => [
+                ['nombre' => 'mission_thread_id', 'obligatorio' => true, 'validacion' => 'required|string|max:150|regex:/^[a-zA-Z0-9_-]+$/', 'que_es' => 'Id del hilo de Codex donde se creó la tarea de la misión.'],
+                ['nombre' => 'mission_hash', 'obligatorio' => true, 'validacion' => 'required|string|size:64|regex:/^[a-f0-9]{64}$/', 'que_es' => 'SHA-256 de la misión que se leyó, para no vincular una misión que cambió.'],
+            ],
+        ],
         'POST api/claude/support-codex/tickets/{id}/diagnostic' => [
             'para_que' => 'Consulta de solo lectura por keywords al ERP del cliente del ticket; sin IA API ni secretos en la respuesta.',
             'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => ['Reserva vigente y cliente/URL resueltos exclusivamente del ticket.'],
