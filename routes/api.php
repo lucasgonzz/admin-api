@@ -373,6 +373,29 @@ Route::middleware('claude.task.key')
         Route::get('draft-version', 'Api\ClaudeVersionItemsIngestController@draft_version_json');
         Route::post('version-items', 'Api\ClaudeVersionItemsIngestController@store_json');
 
+        /* Agenda personal de los admins (misión agenda-admin, 31/10/2026): "agendar" algo desde la
+           conversación ya no es el calendario de Structured sino POST claude/agenda. Misma lógica y
+           misma forma de tarea que el panel (App\Services\Agenda\AgendaService); sin admin
+           explícito (`admin_id` / `admin_name`) va a la agenda del admin por defecto de las tareas
+           de Claude. Todos los {id} con whereNumber y los segmentos fijos después del {id}. */
+        Route::get('agenda', 'Api\ClaudeAgendaController@index');
+        Route::post('agenda', 'Api\ClaudeAgendaController@store');
+        Route::get('agenda/{id}', 'Api\ClaudeAgendaController@show')
+            ->whereNumber('id');
+        Route::patch('agenda/{id}', 'Api\ClaudeAgendaController@update')
+            ->whereNumber('id');
+        Route::delete('agenda/{id}', 'Api\ClaudeAgendaController@destroy')
+            ->whereNumber('id');
+        Route::post('agenda/{id}/complete', 'Api\ClaudeAgendaController@complete')
+            ->whereNumber('id');
+        Route::post('agenda/{id}/uncomplete', 'Api\ClaudeAgendaController@uncomplete')
+            ->whereNumber('id');
+        Route::post('agenda/{id}/subtasks', 'Api\ClaudeAgendaController@store_subtask')
+            ->whereNumber('id');
+        Route::patch('agenda/{id}/subtasks/{subtask_id}', 'Api\ClaudeAgendaController@update_subtask')
+            ->whereNumber('id')
+            ->whereNumber('subtask_id');
+
         /* Análisis de leads: lectura. `schema` describe los filtros de todos los demás. */
         Route::get('schema', 'Api\ClaudeLeadsAnalyticsController@schema_json');
         Route::get('leads', 'Api\ClaudeLeadsAnalyticsController@leads_json');

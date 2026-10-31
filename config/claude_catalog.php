@@ -289,6 +289,151 @@ return [
                 ['nombre' => 'client_ids[]', 'obligatorio' => false, 'validacion' => 'nullable|array, cada ítem integer', 'que_es' => 'Clientes a los que aplica el ítem, cuando no aplica a todos.'],
             ],
         ],
+        /* ---------------------------------------------------------- Agenda de los admins (31/10/2026) */
+
+        /* Misión agenda-admin: la agenda personal tipo Structured de cada admin. Misma lógica, mismas
+           validaciones y misma forma de tarea que el panel (App\Services\Agenda\AgendaService). Las
+           reglas de validación de abajo son las de AgendaValidator::validar_campos(), copiadas el
+           31/10/2026: si se toca una regla allá, se toca acá. */
+        'GET api/claude/agenda' => [
+            'para_que'     => 'La agenda de un admin: las ocurrencias del rango (las repetidas ya expandidas, cada una con su occurrence_date y su hecha/no hecha), la bandeja (tareas sin fecha) y el admin dueño. Sin desde/hasta es hoy..hoy+7 (con uno solo, el otro a 7 días); el rango no puede pasar de 100 días. Con «buscar» suma «coincidencias»: tareas sin expandir del mismo admin cuyo título o notas contienen el texto, sin importar el rango, las más nuevas primero, tope 50. Sin admin_id ni admin_name es la agenda del admin por defecto de las tareas de Claude (CLAUDE_TASK_INGEST_CREATOR_ADMIN_ID → is_default_task_assignee → primer admin).',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+            'parametros'   => [
+                ['nombre' => 'desde', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|date_format:Y-m-d', 'que_es' => 'Primer día del rango. Por defecto hoy.'],
+                ['nombre' => 'hasta', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|date_format:Y-m-d, ≥ desde y ≤ desde + 100 días', 'que_es' => 'Último día del rango. Por defecto desde + 7.'],
+                ['nombre' => 'incluir_completadas', 'obligatorio' => false, 'validacion' => 'true/false o 1/0 (default true)', 'que_es' => 'false saca las hechas de las ocurrencias y de la bandeja.'],
+                ['nombre' => 'admin_id', 'obligatorio' => false, 'validacion' => 'id de un admin existente (si no, 422)', 'que_es' => 'De quién es la agenda. GET claude/admins los lista.'],
+                ['nombre' => 'admin_name', 'obligatorio' => false, 'validacion' => 'LIKE sin distinguir mayúsculas; 0 o más de 1 coincidencia es 422 con la lista', 'que_es' => 'De quién es la agenda, por nombre.'],
+                ['nombre' => 'buscar', 'obligatorio' => false, 'validacion' => 'texto (se usan hasta 200 caracteres)', 'que_es' => 'Busca en título y notas de TODAS las tareas del admin y devuelve «coincidencias».'],
+            ],
+        ],
+        'GET api/claude/agenda/{id}' => [
+            'para_que'     => 'Una tarea de la agenda por id (de cualquier admin), sin expandir: si se repite, occurrence_date es la fecha base y hecha/no hecha es el de esa ocurrencia.',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+        ],
+        'POST api/claude/agenda' => [
+            'para_que'     => 'Agenda una tarea en la agenda de un admin (con created_via = "claude"): título, notas, día y hora, duración, color, ícono, repetición y subpasos. Sin «date» va a la bandeja. Con «date» y sin hora ni all_day arranca a las 09:00. Responde 201 {model, admin}.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Su único efecto son filas en agenda_tasks y agenda_subtasks del admin: no toca el sistema de ningún cliente ni le manda nada a nadie.',
+                'La tarea queda con created_via = "claude", así que siempre se distingue de una cargada a mano en el panel.',
+                'Un admin_name que no matchea, o que matchea a más de un admin, es 422 y NO crea la tarea; un admin_id inexistente también. Agendarle al admin equivocado sería peor que no agendar.',
+                'Misma validación que el panel (AgendaValidator): hora sin fecha, repetición sin fecha, fin de la repetición anterior a la fecha, color fuera de la paleta o ícono inválido son 422 y no escriben nada.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'title', 'obligatorio' => true, 'validacion' => 'required|string|max:500', 'que_es' => 'Título de la tarea.'],
+                ['nombre' => 'notes', 'obligatorio' => false, 'validacion' => 'nullable|string|max:20000 y ≤ 64 KB', 'que_es' => 'Descripción, links de reuniones, teléfonos.'],
+                ['nombre' => 'date', 'obligatorio' => false, 'validacion' => 'nullable|date_format:Y-m-d (entre 2000 y 2100)', 'que_es' => 'Día de la tarea. null o ausente = bandeja.'],
+                ['nombre' => 'start_time', 'obligatorio' => false, 'validacion' => 'nullable|date_format:H:i (24 h); sin date es 422', 'que_es' => 'Hora de inicio. Con date y sin hora (y all_day false) queda 09:00.'],
+                ['nombre' => 'all_day', 'obligatorio' => false, 'validacion' => 'boolean', 'que_es' => 'Todo el día: limpia la hora.'],
+                ['nombre' => 'duration_minutes', 'obligatorio' => false, 'validacion' => 'integer|between:5,1440 (default 15)', 'que_es' => 'Duración; de acá sale end_time.'],
+                ['nombre' => 'color', 'obligatorio' => false, 'validacion' => 'in:salmon,orange,yellow,green,sky,emerald,red,blue,white (default salmon)', 'que_es' => 'Color de la paleta.'],
+                ['nombre' => 'icon', 'obligatorio' => false, 'validacion' => 'string|max:60|regex:/^[a-z0-9-]+$/ (default check2-square)', 'que_es' => 'Nombre de un Bootstrap Icon sin «bi-» (airplane, telephone, cart…).'],
+                ['nombre' => 'repeat', 'obligatorio' => false, 'validacion' => 'in:none,daily,weekly,monthly (default none); distinto de none sin date es 422', 'que_es' => 'Repetición. La mensual del 31 cae el último día de los meses cortos y vuelve al 31.'],
+                ['nombre' => 'repeat_until', 'obligatorio' => false, 'validacion' => 'nullable|date_format:Y-m-d; anterior a date es 422', 'que_es' => 'Último día de la repetición, inclusive. null = sin fin.'],
+                ['nombre' => 'subtasks[]', 'obligatorio' => false, 'validacion' => 'nullable|array|max:100; cada ítem un string o {title (required|max:500), done?}', 'que_es' => 'Subpasos de la tarea. Lo cómodo: un array de strings.'],
+                ['nombre' => 'sort_order', 'obligatorio' => false, 'validacion' => 'integer', 'que_es' => 'Orden en la bandeja. Por defecto, al final.'],
+                ['nombre' => 'admin_id', 'obligatorio' => false, 'validacion' => 'id de un admin existente (si no, 422)', 'que_es' => 'En la agenda de quién se crea. Sin esto ni admin_name, el admin por defecto de las tareas de Claude.'],
+                ['nombre' => 'admin_name', 'obligatorio' => false, 'validacion' => 'LIKE sin distinguir mayúsculas; 0 o más de 1 coincidencia es 422', 'que_es' => 'En la agenda de quién se crea, por nombre.'],
+            ],
+        ],
+        'PATCH api/claude/agenda/{id}' => [
+            'para_que'     => 'Edita o MUEVE una tarea (las mismas reglas que el panel): cambiar date/start_time la mueve de día u hora, date: null la manda a la bandeja (limpia hora y repetición), all_day: true limpia la hora. En una repetida edita y mueve la SERIE entera. Responde {model}.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Edición parcial: lo que no viene en el body no se toca. La tarea se identifica solo por el {id} (admin_id/admin_name no se usan acá ni la cambian de dueño).',
+                '⚠️ «subtasks» presente REEMPLAZA el conjunto: los subpasos que no vengan se BORRAN (con id se actualiza, sin id se crea; un id de otra tarea es 422). subtasks: null = no tocarlos. Para agregar UNO, usá POST claude/agenda/{id}/subtasks.',
+                'Misma validación que el alta: un estado final incoherente (hora sin fecha, repetición sin fecha, fin antes del inicio) es 422 y no escribe nada.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id}', 'obligatorio' => true, 'validacion' => 'whereNumber', 'que_es' => 'Id de la tarea.'],
+                ['nombre' => 'title', 'obligatorio' => false, 'validacion' => 'sometimes|required|string|max:500', 'que_es' => 'Título nuevo.'],
+                ['nombre' => 'notes', 'obligatorio' => false, 'validacion' => 'nullable|string|max:20000 y ≤ 64 KB', 'que_es' => 'Notas nuevas (null las borra).'],
+                ['nombre' => 'date', 'obligatorio' => false, 'validacion' => 'nullable|date_format:Y-m-d', 'que_es' => 'Día nuevo; null = a la bandeja.'],
+                ['nombre' => 'start_time', 'obligatorio' => false, 'validacion' => 'nullable|date_format:H:i', 'que_es' => 'Hora nueva. Mandarla sin all_day saca la tarea de «todo el día».'],
+                ['nombre' => 'all_day', 'obligatorio' => false, 'validacion' => 'boolean', 'que_es' => 'Todo el día.'],
+                ['nombre' => 'duration_minutes', 'obligatorio' => false, 'validacion' => 'integer|between:5,1440', 'que_es' => 'Duración nueva.'],
+                ['nombre' => 'color', 'obligatorio' => false, 'validacion' => 'in:salmon,orange,yellow,green,sky,emerald,red,blue,white', 'que_es' => 'Color nuevo.'],
+                ['nombre' => 'icon', 'obligatorio' => false, 'validacion' => 'string|max:60|regex:/^[a-z0-9-]+$/', 'que_es' => 'Ícono nuevo (Bootstrap Icon sin «bi-»).'],
+                ['nombre' => 'repeat', 'obligatorio' => false, 'validacion' => 'in:none,daily,weekly,monthly', 'que_es' => 'Repetición nueva.'],
+                ['nombre' => 'repeat_until', 'obligatorio' => false, 'validacion' => 'nullable|date_format:Y-m-d', 'que_es' => 'Fin nuevo de la repetición.'],
+                ['nombre' => 'subtasks[]', 'obligatorio' => false, 'validacion' => 'nullable|array|max:100; cada ítem un string o {id?, title, done?}', 'que_es' => 'REEMPLAZA el conjunto de subpasos.'],
+                ['nombre' => 'sort_order', 'obligatorio' => false, 'validacion' => 'integer', 'que_es' => 'Orden en la bandeja.'],
+            ],
+        ],
+        'DELETE api/claude/agenda/{id}' => [
+            'para_que'     => 'Borra una tarea de la agenda con sus subpasos y sus ocurrencias hechas. Responde {deleted: true, id}.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Borra UNA sola tarea, identificada por id: no hay borrado masivo ni por filtro.',
+                '⚠️ No hay papelera: no se deshace. Para sacarla del día sin perderla, PATCH con date: null (va a la bandeja).',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id}', 'obligatorio' => true, 'validacion' => 'whereNumber', 'que_es' => 'Id de la tarea a borrar.'],
+            ],
+        ],
+        'POST api/claude/agenda/{id}/complete' => [
+            'para_que'     => 'Marca hecha una tarea; en una repetida, solo la ocurrencia de «date». Responde {model} en forma de esa ocurrencia.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Idempotente: marcar una que ya estaba hecha devuelve 200 sin cambiar nada (ni la hora en que se marcó).',
+                'En una repetida «date» es obligatoria y tiene que ser una ocurrencia REAL de la serie (si no, 422); las demás ocurrencias no se tocan. En una no repetida, una «date» distinta de la de la tarea es 422.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id}', 'obligatorio' => true, 'validacion' => 'whereNumber', 'que_es' => 'Id de la tarea.'],
+                ['nombre' => 'date', 'obligatorio' => false, 'validacion' => 'date_format:Y-m-d; required si la tarea se repite', 'que_es' => 'La ocurrencia que se marca.'],
+            ],
+        ],
+        'POST api/claude/agenda/{id}/uncomplete' => [
+            'para_que'     => 'Desmarca una tarea; en una repetida, solo la ocurrencia de «date». Responde {model} en forma de esa ocurrencia.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Idempotente: desmarcar una que no estaba hecha devuelve 200 sin cambiar nada.',
+                'En una repetida «date» es obligatoria y tiene que ser una ocurrencia REAL de la serie (si no, 422); las demás ocurrencias no se tocan.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id}', 'obligatorio' => true, 'validacion' => 'whereNumber', 'que_es' => 'Id de la tarea.'],
+                ['nombre' => 'date', 'obligatorio' => false, 'validacion' => 'date_format:Y-m-d; required si la tarea se repite', 'que_es' => 'La ocurrencia que se desmarca.'],
+            ],
+        ],
+        'POST api/claude/agenda/{id}/subtasks' => [
+            'para_que'     => 'Agrega UN subpaso al final de una tarea. Responde 201 {model} con la tarea entera.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Solo agrega: no toca los subpasos que ya estaban (a diferencia de «subtasks» en el PATCH, que reemplaza el conjunto).',
+                'Tope de 100 subpasos por tarea: el que pasa es 422.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id}', 'obligatorio' => true, 'validacion' => 'whereNumber', 'que_es' => 'Id de la tarea.'],
+                ['nombre' => 'title', 'obligatorio' => true, 'validacion' => 'required|string|max:500', 'que_es' => 'Texto del subpaso.'],
+                ['nombre' => 'done', 'obligatorio' => false, 'validacion' => 'boolean (default false)', 'que_es' => 'Si nace tildado.'],
+            ],
+        ],
+        'PATCH api/claude/agenda/{id}/subtasks/{subtask_id}' => [
+            'para_que'     => 'Edita el texto o tilda/destilda UN subpaso. En una repetida el subpaso es de la serie: vale para todas sus fechas. Responde {model} con la tarea entera.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Toca solo ese subpaso. Un subtask_id que no es de esa tarea es 404 y no escribe nada.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id}', 'obligatorio' => true, 'validacion' => 'whereNumber', 'que_es' => 'Id de la tarea.'],
+                ['nombre' => '{subtask_id}', 'obligatorio' => true, 'validacion' => 'whereNumber', 'que_es' => 'Id del subpaso (sale de model.subtasks[].id).'],
+                ['nombre' => 'title', 'obligatorio' => false, 'validacion' => 'sometimes|required|string|max:500', 'que_es' => 'Texto nuevo.'],
+                ['nombre' => 'done', 'obligatorio' => false, 'validacion' => 'boolean', 'que_es' => 'Tildado o no.'],
+            ],
+        ],
+
         'GET api/claude/client-templates' => [
             'para_que'     => 'Plantillas de soporte cargadas para los clientes, para ver el estado antes de escribir.',
             'escribe'      => false,
