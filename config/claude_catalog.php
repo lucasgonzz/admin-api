@@ -1018,6 +1018,33 @@ return [
                 ['nombre' => 'confirm_client_name', 'obligatorio' => false, 'validacion' => 'string de hasta 190; tiene que coincidir con clients.name (trim + minúsculas)', 'que_es' => 'Obligatorio cuando dry_run es false. Es la redundancia contra escribirle los horarios al cliente equivocado: el id numérico no tiene ninguna.'],
             ],
         ],
+        'GET api/claude/clients/{id}/contacto' => [
+            'para_que'     => 'El contacto de un cliente: `phone` (WhatsApp del NEGOCIO, el que se conecta a Kapso), `asistente_phone` (teléfono PERSONAL del dueño, null si usa el del negocio), `telefono_personal_efectivo` (el que de verdad se usa para hablarle al dueño y reconocerlo ante su agente personal), `asistente_whatsapp_activo`, la cantidad de empleados con teléfono y los últimos 10 cambios (`cambios_recientes`). Es lo que hay que mirar antes de cambiarle un teléfono o prenderle el asistente.',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+        ],
+        'PATCH api/claude/clients/{id}/contacto' => [
+            'para_que'     => 'Cambia el teléfono del negocio (`phone`), el teléfono personal del dueño (`asistente_phone`) y/o el interruptor «Habla con su asistente por WhatsApp» de un cliente, sin pasar por el panel. Cambiar un teléfono redirige envíos y el reconocimiento del dueño ante su agente personal.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'dry_run=true devuelve {aplicado:false, cambios:{campo:{antes,despues}}, advertencias} y no escribe nada; sin dry_run escribe y devuelve lo mismo con aplicado:true.',
+                'Formato internacional obligatorio: empieza con + y tiene entre 10 y 15 dígitos; si no, 422 y no se escribe nada.',
+                '422 si el número ya figura como phone o asistente_phone de OTRO cliente activo, o como teléfono de un empleado: el agente personal no podría reconocer a su dueño.',
+                '422 si se prende asistente_whatsapp_activo y el cliente no queda con ningún teléfono. Es solo una advertencia (no frena) que el número del asistente no esté listo o que el cliente no tenga api_key ni paquete de IA.',
+                'Cada campo cambiado deja una fila en client_contact_changes (valor anterior, valor nuevo, origen claude y el motivo).',
+                'La ficha y su rastro se escriben en una sola transacción.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; acepta id numérico o uuid', 'que_es' => 'El cliente cuyo contacto se cambia.'],
+                ['nombre' => 'phone', 'obligatorio' => false, 'validacion' => 'string internacional (+ y 10 a 15 dígitos); no puede quedar vacío', 'que_es' => 'El WhatsApp del NEGOCIO (el que se conecta a Kapso para atender clientes). Si el cliente no tiene asistente_phone, también es el del dueño.'],
+                ['nombre' => 'asistente_phone', 'obligatorio' => false, 'validacion' => 'string internacional, o null / "" para borrarlo', 'que_es' => 'El teléfono PERSONAL del dueño: desde el que le escribe a su agente personal y al que el admin le escribe como persona. Con él cargado, el agente personal reconoce SOLO ese número (el del negocio ya no).'],
+                ['nombre' => 'asistente_whatsapp_activo', 'obligatorio' => false, 'validacion' => 'booleano, 1/0/true/false', 'que_es' => 'El interruptor «Habla con su asistente por WhatsApp».'],
+                ['nombre' => 'motivo', 'obligatorio' => false, 'validacion' => 'string de hasta 191', 'que_es' => 'Por qué se cambia; queda en el rastro.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'booleano, 1/0; default false', 'que_es' => 'En true valida todo y devuelve el antes y el después sin escribir.'],
+            ],
+        ],
         'POST api/claude/clients/{id}/schedule/sync' => [
             'para_que'     => 'Reintenta el push de los horarios del cliente a su empresa-api.',
             'escribe'      => true,

@@ -104,12 +104,15 @@ return [
                 'current_version_id', 'active_client_api_id', 'user_id',
                 'shared_database_group_id', 'api_url', 'payment_expired_at',
                 'cantidad_empleados', 'tiene_ecommerce', 'tiene_mercado_libre',
-                'tiene_tienda_nube', 'total_mensualidad',
+                'tiene_tienda_nube', 'total_mensualidad', 'asistente_whatsapp_activo',
                 'schedule_sync_status', 'schedule_sync_message', 'schedule_synced_at',
                 'created_at', 'updated_at',
             ],
             'columnas_opt_in' => [
                 'contacto' => ['phone'],
+                /* Misión telefono-personal-del-dueno (2/11/2026): el teléfono PERSONAL del dueño es PII igual que
+                   `phone`, pero va bajo su propio include para no cambiar lo que ya devuelve `contacto`. */
+                'contacto_personal' => ['asistente_phone'],
             ],
             'clave_de_cursor' => 'id',
             'orden_default'   => 'asc',
