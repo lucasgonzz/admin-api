@@ -16,6 +16,13 @@
 | 🔴 Y por eso tampoco se guarda el costo en `client_ai_token_usages`: guardarlo congelaría el
 | precio del día en que se recolectó y obligaría a un backfill con cada cambio de lista.
 |
+| 🔴 Desde el 2/11/2026 (misión plan-ia-por-gasto) esta tabla TAMBIÉN VIAJA a cada cliente, dentro del
+| PUT del plan (`ClientAiPlanSyncService::cuerpo_del_plan`, clave `precios_ia`): el `empresa-api`
+| necesita costear para cortar por el tope de gasto sin consultarle al admin en cada mensaje. La
+| fuente sigue siendo una sola, esta. Cuando cambia un precio se corrige acá, y llega solo con el
+| barrido de cada noche (`ai-planes:sincronizar`, 03:45), o en el momento con
+| `php artisan ia:sincronizar-precios`. Sigue sin hacer falta actualizar a ningún cliente.
+|
 | Las BÚSQUEDAS de imágenes (Serper / Google) no van acá: se cobran por búsqueda y no por token, y
 | tienen su propia tabla, en dólares cada 1.000, en `config/busquedas_precios.php` (el porqué de
 | que sean dos archivos está en su encabezado). Esta tabla es solo de modelos.
@@ -23,7 +30,10 @@
 | **Un modelo que no esté en esta lista NO rompe nada**: su costo sale `null` y la respuesta lo
 | marca como "sin precio cargado". No hay precio por defecto ni estimación a ojo, a propósito: un
 | total que miente es peor que un renglón sin plata, porque el renglón sin plata se ve y el total
-| que miente se cree.
+| que miente se cree. (Eso vale para la pantalla del admin. Para CORTAR no sirve: del lado de empresa
+| un modelo que no esté acá se cobra a la tarifa más cara de la tabla, porque un modelo desconocido
+| nunca puede ser gratis. Hoy está en ese caso `gpt-4o-mini-transcribe`, el de la transcripción de
+| audios: sin precio a propósito, hasta que alguien lo lea de la lista oficial del proveedor.)
 |
 | Las cuatro puntas son las que factura Anthropic por separado:
 |

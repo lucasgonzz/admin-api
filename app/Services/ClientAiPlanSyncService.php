@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Client;
+use App\Models\ClientAiTokenUsage;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Http;
@@ -238,12 +239,12 @@ class ClientAiPlanSyncService
     }
 
     /**
-     * Arma el cuerpo del PUT con las CUATRO claves EXACTAS del contrato.
+     * Arma el cuerpo del PUT con las SEIS claves EXACTAS del contrato.
      *
      * 🔴 Los nombres son parte del contrato y el otro lado los lee con `$request->input('nombre')`,
-     * etc.: renombrar cualquiera de las cuatro en el camino es justo donde este proyecto ya se quemó
-     * (`manual_tasks` vs `tareas`). Si el cliente no tiene paquete, las cuatro van en null (destope
-     * de los dos topes de consumo; en las búsquedas web, null = el defecto de 30 de empresa).
+     * etc.: renombrar cualquiera de las seis en el camino es justo donde este proyecto ya se quemó
+     * (`manual_tasks` vs `tareas`). Si el cliente no tiene paquete, las seis van en null (destope
+     * de los topes de consumo; en las búsquedas web, null = el defecto de 30 de empresa).
      *
      * La cuarta, `tope_busquedas_web_diarias` (misión asistente-fotos-barras-y-compras, 24/9/2026),
      * es OPCIONAL del lado de empresa y por eso se puede mandar a todo el parque sin romper a nadie:
@@ -251,9 +252,22 @@ class ClientAiPlanSyncService
      * contesta 200 igual), y un `empresa-api` nuevo que no la recibe (admin viejo) no toca su columna
      * y aplica el defecto de 30.
      *
+     * La quinta y la sexta, `tope_gasto_usd_mensual` y `precios_ia` (misión plan-ia-por-gasto,
+     * 2/11/2026), son opcionales con el MISMO patrón, y se pueden mandar a todo el parque por el mismo
+     * motivo: un `empresa-api` viejo las ignora y contesta 200, y uno nuevo que no las recibe no toca
+     * sus columnas y sigue con el tope de tokens. No se renombra ni se saca ninguna de las otras cuatro.
+     *
+     * 🔴 El tope de gasto se manda como NÚMERO: el cast `decimal:2` del modelo lo lee como el string
+     * "6.41", y el contrato dice "decimal o null". Lo que hay que mirar del otro lado es una cuenta, no
+     * un texto.
+     *
+     * 🔴 `precios_ia` viaja aunque el paquete no tenga tope de gasto: la tabla es la misma para todos y
+     * tenerla cargada no cambia nada del lado de empresa hasta que llegue un tope > 0. Sin paquete, las
+     * dos van en null, igual que las otras cuatro: es el mismo destope explícito.
+     *
      * @param Client $client Cliente dueño.
      *
-     * @return array{nombre: string|null, tope_tokens_mensual: int|null, tope_interacciones_diarias: int|null, tope_busquedas_web_diarias: int|null}
+     * @return array{nombre: string|null, tope_tokens_mensual: int|null, tope_interacciones_diarias: int|null, tope_busquedas_web_diarias: int|null, tope_gasto_usd_mensual: float|null, precios_ia: array<string, array<string, float>>|null}
      */
     protected function cuerpo_del_plan(Client $client)
     {
@@ -267,6 +281,8 @@ class ClientAiPlanSyncService
                 'tope_tokens_mensual'        => null,
                 'tope_interacciones_diarias' => null,
                 'tope_busquedas_web_diarias' => null,
+                'tope_gasto_usd_mensual'     => null,
+                'precios_ia'                 => null,
             ];
         }
 
@@ -275,7 +291,55 @@ class ClientAiPlanSyncService
             'tope_tokens_mensual'        => $plan->tope_tokens_mensual,
             'tope_interacciones_diarias' => $plan->tope_interacciones_diarias,
             'tope_busquedas_web_diarias' => $plan->tope_busquedas_web_diarias,
+            'tope_gasto_usd_mensual'     => $plan->tope_gasto_usd_mensual === null
+                ? null
+                : (float) $plan->tope_gasto_usd_mensual,
+            'precios_ia'                 => $this->tabla_de_precios(),
         ];
+    }
+
+    /**
+     * La tabla de `config('ia_precios')` en la forma exacta del contrato:
+     * `{ "<modelo>": { "input": n, "output": n, "cache_write": n, "cache_read": n } }`, en dólares por
+     * millón de tokens.
+     *
+     * Se recorre `ClientAiTokenUsage::PUNTAS` en vez de mandar el array crudo de la config: las cuatro
+     * claves son contrato, y este es el único punto por donde la tabla sale del admin. Una fila que no
+     * sea un array se descarta con el mismo criterio de `ClientAiTokenUsage::tarifa_de`, y una punta
+     * que falte va en 0, igual que la lee `costo_usd`: los dos lados tienen que costear lo mismo.
+     *
+     * Una tabla vacía viaja como null y no como `[]`: "no tengo precios" no es una tabla de cero filas.
+     *
+     * 🔴 Acá no se inventa ningún precio. Un modelo que no está en la config no viaja, y del lado de
+     * empresa se cobra a la tarifa más cara de la tabla (un modelo desconocido nunca es gratis).
+     *
+     * @return array<string, array<string, float>>|null
+     */
+    protected function tabla_de_precios()
+    {
+        $precios = config('ia_precios', []);
+
+        if (! is_array($precios)) {
+            return null;
+        }
+
+        $tabla = [];
+
+        foreach ($precios as $modelo => $tarifa) {
+            if (! is_array($tarifa)) {
+                continue;
+            }
+
+            $fila = [];
+
+            foreach (ClientAiTokenUsage::PUNTAS as $punta) {
+                $fila[$punta] = (float) (isset($tarifa[$punta]) ? $tarifa[$punta] : 0);
+            }
+
+            $tabla[(string) $modelo] = $fila;
+        }
+
+        return $tabla === [] ? null : $tabla;
     }
 
     /**
