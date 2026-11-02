@@ -92,7 +92,7 @@ class SupportTicket extends Model
      */
     public function scopeWithAll($query)
     {
-        $query->with('client', 'client_employee', 'assigned_admin', 'messages.attachments', 'messages.sender_admin', 'support_codex_case');
+        $query->with('client', 'client_employee', 'assigned_admin', 'messages.attachments', 'messages.sender_admin', 'messages.reply_to_message', 'support_codex_case');
     }
 
     public function support_codex_case()

@@ -63,6 +63,46 @@ class WhatsappSendService
     private $config_destino = null;
 
     /**
+     * wamid del mensaje al que el próximo envío responde citándolo (cita nativa de WhatsApp), o null.
+     *
+     * Se fija con {@see self::con_cita()} y la leen los payloads de texto, imagen, audio y documento.
+     * Las plantillas y las reacciones no llevan cita. Quien la fija es responsable de limpiarla
+     * (`con_cita(null)`) apenas termina, para que no se filtre al siguiente envío de la misma instancia.
+     *
+     * @var string|null
+     */
+    private $reply_to_wamid = null;
+
+    /**
+     * Fija (o limpia, con null) el mensaje que citará lo próximo que se mande desde esta instancia.
+     *
+     * @param string|null $wamid wamid del mensaje citado.
+     *
+     * @return self
+     */
+    public function con_cita(?string $wamid): self
+    {
+        $wamid = trim((string) $wamid);
+        $this->reply_to_wamid = $wamid !== '' ? $wamid : null;
+
+        return $this;
+    }
+
+    /**
+     * Fragmento `context` del payload de Meta para citar un mensaje; vacío si no hay cita.
+     *
+     * @return array
+     */
+    private function cita_payload(): array
+    {
+        if ($this->reply_to_wamid === null) {
+            return [];
+        }
+
+        return ['context' => ['message_id' => $this->reply_to_wamid]];
+    }
+
+    /**
      * Fija por qué número sale lo que mande esta instancia de acá en adelante.
      *
      * Devuelve `$this` para poder encadenar (`$sender->para($config)->send_text(...)`), que es como
@@ -158,6 +198,26 @@ class WhatsappSendService
      * @return string|null whatsapp_message_id de Meta.
      */
     public function send_support_message(string $to, SupportMessage $message): ?string
+    {
+        // Si el operador respondió citando un mensaje, el envío lleva la cita nativa de WhatsApp.
+        $this->con_cita($message->reply_to_whatsapp_message_id());
+
+        try {
+            return $this->send_support_message_citado($to, $message);
+        } finally {
+            $this->con_cita(null);
+        }
+    }
+
+    /**
+     * Cuerpo de {@see self::send_support_message()}, ya con la cita fijada.
+     *
+     * @param string         $to      Número destino E.164.
+     * @param SupportMessage $message Mensaje persistido.
+     *
+     * @return string|null
+     */
+    private function send_support_message_citado(string $to, SupportMessage $message): ?string
     {
         $message->loadMissing('attachments');
 
@@ -298,7 +358,7 @@ class WhatsappSendService
                     'text'              => [
                         'body' => $text_body,
                     ],
-                ]);
+                ] + $this->cita_payload());
 
             $message_id = $this->extract_message_id_from_response($response, $normalized_to);
             if ($message_id === null) {
@@ -825,7 +885,7 @@ class WhatsappSendService
                     'to'                => $to_digits,
                     'type'              => 'image',
                     'image'             => $image_payload,
-                ]);
+                ] + $this->cita_payload());
 
             $message_id = $this->extract_message_id_from_response($response, $normalized_to);
             if ($message_id === null) {
@@ -1394,7 +1454,7 @@ class WhatsappSendService
                     'to'                => $to_digits,
                     'type'              => 'image',
                     'image'             => $image_payload,
-                ]);
+                ] + $this->cita_payload());
 
             $message_id = $this->extract_message_id_from_response($response, $normalized_to);
             if ($message_id === null) {
@@ -1465,7 +1525,7 @@ class WhatsappSendService
                     'to'                => $to_digits,
                     'type'              => 'audio',
                     'audio'             => $audio_payload,
-                ]);
+                ] + $this->cita_payload());
 
             $message_id = $this->extract_message_id_from_response($response, $normalized_to);
             if ($message_id === null) {
@@ -1549,7 +1609,7 @@ class WhatsappSendService
                     'to'                => $to_digits,
                     'type'              => 'document',
                     'document'          => $document_payload,
-                ]);
+                ] + $this->cita_payload());
 
             return $this->extract_message_id_from_response($response, $normalized_to);
         } catch (\Throwable $exception) {

@@ -112,7 +112,60 @@ class SupportMessage extends Model
      */
     public function scopeWithAll($query)
     {
-        $query->with('ticket', 'attachments', 'sender_admin');
+        $query->with('ticket', 'attachments', 'sender_admin', 'reply_to_message');
+    }
+
+    /**
+     * Mensaje al que este responde citándolo (null si no cita nada o si el original ya no existe).
+     *
+     * Solo trae lo que hace falta para dibujar la cita en la burbuja; el `whatsapp_message_id` NO
+     * viaja a la pantalla (se arma aparte en {@see self::reply_to_whatsapp_message_id()}).
+     */
+    public function reply_to_message()
+    {
+        return $this->belongsTo(SupportMessage::class, 'reply_to_message_id')
+            ->select('id', 'support_ticket_id', 'sender_type', 'kind', 'body');
+    }
+
+    /**
+     * wamid del mensaje citado, para mandar la cita nativa de WhatsApp. null si no hay cita, si el
+     * original no salió/llegó por WhatsApp (sin wamid) o si es un id simulado del modo de prueba.
+     *
+     * @return string|null
+     */
+    public function reply_to_whatsapp_message_id(): ?string
+    {
+        if (empty($this->reply_to_message_id)) {
+            return null;
+        }
+
+        $wamid = trim((string) SupportMessage::where('id', $this->reply_to_message_id)->value('whatsapp_message_id'));
+
+        if ($wamid === '' || strncmp($wamid, 'test-', 5) === 0) {
+            return null;
+        }
+
+        return $wamid;
+    }
+
+    /**
+     * Id local del mensaje de un ticket que tiene ese wamid (para resolver la cita de un entrante).
+     *
+     * @param int         $ticket_id Ticket donde se busca.
+     * @param string|null $wamid     wamid del mensaje citado por el cliente.
+     *
+     * @return int|null
+     */
+    public static function local_id_by_wamid(int $ticket_id, ?string $wamid): ?int
+    {
+        $wamid = trim((string) $wamid);
+        if ($wamid === '') {
+            return null;
+        }
+
+        $id = SupportMessage::where('support_ticket_id', $ticket_id)->where('whatsapp_message_id', $wamid)->value('id');
+
+        return $id !== null ? (int) $id : null;
     }
 
     /**

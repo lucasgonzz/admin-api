@@ -508,7 +508,11 @@ class SupportWhatsappOpenerService
         $primer_id = null;
 
         foreach ($filas as $indice => $fila) {
+            // La cita (si el operador respondió a un mensaje) va solo en la primera parte: las demás
+            // son continuación del mismo texto y citar el mismo mensaje tres veces sería ruido.
+            $this->sender->con_cita($indice === 0 ? $message->reply_to_whatsapp_message_id() : null);
             $whatsapp_message_id = $this->send_con_reintentos($to, (string) $fila->body, $ticket, $indice + 1, $total);
+            $this->sender->con_cita(null);
 
             if ($whatsapp_message_id === null) {
                 // Se corta aca: mandar la parte 4 cuando la 3 nunca llego deja la conversacion

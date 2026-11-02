@@ -1893,6 +1893,12 @@ class WhatsappWebhookController extends Controller
                 'body'                => $parsed['body'],
                 'whatsapp_message_id' => $parsed['message_id'],
                 'delivered_at'        => $delivered_at,
+                // Si el cliente respondió citando un mensaje del hilo, se guarda a cuál (null si cita
+                // algo que no está en este ticket).
+                'reply_to_message_id' => SupportMessage::local_id_by_wamid(
+                    (int) $ticket->id,
+                    isset($parsed['reply_to_message_id']) ? (string) $parsed['reply_to_message_id'] : null
+                ),
             ]);
 
             if ($kind === 'image') {

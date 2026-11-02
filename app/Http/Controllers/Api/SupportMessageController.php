@@ -58,6 +58,23 @@ class SupportMessageController extends BaseController
             return response()->json(['error' => 'ticket closed'], 422);
         }
 
+        // Mensaje al que se responde citándolo. Opcional: sin el campo el envío es el de siempre. Tiene
+        // que ser un mensaje real de ESTE ticket (no un borrador del agente, que el cliente nunca vio).
+        $request->validate(['reply_to_message_id' => ['nullable', 'integer']]);
+        $reply_to_message_id = $request->input('reply_to_message_id');
+        if ($reply_to_message_id !== null && $reply_to_message_id !== '') {
+            $reply_to_message_id = (int) $reply_to_message_id;
+            $cited = SupportMessage::where('id', $reply_to_message_id)
+                ->where('support_ticket_id', $ticket->id)
+                ->where('is_ai_suggestion_draft', false)
+                ->exists();
+            if (! $cited) {
+                return response()->json(['error' => 'El mensaje que querés citar no es de esta conversación.'], 422);
+            }
+        } else {
+            $reply_to_message_id = null;
+        }
+
         // Tipo de contenido recibido desde frontend (en WhatsApp se corrige abajo con el que sale de los bytes).
         $kind = $request->input('kind', 'text');
 
@@ -94,7 +111,7 @@ class SupportMessageController extends BaseController
         $stored_path = null;
         $created = false;
         try {
-            $message = DB::transaction(function () use ($ticket, $kind, $body, $request, $prepared_attachment, $client_message_id, $admin_id, &$stored_path, &$created) {
+            $message = DB::transaction(function () use ($ticket, $kind, $body, $request, $prepared_attachment, $client_message_id, $admin_id, $reply_to_message_id, &$stored_path, &$created) {
                 $locked_ticket = SupportTicket::where('id', $ticket->id)->lockForUpdate()->firstOrFail();
                 // El lock del ticket serializa dos subidas simultáneas del mismo borrador; el índice
                 // único también protege a cualquier consumidor que inserte sin pasar por este método.
@@ -122,6 +139,9 @@ class SupportMessageController extends BaseController
                 ];
                 if ($client_message_id !== null) {
                     $attributes['client_message_id'] = $client_message_id;
+                }
+                if ($reply_to_message_id !== null) {
+                    $attributes['reply_to_message_id'] = $reply_to_message_id;
                 }
                 $message = SupportMessage::create($attributes);
 
