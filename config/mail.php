@@ -72,6 +72,18 @@ return [
             ],
         ],
 
+        // Canal independiente del proceso local; reutiliza la casilla operativa ya configurada.
+        'support_monitor' => [
+            'transport' => env('MAIL_ADMIN_TRANSPORT', 'smtp'),
+            'host' => env('MAIL_HOST', 'smtp.mailgun.org'),
+            'port' => env('MAIL_PORT', 587),
+            'encryption' => env('MAIL_ENCRYPTION', 'tls'),
+            'username' => env('MAIL_ADMIN_USERNAME'),
+            'password' => env('MAIL_ADMIN_PASSWORD'),
+            'timeout' => 15,
+            'from' => ['address' => env('MAIL_ADMIN_FROM_ADDRESS', 'admin@comerciocity.com'), 'name' => 'ComercioCity'],
+        ],
+
         'ses' => [
             'transport' => 'ses',
         ],

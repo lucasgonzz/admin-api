@@ -27,6 +27,18 @@ class ClaudeSupportCodexController extends Controller
         return response()->json(SupportCodexSettings::set_enabled((bool) $data['enabled']));
     }
 
+    public function health(Request $request, \App\Services\SupportCodexHealthService $service)
+    {
+        $data = $request->validate([
+            'status' => 'sometimes|in:ok,error',
+            'error_code' => 'nullable|in:' . implode(',', \App\Services\SupportCodexHealthService::ERROR_CODES),
+            'monitor_version' => ['nullable', 'string', 'max:40', 'regex:/^[A-Za-z0-9_.-]+$/'],
+        ]);
+        $state = $service->heartbeat($data);
+        return response()->json(['accepted' => true, 'server_time' => now()->toIso8601String(),
+            'last_success_at' => $state['last_success_at'] ?? null]);
+    }
+
     public function pending(SupportCodexService $service)
     {
         return response()->json($service->pending());

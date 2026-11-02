@@ -348,6 +348,7 @@ Route::middleware('claude.task.key')
         // Atención desde la suscripción de Codex: endpoints aditivos, nunca un modelo genérico.
         Route::get('support-codex/settings', 'Api\ClaudeSupportCodexController@settings');
         Route::put('support-codex/settings', 'Api\ClaudeSupportCodexController@update_settings');
+        Route::post('support-codex/health', 'Api\ClaudeSupportCodexController@health');
         Route::get('support-codex/pending', 'Api\ClaudeSupportCodexController@pending');
         Route::get('support-codex/operations/{operation_id}', 'Api\ClaudeSupportCodexController@operation');
         Route::post('support-codex/operations/{operation_id}/reconcile', 'Api\ClaudeSupportCodexController@reconcile');

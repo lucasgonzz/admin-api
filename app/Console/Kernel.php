@@ -18,6 +18,9 @@ class Kernel extends ConsoleKernel
         // Reintenta cada 5 minutos los mensajes de soporte no sincronizados a clientes.
         $schedule->command('support:retry-pending-syncs')->everyFiveMinutes();
         $schedule->command('support:check-response-alerts')->everyFiveMinutes();
+        // Fuera del proceso principal: el SMTP tiene tiempo acotado y no frena el scheduler.
+        $schedule->exec(self::artisan_sin_el_lock_del_cron('support:check-codex-health'))
+            ->everyMinute()->withoutOverlapping(2)->runInBackground();
         $schedule->command('support:notify-attention')->everyMinute()->withoutOverlapping(5);
         // Una vez por día alcanza: un cliente se queda sin teléfono cargado una vez, no cada cinco minutos.
         $schedule->command('support:check-clients-without-phone')->dailyAt('09:00');
