@@ -174,8 +174,47 @@ class ClientTokensController extends Controller
              * es lo que le dice al front que la columna de costo por persona es real y no un
              * guion, y que el pie de la tabla tiene que decir de dónde sale la plata. */
             'informa_modelo_por_persona' => $por_persona_modelo !== [],
+            'gasto_del_mes'  => $this->gasto_del_mes($client),
             'configuracion'  => $this->configuracion_de_ia($client),
             'sincronizacion' => $this->estado_de_sincronizacion($client),
+        ];
+    }
+
+    /**
+     * Lo que gastó este cliente en el MES CALENDARIO en curso, para mostrarlo contra el tope de gasto
+     * de su paquete (misión plan-ia-por-gasto, 2/11/2026).
+     *
+     * 🔴 Va aparte de `totales` porque no depende del rango que el operador está mirando: `totales`
+     * son los últimos 30, 7 o 90 días, y el tope es del mes calendario, que es la misma ventana con la
+     * que corta `TopeDeTokensHelper` del lado de empresa.
+     *
+     * 🔴 No es exactamente el número con el que corta el cliente, y por dos motivos que la interfaz
+     * dice: este sale del espejo, que se llena con la recolección de cada noche, y acá un modelo sin
+     * precio queda afuera y se nombra (`modelos_sin_precio`), mientras que empresa lo cobra a la tarifa
+     * más cara. Sirve para que Lucas vea por dónde anda un cliente, no para auditar un corte.
+     *
+     * Solo se devuelve el gasto y no el tope: el tope sale del paquete elegido en el selector de la
+     * pantalla, que es lo que ya hace la línea "Tope:" de la solapa.
+     *
+     * @param Client $client Cliente dueño del consumo.
+     *
+     * @return array{desde: string, hasta: string, costo_usd: float|null, modelos_sin_precio: array<int, string>}
+     */
+    private function gasto_del_mes(Client $client)
+    {
+        $hoy   = Carbon::now(config('app.timezone'));
+        $desde = $hoy->copy()->startOfMonth()->format('Y-m-d');
+        $hasta = $hoy->format('Y-m-d');
+
+        $total = ClientAiTokenUsage::totalizar(
+            ClientAiTokenUsage::resumir(['modelo'], $desde, $hasta, (int) $client->id)
+        );
+
+        return [
+            'desde'              => $desde,
+            'hasta'              => $hasta,
+            'costo_usd'          => $total['costo_usd'],
+            'modelos_sin_precio' => $total['modelos_sin_precio'],
         ];
     }
 
