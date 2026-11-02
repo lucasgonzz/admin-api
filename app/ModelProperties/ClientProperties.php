@@ -78,14 +78,28 @@ class ClientProperties
                 'use_to_filter_in_search' => true,
                 'width' => 200,
             ],
+            /*
+             * Misión telefono-personal-del-dueno (2/11/2026): `phone` es el WhatsApp del NEGOCIO (el que se
+             * conecta a Kapso para atender a los clientes del cliente) y `asistente_phone` el teléfono
+             * PERSONAL del dueño. Vacío = el dueño usa el del negocio, como siempre. La `key` de `phone` no
+             * cambia: solo el rótulo.
+             */
             [
                 'key' => 'phone',
-                'text' => 'Teléfono',
+                'text' => 'Teléfono del negocio (WhatsApp que se conecta para atender clientes)',
                 'type' => 'text',
                 'value' => '',
                 'use_to_filter_in_search' => true,
                 'width' => 140,
                 'show'  => true,
+            ],
+            [
+                'key' => 'asistente_phone',
+                'text' => 'Teléfono personal del dueño (el que le escribe a su agente personal)',
+                'type' => 'text',
+                'value' => '',
+                'not_show_on_table' => true,
+                'width' => 140,
             ],
             /*
              * Casilla del dueño. Es a donde sale el mail con las novedades cuando se le actualiza

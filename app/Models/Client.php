@@ -12,7 +12,9 @@ use Illuminate\Database\Eloquent\Model;
  *
  * @property string|null $slug         Identificador legible opcional (único cuando está definido).
  * @property string|null $company_name Razón social; name suele reflejar el contacto cuando el lead crea el registro.
- * @property string|null $phone        Teléfono de contacto (formato libre; se normaliza al comparar en WhatsApp).
+ * @property string|null $phone        Teléfono de contacto (formato libre; se normaliza al comparar en WhatsApp). Es el WhatsApp del NEGOCIO.
+ * @property string|null $asistente_phone Teléfono PERSONAL del dueño (desde el que le escribe a su agente personal y al
+ *                                      que el admin le escribe como persona). NULL = el dueño usa `phone`.
  * @property int|null     $user_id      Inicio de bloque ComercioCity (múltiplo de 100), alineado con el User en empresa-api.
  */
 class Client extends Model
@@ -478,6 +480,55 @@ class Client extends Model
 
     public function active_client_api() {
         return $this->belongsTo(ClientApi::class, 'active_client_api_id');
+    }
+
+    /**
+     * El teléfono con el que se le habla al DUEÑO como persona y con el que se lo reconoce ante su agente personal
+     * (misión telefono-personal-del-dueno, 2/11/2026).
+     *
+     * 🔴 Es `asistente_phone` si el cliente lo tiene cargado y, si no, `phone`: sin el campo nuevo el resultado es
+     * EXACTAMENTE el de hoy. Devuelve el valor crudo de la ficha (o null si no hay ninguno), sin normalizar, para que
+     * los llamadores que hacían `trim((string) $client->phone)` o `$client->phone ?? $otro` se comporten igual.
+     *
+     * Lo que NO usa este método: todo lo que es «el WhatsApp del negocio conectado a Kapso» (sigue siendo `phone`).
+     *
+     * @return string|null
+     */
+    public function telefono_personal()
+    {
+        if ($this->tiene_telefono_personal_propio()) {
+            return trim((string) $this->asistente_phone);
+        }
+
+        return $this->phone;
+    }
+
+    /**
+     * {@see telefono_personal()} para quien tiene un cliente que puede ser null (`Client::find()` que no encontró nada).
+     *
+     * Existe porque el `$client->phone ?? ''` de los servicios de implementación toleraba un cliente null, y un
+     * `$client->telefono_personal() ?? ''` no: llamar un método sobre null es un error fatal, no un null.
+     *
+     * @param Client|null $client Cliente o null.
+     *
+     * @return string|null El teléfono personal efectivo, o null si no hay cliente o no tiene ninguno.
+     */
+    public static function telefono_personal_de(?Client $client)
+    {
+        return $client === null ? null : $client->telefono_personal();
+    }
+
+    /**
+     * Si el cliente tiene cargado un teléfono personal propio, distinto de «usa el del negocio».
+     *
+     * Con esto en true, el reconocimiento ante el agente personal es SOLO por ese número: el del negocio deja de
+     * identificar al dueño ante el asistente.
+     *
+     * @return bool
+     */
+    public function tiene_telefono_personal_propio()
+    {
+        return trim((string) $this->asistente_phone) !== '';
     }
 
     /**
