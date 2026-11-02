@@ -80,6 +80,9 @@ class ContactoDelClientePorClaudeTest extends TestCase
     /**
      * PATCH al contacto del cliente.
      *
+     * Para escribir (sin `dry_run=true`) el pedido necesita `confirm_client_name`: si el cuerpo no lo trae se agrega el
+     * nombre del cliente. Una prueba que quiere mandarlo ausente o equivocado lo pasa a propósito (`null` = ausente).
+     *
      * @param Client|int           $client Cliente o id.
      * @param array<string, mixed> $cuerpo Cuerpo del pedido.
      *
@@ -88,6 +91,10 @@ class ContactoDelClientePorClaudeTest extends TestCase
     private function patch_contacto($client, array $cuerpo)
     {
         $id = $client instanceof Client ? $client->id : $client;
+
+        if ($client instanceof Client && ! array_key_exists('confirm_client_name', $cuerpo) && empty($cuerpo['dry_run'])) {
+            $cuerpo['confirm_client_name'] = $client->name;
+        }
 
         return $this->patchJson('/api/claude/clients/' . $id . '/contacto', $cuerpo, $this->headers());
     }
@@ -205,6 +212,169 @@ class ContactoDelClientePorClaudeTest extends TestCase
 
         $personal = $this->getJson('/api/claude/query?model=client&include=contacto_personal&ids=' . $client->id, $this->headers());
         $personal->assertStatus(200)->assertJsonPath('data.0.asistente_phone', self::PERSONAL);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Ids mal armados y confirmación del nombre
+    // ---------------------------------------------------------------------------------------------
+
+    /**
+     * 🔴 Un id que no es de dígitos puros (`64.9`, `1e1`, ` 64`) es 404 y NO escribe: `is_numeric()` lo habría casteado
+     * al id de otro cliente. Vale para el GET y para el PATCH.
+     *
+     * @return void
+     */
+    public function test_un_id_mal_armado_es_404_y_no_escribe(): void
+    {
+        $client = $this->cliente();
+        $id     = (string) $client->id;
+
+        foreach ([$id . '.9', $id . 'e0', '%20' . $id, $id . '%20'] as $malo) {
+            $this->patchJson('/api/claude/clients/' . $malo . '/contacto', [
+                'asistente_phone'     => self::PERSONAL,
+                'confirm_client_name' => $client->name,
+            ], $this->headers())->assertStatus(404);
+
+            $this->getJson('/api/claude/clients/' . $malo . '/contacto', $this->headers())->assertStatus(404);
+        }
+
+        $this->assertNull($client->fresh()->asistente_phone);
+        $this->assertSame(0, ClientContactChange::where('client_id', $client->id)->count());
+
+        /* Y el id bien armado sí escribe. */
+        $this->patch_contacto($client, ['asistente_phone' => self::PERSONAL])->assertStatus(200);
+        $this->assertSame(self::PERSONAL, $client->fresh()->asistente_phone);
+    }
+
+    /**
+     * 🔴 Sin `confirm_client_name`, escribir es 422 y no escribe nada.
+     *
+     * @return void
+     */
+    public function test_sin_confirm_client_name_no_escribe(): void
+    {
+        $client = $this->cliente();
+
+        foreach ([null, '', '   '] as $vacio) {
+            $this->patch_contacto($client, ['asistente_phone' => self::PERSONAL, 'confirm_client_name' => $vacio])
+                ->assertStatus(422);
+        }
+
+        $this->assertNull($client->fresh()->asistente_phone);
+        $this->assertSame(0, ClientContactChange::where('client_id', $client->id)->count());
+    }
+
+    /**
+     * Un `confirm_client_name` equivocado es 422, no revela el nombre correcto y no escribe. Mayúsculas y espacios
+     * de más no cuentan.
+     *
+     * @return void
+     */
+    public function test_un_confirm_client_name_equivocado_es_422_y_el_correcto_ignora_mayusculas(): void
+    {
+        $client = $this->cliente();
+
+        $r = $this->patch_contacto($client, ['asistente_phone' => self::PERSONAL, 'confirm_client_name' => 'Otro negocio']);
+
+        $r->assertStatus(422);
+        $this->assertStringNotContainsString($client->name, (string) $r->getContent());
+        $this->assertNull($client->fresh()->asistente_phone);
+
+        $this->patch_contacto($client, ['asistente_phone' => self::PERSONAL, 'confirm_client_name' => '  ' . strtoupper($client->name) . ' '])
+            ->assertStatus(200)
+            ->assertJsonPath('aplicado', true);
+    }
+
+    /**
+     * Con `dry_run=true` no hace falta confirmar el nombre.
+     *
+     * @return void
+     */
+    public function test_el_dry_run_no_pide_confirm_client_name(): void
+    {
+        $client = $this->cliente();
+
+        $this->patchJson('/api/claude/clients/' . $client->id . '/contacto', [
+            'asistente_phone' => self::PERSONAL,
+            'dry_run'         => true,
+        ], $this->headers())
+            ->assertStatus(200)
+            ->assertJsonPath('aplicado', false);
+
+        $this->assertNull($client->fresh()->asistente_phone);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Advertencias
+    // ---------------------------------------------------------------------------------------------
+
+    /**
+     * Un número que no empieza con +54 avisa que los envíos del admin son para teléfonos argentinos.
+     *
+     * @return void
+     */
+    public function test_un_numero_extranjero_advierte(): void
+    {
+        $client = $this->cliente();
+
+        $r = $this->patch_contacto($client, ['asistente_phone' => '+15551234567']);
+
+        $r->assertStatus(200);
+        $this->assertStringContainsString('teléfonos argentinos', implode(' ', $r->json('advertencias')));
+
+        $argentino = $this->patch_contacto($this->cliente(), ['asistente_phone' => self::PERSONAL]);
+        $this->assertStringNotContainsString('teléfonos argentinos', implode(' ', $argentino->json('advertencias')));
+    }
+
+    /**
+     * Con el interruptor prendido, cambiar o borrar el teléfono personal avisa desde dónde tiene que escribir el
+     * dueño y que el número anterior cae a soporte.
+     *
+     * @return void
+     */
+    public function test_cambiar_el_personal_con_el_interruptor_prendido_advierte(): void
+    {
+        $client = $this->cliente(['asistente_phone' => self::PERSONAL, 'asistente_whatsapp_activo' => true]);
+
+        $r = $this->patch_contacto($client, ['asistente_phone' => '+5493476112233']);
+
+        $r->assertStatus(200);
+        $texto = implode(' ', $r->json('advertencias'));
+        $this->assertStringContainsString('el dueño debe escribirle al agente desde +5493476112233', $texto);
+        $this->assertStringContainsString('cae a soporte', $texto);
+
+        /* Borrarlo: desde ahora es el del negocio. */
+        $borrado = $this->patch_contacto($client->fresh(), ['asistente_phone' => null]);
+        $this->assertStringContainsString('desde ' . self::NEGOCIO, implode(' ', $borrado->json('advertencias')));
+    }
+
+    /**
+     * Con el interruptor apagado no hace falta ese aviso.
+     *
+     * @return void
+     */
+    public function test_cambiar_el_personal_con_el_interruptor_apagado_no_avisa_del_cambio_de_numero(): void
+    {
+        $client = $this->cliente(['asistente_phone' => self::PERSONAL]);
+
+        $r = $this->patch_contacto($client, ['asistente_phone' => '+5493476112233']);
+
+        $this->assertStringNotContainsString('cae a soporte', implode(' ', $r->json('advertencias')));
+    }
+
+    /**
+     * Un cliente dado de baja avisa que el webhook no lo reconoce.
+     *
+     * @return void
+     */
+    public function test_un_cliente_inactivo_advierte(): void
+    {
+        $client = $this->cliente(['is_active' => false]);
+
+        $r = $this->patch_contacto($client, ['asistente_phone' => self::PERSONAL]);
+
+        $r->assertStatus(200);
+        $this->assertStringContainsString('dado de baja', implode(' ', $r->json('advertencias')));
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -571,7 +741,8 @@ class ContactoDelClientePorClaudeTest extends TestCase
         $texto = implode(' ', $r->json('advertencias'));
         $this->assertStringContainsString('número del asistente no está listo', $texto);
         $this->assertStringContainsString('api_key', $texto);
-        $this->assertStringContainsString('paquete de IA', $texto);
+        $this->assertStringContainsString('paquete de IA asignado (ai_plan_id vacío)', $texto);
+        $this->assertStringNotContainsString('puede que no tenga la extensión', $texto);
         $this->assertTrue($client->fresh()->asistente_whatsapp_activo);
     }
 }

@@ -239,7 +239,8 @@ class ClaudeAgentImplementationOpsController extends Controller
      * Cambia el camino, carga los ids de Kapso y Meta y el teléfono de contacto, y/o cierra la implementación
      * (`completed` o `cancelled`). Todo opcional: solo se toca lo que vino (un null explícito borra el valor).
      *
-     * `contact_phone` es el teléfono al que `.../whatsapp` le escribe al dueño en vez del de la ficha: en el
+     * `contact_phone` es el teléfono al que `.../whatsapp` le escribe al dueño en vez del suyo (su teléfono
+     * personal `asistente_phone` si lo tiene cargado y, si no, el de la ficha, `clients.phone`): en el
      * camino `propio`, cuando el dueño elimina su cuenta para conectar el número del negocio a Meta, ese número
      * deja de tener la app. Acá no se valida contra los contactos del cliente: lo valida el envío (422
      * `telefono_ajeno`), que es donde importa y donde los contactos están al día.
@@ -438,8 +439,8 @@ class ClaudeAgentImplementationOpsController extends Controller
      *   1. Lista blanca y tipos (422). La implementación (404), el cliente (404) y activo (422 `cliente_inactivo`).
      *   2. Circuito de Codex apagado: 422 `codex_apagado` (nadie atendería la respuesta del ticket).
      *   3. El destino: el `contact_phone` de la implementación si está cargado (tiene que ser un contacto del
-     *      cliente: si no, 422 `telefono_ajeno`) o, si no, el dueño con un teléfono válido en la ficha (422
-     *      `sin_contacto`). Y un admin remitente (422 `sin_admin`).
+     *      cliente: si no, 422 `telefono_ajeno`) o, si no, el dueño (su teléfono personal `asistente_phone` si lo tiene
+     *      cargado; si no, el de la ficha) con un teléfono válido (422 `sin_contacto`). Y un admin remitente (422 `sin_admin`).
      *   4. Idempotencia por `operation_id`: misma clave y mismo contenido → el resultado guardado
      *      (`repetida: true`, sin reenviar); otro contenido → 409 `operation_id_reusado`; todavía mandando →
      *      409 `envio_en_curso`.
@@ -509,7 +510,7 @@ class ClaudeAgentImplementationOpsController extends Controller
         $etapa        = $this->entero_o_null($request->input('etapa'));
         $etapa        = $etapa === null ? (int) $implementation->current_stage : $etapa;
 
-        /* --- Freno 3: el contacto y el remitente. El dueño por la ficha, salvo que la implementación tenga un
+        /* --- Freno 3: el contacto y el remitente. El dueño (`asistente_phone` o, si no lo tiene, el de la ficha), salvo que la implementación tenga un
            `contact_phone` (camino `propio`, después de eliminar la cuenta del número del negocio): entonces ese,
            que tiene que ser un contacto del cliente con el MISMO criterio que el webhook (`resolver_contacto` →
            `ClientPhoneDirectory::resolve_for_client`); si no, la respuesta no caería en el ticket. --- */

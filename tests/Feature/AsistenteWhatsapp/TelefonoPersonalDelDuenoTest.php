@@ -4,12 +4,15 @@ namespace Tests\Feature\AsistenteWhatsapp;
 
 use App\Jobs\EnviarMensajeAlAsistenteJob;
 use App\Models\Client;
+use App\Models\AdminSetting;
 use App\Models\ClientAssistantMessage;
 use App\Models\ClientTemplate;
 use App\Models\Lead;
 use App\Models\LeadMessage;
+use App\Models\SupportMessage;
 use App\Models\SupportTicket;
 use App\Services\AsistenteInformesService;
+use App\Services\AsistenteWhatsappSettings;
 use App\Services\AsistenteRecordatoriosService;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
@@ -183,6 +186,36 @@ class TelefonoPersonalDelDuenoTest extends BaseDelCanal
 
         $this->assertSame(0, $this->filas_del_asistente($client), 'El del negocio no es el dueño ante el asistente.');
         Queue::assertNotPushed(EnviarMensajeAlAsistenteJob::class);
+    }
+
+    /**
+     * 🔴 Con los tickets de soporte prendidos, el mensaje del número del NEGOCIO (que ya no es el dueño ante el
+     * asistente) termina en un TICKET de soporte del cliente, y no en el asistente.
+     *
+     * @return void
+     */
+    public function test_con_telefono_personal_el_mensaje_del_negocio_termina_en_un_ticket_de_soporte(): void
+    {
+        Queue::fake();
+        AdminSetting::set(AsistenteWhatsappSettings::KEY_TICKETS_ENABLED, '1');
+        $client = $this->cliente_con_personal();
+
+        $this->postear_webhook($this->payload_de_texto(self::NEGOCIO, 'Se me traba el sistema', 'wamid.NEGOCIO-A-SOPORTE'))
+            ->assertStatus(200);
+
+        $ticket = SupportTicket::where('client_id', $client->id)->first();
+        $this->assertNotNull($ticket, 'El mensaje del número del negocio tenía que abrir un ticket de soporte.');
+        $this->assertSame('whatsapp', $ticket->source);
+        $this->assertSame(1, SupportMessage::where('whatsapp_message_id', 'wamid.NEGOCIO-A-SOPORTE')->count());
+        $this->assertSame(0, $this->filas_del_asistente($client));
+        Queue::assertNotPushed(EnviarMensajeAlAsistenteJob::class);
+
+        /* Y el del personal, con los mismos tickets prendidos, sigue yendo al asistente y no abre ticket nuevo. */
+        $this->postear_webhook($this->payload_de_texto(self::PERSONAL, 'Cuánto vendí ayer?', 'wamid.PERSONAL-AL-ASISTENTE'))
+            ->assertStatus(200);
+
+        $this->assertSame(1, $this->filas_del_asistente($client));
+        $this->assertSame(1, SupportTicket::where('client_id', $client->id)->count());
     }
 
     /**

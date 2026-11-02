@@ -561,8 +561,10 @@ Route::middleware('claude.task.key')
            el PERSONAL del dueño (`asistente_phone`) y el interruptor «Habla con su asistente por WhatsApp». El PATCH
            tiene dry_run, validación de formato y de duplicados, y deja rastro en `client_contact_changes`. Están en
            ClaudeClientContactoController. */
-        Route::get('clients/{id}/contacto', 'Api\ClaudeClientContactoController@contacto_json');
-        Route::patch('clients/{id}/contacto', 'Api\ClaudeClientContactoController@actualizar_contacto_json');
+        Route::get('clients/{id}/contacto', 'Api\ClaudeClientContactoController@contacto_json')
+            ->whereNumber('id');
+        Route::patch('clients/{id}/contacto', 'Api\ClaudeClientContactoController@actualizar_contacto_json')
+            ->whereNumber('id');
         /* 🔴 Carga de horarios sin pasar por el modal del admin. REEMPLAZA el conjunto entero: lo
            que no viaja en `dias` se borra. Los frenos (dry_run por defecto y confirm_client_name
            cuando dry_run es false) están en ClaudeClientOpsController; la regla del modelo y la

@@ -27,7 +27,8 @@ use Illuminate\Support\Facades\DB;
  * (`Client::telefono_personal()`).
  *
  * 🔴 Cambiar un teléfono REDIRIGE envíos y el reconocimiento del dueño ante el agente personal. Por eso:
- *   - `dry_run=true` devuelve el antes y el después sin escribir nada;
+ *   - `dry_run=true` devuelve el antes y el después sin escribir nada; para escribir hace falta además
+ *     `confirm_client_name` (el `name` del cliente), igual que `PUT clients/{id}/schedule`;
  *   - el formato tiene que ser internacional (`+` y entre 10 y 15 dígitos);
  *   - un número que ya es de otro cliente activo o de un empleado se rechaza (422): el agente personal no sabría a
  *     quién darle el acceso, y por seguridad no se lo daría a nadie;
@@ -71,7 +72,8 @@ class ClaudeClientContactoController extends Controller
      * Cambia el contacto del cliente. Todos los campos son opcionales, pero tiene que venir al menos uno.
      *
      * Cuerpo: `phone` (string), `asistente_phone` (string, o null / "" para borrarlo), `asistente_whatsapp_activo`
-     * (booleano), `motivo` (string, queda en el rastro) y `dry_run` (booleano, default false).
+     * (booleano), `motivo` (string, queda en el rastro), `dry_run` (booleano, default false) y `confirm_client_name`
+     * (obligatorio cuando `dry_run` es false: tiene que coincidir con `clients.name`).
      *
      * @param Request    $request Request entrante.
      * @param int|string $id      Id numérico o uuid del cliente.
@@ -86,6 +88,7 @@ class ClaudeClientContactoController extends Controller
             'asistente_whatsapp_activo' => 'nullable|boolean',
             'motivo'                    => 'nullable|string|max:191',
             'dry_run'                   => 'nullable|boolean',
+            'confirm_client_name'       => 'nullable|string|max:190',
         ]);
         if ($invalido !== null) {
             return $invalido;
@@ -194,6 +197,27 @@ class ClaudeClientContactoController extends Controller
         $advertencias = $this->advertencias($client, $antes, $despues, $cambios);
 
         $dry_run = $request->filled('dry_run') ? $request->boolean('dry_run') : false;
+
+        /* Freno: para ESCRIBIR hace falta `confirm_client_name` igual al `name` del cliente, igual que en
+           `PUT clients/{id}/schedule`. Cambiar un teléfono redirige envíos y el reconocimiento del dueño, y un id
+           numérico no tiene ninguna redundancia contra operar el cliente equivocado; el nombre sí. Con
+           `dry_run=true` no hace falta. El error no revela el nombre correcto. */
+        if (! $dry_run) {
+            if (trim((string) $request->input('confirm_client_name')) === '') {
+                return $this->error_422(
+                    'Falta confirm_client_name: para escribir hay que confirmar el nombre del cliente (clients.name). No se escribió nada.',
+                    [
+                        'client_id' => (int) $client->id,
+                        'ayuda'     => 'Mandá confirm_client_name con el nombre exacto del cliente (GET claude/clients/' . (int) $client->id . '), o dry_run=true para previsualizar sin confirmar.',
+                    ]
+                );
+            }
+
+            $rechazo = $this->rechazar_si_el_nombre_del_cliente_no_confirma($request, $client, 'No se escribió nada.');
+            if ($rechazo !== null) {
+                return $rechazo;
+            }
+        }
 
         /* `(object)` para que un cambio vacío viaje como `{}` y no como `[]`. */
         $cambios_json = count($cambios) === 0 ? (object) [] : $cambios;
@@ -329,6 +353,25 @@ class ClaudeClientContactoController extends Controller
             $advertencias[] = '`asistente_phone` es igual a `phone`: no hace falta cargarlo.';
         }
 
+        /* Los envíos salientes del admin pasan por `WhatsappNormalizer::normalize()`, que está escrito para
+           teléfonos argentinos: un número de otro país puede no recibir nada. */
+        foreach (['phone', 'asistente_phone'] as $campo) {
+            if (isset($cambios[$campo]) && $cambios[$campo]['despues'] !== null && strpos((string) $cambios[$campo]['despues'], '+54') !== 0) {
+                $advertencias[] = 'Los envíos salientes del admin están escritos para teléfonos argentinos; un número extranjero puede no recibir los mensajes (`' . $campo . '`: ' . $cambios[$campo]['despues'] . ').';
+            }
+        }
+
+        /* Con el interruptor prendido, cambiar o borrar el teléfono personal cambia desde dónde tiene que
+           escribirle el dueño al agente: el número anterior deja de ser reconocido. */
+        if (isset($cambios['asistente_phone']) && $despues['asistente_whatsapp_activo'] === true) {
+            $efectivo = $despues['asistente_phone'] !== null ? $despues['asistente_phone'] : $despues['phone'];
+            $advertencias[] = 'A partir de ahora el dueño debe escribirle al agente desde ' . ($efectivo !== null ? $efectivo : '(ningún teléfono)') . '; el número anterior cae a soporte.';
+        }
+
+        if (! (bool) $client->is_active) {
+            $advertencias[] = 'El cliente está dado de baja (is_active falso): el webhook no lo reconoce, así que el agente personal no le va a contestar aunque el interruptor esté prendido.';
+        }
+
         if (isset($cambios['asistente_phone']) && $despues['asistente_phone'] !== null && $despues['asistente_whatsapp_activo'] !== true) {
             $advertencias[] = 'Quedó cargado el teléfono personal, pero «Habla con su asistente por WhatsApp» está apagado: el dueño no va a hablar con el agente personal hasta que se prenda.';
         }
@@ -343,7 +386,7 @@ class ClaudeClientContactoController extends Controller
             }
 
             if (empty($client->ai_plan_id)) {
-                $advertencias[] = 'El cliente no tiene un paquete de IA asignado: puede que no tenga la extensión de Agentes de IA y el agente personal le conteste que su sistema todavía no tiene la función.';
+                $advertencias[] = 'El cliente no tiene paquete de IA asignado (ai_plan_id vacío). Este dato no dice si el sistema del cliente tiene la extensión agentes_ia: eso se verifica en su empresa-api, no desde acá.';
             }
         }
 
@@ -532,7 +575,10 @@ class ClaudeClientContactoController extends Controller
     }
 
     /**
-     * Resuelve el cliente de la ruta (id numérico o uuid).
+     * Resuelve el cliente de la ruta: solo un id de dígitos puros o un uuid con su forma.
+     *
+     * 🔴 No `is_numeric()`: aceptaría `64.9`, `1e1` o ` 64` y los castearía a otro id, y esta ruta ESCRIBE. Las
+     * rutas ya llevan `whereNumber('id')`; esto es la segunda barrera, por si el método se llama de otro lado.
      *
      * @param int|string $route_id Segmento de la ruta.
      *
@@ -540,10 +586,16 @@ class ClaudeClientContactoController extends Controller
      */
     private function resolver_cliente($route_id)
     {
-        $query = Client::query();
+        $id = (string) $route_id;
 
-        return is_numeric($route_id)
-            ? $query->where('id', (int) $route_id)->first()
-            : $query->where('uuid', (string) $route_id)->first();
+        if ($id !== '' && ctype_digit($id)) {
+            return Client::query()->where('id', (int) $id)->first();
+        }
+
+        if (preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $id) === 1) {
+            return Client::query()->where('uuid', $id)->first();
+        }
+
+        return null;
     }
 }
