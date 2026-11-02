@@ -16,6 +16,10 @@ use Illuminate\Database\Eloquent\Model;
  * @property string      $nombre                     Nombre del paquete (Básico, Intermedio, Pro).
  * @property float       $precio_usd                 Precio mensual en dólares.
  * @property int|null    $tope_tokens_mensual        Tope de tokens del mes; null/0 = sin tope.
+ * @property string|null $tope_gasto_usd_mensual     Tope de gasto del mes en dólares (2/11/2026). Con un
+ *                                                   valor > 0 reemplaza al tope de tokens del lado de
+ *                                                   empresa; null/0 = sin tope de gasto y todo sigue
+ *                                                   como hoy. Lee como string por el cast `decimal:2`.
  * @property int|null    $tope_interacciones_diarias Tope de interacciones diarias; null/0 = sin tope.
  * @property int|null    $tope_busquedas_web_diarias Tope diario de búsquedas por código de barras con
  *                                                   búsqueda web por negocio (24/9/2026); null/0 =
@@ -35,12 +39,14 @@ class AiPlan extends Model
 
     /**
      * Los topes viajan como enteros (o null) para que la comparación con el consumo del lado de
-     * empresa sea aritmética y no de strings. El precio como decimal para no arrastrar floats sucios.
+     * empresa sea aritmética y no de strings. El precio y el tope de gasto como decimal para no
+     * arrastrar floats sucios (el push lo convierte a número: ver `cuerpo_del_plan`).
      *
      * @var array<string, string>
      */
     protected $casts = [
         'precio_usd'                 => 'decimal:2',
+        'tope_gasto_usd_mensual'     => 'decimal:2',
         'tope_tokens_mensual'        => 'integer',
         'tope_interacciones_diarias' => 'integer',
         'tope_busquedas_web_diarias' => 'integer',

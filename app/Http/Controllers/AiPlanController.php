@@ -104,6 +104,12 @@ class AiPlanController extends Controller
      * null o 0 NO es "sin tope": es el defecto de 30 que aplica empresa. Si no viene en el alta,
      * la columna toma su default (30).
      *
+     * El tope de gasto en dólares (misión plan-ia-por-gasto, 2/11/2026) es nullable y decimal: null o
+     * 0 = sin tope de gasto, y empresa sigue con el de tokens. Como `validate()` solo devuelve lo que
+     * vino, un PUT sin esta clave (un SPA abierto desde antes del deploy) no la toca en vez de
+     * borrarla. El `max` es el techo de `decimal(10,2)`: sin él, un número de más se convierte en un
+     * 500 de la base en vez de un 422 que diga qué pasó.
+     *
      * @param Request  $request
      * @param int|null $ignorar_id Id a excluir de la regla `unique` en la edición.
      *
@@ -121,6 +127,7 @@ class AiPlanController extends Controller
             'nombre'                     => ['required', 'string', 'max:255', $regla_nombre],
             'precio_usd'                 => ['required', 'numeric', 'min:0'],
             'tope_tokens_mensual'        => ['nullable', 'integer', 'min:0'],
+            'tope_gasto_usd_mensual'     => ['nullable', 'numeric', 'min:0', 'max:99999999.99'],
             'tope_interacciones_diarias' => ['nullable', 'integer', 'min:0'],
             'tope_busquedas_web_diarias' => ['nullable', 'integer', 'min:0'],
             'activo'                     => ['boolean'],
