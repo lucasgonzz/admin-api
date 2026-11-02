@@ -102,7 +102,8 @@ class ImplementationSupportWhatsappService
 
     /**
      * El contacto al que va el mensaje: el `telefono` pedido (que tiene que ser un contacto del cliente) o,
-     * si no vino, el teléfono del dueño (`clients.phone`).
+     * si no vino, el teléfono del dueño como persona (`Client::telefono_personal()`: su teléfono personal si lo
+     * tiene cargado y, si no, `clients.phone`).
      *
      * 🔴 El teléfono tiene que estar en la ficha (`ClientPhoneDirectory::resolve_for_client`, el mismo
      * criterio que el modal de la bandeja y que el webhook): si no, la respuesta del cliente no la reconoce
@@ -125,7 +126,7 @@ class ImplementationSupportWhatsappService
             return ['contacto' => $contacto, 'motivo' => $contacto === null ? 'telefono_ajeno' : null];
         }
 
-        $del_dueno = trim((string) $client->phone);
+        $del_dueno = trim((string) $client->telefono_personal());
         $contacto  = $del_dueno === '' ? null : $this->directorio->resolve_for_client($client, $del_dueno);
 
         return ['contacto' => $contacto, 'motivo' => $contacto === null ? 'sin_contacto' : null];
