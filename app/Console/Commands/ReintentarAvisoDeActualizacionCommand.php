@@ -313,7 +313,11 @@ class ReintentarAvisoDeActualizacionCommand extends Command
             ->whereNotNull('mail_enviado_at')
             ->whereNull('whatsapp_enviado_at')
             ->whereHas('client', function ($query) {
-                $query->whereNotNull('phone')->where('phone', '!=', '');
+                $query->where(function ($con_phone) {
+                    $con_phone->whereNotNull('phone')->where('phone', '!=', '');
+                })->orWhere(function ($con_personal) {
+                    $con_personal->whereNotNull('asistente_phone')->where('asistente_phone', '!=', '');
+                });
             })
             ->with(['client', 'client_version_upgrade.to_version'])
             ->orderByDesc('id');

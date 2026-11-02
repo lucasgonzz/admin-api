@@ -183,7 +183,7 @@ class EcommerceImplementationConversationService
         }
 
         $client = $this->resolve_client($implementation);
-        $phone  = trim((string) ($client->phone ?? ''));
+        $phone  = trim((string) Client::telefono_personal_de($client));
 
         if ($phone === '') {
             Log::channel('daily')->warning('EcommerceImplementationConversationService: cliente sin teléfono para apertura de Etapa 1.', [
@@ -213,7 +213,7 @@ class EcommerceImplementationConversationService
     private function send_stage_2_opening(EcommerceImplementation $implementation): void
     {
         $client = $this->resolve_client($implementation);
-        $phone  = trim((string) ($client->phone ?? ''));
+        $phone  = trim((string) Client::telefono_personal_de($client));
 
         if ($phone === '') {
             return;
@@ -236,7 +236,7 @@ class EcommerceImplementationConversationService
     private function send_stage_5_opening(EcommerceImplementation $implementation): void
     {
         $client = $this->resolve_client($implementation);
-        $phone  = trim((string) ($client->phone ?? ''));
+        $phone  = trim((string) Client::telefono_personal_de($client));
 
         if ($phone === '') {
             return;

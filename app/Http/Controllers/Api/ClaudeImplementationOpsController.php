@@ -652,6 +652,9 @@ class ClaudeImplementationOpsController extends Controller
 
             $bloque['contacto'] = [
                 'phone'                   => $client->phone,
+                /* Teléfono PERSONAL del dueño (misión telefono-personal-del-dueno, 2/11/2026): clave nueva, null si
+                   el cliente no tiene uno propio (entonces el dueño usa `phone`). */
+                'asistente_phone'         => $client->tiene_telefono_personal_propio() ? trim((string) $client->asistente_phone) : null,
                 'email'                   => $client->email,
                 'email_formulario'        => isset($datos_del_formulario['email']) ? (string) $datos_del_formulario['email'] : null,
                 'migration_contact_phone' => $implementation->migration_contact_phone,
@@ -1294,7 +1297,7 @@ class ClaudeImplementationOpsController extends Controller
                     . 'sobre un negocio que opera.';
             }
 
-            if (trim((string) $client->phone) === '') {
+            if (trim((string) $client->telefono_personal()) === '') {
                 $avisos[] = 'El cliente no tiene teléfono cargado: no se le va a poder escribir por WhatsApp.';
             }
 
@@ -2476,7 +2479,7 @@ class ClaudeImplementationOpsController extends Controller
         if ($crudo === null) {
             $implementation->loadMissing('client');
 
-            $del_dueno = $implementation->client === null ? '' : trim((string) $implementation->client->phone);
+            $del_dueno = $implementation->client === null ? '' : trim((string) $implementation->client->telefono_personal());
             $del_resp  = trim((string) $implementation->migration_contact_phone);
 
             $crudo = $accion === 'pedir_archivos' && $del_resp !== '' ? $del_resp : $del_dueno;

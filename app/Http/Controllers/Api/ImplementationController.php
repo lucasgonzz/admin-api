@@ -580,7 +580,7 @@ class ImplementationController extends Controller
             'stage_number'        => $implementation->current_stage,
             'direction'           => 'inbound',
             // Teléfono remitente (necesario para la ventana de 24 h): el del dueño en esta simulación.
-            'phone'               => (string) ($implementation->client->phone ?? ''),
+            'phone'               => (string) Client::telefono_personal_de($implementation->client),
             'body'                => $content,
             'whatsapp_message_id' => null,
             'sent_at'             => now(),
@@ -594,7 +594,7 @@ class ImplementationController extends Controller
 
         // Procesar el mensaje como si viniera del webhook de WhatsApp real.
         $parsed = [
-            'from' => (string) ($implementation->client->phone ?? ''),
+            'from' => (string) Client::telefono_personal_de($implementation->client),
             'type' => 'text',
             'body' => $content,
         ];
@@ -627,7 +627,7 @@ class ImplementationController extends Controller
 
         // Obtener el cliente asociado a la implementación para leer el teléfono.
         $client = $implementation->client ?? Client::find($implementation->client_id);
-        $phone  = trim((string) ($client->phone ?? ''));
+        $phone  = trim((string) Client::telefono_personal_de($client));
 
         if ($phone === '') {
             return response()->json(['message' => 'El cliente no tiene teléfono cargado.'], 422);

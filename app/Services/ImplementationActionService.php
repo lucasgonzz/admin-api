@@ -557,7 +557,7 @@ class ImplementationActionService
     {
         $client = $implementation->client ?? Client::find($implementation->client_id);
 
-        return trim((string) ($client->phone ?? ''));
+        return trim((string) Client::telefono_personal_de($client));
     }
 
     /**

@@ -290,7 +290,10 @@ class ClaudeClientOpsController extends Controller
                     ],
                 ],
                 'GET claude/clients/{id}' => 'Ficha completa de un cliente (id numérico o uuid): proyección flaca + apis '
-                    . '+ horarios crudos y resueltos + estado_ahora + proximo_cierre + upgrades recientes.',
+                    . '+ horarios crudos y resueltos + estado_ahora + proximo_cierre + upgrades recientes. '
+                    . 'Trae también `phone`, `asistente_phone` (teléfono personal del dueño) y `asistente_whatsapp_activo`.',
+                'GET|PATCH claude/clients/{id}/contacto' => 'Ver y cambiar los teléfonos del cliente (negocio y personal del dueño) '
+                    . 'y el interruptor del asistente por WhatsApp, con dry_run y rastro. Detalle en GET claude/catalog.',
                 'GET claude/clients/{id}/schedule' => [
                     'parametros' => [
                         'dias'     => 'Días a resolver. Default ' . self::DIAS_SCHEDULE_DEFAULT . ', máximo ' . self::DIAS_SCHEDULE_MAX . '.',
@@ -656,6 +659,10 @@ class ClaudeClientOpsController extends Controller
         $columnas = self::CLIENT_COLUMNS_BASE;
         $columnas[] = 'versions.version as current_version';
         $columnas[] = 'clients.phone';
+        /* Misión telefono-personal-del-dueno (2/11/2026): dos claves nuevas en la ficha, sin sacar ninguna. El
+           teléfono personal viaja con el mismo criterio que `phone` en este endpoint (la ficha de UN cliente). */
+        $columnas[] = 'clients.asistente_phone';
+        $columnas[] = 'clients.asistente_whatsapp_activo';
 
         $row = DB::table('clients')
             ->leftJoin('versions', 'versions.id', '=', 'clients.current_version_id')
@@ -2161,6 +2168,10 @@ class ClaudeClientOpsController extends Controller
 
         $cliente['id']        = (int) $cliente['id'];
         $cliente['is_active'] = (bool) $cliente['is_active'];
+
+        if (array_key_exists('asistente_whatsapp_activo', $cliente)) {
+            $cliente['asistente_whatsapp_activo'] = (bool) $cliente['asistente_whatsapp_activo'];
+        }
 
         foreach (['current_version_id', 'active_client_api_id', 'user_id', 'shared_database_group_id'] as $campo) {
             if (array_key_exists($campo, $cliente) && $cliente[$campo] !== null) {

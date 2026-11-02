@@ -108,6 +108,26 @@ class ClientPhoneDirectory
             }
         }
 
+        /* Teléfono PERSONAL del dueño (misión telefono-personal-del-dueno, 2/11/2026). Es un contacto del cliente
+           con el mismo carácter de dueño que `clients.phone` (`origin = client`, sin empleado): cuando el dueño
+           escribe desde su teléfono personal al número institucional, el webhook lo tiene que reconocer como el
+           cliente y no como un desconocido. Sin duplicar la fila si coincide con el teléfono de la ficha (o con
+           el de un empleado: el `$seen` ya lo tiene). Sin `asistente_phone` este bloque no hace nada. */
+        $asistente_phone = trim((string) ($client->asistente_phone ?? ''));
+        if ($asistente_phone !== '') {
+            $normalized = WhatsappNormalizer::normalize($asistente_phone);
+            if ($normalized !== '' && ! isset($seen[$normalized])) {
+                $seen[$normalized] = true;
+                $rows[] = [
+                    'label'              => $client->resolve_display_name() . ' (personal)',
+                    'phone'              => $normalized,
+                    'raw_phone'          => $asistente_phone,
+                    'client_employee_id' => null,
+                    'origin'             => 'client',
+                ];
+            }
+        }
+
         // Lead promovido: el webhook lo usa como fallback cuando clients.phone está vacío.
         $promoted_leads = Lead::query()
             ->where('promoted_client_id', $client->id)
@@ -254,8 +274,8 @@ class ClientPhoneDirectory
      * ¿Un mensaje dirigido a este teléfono le llegaría a un cliente (o a un admin)?
      *
      * El conjunto de teléfonos «de cliente» sale de:
-     *   1. `clients.phone` de los clientes ACTIVOS (`is_active = true`, la misma columna con la que
-     *      `WhatsappWebhookController::find_client_by_phone()` decide quién es cliente). Un cliente
+     *   1. `clients.phone` y `clients.asistente_phone` de los clientes ACTIVOS (`is_active = true`, las columnas con
+     *      las que `WhatsappWebhookController::find_client_by_phone()` decide quién es cliente). Un cliente
      *      dado de baja no cuenta: el que dejó de serlo puede volver a ser un lead y recibir lo suyo;
      *   2. `client_employees.phone` de esos mismos clientes activos;
      *   3. `leads.phone` de los leads promovidos a un cliente activo — la tercera fuente con la que el
@@ -339,12 +359,15 @@ class ClientPhoneDirectory
 
         $clientes_activos = Client::query()
             ->where('is_active', true)
-            ->get(['id', 'phone']);
+            ->get(['id', 'phone', 'asistente_phone']);
 
         $ids_activos = [];
         foreach ($clientes_activos as $cliente) {
             $ids_activos[] = (int) $cliente->id;
             $guardados[]   = (string) ($cliente->phone ?? '');
+            /* El teléfono personal del dueño también es «de un cliente»: un lead con ese número no recibe
+               seguimientos automáticos (misión telefono-personal-del-dueno, 2/11/2026). */
+            $guardados[]   = (string) ($cliente->asistente_phone ?? '');
         }
 
         if (! empty($ids_activos)) {

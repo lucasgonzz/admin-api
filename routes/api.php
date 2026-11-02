@@ -557,6 +557,14 @@ Route::middleware('claude.task.key')
         Route::get('clients', 'Api\ClaudeClientOpsController@clients_json');
         Route::get('clients/{id}', 'Api\ClaudeClientOpsController@client_json');
         Route::get('clients/{id}/schedule', 'Api\ClaudeClientOpsController@client_schedule_json');
+        /* Contacto del cliente (misión telefono-personal-del-dueno, 2/11/2026): el teléfono del NEGOCIO (`phone`),
+           el PERSONAL del dueño (`asistente_phone`) y el interruptor «Habla con su asistente por WhatsApp». El PATCH
+           tiene dry_run, validación de formato y de duplicados, y deja rastro en `client_contact_changes`. Están en
+           ClaudeClientContactoController. */
+        Route::get('clients/{id}/contacto', 'Api\ClaudeClientContactoController@contacto_json')
+            ->whereNumber('id');
+        Route::patch('clients/{id}/contacto', 'Api\ClaudeClientContactoController@actualizar_contacto_json')
+            ->whereNumber('id');
         /* 🔴 Carga de horarios sin pasar por el modal del admin. REEMPLAZA el conjunto entero: lo
            que no viaja en `dias` se borra. Los frenos (dry_run por defecto y confirm_client_name
            cuando dry_run es false) están en ClaudeClientOpsController; la regla del modelo y la

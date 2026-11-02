@@ -1069,7 +1069,7 @@ class ImplementationConversationService
 
         // Teléfono del dueño del negocio (cliente).
         $client = $implementation->client ?? Client::find($implementation->client_id);
-        $phone  = trim((string) ($client->phone ?? ''));
+        $phone  = trim((string) Client::telefono_personal_de($client));
 
         if ($phone === '') {
             Log::channel('daily')->warning('ImplementationConversationService: cliente sin teléfono para apertura de Etapa 2.', [
@@ -1354,7 +1354,7 @@ class ImplementationConversationService
             if ($chosen_index === 0 || $chosen_index === $self_index) {
                 // El dueño mismo se encarga: usar su teléfono como contacto de migración.
                 $responsible_name  = $client ? $client->resolve_display_name() : 'el responsable';
-                $responsible_phone = trim((string) ($client->phone ?? $phone));
+                $responsible_phone = trim((string) (Client::telefono_personal_de($client) ?? $phone));
 
                 $data['migration_responsible_name']  = $responsible_name;
                 $data['migration_responsible_phone'] = $responsible_phone;
@@ -1406,7 +1406,7 @@ class ImplementationConversationService
             if ($is_self) {
                 // El dueño se encarga: usar su nombre real y su teléfono como contacto; saltar pregunta de teléfono.
                 $responsible_name  = $client ? $client->resolve_display_name() : $body;
-                $responsible_phone = trim((string) ($client->phone ?? $phone));
+                $responsible_phone = trim((string) (Client::telefono_personal_de($client) ?? $phone));
 
                 $data['migration_responsible_name']  = $responsible_name;
                 $data['migration_responsible_phone'] = $responsible_phone;
@@ -1580,7 +1580,7 @@ class ImplementationConversationService
         $admin_name = $this->resolve_assigned_admin_name($implementation);
 
         // Teléfono del dueño para el mensaje de cierre.
-        $owner_phone = trim((string) ($client->phone ?? ''));
+        $owner_phone = trim((string) Client::telefono_personal_de($client));
 
         // URL del sistema del cliente: intentar spa_url primero, luego url.
         $client->loadMissing('active_client_api');
@@ -1956,7 +1956,7 @@ class ImplementationConversationService
 
         // Teléfono del dueño del negocio (cliente).
         $client      = $implementation->client ?? Client::find($implementation->client_id);
-        $owner_phone = trim((string) ($client->phone ?? ''));
+        $owner_phone = trim((string) Client::telefono_personal_de($client));
 
         if ($owner_phone === '') {
             Log::channel('daily')->warning('ImplementationConversationService: cliente sin teléfono para apertura de Etapa 7.', [
@@ -2016,7 +2016,7 @@ class ImplementationConversationService
 
         // Cliente dueño de la implementación.
         $client      = $implementation->client ?? Client::find($implementation->client_id);
-        $owner_phone = trim((string) ($client->phone ?? ''));
+        $owner_phone = trim((string) Client::telefono_personal_de($client));
 
         // Nombre del admin asignado para los mensajes.
         $admin_name  = $this->resolve_assigned_admin_name($implementation);
@@ -2239,7 +2239,7 @@ class ImplementationConversationService
 
         // Teléfono del dueño del negocio (cliente).
         $client      = $implementation->client ?? Client::find($implementation->client_id);
-        $owner_phone = trim((string) ($client->phone ?? ''));
+        $owner_phone = trim((string) Client::telefono_personal_de($client));
 
         if ($owner_phone === '') {
             Log::channel('daily')->warning('ImplementationConversationService: cliente sin teléfono para apertura de Etapa 5.', [
@@ -3536,7 +3536,7 @@ class ImplementationConversationService
 
         // Teléfono del cliente (dueño del negocio) para enviar el mensaje de confirmación.
         $client        = $implementation->client ?? Client::find($implementation->client_id);
-        $contact_phone = trim((string) ($client->phone ?? ''));
+        $contact_phone = trim((string) Client::telefono_personal_de($client));
 
         if ($contact_phone === '') {
             Log::channel('daily')->warning('process_stage1_employees_debounce: cliente sin teléfono, no se puede enviar mensaje.', [
@@ -4174,7 +4174,7 @@ class ImplementationConversationService
             }
 
             // Teléfono del cliente: destino de la plantilla de bienvenida.
-            $phone = trim((string) ($client->phone ?? ''));
+            $phone = trim((string) Client::telefono_personal_de($client));
             if ($phone === '') {
                 Log::channel('daily')->warning('ImplementationConversationService: send_welcome_template sin teléfono de cliente.', [
                     'implementation_id' => $implementation->id,
@@ -4295,7 +4295,7 @@ class ImplementationConversationService
         }
 
         // Teléfono del cliente para enviar el mensaje de confirmación.
-        $phone = trim((string) ($client->phone ?? ''));
+        $phone = trim((string) Client::telefono_personal_de($client));
 
         if ($phone === '') {
             Log::channel('daily')->warning('ImplementationConversationService: handle_form_submitted sin teléfono de cliente.', [

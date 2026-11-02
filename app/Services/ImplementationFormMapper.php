@@ -275,9 +275,9 @@ class ImplementationFormMapper
             }
         }
 
-        // Fallback: el dueño del negocio.
+        // Fallback: el dueño del negocio, como persona (su teléfono personal si lo tiene cargado).
         if ($phone === '') {
-            $phone = trim((string) ($client->phone ?? ''));
+            $phone = trim((string) Client::telefono_personal_de($client));
         }
 
         if ($phone === '') {

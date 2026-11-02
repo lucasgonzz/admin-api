@@ -552,7 +552,9 @@ class AvisoDeActualizacionService
      */
     private function avisar_por_whatsapp(Client $client, ClientUpgradeNotice $aviso): void
     {
-        $telefono = trim((string) $client->phone);
+        /* Al dueño como persona: su teléfono personal si lo tiene cargado y, si no, el de la ficha (misión
+           telefono-personal-del-dueno, 2/11/2026). */
+        $telefono = trim((string) $client->telefono_personal());
 
         if ($telefono === '') {
             // No es un error del aviso: el mail salió. Es un dato que falta en la ficha.
