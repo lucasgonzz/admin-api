@@ -31,7 +31,7 @@
 | marca como "sin precio cargado". No hay precio por defecto ni estimación a ojo, a propósito: un
 | total que miente es peor que un renglón sin plata, porque el renglón sin plata se ve y el total
 | que miente se cree. (Eso vale para la pantalla del admin. Para CORTAR no sirve: del lado de empresa
-| un modelo que no esté acá se cobra a la tarifa más cara de la tabla, porque un modelo desconocido
+| un modelo que no esté acá se cobra a la tarifa más cara de su mismo proveedor, porque un modelo desconocido
 | nunca puede ser gratis. Hoy está en ese caso `gpt-4o-mini-transcribe`, el de la transcripción de
 | audios: sin precio a propósito, hasta que alguien lo lea de la lista oficial del proveedor.)
 |

@@ -311,7 +311,7 @@ class ClientAiPlanSyncService
      * Una tabla vacía viaja como null y no como `[]`: "no tengo precios" no es una tabla de cero filas.
      *
      * 🔴 Acá no se inventa ningún precio. Un modelo que no está en la config no viaja, y del lado de
-     * empresa se cobra a la tarifa más cara de la tabla (un modelo desconocido nunca es gratis).
+     * empresa se cobra a la tarifa más cara de su proveedor (un modelo desconocido nunca es gratis).
      *
      * @return array<string, array<string, float>>|null
      */
