@@ -121,6 +121,34 @@ return [
     ],
 
     /*
+     * Los tres Claude de la lectura de planillas del asistente (misión agente-venta-por-planilla, 2/11/2026):
+     * Opus 5.5 y Haiku 5.5 leen, Sonnet 5.5 desempata. Sin estas claves el costo de cada lectura salía sin
+     * precio, o con el de la generación anterior. Escritura en caché: 1,25×; lectura: la de la lista. Haiku 5.5
+     * sube a 0,50 / 2,50 con prompts de más de 100 mil tokens; una lectura de planilla no llega a 10 mil.
+     * ⚠️ Referencia de la lista de Anthropic: pendiente de confirmación de Lucas contra la factura.
+     */
+    'claude-opus-5-5' => [
+        'input'       => 4.00,
+        'output'      => 20.00,
+        'cache_write' => 5.00,
+        'cache_read'  => 0.20,
+    ],
+
+    'claude-sonnet-5-5' => [
+        'input'       => 2.00,
+        'output'      => 10.00,
+        'cache_write' => 2.50,
+        'cache_read'  => 0.20,
+    ],
+
+    'claude-haiku-5-5' => [
+        'input'       => 0.10,
+        'output'      => 0.50,
+        'cache_write' => 0.125,
+        'cache_read'  => 0.01,
+    ],
+
+    /*
      * Embeddings de OpenAI (indexar el catálogo y el RAG de cada respuesta de WhatsApp). Sin
      * salida y sin caché: las tres puntas en 0 son el precio real, no un dato faltante.
      * ⚠️ Pendiente de confirmación de Lucas.
