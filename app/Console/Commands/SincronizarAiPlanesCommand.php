@@ -26,6 +26,11 @@ use Illuminate\Support\Facades\Log;
  *
  * No hay ventana de reintento como en `tokens:recolectar` porque el push es idempotente y corre
  * todas las noches: un cliente que estuvo caído recibe su plan en la corrida siguiente sin más.
+ *
+ * Desde el 2/11/2026 (misión plan-ia-por-gasto) el plan lleva adentro la tabla de `config/ia_precios.php`,
+ * así que este barrido también es el que propaga un cambio de precios en menos de un día.
+ * `ia:sincronizar-precios` hereda de esta clase para hacerlo en el momento, solo a los que tienen paquete;
+ * por eso `clientes_a_barrer()` es `protected`.
  */
 class SincronizarAiPlanesCommand extends Command
 {
@@ -121,7 +126,7 @@ class SincronizarAiPlanesCommand extends Command
      *
      * @return \Illuminate\Support\Collection|null Null si el `--client` no existe (ya se avisó).
      */
-    private function clientes_a_barrer()
+    protected function clientes_a_barrer()
     {
         $client_id = $this->option('client');
 
@@ -166,9 +171,13 @@ class SincronizarAiPlanesCommand extends Command
             $conteo[$estado] = (isset($conteo[$estado]) ? $conteo[$estado] : 0) + 1;
         }
 
+        $exitosos     = isset($conteo['success']) ? $conteo['success'] : 0;
         $no_soportado = isset($conteo['no_soportado']) ? $conteo['no_soportado'] : 0;
         $fallados     = (isset($conteo['failed']) ? $conteo['failed'] : 0)
             + (isset($conteo['excepcion']) ? $conteo['excepcion'] : 0);
+
+        // Una línea para leer el desenlace sin contar filas de la tabla.
+        $this->info('Resumen: ' . $exitosos . ' sincronizado(s), ' . $no_soportado . ' sin soporte, ' . $fallados . ' con falla.');
 
         if ($no_soportado > 0) {
             $this->line($no_soportado . ' cliente(s) todavía no tienen la versión con la ruta plan-ia. No es un error.');
