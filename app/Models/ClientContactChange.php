@@ -12,13 +12,12 @@ use Illuminate\Database\Eloquent\Model;
  * @property string      $campo           `phone`, `asistente_phone` o `asistente_whatsapp_activo`.
  * @property string|null $valor_anterior
  * @property string|null $valor_nuevo
- * @property string      $origen          `claude` o `panel`.
+ * @property string      $origen          Hoy siempre `claude` (las rutas `claude/*`).
  * @property string|null $motivo
  */
 class ClientContactChange extends Model
 {
     const ORIGEN_CLAUDE = 'claude';
-    const ORIGEN_PANEL  = 'panel';
 
     /** Solo `created_at`: es una tabla de rastro, no se modifica. */
     const UPDATED_AT = null;
