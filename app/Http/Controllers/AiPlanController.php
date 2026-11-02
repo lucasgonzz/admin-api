@@ -132,6 +132,11 @@ class AiPlanController extends Controller
             'tope_busquedas_web_diarias' => ['nullable', 'integer', 'min:0'],
             'activo'                     => ['boolean'],
             'orden'                      => ['nullable', 'integer'],
+        ], [
+            // En español: este texto le llega tal cual a quien edita el paquete, en el aviso del ABM.
+            'tope_gasto_usd_mensual.numeric' => 'El tope de gasto mensual tiene que ser un monto en dólares.',
+            'tope_gasto_usd_mensual.min'     => 'El tope de gasto mensual no puede ser negativo.',
+            'tope_gasto_usd_mensual.max'     => 'El tope de gasto mensual no puede pasar de US$ 99.999.999,99.',
         ]);
     }
 

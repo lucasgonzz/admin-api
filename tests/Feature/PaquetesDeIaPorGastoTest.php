@@ -261,6 +261,9 @@ class PaquetesDeIaPorGastoTest extends BaseDelCanal
 
             $response->assertStatus(422);
             $response->assertJsonValidationErrors('tope_gasto_usd_mensual');
+
+            // El mensaje le llega tal cual a quien edita el paquete: tiene que estar en español.
+            $this->assertStringContainsString('El tope de gasto mensual', (string) $response->json('errors.tope_gasto_usd_mensual.0'));
         }
 
         // El cero es válido: es "sin tope de gasto", igual que null, y lo decide el otro lado.
