@@ -9,19 +9,19 @@ use Tests\TestCase;
  * `implementacion-agentes-ia`, 28/10/2026). Se sirven desde `resources/guias/` porque `/deploy-admin` no
  * despliega `public/`.
  *
- * Lo que se mira: que las dos salgan sin sesión como PDF `inline`, y que cualquier otro nombre —incluido un
+ * Lo que se mira: que las tres salgan sin sesión como PDF `inline`, y que cualquier otro nombre —incluido un
  * intento de salir de la carpeta— sea 404.
  */
 class GuiasPublicasDeAgentesTest extends TestCase
 {
     /**
-     * Las dos guías salen sin sesión, como PDF para ver en el navegador, con el contenido del archivo.
+     * Las tres guías salen sin sesión, como PDF para ver en el navegador, con el contenido del archivo.
      *
      * @return void
      */
-    public function test_las_dos_guias_salen_como_pdf_inline_sin_sesion(): void
+    public function test_las_tres_guias_salen_como_pdf_inline_sin_sesion(): void
     {
-        foreach (['agentes-ia-numero-propio.pdf', 'agentes-ia-linea-nueva.pdf'] as $nombre) {
+        foreach (['agentes-ia-numero-propio.pdf', 'agentes-ia-linea-nueva.pdf', 'agentes-ia-que-puede-hacer-pesca.pdf'] as $nombre) {
             $respuesta = $this->get('/api/guias/' . $nombre);
 
             $respuesta->assertStatus(200);

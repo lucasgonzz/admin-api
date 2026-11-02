@@ -4,7 +4,8 @@ namespace App\Http\Controllers;
 
 /**
  * Sirve las guías públicas en PDF que se le mandan al cliente por WhatsApp (misión `implementacion-agentes-ia`,
- * 28/10/2026): cómo conectar su número de WhatsApp a los Agentes de IA, en sus dos caminos.
+ * 28/10/2026): cómo conectar su número de WhatsApp a los Agentes de IA, en sus dos caminos. Desde el 2/11/2026 suma una tercera:
+ * qué puede hacer el agente de un mayorista de pesca (misión `telefono-personal-del-dueno`).
  *
  * 🔴 POR QUÉ UNA RUTA Y NO UN ARCHIVO EN public/. `/deploy-admin` despliega solo app, bootstrap, config,
  * database, resources y routes: un PDF en `public/` no llegaría nunca a producción. Por eso viven en
@@ -18,13 +19,14 @@ namespace App\Http\Controllers;
 class PublicGuideController extends Controller
 {
     /**
-     * Nombre público → archivo dentro de `resources/guias/`. Solo estos dos existen.
+     * Nombre público → archivo dentro de `resources/guias/`. Solo estos tres existen.
      *
      * @var array<string, string>
      */
     const GUIDES = [
         'agentes-ia-numero-propio.pdf' => 'agentes-ia-numero-propio.pdf',
         'agentes-ia-linea-nueva.pdf'   => 'agentes-ia-linea-nueva.pdf',
+        'agentes-ia-que-puede-hacer-pesca.pdf' => 'agentes-ia-que-puede-hacer-pesca.pdf',
     ];
 
     /**
