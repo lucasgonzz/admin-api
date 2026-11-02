@@ -120,11 +120,16 @@ class SupportMessage extends Model
      *
      * Solo trae lo que hace falta para dibujar la cita en la burbuja; el `whatsapp_message_id` NO
      * viaja a la pantalla (se arma aparte en {@see self::reply_to_whatsapp_message_id()}).
+     *
+     * 🔴 El cuerpo se corta a 300 caracteres EN LA CONSULTA: la pantalla solo muestra 140 y este
+     * mensaje viaja anidado en el evento de Pusher (`SupportMessageReceived`), que tiene un tope de
+     * 10 KB y no pasa por ninguna guarda. Citar un mensaje largo no puede hacer que el broadcast del
+     * mensaje corto que lo responde reviente (y con eso el envío o la respuesta del agente).
      */
     public function reply_to_message()
     {
         return $this->belongsTo(SupportMessage::class, 'reply_to_message_id')
-            ->select('id', 'support_ticket_id', 'sender_type', 'kind', 'body');
+            ->selectRaw('id, support_ticket_id, sender_type, kind, LEFT(body, 300) AS body');
     }
 
     /**

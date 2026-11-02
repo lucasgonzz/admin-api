@@ -200,6 +200,21 @@ class RespuestaCitadaEnSoporteTest extends TestCase
         $this->assertNull($mensajes[$huerfana->id]['reply_to_message']);
     }
 
+    public function test_el_cuerpo_de_la_cita_se_corta_para_no_pasar_el_tope_del_broadcast(): void
+    {
+        $this->actingAs($this->admin(), 'sanctum');
+        $ticket = $this->ticket();
+        $largo = $this->entrante($ticket, 'wamid.LARGO', str_repeat('ñandú ', 1000));
+
+        $respuesta = $this->responder($ticket, ['kind' => 'text', 'body' => 'ok', 'reply_to_message_id' => $largo->id])
+            ->assertStatus(201);
+
+        $this->assertLessThanOrEqual(300, mb_strlen($respuesta->json('model.reply_to_message.body')));
+        $this->assertGreaterThan(100, mb_strlen($respuesta->json('model.reply_to_message.body')));
+        // El mensaje original sigue entero en la base.
+        $this->assertSame(6000, mb_strlen(SupportMessage::findOrFail($largo->id)->body));
+    }
+
     public function test_un_entrante_que_cita_se_enlaza_con_el_mensaje_local_por_su_wamid(): void
     {
         $ticket = $this->ticket();

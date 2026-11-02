@@ -185,7 +185,7 @@ class SupportMessageController extends BaseController
         }
 
         if (! $created) {
-            return response()->json(['model' => $message->load('ticket', 'attachments', 'sender_admin')], 200);
+            return response()->json(['model' => SupportMessage::where('id', $message->id)->withAll()->first()], 200);
         }
 
         $message = SupportMessage::where('id', $message->id)->withAll()->first();
