@@ -233,7 +233,7 @@ class AsistenteRecordatoriosService
     public static function cliente_recibe_recordatorios(Client $client): bool
     {
         return AsistenteAvisosService::cliente_recibe_avisos($client)
-            && trim((string) $client->phone) !== '';
+            && trim((string) $client->telefono_personal()) !== '';
     }
 
     /**
@@ -274,8 +274,15 @@ class AsistenteRecordatoriosService
             ->where('asistente_whatsapp_activo', true)
             ->whereNotNull('api_key')
             ->where('api_key', '!=', '')
-            ->whereNotNull('phone')
-            ->where('phone', '!=', '')
+            ->where(function ($query) {
+                /* Alcanza con el teléfono de la ficha o con el personal del dueño (misión
+                   telefono-personal-del-dueno, 2/11/2026). */
+                $query->where(function ($con_phone) {
+                    $con_phone->whereNotNull('phone')->where('phone', '!=', '');
+                })->orWhere(function ($con_personal) {
+                    $con_personal->whereNotNull('asistente_phone')->where('asistente_phone', '!=', '');
+                });
+            })
             ->orderBy('id')
             ->get()
             /* La consulta de arriba es el prefiltro barato en SQL; el que decide es el criterio
@@ -322,7 +329,8 @@ class AsistenteRecordatoriosService
             $plantilla = self::plantilla_configurada();
         }
 
-        $telefono = trim((string) $client->phone);
+        /* A su teléfono personal si lo tiene cargado y, si no, al de la ficha (misión telefono-personal-del-dueno). */
+        $telefono = trim((string) $client->telefono_personal());
         if ($telefono === '') {
             return $this->resultado($client, 'sin_telefono', 0, 0, 'El cliente no tiene teléfono cargado en su ficha.');
         }

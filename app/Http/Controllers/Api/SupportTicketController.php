@@ -728,6 +728,19 @@ class SupportTicketController extends BaseController
                 $telefonos_que_matchearon[$client_id][WhatsappNormalizer::normalize((string) $fila->phone)] = true;
             }
 
+            /* El teléfono PERSONAL del dueño (misión telefono-personal-del-dueno, 2/11/2026) también es
+               buscable: es un contacto del cliente en el directorio. */
+            foreach (Client::query()
+                ->select('id', 'asistente_phone')
+                ->whereNotNull('asistente_phone')
+                ->where('asistente_phone', '!=', '')
+                ->whereRaw($this->solo_digitos_sql('asistente_phone') . ' LIKE ?', [$like_digits])
+                ->get() as $fila) {
+                $client_id = (int) $fila->id;
+                $motivos[$client_id]['telefono'] = true;
+                $telefonos_que_matchearon[$client_id][WhatsappNormalizer::normalize((string) $fila->asistente_phone)] = true;
+            }
+
             foreach (ClientEmployee::query()
                 ->select('id', 'client_id', 'phone')
                 ->whereNotNull('phone')

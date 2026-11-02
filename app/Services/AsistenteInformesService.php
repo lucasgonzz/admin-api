@@ -170,7 +170,9 @@ class AsistenteInformesService
             $asistente = app(AsistenteWhatsappService::class);
         }
 
-        $telefono = trim((string) $client->phone);
+        /* El informe se le manda al dueño COMO PERSONA: a su teléfono personal si lo tiene cargado y, si no,
+           al de la ficha (misión telefono-personal-del-dueno, 2/11/2026). */
+        $telefono = trim((string) $client->telefono_personal());
         if ($telefono === '') {
             return $this->resultado($client, 'sin_telefono', 0, 'El cliente no tiene teléfono cargado en su ficha.');
         }

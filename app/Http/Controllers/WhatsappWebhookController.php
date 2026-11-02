@@ -262,7 +262,8 @@ class WhatsappWebhookController extends Controller
                         'client_id'                   => $client->id,
                         'ecommerce_implementation_id' => $ecommerce_implementation->id,
                     ]);
-                } elseif (! \App\Services\SupportCodexSettings::enabled() && (bool) $client->asistente_whatsapp_activo && $client_employee === null) {
+                } elseif (! \App\Services\SupportCodexSettings::enabled() && (bool) $client->asistente_whatsapp_activo && $client_employee === null
+                    && $this->remitente_es_el_telefono_personal_del_dueno($client, (string) $parsed['from'])) {
                     /*
                      * El canal del asistente por WhatsApp (misión asistente-por-whatsapp, 16/9/2026).
                      *
@@ -1390,6 +1391,14 @@ class WhatsappWebhookController extends Controller
             if (! empty($client->phone) && WhatsappNormalizer::phones_match((string) $client->phone, $phone)) {
                 return $client;
             }
+
+            /* El teléfono PERSONAL del dueño (misión telefono-personal-del-dueno, 2/11/2026) también lo
+               identifica ante el número institucional: si escribe desde su personal tiene que llegar como
+               el cliente y no como un desconocido que cae al pipeline de leads. Sin `asistente_phone` no
+               hay nada que mirar y el resultado es el de siempre. */
+            if ($client->tiene_telefono_personal_propio() && WhatsappNormalizer::phones_match((string) $client->asistente_phone, $phone)) {
+                return $client;
+            }
         }
 
         // Fallback: lead promovido cuyo teléfono coincide (client.phone puede no estar cargado aún).
@@ -1680,6 +1689,12 @@ class WhatsappWebhookController extends Controller
      * la ficha de un cliente: el asistente es del dueño y de nadie más, y el lado seguro de la
      * duda es no darle acceso.
      *
+     * 🔴 **Teléfono personal del dueño** (misión telefono-personal-del-dueno, 2/11/2026): el dueño se
+     * reconoce por `Client::telefono_personal()`. Un cliente que TIENE `asistente_phone` se reconoce SOLO
+     * por ese número (el del negocio, el que atiende Kapso, ya no lo identifica ante el asistente) y su
+     * lead promovido tampoco cuenta como repliegue. Un cliente SIN `asistente_phone` se reconoce
+     * exactamente como antes: por `clients.phone` y, si no lo tiene, por el lead promovido.
+     *
      * @param string $phone Teléfono del remitente, TAL CUAL llegó en el payload.
      *
      * @return Client|null
@@ -1702,12 +1717,17 @@ class WhatsappWebhookController extends Controller
         }
 
         $active_clients = Client::where('is_active', true)
-            ->whereNotNull('phone')
-            ->where('phone', '!=', '')
+            ->where(function ($query) {
+                $query->where(function ($con_phone) {
+                    $con_phone->whereNotNull('phone')->where('phone', '!=', '');
+                })->orWhere(function ($con_personal) {
+                    $con_personal->whereNotNull('asistente_phone')->where('asistente_phone', '!=', '');
+                });
+            })
             ->get();
 
         foreach ($active_clients as $client) {
-            if (WhatsappNormalizer::equals_estricto((string) $client->phone, $phone)) {
+            if (WhatsappNormalizer::equals_estricto((string) $client->telefono_personal(), $phone)) {
                 return $client;
             }
         }
@@ -1724,12 +1744,36 @@ class WhatsappWebhookController extends Controller
             }
 
             $client = Client::where('is_active', true)->find($lead->promoted_client_id);
-            if ($client) {
+            /* Un cliente con teléfono personal propio se reconoce solo por ese número: su lead promovido
+               (el teléfono con el que se registró, que suele ser el del negocio) no lo identifica. */
+            if ($client && ! $client->tiene_telefono_personal_propio()) {
                 return $client;
             }
         }
 
         return null;
+    }
+
+    /**
+     * Si el remitente es el teléfono con el que el dueño le habla a su agente personal.
+     *
+     * Sin `asistente_phone` cualquier remitente que ya resolvió al dueño por el número institucional lo es
+     * (como siempre). Con `asistente_phone`, el único que habla con el asistente es el que escribe desde ese
+     * número: el del negocio (el que atiende Kapso) cae a soporte como cualquier otro contacto del cliente.
+     * Se compara con el mismo criterio laxo con el que `find_client_by_phone()` resolvió al cliente.
+     *
+     * @param Client $client Cliente ya resuelto por el número institucional.
+     * @param string $from   Teléfono del remitente (E.164 normalizado).
+     *
+     * @return bool
+     */
+    private function remitente_es_el_telefono_personal_del_dueno(Client $client, string $from): bool
+    {
+        if (! $client->tiene_telefono_personal_propio()) {
+            return true;
+        }
+
+        return WhatsappNormalizer::phones_match((string) $client->asistente_phone, $from);
     }
 
     /**
