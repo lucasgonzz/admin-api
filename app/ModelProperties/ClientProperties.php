@@ -86,20 +86,22 @@ class ClientProperties
              */
             [
                 'key' => 'phone',
-                'text' => 'Teléfono del negocio (WhatsApp que se conecta para atender clientes)',
+                'text' => 'Teléfono del negocio',
                 'type' => 'text',
                 'value' => '',
                 'use_to_filter_in_search' => true,
                 'width' => 140,
                 'show'  => true,
+                'description' => 'El WhatsApp del negocio: el que se conecta para atender a sus clientes. Si el cliente no tiene cargado el teléfono personal del dueño, es también el del dueño.',
             ],
             [
                 'key' => 'asistente_phone',
-                'text' => 'Teléfono personal del dueño (el que le escribe a su agente personal)',
+                'text' => 'Teléfono personal del dueño (agente personal)',
                 'type' => 'text',
                 'value' => '',
                 'not_show_on_table' => true,
                 'width' => 140,
+                'description' => 'El teléfono desde el que el dueño le escribe a su agente personal y al que se le escribe como persona (informes, recordatorios, avisos). Vacío = usa el teléfono del negocio. Con este cargado, el agente personal reconoce SOLO este número.',
             ],
             /*
              * Casilla del dueño. Es a donde sale el mail con las novedades cuando se le actualiza
