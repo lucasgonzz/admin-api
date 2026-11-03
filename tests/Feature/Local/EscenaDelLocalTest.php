@@ -815,6 +815,76 @@ class EscenaDelLocalTest extends TestCase
     }
 
     /**
+     * Una tarea de Claude sin hacer (fuente `tarea` de la bandeja).
+     *
+     * @param Admin  $admin
+     * @param string $titulo
+     *
+     * @return int
+     */
+    private function tarea_de_claude(Admin $admin, string $titulo): int
+    {
+        return (int) DB::table('admin_tasks')->insertGetId([
+            'created_by_admin_id' => $admin->id,
+            'created_via'         => 'claude',
+            'title'               => $titulo,
+            'is_done'             => false,
+            'sort_order'          => 0,
+            'created_at'          => AppTime::now()->format('Y-m-d H:i:s'),
+            'updated_at'          => AppTime::now()->format('Y-m-d H:i:s'),
+        ]);
+    }
+
+    /**
+     * 🔴 `resumen.para_lucas` es el total REAL de la bandeja (un count por fuente), no el largo de la lista: con
+     * 55 cosas nuevas para Lucas el número sube 55 y la lista sigue cortada en 50.
+     *
+     * @return void
+     */
+    public function test_para_lucas_es_el_total_real_aunque_la_lista_se_corte_en_50(): void
+    {
+        $admin = $this->crear_admin();
+        $antes = $this->escena($admin)['resumen']['para_lucas'];
+
+        for ($i = 1; $i <= 55; $i++) {
+            $this->tarea_de_claude($admin, 'Tarea ' . $i);
+        }
+
+        $escena = $this->escena($admin);
+
+        $this->assertSame($antes + 55, $escena['resumen']['para_lucas']);
+        $this->assertCount(50, $escena['bandeja']);
+    }
+
+    /**
+     * Un ticket escalado que además tiene su caso en `mission_pending` aparece UNA sola vez en la bandeja (como
+     * misión), y suma uno solo a `para_lucas`.
+     *
+     * @return void
+     */
+    public function test_un_ticket_escalado_con_mision_pendiente_aparece_una_sola_vez(): void
+    {
+        $admin  = $this->crear_admin();
+        $client = $this->crear_cliente('Escalado con misión');
+        $antes  = $this->escena($admin)['resumen']['para_lucas'];
+
+        $ticket                    = $this->crear_ticket($client);
+        $ticket->escalated_at      = AppTime::now()->subMinutes(2);
+        $ticket->escalation_reason = 'Necesita a Lucas';
+        $ticket->save();
+        SupportCodexCase::create(['support_ticket_id' => $ticket->id, 'state' => 'mission_pending', 'mission' => 'Arreglar el redondeo']);
+
+        $escena = $this->escena($admin);
+
+        $this->assertNotNull($this->item_de_bandeja($escena, 'soporte-mision-' . $ticket->id));
+        $this->assertNull($this->item_de_bandeja($escena, 'soporte-caso-' . $ticket->id), 'No se repite como caso delegado.');
+        $this->assertCount(1, array_filter($escena['bandeja'], function ($item) use ($ticket) {
+            return $item['ruta'] === '/soporte/ticket/' . $ticket->id;
+        }));
+        $this->assertSame($antes + 1, $escena['resumen']['para_lucas']);
+    }
+
+    /**
      * Un slot reportado por el endpoint real del reporter aparece en `oficina.slots` con sus campos, el reporter
      * queda `ok`, el planificador trabaja (hay un slot en fase `plan`) y el resumen cuenta misiones y libres.
      *

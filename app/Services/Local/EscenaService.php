@@ -888,7 +888,8 @@ class EscenaService
 
     /**
      * `bandeja` «Para Lucas»: lo que Soporte y los demás le dejaron a Lucas en el mostrador, los más nuevos
-     * primero y con tope de {@see self::TOPE_BANDEJA}.
+     * primero y con tope de {@see self::TOPE_BANDEJA}. El `total` que devuelve (→ `resumen.para_lucas`) es el
+     * real, contado fuente por fuente, sin ese tope.
      *
      * Fuentes (cada una con su propio tope, así ninguna puede tapar a las demás en la consulta):
      *   - `support_codex_cases.state = mission_pending` → `mision_pendiente`. 🔴 Sin las que Lucas ya inició
@@ -907,7 +908,11 @@ class EscenaService
     {
         $items = [];
 
-        $casos = DB::table('support_codex_cases as c')
+        /* 🔴 `total` es el total REAL (para `resumen.para_lucas`): un count() por fuente, sin el tope de 50
+           que solo aplica a la lista. Cada fuente se arma una vez y se clona para contar. */
+        $total = 0;
+
+        $casos_base = DB::table('support_codex_cases as c')
             ->join('support_tickets as t', 't.id', '=', 'c.support_ticket_id')
             ->leftJoin('clients as cl', 'cl.id', '=', 't.client_id')
             ->where(function ($q) {
@@ -916,7 +921,10 @@ class EscenaService
                 })->orWhere(function ($q2) {
                     $q2->where('c.state', 'manual_review')->where('t.status', SupportTicket::STATUS_ABIERTO);
                 });
-            })
+            });
+        $total += (clone $casos_base)->count();
+
+        $casos = $casos_base
             ->select(
                 'c.state',
                 'c.review_reason',
@@ -958,7 +966,9 @@ class EscenaService
             );
         }
 
-        $delegados = DB::table('support_tickets as t')
+        /* Un ticket delegado que ya tiene caso en mission_pending o manual_review NO se repite como
+           caso_delegado: aparece una sola vez, por su caso. */
+        $delegados_base = DB::table('support_tickets as t')
             ->leftJoin('clients as cl', 'cl.id', '=', 't.client_id')
             ->whereNotNull('t.escalated_at')
             ->where('t.status', SupportTicket::STATUS_ABIERTO)
@@ -967,7 +977,10 @@ class EscenaService
                     ->from('support_codex_cases as c')
                     ->whereColumn('c.support_ticket_id', 't.id')
                     ->whereIn('c.state', ['mission_pending', 'manual_review']);
-            })
+            });
+        $total += (clone $delegados_base)->count();
+
+        $delegados = $delegados_base
             ->select('t.id', 't.client_id', 't.name', 't.escalation_reason', 't.escalated_at', 'cl.name as client_name', 'cl.company_name as client_company')
             ->orderByDesc('t.escalated_at')
             ->limit(self::TOPE_BANDEJA)
@@ -989,10 +1002,13 @@ class EscenaService
             );
         }
 
-        $operaciones = DB::table('support_codex_operations as o')
+        $operaciones_base = DB::table('support_codex_operations as o')
             ->join('support_tickets as t', 't.id', '=', 'o.support_ticket_id')
             ->leftJoin('clients as cl', 'cl.id', '=', 't.client_id')
-            ->where('o.status', 'awaiting_approval')
+            ->where('o.status', 'awaiting_approval');
+        $total += (clone $operaciones_base)->count();
+
+        $operaciones = $operaciones_base
             ->select('o.id', 'o.created_at', 't.id as ticket_id', 't.client_id', 'cl.name as client_name', 'cl.company_name as client_company')
             ->orderByDesc('o.created_at')
             ->limit(self::TOPE_BANDEJA)
@@ -1011,10 +1027,13 @@ class EscenaService
             );
         }
 
-        $sugeridos = DB::table('lead_messages as lm')
+        $sugeridos_base = DB::table('lead_messages as lm')
             ->join('leads as l', 'l.id', '=', 'lm.lead_id')
             ->where('lm.status', 'sugerido')
-            ->where('l.requiere_verificacion_mensajes', true)
+            ->where('l.requiere_verificacion_mensajes', true);
+        $total += (clone $sugeridos_base)->count();
+
+        $sugeridos = $sugeridos_base
             ->select('lm.id', 'lm.lead_id', 'lm.created_at', 'l.contact_name', 'l.company_name')
             ->orderByDesc('lm.created_at')
             ->limit(self::TOPE_BANDEJA)
@@ -1036,9 +1055,12 @@ class EscenaService
             );
         }
 
-        $tareas = DB::table('admin_tasks')
+        $tareas_base = DB::table('admin_tasks')
             ->where('is_done', false)
-            ->where('created_via', 'claude')
+            ->where('created_via', 'claude');
+        $total += (clone $tareas_base)->count();
+
+        $tareas = $tareas_base
             ->select('id', 'title', 'created_at')
             ->orderByDesc('created_at')
             ->limit(self::TOPE_BANDEJA)
@@ -1063,7 +1085,6 @@ class EscenaService
             return $por_fecha !== 0 ? $por_fecha : strcmp($a['id'], $b['id']);
         });
 
-        $total = count($items);
         $items = array_slice($items, 0, self::TOPE_BANDEJA);
 
         foreach ($items as $i => $item) {
