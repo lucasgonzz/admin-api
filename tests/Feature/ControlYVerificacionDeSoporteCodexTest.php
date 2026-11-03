@@ -487,4 +487,35 @@ class ControlYVerificacionDeSoporteCodexTest extends TestCase
         $this->assertSame(0, SupportCodexCase::where('support_ticket_id', $ticket->id)->count());
         $this->assertCount(0, $this->transport->sent);
     }
+
+    public function test_cierre_por_gracias_espera_aprobacion_y_cierra_solo_al_enviar(): void
+    {
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), ['body' => 'En Ventas abrí el detalle de la cuota.'])->assertOk();
+        $message = $this->inbound($ticket);
+        $message->update(['body' => 'Muchas gracias Martín']);
+        $this->verification($ticket);
+        $result = $this->reply($ticket, $this->claim($ticket), ['action' => 'cerrar', 'confirmation_message_id' => $message->id, 'body' => 'Un abrazo!'])
+            ->assertOk()->assertJsonPath('operation.status', 'awaiting_approval')->json();
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->assertCount(1, $this->transport->sent);
+        $id = $result['operation']['message_id'];
+        $this->actingAs($this->admin, 'sanctum')->postJson('/api/admin/support-message/' . $id . '/approve-ai-draft')->assertOk()->assertJsonPath('delivered', true);
+        $this->assertSame('closed', $ticket->fresh()->status);
+        $this->assertSame(['En Ventas abrí el detalle de la cuota.', 'De nada! Un abrazo!'], $this->transport->sent);
+    }
+
+    public function test_cierre_por_gracias_obsoleto_no_se_envia_al_llegar_nueva_consulta(): void
+    {
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), ['body' => 'En Ventas abrí el detalle de la cuota.'])->assertOk();
+        $message = $this->inbound($ticket);
+        $message->update(['body' => 'Gracias']);
+        $this->verification($ticket);
+        $result = $this->reply($ticket, $this->claim($ticket), ['action' => 'cerrar', 'confirmation_message_id' => $message->id, 'body' => 'De nada!'])->assertOk()->json();
+        $this->inbound($ticket);
+        $this->actingAs($this->admin, 'sanctum')->postJson('/api/admin/support-message/' . $result['operation']['message_id'] . '/approve-ai-draft')->assertStatus(409);
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->assertCount(1, $this->transport->sent);
+    }
 }

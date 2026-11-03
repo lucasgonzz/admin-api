@@ -222,3 +222,10 @@ POST `/api/admin/support-ticket/{id}/suggest` conserva las claves de sugerencia 
 La solicitud bloquea ticket y caso igual que claim/reply, relee elegibilidad y no enciende el agente. Solo libera una pausa humana segura para el último entrante pendiente; conserva estados ya elegibles, hilo, misión y handled_message_id. El estado durable ready es el mismo que consulta el monitor: no hay una segunda cola ni un envío directo. Clics repetidos no crean operaciones ni reservas. Una reserva activa informa en curso; una aprobación válida se conserva; una aprobación obsoleta se invalida igual que en pending. Operaciones sin terminar, revisiones técnicas y ventana WhatsApp vencida mantienen sus guardas.
 
 El encendido del agente sigue usando agent_toggled: retoma la pausa humana pendiente sin necesitar otro entrante. No usar resume para este objetivo porque consume el último mensaje.
+
+
+## Cierre natural por agradecimiento (ampliación 02/11/2026)
+
+`capabilities.natural_thanks_closure=true` permite al helper reconocer el backend compatible antes de pedir un cierre de cortesía. `reply` conserva su contrato: `action=cerrar`, `confirmation_message_id` del último entrante y `body` de despedida. Un agradecimiento natural después de orientación, o como único entrante sin otra consulta pendiente, permite responder de nada y cerrar sin exigir otra confirmación ni afirmar que el cliente probó una solución. Se incluyen cortesías coloquiales y elogios sin nueva consulta. Misiones, revisiones humanas pendientes, solicitudes de información, pruebas futuras, dudas, negaciones y envíos inciertos conservan el caso abierto.
+
+Política anterior modificada por pedido explícito de Lucas: «Gracias» tras «¿Quedó resuelto?» estaba en el dataset de rechazos y en el test `test_agradecer_o_prometer_probar_no_confirma_resolucion`. Ahora tiene regresión positiva de cierre natural; las promesas de probar y condiciones siguen rechazadas. El cierre se aplica únicamente tras entrega confirmada, o después de aprobar el borrador si requiere verificación. Un entrante nuevo invalida el cierre anterior. Los replays idempotentes no repiten la despedida.

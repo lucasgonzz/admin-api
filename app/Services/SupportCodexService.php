@@ -181,7 +181,7 @@ class SupportCodexService
             'reason' => $this->pending_reason($ticket, $case),
             // El helper debe verificar esta capacidad ANTES de pedir el modo nuevo: un admin
             // anterior ignoraría el campo y ejecutaría el resume que consume la consulta.
-            'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true],
+            'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true],
             'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
             'window' => app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone),
@@ -634,7 +634,7 @@ class SupportCodexService
             $input['_follow_up'] = $this->is_follow_up($case, (int) $input['expected_message_id']);
             $body = trim($input['body']);
             if ($input['action'] === 'cerrar' && mb_stripos($body, 'de nada') === false) {
-                $body = 'De nada, me alegra que haya quedado resuelto! ' . $body;
+                $body = 'De nada! ' . $body;
             }
             // Una sola pieza: no hay reintentos de partes ni demoras de separación de mensajes.
             $body = preg_replace('/^\s*---\s*$/m', '', $body);
@@ -691,6 +691,9 @@ class SupportCodexService
 
     private function prepare_approval(SupportTicket $ticket, SupportCodexCase $case, SupportCodexOperation $operation, array $input): void
     {
+        if ($input['action'] === 'cerrar' && mb_stripos($input['body'], 'de nada') === false) {
+            $input['body'] = 'De nada! ' . trim($input['body']);
+        }
         $draft = app(SupportAiSuggestionDraftService::class)->create_draft($ticket, trim($input['body']), 0);
         $operation->message_id = (int) $draft->id;
         $operation->status = 'awaiting_approval';
@@ -1413,9 +1416,53 @@ class SupportCodexService
             && preg_match('/^(?:(?:listo|perfecto|si)[,.! ]+)?(?:ya )?pude(?: hacerlo)?(?:[,.! ]+(?:muchas )?gracias)?[!. ]*$/', $body);
         $own_error = $question !== null && $question->id < $message->id
             && $this->acknowledges_own_error_after_guidance($body, $question_body);
-        if ((! $own_error && $negative) || (! $resolved && ! $short_answer && ! $task_completed && ! $implicit_completed && ! $own_error)) {
+        $natural_thanks = $this->natural_thanks_can_close($ticket, $case, $message, $body);
+        if ((! $own_error && $negative) || (! $resolved && ! $short_answer && ! $task_completed && ! $implicit_completed && ! $own_error && ! $natural_thanks)) {
             $this->fail(422, 'confirmation_required', 'El mensaje no confirma de forma suficiente que el caso quedó resuelto.');
         }
+    }
+
+    /**
+     * Lucas cambió la política el 02/11/2026: «gracias» puede terminar la conversación
+     * sin afirmar que se probó una solución. Una cortesía no resuelve tareas pendientes.
+     */
+    private function natural_thanks_can_close(SupportTicket $ticket, SupportCodexCase $case, SupportMessage $message, string $body): bool
+    {
+        if ($case->state === 'mission_pending' || trim((string) $case->mission) !== ''
+            || ($case->review_requested_message_id !== null && trim((string) $case->review_reason) !== '')) {
+            return false;
+        }
+        $words = trim(preg_replace('/[^a-z ]/', ' ', $body));
+        $words = preg_replace('/\s+/', ' ', $words);
+        // El agente elige cerrar por el sentido del mensaje. El servidor verifica el
+        // agradecimiento y rechaza señales explícitas de otra consulta o trabajo futuro;
+        // un elogio o un chiste no requieren reproducir una frase de un cliente concreto.
+        $thanks = preg_match('/^(?:(?:hola|si|ah|ok|oka|dale|listo|perfecto|buenisimo|genial|barbaro|excelente|martin) )*(?:(?:muchas|muchisimas|mil) )?gracias\b/', $words);
+        if (! $thanks || preg_match('/\b(?:consulta|duda|pregunta|necesito|quiero|podes|podrias|como|donde|cual|cuales|cuantos|mandame|pasame|enviame|revisame|fijate|tengo|ademas|tambien|otra|otro|proba[a-z]*|prueb[a-z]*|verific[a-z]*|hare|haremos|hago|haremos|esper[a-z]*|pendiente|viernes|lunes|martes|miercoles|jueves|sabado|domingo)\b|\b(?:te|les) aviso\b/', $words)) {
+            return false;
+        }
+        $previous = SupportMessage::where('support_ticket_id', $ticket->id)->where('id', '<', $message->id);
+        SupportMessage::apply_mensaje_real_conditions($previous, 'support_messages');
+        $last = $previous->orderByDesc('id')->first();
+        if ($last === null) {
+            return true; // Solo llegó una despedida; no hay consulta anterior que dejar abierta.
+        }
+        if ($last->sender_type !== 'admin') {
+            return false; // Hay otra consulta entrante que todavía nadie contestó.
+        }
+        // El «?» de un enlace al centro de recursos no es una pregunta pendiente.
+        $guidance = preg_replace('~https?://\S+~', '', Str::ascii(mb_strtolower((string) $last->body)));
+        if (preg_match('/\b(manana|proximamente|pendiente|revisando|investigando|escalado)\b|\b(?:voy|vamos) a\b|\b(?:te|lo) (?:aviso|avisamos|reviso|revisamos|confirmo|confirmamos)\b|\b(?:pasame|mandame|enviame|necesito|necesitamos)\b|\b(?:proba|probar|prueba|probarlo) (?:luego|despues)\b|\bcuando (?:puedas|puedan|podamos)\b|\b(?:dame|danos) un (?:minuto|momento)\b|\b(?:estoy|estamos|sigo|seguimos) (?:viendo|revisando|investigando)\b|\bque reviso\b/', $guidance)) {
+            return false;
+        }
+        if (preg_match('/\b(?:no pude|no pudimos|no sabemos|no funciona|no anda|todavia|aun)\b/', $guidance)
+            || (strpos($guidance, '?') !== false && preg_match('/\b(que|cual|cuales|como|donde|cuanto|cuantos|dificultad|problema)\b/', $guidance))) {
+            return false;
+        }
+        // Una pregunta de datos o una tarea por coordinar siguen abiertas. Una pregunta
+        // de cierre sí permite que el cliente termine con su agradecimiento natural.
+        $greeting_only = preg_match('/^(?:(?:hola|buenas|buen dia|buenos dias|buenas tardes|buenas noches|soy martin|martin|todo bien|como estas)[,.! ?]*)+$/', trim($guidance));
+        return ! $greeting_only && trim($guidance) !== '';
     }
 
     /**

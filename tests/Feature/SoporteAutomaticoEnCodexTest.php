@@ -47,6 +47,7 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         AdminSetting::set(SupportCodexSettings::KEY_ACTIVATED_AT, '2026-10-24 12:00:00');
         $this->deliveries = new class extends SupportWhatsappOpenerService {
             public $bodies = [];
+            public $ticket_states_during_delivery = [];
             public $success = true;
             public function __construct()
             {
@@ -55,6 +56,7 @@ class SoporteAutomaticoEnCodexTest extends TestCase
             public function deliver_follow_up(SupportTicket $ticket, SupportMessage $message, string $admin_name): array
             {
                 $this->bodies[] = $message->body;
+                $this->ticket_states_during_delivery[] = $ticket->fresh()->status;
                 if ($this->success) {
                     $message->whatsapp_message_id = 'wamid.codex.' . count($this->bodies);
                     $message->save();
@@ -988,7 +990,6 @@ class SoporteAutomaticoEnCodexTest extends TestCase
             'sí a saludo social' => ['solicitar_confirmacion', '¿Todo bien?', 'Sí, gracias'],
             'estado listo sin pedido' => ['responder', '¿Quedó resuelto?', 'Todo normal'],
             'afirmación del agente sin pregunta' => ['solicitar_confirmacion', 'Ya podés abrir el sistema.', 'Todo normal'],
-            'agradecimiento aislado' => ['solicitar_confirmacion', '¿Quedó resuelto?', 'Gracias'],
             'negación' => ['solicitar_confirmacion', '¿Quedó resuelto?', 'No, todavía no funciona'],
             'problema pendiente' => ['solicitar_confirmacion', '¿Quedó resuelto?', 'Todo normal, pero no puedo vender'],
             'condicional' => ['solicitar_confirmacion', '¿Quedó resuelto?', 'Si funciona después te aviso'],
@@ -1132,9 +1133,9 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         $this->get($this->base . '/tickets/' . $ticket->id . '/attachments/' . $attachment->id, $this->headers)->assertOk();
     }
 
-    public function test_agradecer_o_prometer_probar_no_confirma_resolucion(): void
+    public function test_prometer_probar_no_confirma_resolucion(): void
     {
-        foreach (['Gracias', 'Perfecto, lo pruebo mañana, gracias', 'Si funciona después te aviso'] as $body) {
+        foreach (['Perfecto, lo pruebo mañana, gracias', 'Si funciona después te aviso'] as $body) {
             $ticket = $this->ticket();
             $claim = $this->claim($ticket);
             $this->reply($ticket, $claim, ['action' => 'solicitar_confirmacion', 'body' => '¿Quedó resuelto?'])->assertOk();
@@ -1355,5 +1356,130 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         $claim = $this->claim($ticket);
         $this->reply($ticket, $claim, ['body' => 'Ahora abrí el comprobante.'])->assertOk();
         $this->assertSame('Ahora abrí el comprobante.', end($this->deliveries->bodies));
+    }
+
+    /** @dataProvider agradecimientos_naturales */
+    public function test_agradecimiento_natural_cierra_despues_de_despedir_sin_duplicar(string $thanks): void
+    {
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), ['body' => 'En Ventas podés abrir el detalle de la cuota desde el listado.'])->assertOk();
+        $message = $this->inbound($ticket, $thanks);
+        $claim = $this->claim($ticket);
+        $this->assertTrue($claim['ticket']['capabilities']['natural_thanks_closure']);
+        $payload = ['action' => 'cerrar', 'confirmation_message_id' => $message->id, 'body' => 'De nada!'];
+        $this->reply($ticket, $claim, $payload)->assertOk()->assertJsonPath('ticket.status', 'closed');
+        $this->reply($ticket, $claim, $payload)->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->assertSame(['En Ventas podés abrir el detalle de la cuota desde el listado.', 'De nada!'], $this->deliveries->bodies);
+        $this->assertSame(['open', 'open'], $this->deliveries->ticket_states_during_delivery);
+    }
+
+    public function agradecimientos_naturales(): array
+    {
+        return [
+            ['Gracias'], ['Oka gracias'], ['Buenísimo Martín, muchas gracias.'],
+            ['Gracias sos un genio, me hiciste el día'], ['Mil gracias Martín, un abrazo grande'],
+            ['Gracias por la ayuda, te ganaste un café'],
+            ['Gracias Martin sos un fenómeno en cuánto aprendas un poco más lo despedís a Lucas y seguís vos'],
+        ];
+    }
+
+    /** @dataProvider agradecimientos_con_pendientes */
+    public function test_agradecimiento_no_cierra_dudas_futuro_o_pedidos_de_datos(string $guidance, string $thanks): void
+    {
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), ['body' => $guidance])->assertOk();
+        $message = $this->inbound($ticket, $thanks);
+        $this->reply($ticket, $this->claim($ticket), ['action' => 'cerrar', 'confirmation_message_id' => $message->id])->assertStatus(422);
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->assertCount(1, $this->deliveries->bodies);
+    }
+
+    public function agradecimientos_con_pendientes(): array
+    {
+        return [
+            ['Probá guardar el artículo.', 'Gracias, pero no anda'],
+            ['Probá guardar el artículo.', 'Gracias, tengo otra duda'],
+            ['Probá guardar el artículo.', 'Gracias ¿cómo veo el stock?'],
+            ['Probá guardar el artículo.', 'Gracias, lo pruebo mañana'],
+            ['Probá mañana y avisame.', 'Gracias'],
+            ['Lo estamos revisando, te aviso.', 'Gracias'],
+            ['Mandame una captura de la pantalla.', 'Gracias'],
+            ['¿Qué versión usás?', 'Gracias'],
+            ['Hola, ¿cómo estás?', 'Gracias'],
+            ['Hola', 'Gracias'],
+            ['¿Qué parte no funciona?', 'Gracias'],
+            ['No pude verificar la venta.', 'Gracias'],
+            ['Dame un minuto que reviso la venta.', 'Gracias'],
+            ['Estoy viendo tu venta.', 'Gracias'],
+            ['Probá guardar el artículo.', 'Gracias sos un genio. Lo pruebo el viernes'],
+            ['Probá guardar el artículo.', 'Gracias sos un genio. Te aviso en cuanto pueda probarlo'],
+            ['Probá guardar el artículo.', 'Gracias Martín sos un genio, tengo otra consulta'],
+        ];
+    }
+
+    public function test_agradecimiento_aislado_sin_consulta_pendiente_puede_despedir(): void
+    {
+        $ticket = $this->ticket();
+        SupportMessage::where('support_ticket_id', $ticket->id)->delete();
+        $message = $this->inbound($ticket, 'Muchas gracias');
+        $this->reply($ticket, $this->claim($ticket), ['action' => 'cerrar', 'confirmation_message_id' => $message->id, 'body' => 'De nada!'])->assertOk()->assertJsonPath('ticket.status', 'closed');
+        $this->assertSame(['De nada!'], $this->deliveries->bodies);
+    }
+
+    public function test_agradecimiento_no_cierra_una_consulta_previa_sin_respuesta(): void
+    {
+        $ticket = $this->ticket();
+        $message = $this->inbound($ticket, 'Gracias');
+        $this->reply($ticket, $this->claim($ticket), ['action' => 'cerrar', 'confirmation_message_id' => $message->id])->assertStatus(422);
+        $this->assertCount(0, $this->deliveries->bodies);
+    }
+
+    public function test_agradecimiento_con_entrega_incierta_no_cierra_ni_reenvia(): void
+    {
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), ['body' => 'En Ventas abrí el detalle de la cuota.'])->assertOk();
+        $message = $this->inbound($ticket, 'Gracias');
+        $claim = $this->claim($ticket);
+        $this->deliveries->success = false;
+        $payload = ['action' => 'cerrar', 'confirmation_message_id' => $message->id, 'body' => 'De nada!'];
+        $this->reply($ticket, $claim, $payload)->assertOk()->assertJsonPath('operation.status', 'unknown');
+        $this->reply($ticket, $claim, $payload)->assertOk()->assertJsonPath('operation.status', 'unknown');
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->assertCount(2, $this->deliveries->bodies);
+    }
+
+    public function test_agradecimiento_no_cierra_mision_o_revision_pendiente(): void
+    {
+        foreach (['mission', 'review'] as $pending) {
+            $ticket = $this->ticket();
+            $this->reply($ticket, $this->claim($ticket), ['body' => 'En Ventas abrí el detalle de la cuota.'])->assertOk();
+            $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->firstOrFail();
+            $case->update($pending === 'mission' ? ['mission' => 'Corregir cuotas'] : ['review_reason' => 'Lucas debe revisar', 'review_requested_message_id' => $case->last_reply_id]);
+            $message = $this->inbound($ticket, 'Gracias');
+            $this->reply($ticket, $this->claim($ticket), ['action' => 'cerrar', 'confirmation_message_id' => $message->id])->assertStatus(422);
+            $this->assertSame('open', $ticket->fresh()->status);
+        }
+    }
+
+    /** @dataProvider orientaciones_reales_con_agradecimiento */
+    public function test_cierra_agradecimiento_tras_orientacion_real_sin_afirmar_resultado(string $guidance, string $thanks): void
+    {
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), ['body' => $guidance])->assertOk();
+        $message = $this->inbound($ticket, $thanks);
+        $this->reply($ticket, $this->claim($ticket), ['action' => 'cerrar', 'confirmation_message_id' => $message->id, 'body' => 'De nada!'])->assertOk()->assertJsonPath('ticket.status', 'closed');
+        $this->assertSame('De nada!', end($this->deliveries->bodies));
+    }
+
+    public function orientaciones_reales_con_agradecimiento(): array
+    {
+        return [
+            ['No puedo ver ni confirmar la contraseña de Marcelo. Si es un usuario de "Empleados", podés cambiarle la clave desde tu cuenta: en "ABM", abrí "Empleados", tocá su fila, cargá una nueva contraseña y apretá "Guardar y cerrar". Si Marcelo es el dueño de la cuenta, puede usar "Olvidé mi contraseña" en la pantalla de ingreso con su correo.', 'Oka gracias'],
+            ['Sí, los podés modificar después. En ABM, entrá en Cuenta corriente y después en Cuotas. Buscá las opciones de Mercado Pago y editá el recargo de la cantidad de cuotas que quieras cambiar.
+
+Ahí se carga el porcentaje de recargo, no el coeficiente: por ejemplo, un coeficiente de 1,0256 equivale a 2,56% de recargo. Dejá elegido Mercado Pago como método para que siga apareciendo en la tienda.
+
+Acá se ve cómo configurar las cuotas: https://recursos.comerciocity.com/?v=T11.25', 'Gracias Martin sos un fenómeno en cuánto aprendas un poco más lo despedís a Lucas y seguís vos']
+        ];
     }
 }
