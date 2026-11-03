@@ -148,6 +148,50 @@ class EnvSshService
     }
 
     /**
+     * Lee señales agregadas de actividad del ERP. El comando es fijo y no recibe SQL del ticket.
+     */
+    public function read_upgrade_activity_for(ClientApi $client_api, int $owner_id): array
+    {
+        if ($owner_id < 1) {
+            throw new \InvalidArgumentException('El negocio no tiene un dueño verificable.');
+        }
+
+        $this->connect_for($client_api);
+        try {
+            $payload = file_get_contents(__DIR__ . '/UpgradePreflight/read_activity.php');
+            if ($payload === false || strpos($payload, '<?php') !== 0) {
+                throw new \RuntimeException('No se pudo cargar el prechequeo de actividad.');
+            }
+            $command = 'cd ' . $this->escape_remote_arg($this->get_api_path($client_api))
+                . ' && php -d display_errors=0 -r ' . $this->escape_remote_arg(substr($payload, 5))
+                . ' -- ' . $owner_id . ' 2>/dev/null';
+            $site_user = $this->path_resolver->vps_site_user($client_api);
+            if ($site_user !== '') {
+                $command = 'sudo -n -H -u ' . $this->escape_remote_arg($site_user)
+                    . ' /bin/bash -c ' . $this->escape_remote_arg($command);
+            }
+            $this->ssh->setTimeout(15);
+            $output = $this->ssh->exec($command);
+            if ($this->ssh->isTimeout() || $this->ssh->getExitStatus() !== 0 || ! is_string($output)) {
+                throw new \RuntimeException('No se pudo medir la actividad del negocio.');
+            }
+            $result = json_decode($output, true);
+            if (! is_array($result) || array_keys($result) !== ['usuarios_activos', 'ventas_recientes']) {
+                throw new \RuntimeException('La medición de actividad del negocio es inválida.');
+            }
+            foreach ($result as $value) {
+                if (! is_int($value) || $value < 0) {
+                    throw new \RuntimeException('La medición de actividad del negocio es inválida.');
+                }
+            }
+
+            return $result;
+        } finally {
+            $this->disconnect();
+        }
+    }
+
+    /**
      * Lee y parsea el .env de esa ClientApi.
      *
      * @param  ClientApi  $client_api
