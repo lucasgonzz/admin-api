@@ -60,6 +60,16 @@ class LeadEventoMeta extends Model
         self::EVENTO_PURCHASE,
     ];
 
+    /**
+     * Canal `web`: el negocio empezó su prueba gratuita desde la landing (evento estándar `StartTrial`;
+     * programa «Prueba gratuita de 7 días», misión `prueba-alta-instancia`, 3/11/2026).
+     *
+     * 🔴 Va APARTE de `EVENTOS_WEB`, a propósito: ese array se lee por posición (0 = Lead, 1 = Schedule,
+     * 2 = Purchase) en `MetaConversionesService::eventos_alcanzados()`, y meterlo adentro correría las
+     * posiciones. Lo agrega el mismo método, solo para los leads en prueba.
+     */
+    const EVENTO_WEB_START_TRIAL = 'StartTrial';
+
     const ESTADO_PENDIENTE = 'pendiente';
     const ESTADO_ENVIANDO = 'enviando';
     const ESTADO_ENVIADO = 'enviado';

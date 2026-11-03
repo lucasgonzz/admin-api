@@ -109,8 +109,8 @@ class EmpujonesDiariosTest extends BaseDeLaPrueba
     {
         $espia = $this->espiar_sender();
         [$client, $lead] = $this->negocio_con_bienvenida();
-        /* El admin sin fecha de vencimiento (M2 sin cargarla todavía): manda lo que diga la instancia. */
-        \App\Services\PruebaDelClienteService::forzar_en_prueba([(int) $client->id => ['dias' => 7, 'vence_at' => null]]);
+        /* El admin sin fecha de vencimiento: manda lo que diga la instancia. */
+        $this->fijar_en_prueba($client, 5, 7, false);
 
         $vencida = $this->estado_de_la_instancia(['ingreso']);
         $vencida['vencida'] = true;

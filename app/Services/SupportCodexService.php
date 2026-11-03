@@ -14,6 +14,7 @@ use App\Models\SupportCodexUpgradeAgreement;
 use App\Models\SupportCodexOperation;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
+use App\Services\Prueba\PruebaContextoSoporteService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Symfony\Component\HttpKernel\Exception\HttpException;
@@ -175,7 +176,7 @@ class SupportCodexService
                 // El programa local de Martín ubica la bitácora de la implementación por slug cuando no hay estado.json.
                 'slug' => $ticket->client ? $ticket->client->slug : null,
                 // `prueba` si el negocio está en prueba gratuita (misión prueba-martin-importacion, 3/11/2026); si no, null.
-                'estado' => app(PruebaDelClienteService::class)->es_cliente_en_prueba($ticket->client) ? PruebaDelClienteService::ESTADO_PRUEBA : null,
+                'estado' => app(PruebaDelClienteService::class)->es_cliente_en_prueba($ticket->client) ? (string) $ticket->client->estado : null,
             ],
             'contact_name' => $ticket->resolve_contact_display_name(),
             'contact_role' => $ticket->client_employee_id ? 'employee' : 'owner',
@@ -196,12 +197,15 @@ class SupportCodexService
             'expected_message_id' => $last ? (int) $last->id : null,
             'window' => app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone),
             'client_context' => app(SupportClientContextService::class)->bloque_para_el_prompt($ticket),
+            /* La prueba gratuita del cliente (misión prueba-alta-instancia, 3/11/2026): estado, vencimiento, días
+             * restantes y los hitos `prueba.*` recibidos por C2. Solo datos; el protocolo de Martín para un negocio en
+             * prueba lo escribe M4. null = el cliente no es una prueba. M4 (prueba-martin-importacion) le suma sus
+             * claves (día actual, próximo paso, hitos en vivo por C3, bienvenida) por
+             * `PruebaContextoSoporteService::extender()`, registrada en `SupportPruebaContextService::registrar()`. */
+            'prueba' => app(PruebaContextoSoporteService::class)->bloque_para_el_cliente($ticket->client),
             /* La implementación del sistema y de la tienda (abierta, o cerrada hace ≤ 30 días), para que
              * Martín siga la conversación de la implementación donde la dejó Lucas. null = no tiene. */
             'implementation' => app(SupportImplementationContextService::class)->bloque_para_el_ticket($ticket),
-            /* La prueba gratuita del negocio (misión prueba-martin-importacion, 3/11/2026): días que quedan, hitos
-             * (C3) y próximo paso, para que Martín lea `prueba.md` y lo acompañe. null = no está en prueba. */
-            'prueba' => app(SupportPruebaContextService::class)->bloque_para_el_ticket($ticket),
             /* Los tickets anteriores del cliente, resumidos (hasta 5, sin el actual; de un empleado, solo los
              * suyos), para que Martín sepa que existen y los pida con GET .../history si le hacen falta. */
             'previous_tickets' => $this->previous_tickets($ticket),

@@ -53,5 +53,12 @@ class AppServiceProvider extends ServiceProvider
         Lead::observe(\App\Observers\ReservaAtribucionObserver::class);
         \App\Models\SupportTicket::observe(\App\Observers\SupportAttentionObserver::class);
         \App\Models\SupportCodexCase::observe(\App\Observers\SupportAttentionObserver::class);
+
+        /*
+         * Prueba gratuita (misión cruzada prueba-martin-importacion, 3/11/2026): el bloque `prueba` del
+         * contexto de Martín lo arma `Prueba\PruebaContextoSoporteService` (M2) y acá se le registra la
+         * extensión que le suma el día actual, el próximo paso (C3) y la bienvenida. Una vez por proceso.
+         */
+        \App\Services\SupportPruebaContextService::registrar();
     }
 }

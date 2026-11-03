@@ -9,10 +9,14 @@ use App\Services\PruebaWhatsappService;
 use Illuminate\Http\Request;
 
 /**
- * API JSON (Sanctum) de la pestaña «Prueba» del modal del lead y de la ficha del cliente en admin-spa
- * (misión cruzada prueba-martin-importacion, 3/11/2026): cuántos días quedan, en qué hito va (C3, por el
- * puente del admin, con fallback a los eventos de C2), qué WhatsApps de la prueba salieron, y el botón
- * «Avisar a Tomás».
+ * API JSON (Sanctum) del SEGUIMIENTO de la prueba en la pestaña «Prueba» del modal del lead y de la ficha
+ * del cliente en admin-spa (misión cruzada prueba-martin-importacion, 3/11/2026): cuántos días quedan, en qué
+ * hito va (C3, por el puente del admin, con fallback a los eventos de C2), qué WhatsApps de la prueba salieron,
+ * y el botón «Avisar a Tomás».
+ *
+ * Rutas: `GET client/{id}/prueba/seguimiento`, `GET lead/{id}/prueba/seguimiento` y `POST .../prueba/avisar-a-tomas`.
+ * La solapa en sí (estado, URL, instancia y los días editables) es `GET/PUT .../prueba` de `PruebaInstanciaController`
+ * (misión prueba-alta-instancia): `PruebaSeguimiento.vue` se monta adentro de esa solapa.
  *
  * Molde: `ClientSessionLockController` (GET/PUT client/{clientId}/candado-sesion).
  *

@@ -339,6 +339,42 @@ class HostingerApiClient extends HostingerHttpTransport
     }
 
     /**
+     * Borra registros de la zona DNS del dominio de config (misión `prueba-alta-instancia`, 3/11/2026,
+     * decisión D7: la baja de una instancia de prueba borra sus A records).
+     *
+     * `DELETE /api/dns/v1/zones/{dominio}` con `{ "filters": [ { "name", "type" } ] }`: es la forma que
+     * ya usó `hostinger-dns-tanda-20261003.sh` (borrado de los AAAA en la migración de Pack y 3DTisk) y
+     * la única que Hostinger documenta para sacar registros sueltos.
+     *
+     * 🔴 Transporte puro, como `put_dns_zone()`: las guardas (lista blanca de labels, interruptor,
+     * respaldo previo y verificación posterior) viven en `App\Services\Prueba\PruebaDnsService`, que
+     * es su ÚNICO llamador. Acá solo se exige que cada filtro traiga `name` y `type`, para que un
+     * array vacío o mal armado no se convierta en un DELETE sin filtros.
+     *
+     * @param  array<int, array<string, string>>  $filtros  [['name' => 'api-lacava', 'type' => 'A'], ...]
+     * @return array<int|string, mixed>
+     * @throws \RuntimeException
+     * @throws \InvalidArgumentException Si algún filtro no trae name y type.
+     */
+    public function delete_dns_records(array $filtros): array
+    {
+        if ($filtros === []) {
+            throw new \InvalidArgumentException('delete_dns_records() exige al menos un filtro: un DELETE sin filtros no se manda.');
+        }
+
+        $limpios = [];
+        foreach ($filtros as $filtro) {
+            if (! is_array($filtro) || ! isset($filtro['name'], $filtro['type'])
+                || trim((string) $filtro['name']) === '' || trim((string) $filtro['type']) === '') {
+                throw new \InvalidArgumentException('Cada filtro de delete_dns_records() lleva name y type.');
+            }
+            $limpios[] = ['name' => (string) $filtro['name'], 'type' => (string) $filtro['type']];
+        }
+
+        return $this->request('DELETE', $this->ruta_zona(), ['filters' => $limpios]);
+    }
+
+    /**
      * Lista los snapshots que Hostinger tiene de la zona DNS.
      *
      * 🔴 ANTES ESTO PEDÍA UN SNAPSHOT CON POST, Y ESE ENDPOINT NO EXISTE. Medido el 10/9/2026

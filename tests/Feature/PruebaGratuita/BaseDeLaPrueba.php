@@ -8,8 +8,11 @@ use App\Models\FollowupTemplate;
 use App\Models\Lead;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
+use App\Services\Prueba\PruebaCicloService;
+use App\Services\Prueba\PruebaContextoSoporteService;
 use App\Services\PruebaDelClienteService;
 use App\Services\PruebaPlantillasService;
+use App\Services\SupportPruebaContextService;
 use Illuminate\Support\Str;
 use Tests\Feature\AsistenteWhatsapp\BaseDelCanal;
 
@@ -21,9 +24,10 @@ use Tests\Feature\AsistenteWhatsapp\BaseDelCanal;
  * Meta se espía a nivel `WhatsappSendService`, y los constructores de cliente, frente y configuración de
  * WhatsApp.
  *
- * 🔴 Los clientes en prueba se fijan con `PruebaDelClienteService::forzar_en_prueba()`: las columnas
- * `clients.estado` / `trial_days` / `trial_ends_at` las crea la misión M2, que se construyó en paralelo,
- * así que estas pruebas no pueden depender del esquema. Se restablece en `tearDown()`.
+ * Los clientes en prueba se fijan en las columnas de M2 (`clients.estado = prueba`, `trial_days`,
+ * `trial_ends_at`) con {@see fijar_en_prueba()}. Como los tests de M2 vacían las extensiones del bloque
+ * `prueba` del contexto (`PruebaContextoSoporteService::sin_extensiones()`), acá se deja registrada exactamente
+ * una en cada `setUp()`.
  *
  * No termina en `Test.php` a propósito, así PHPUnit no lo corre como suite.
  */
@@ -42,13 +46,13 @@ abstract class BaseDeLaPrueba extends BaseDelCanal
         config(['services.claude_task_ingest.key' => self::CLAVE_DE_INGESTA]);
         config(['services.admin_spa.url' => 'https://admin.ejemplo.test']);
 
-        $this->forzados = [];
-        PruebaDelClienteService::restablecer();
+        PruebaContextoSoporteService::sin_extensiones();
+        SupportPruebaContextService::registrar(true);
     }
 
     protected function tearDown(): void
     {
-        PruebaDelClienteService::restablecer();
+        PruebaContextoSoporteService::sin_extensiones();
 
         parent::tearDown();
     }
@@ -86,26 +90,23 @@ abstract class BaseDeLaPrueba extends BaseDelCanal
     }
 
     /**
-     * Fija (o refija) un cliente como en prueba, sumándolo a los ya forzados.
+     * Fija (o refija) un cliente como en prueba en las columnas de M2.
      *
-     * @param Client $client
-     * @param int    $dias_restantes
-     * @param int    $dias
+     * @param Client      $client
+     * @param int         $dias_restantes
+     * @param int         $dias
+     * @param string|null $vence_at       Para fijar el vencimiento a mano (null = sin fecha).
+     * @param bool        $con_fecha      false = `trial_ends_at` queda null.
      *
      * @return void
      */
-    protected function fijar_en_prueba(Client $client, int $dias_restantes = 5, int $dias = 7): void
+    protected function fijar_en_prueba(Client $client, int $dias_restantes = 5, int $dias = 7, bool $con_fecha = true): void
     {
-        $this->forzados[(int) $client->id] = [
-            'dias'     => $dias,
-            'vence_at' => now()->addDays($dias_restantes)->addMinutes(30)->toIso8601String(),
-        ];
-
-        PruebaDelClienteService::forzar_en_prueba($this->forzados);
+        $client->estado        = PruebaCicloService::CLIENTE_PRUEBA;
+        $client->trial_days    = $dias;
+        $client->trial_ends_at = $con_fecha ? now()->addDays($dias_restantes)->addMinutes(30) : null;
+        $client->save();
     }
-
-    /** @var array<int, array<string, mixed>> Los clientes fijados en prueba por ESTE test. */
-    protected $forzados = [];
 
     /**
      * El lead de la prueba, promovido al cliente, con la dinámica nueva y su token de eventos (C2).

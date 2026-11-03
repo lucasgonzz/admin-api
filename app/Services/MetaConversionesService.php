@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Helpers\AppTime;
 use App\Jobs\EnviarEventoMetaJob;
+use App\Models\Client;
 use App\Models\Lead;
 use App\Models\LeadEventoMeta;
 use App\Models\LicenciaCuota;
@@ -286,10 +287,14 @@ class MetaConversionesService
     {
         $nombres   = $canal === LeadEventoMeta::CANAL_WEB ? LeadEventoMeta::EVENTOS_WEB : LeadEventoMeta::EVENTOS;
         $status    = (string) $lead->status;
-        $promovido = $lead->promoted_client_id !== null && (string) $lead->promoted_client_id !== '';
+        $en_prueba = $status === self::ESTADO_PRUEBA_ACTIVA || self::cliente_promovido_en_prueba($lead);
+        /* 🔴 Un lead cuyo cliente está EN PRUEBA no compró (misión prueba-alta-instancia, 3/11/2026): tiene
+           `promoted_client_id` desde el alta, pero el `Purchase` sale recién cuando contrata (el cliente pasa a
+           `activo` y el lead a `cerrado_ganado`). */
+        $promovido = $lead->promoted_client_id !== null && (string) $lead->promoted_client_id !== '' && ! $en_prueba;
         $eventos   = [];
 
-        if ($promovido || in_array($status, self::ESTADOS_LEAD_SUBMITTED, true)) {
+        if ($promovido || $en_prueba || in_array($status, self::ESTADOS_LEAD_SUBMITTED, true)) {
             $eventos[] = $nombres[0];
         }
         if ($promovido || in_array($status, self::ESTADOS_QUALIFIED_LEAD, true)) {
@@ -297,6 +302,11 @@ class MetaConversionesService
         }
         if ($promovido) {
             $eventos[] = $nombres[2];
+        }
+        /* `StartTrial` solo por la web (es donde está el píxel que lo dispara del lado del navegador y lo deduplica
+           por `event_id`): el negocio empezó su prueba gratuita. */
+        if ($en_prueba && $canal === LeadEventoMeta::CANAL_WEB) {
+            $eventos[] = LeadEventoMeta::EVENTO_WEB_START_TRIAL;
         }
 
         return $eventos;
@@ -568,7 +578,29 @@ class MetaConversionesService
      */
     private static function esta_promovido(Lead $lead): bool
     {
-        return $lead->promoted_client_id !== null && (string) $lead->promoted_client_id !== '';
+        return $lead->promoted_client_id !== null && (string) $lead->promoted_client_id !== ''
+            && ! self::cliente_promovido_en_prueba($lead);
+    }
+
+    /**
+     * Estado del pipeline de un lead con la prueba gratuita en curso (`LeadPipelineStatus`, misión
+     * `prueba-alta-instancia`, 3/11/2026). Cuenta como `Lead` (y `StartTrial` por la web), nunca como compra.
+     */
+    const ESTADO_PRUEBA_ACTIVA = 'prueba_activa';
+
+    /**
+     * ¿El cliente al que apunta el lead es una prueba todavía no contratada? Lee `clients.estado` con una
+     * consulta liviana; un lead sin cliente devuelve false y el resto del servicio no cambia.
+     */
+    private static function cliente_promovido_en_prueba(Lead $lead): bool
+    {
+        if ($lead->promoted_client_id === null || (string) $lead->promoted_client_id === '') {
+            return false;
+        }
+
+        $estado = (string) Client::query()->whereKey((int) $lead->promoted_client_id)->value('estado');
+
+        return in_array($estado, ['prueba', 'prueba_vencida', 'prueba_borrada'], true);
     }
 
     /**

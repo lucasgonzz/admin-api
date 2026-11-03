@@ -13,11 +13,15 @@ use Illuminate\Support\Str;
  * El bloque `prueba` del contexto de Martín (`GET claude/support-codex/tickets/{id}`) y la marca `prueba`
  * de `pending` (misión cruzada prueba-martin-importacion, 3/11/2026).
  *
+ * El bloque lo arma M2 (`Prueba\PruebaContextoSoporteService`: estado, vencimiento, URL, instancia, `hitos`
+ * registrados en el admin) y este lado le suma el día actual, el próximo paso leído en vivo (C3) y la
+ * bienvenida por la extensión registrada en `SupportPruebaContextService::registrar()`.
+ *
  * Lo que protege:
- *  1. Con el cliente en prueba, el contexto trae `prueba` con los días, los hitos de la instancia (C3) y el
- *     próximo paso, `client.estado = 'prueba'` y la capability `prueba_import`. Es lo que hace que Martín
- *     lea `prueba.md`.
- *  2. Si la instancia no tiene C3 (404), los hitos salen de los eventos de C2 y el bloque lo dice.
+ *  1. Con el cliente en prueba, el contexto trae `prueba` con la base de M2 y las claves de M4 (días, próximo
+ *     paso según la instancia), `client.estado = 'prueba'` y la capability `prueba_import`. Es lo que hace que
+ *     Martín lea `prueba.md`.
+ *  2. Si la instancia no tiene C3 (404), el próximo paso sale de los eventos de C2 y el bloque lo dice.
  *  3. Un cliente que no está en prueba sigue exactamente igual: `prueba` null, `client.estado` null.
  */
 class ContextoDePruebaParaMartinTest extends BaseDeLaPrueba
@@ -38,19 +42,25 @@ class ContextoDePruebaParaMartinTest extends BaseDeLaPrueba
 
         $prueba = $respuesta->json('ticket.prueba');
         $this->assertIsArray($prueba, 'El contexto tiene que traer el bloque prueba.');
+        /* La base de M2. */
         $this->assertSame('prueba', $prueba['estado']);
-        $this->assertSame(7, $prueba['dias']);
+        $this->assertSame(7, $prueba['trial_days']);
         $this->assertSame(6, $prueba['dias_restantes'], 'Vence en 5 días y media hora: quedan 6 contando el de hoy.');
         $this->assertFalse($prueba['vencida']);
+        $this->assertSame((int) $lead->id, $prueba['lead_id']);
+        $this->assertArrayHasKey('hitos', $prueba, 'Los hitos registrados en el admin (lead_demo_hitos) son de M2.');
+        $this->assertArrayHasKey('url', $prueba);
+        /* Lo que suma M4. */
+        $this->assertSame(7, $prueba['dias']);
+        $this->assertSame(2, $prueba['dia_actual']);
         $this->assertTrue($prueba['semilla_presente']);
         $this->assertSame('instancia', $prueba['hitos_fuente']);
-        $this->assertSame('2026-11-03T10:15:00-03:00', $prueba['hitos']['ingreso']);
-        $this->assertNull($prueba['hitos']['importo']);
         $this->assertSame('importo', $prueba['proximo_hito']);
         $this->assertSame('Importó su información', $prueba['proximo_hito_label']);
         $this->assertFalse($prueba['bienvenida_enviada']);
         $this->assertFalse($prueba['bienvenida_en_cola']);
-        $this->assertSame((int) $lead->id, $prueba['lead_id']);
+        $this->assertNull($prueba['ultimo_empujon_at']);
+        $this->assertArrayNotHasKey('error', $prueba);
 
         $this->assertSame('prueba', $respuesta->json('ticket.client.estado'));
         $this->assertTrue($respuesta->json('ticket.capabilities.prueba_import'));
@@ -88,10 +98,7 @@ class ContextoDePruebaParaMartinTest extends BaseDeLaPrueba
             ->json('ticket.prueba');
 
         $this->assertSame('admin', $prueba['hitos_fuente']);
-        $this->assertNotNull($prueba['hitos']['ingreso']);
-        $this->assertNotNull($prueba['hitos']['importo']);
-        $this->assertNull($prueba['hitos']['venta']);
-        $this->assertSame('articulo_creado', $prueba['proximo_hito']);
+        $this->assertSame('articulo_creado', $prueba['proximo_hito'], 'Entró e importó según C2: lo que sigue es crear un artículo.');
         $this->assertNull($prueba['semilla_presente'], 'Sin la instancia no se sabe si la semilla sigue.');
     }
 

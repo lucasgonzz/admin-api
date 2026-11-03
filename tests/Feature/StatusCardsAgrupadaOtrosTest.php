@@ -28,7 +28,7 @@ use Tests\TestCase;
  *
  * 🔴 La tabla `lead_pipeline_statuses` empieza VACÍA en cada test (la deja así `DatabaseTransactions`,
  * que revierte cualquier fila que un test inserte) y ahí `LeadPipelineStatus::all_slugs()` cae al
- * fallback `DEFAULT_STATUSES` -- de eso sale la lista de 8 slugs de SLUGS_OTROS_POR_DEFECTO. El único
+ * fallback `DEFAULT_STATUSES` -- de eso sale la lista de 9 slugs de SLUGS_OTROS_POR_DEFECTO. El único
  * test que inserta una fila en esa tabla (el del slug dinámico) queda deliberadamente aislado del
  * resto: en cuanto la tabla deja de estar vacía, `all_slugs()` deja de usar el fallback y devuelve
  * SOLO lo que hay en BD, así que ese test no puede mezclar aserciones sobre el resto de los slugs
@@ -39,8 +39,9 @@ class StatusCardsAgrupadaOtrosTest extends TestCase
     use DatabaseTransactions;
 
     /**
-     * Los 8 slugs de `DEFAULT_STATUSES` que hoy NO tienen tarjeta propia: el catálogo completo (14)
-     * menos los 6 que ya cubren calificado/solicita_disponibilidad/closer_activo/demo. Verificado a
+     * Los 9 slugs de `DEFAULT_STATUSES` que hoy NO tienen tarjeta propia: el catálogo completo (15,
+     * con `prueba_activa` desde la prueba gratuita del 3/11/2026) menos los 6 que ya cubren
+     * calificado/solicita_disponibilidad/closer_activo/demo. Verificado a
      * mano contra `LeadPipelineStatus::DEFAULT_STATUSES` el 8/9/2026 -- si ese catálogo cambia
      * (se agrega o se saca un estado), esta lista tiene que actualizarse junto con él.
      */
@@ -49,6 +50,7 @@ class StatusCardsAgrupadaOtrosTest extends TestCase
         'contactado',
         'demo_pendiente_de_terminar',
         'demo_realizada',
+        'prueba_activa',
         'mail2_enviado',
         'cerrado_ganado',
         'cerrado_perdido',
@@ -114,7 +116,7 @@ class StatusCardsAgrupadaOtrosTest extends TestCase
     }
 
     /**
-     * "Otros" es la primera tarjeta, con su value/text/color/group fijos y trayendo los 8 slugs
+     * "Otros" es la primera tarjeta, con su value/text/color/group fijos y trayendo los 9 slugs
      * que hoy no tienen tarjeta propia (catálogo vacío -> fallback DEFAULT_STATUSES).
      *
      * @return void

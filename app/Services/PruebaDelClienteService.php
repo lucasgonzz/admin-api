@@ -9,19 +9,19 @@ use App\Models\Lead;
 use App\Models\PruebaWhatsappEnvio;
 use Carbon\Carbon;
 use Illuminate\Support\Collection;
+use App\Services\Prueba\PruebaCicloService;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Schema;
 
 /**
  * Todo lo que el admin necesita saber de un negocio en PRUEBA GRATUITA (programa «Prueba gratuita de 7
  * días», misión cruzada prueba-martin-importacion, 3/11/2026): si un cliente está en prueba, cuál es su
  * lead, cuántos días le quedan y en qué hito va.
  *
- * 🔴 ES TOLERANTE A PROPÓSITO. Las columnas que lo definen las crea la misión M2 (`clients.estado`,
- * `clients.trial_days`, `clients.trial_ends_at`, `leads.status = 'prueba_activa'`) y este servicio se
- * construyó en paralelo, sin ellas: cada lectura pasa por `getAttribute()` y por `Schema::hasColumn()`,
- * así que con un admin donde esas columnas todavía no existen nada se rompe y simplemente «nadie está en
- * prueba». Los tests fijan clientes en prueba con {@see forzar_en_prueba()} sin tocar el esquema.
+ * Las columnas que lo definen son de la misión M2 (prueba-alta-instancia): `clients.estado` (`prueba`,
+ * `prueba_vencida`, `prueba_borrada`; ver `PruebaCicloService`), `clients.trial_days`, `clients.trial_ends_at`
+ * y `leads.trial_days`. «En prueba» acá es lo mismo que para M2: en curso O vencida sin contratar
+ * (`PruebaCicloService::ESTADOS_EN_PRUEBA`); una prueba vencida sigue siendo del programa (Martín la atiende,
+ * Tomás la llama), lo que no recibe más son empujones.
  *
  * Los hitos salen de DOS fuentes, en este orden: la instancia del negocio (C3, `GET
  * admin-sync/prueba/estado`, por el puente del admin con la clave del cliente) y, si esa instancia no
@@ -32,8 +32,8 @@ use Illuminate\Support\Facades\Schema;
  */
 class PruebaDelClienteService
 {
-    /** `clients.estado` de un negocio en prueba (M2). */
-    const ESTADO_PRUEBA = 'prueba';
+    /** `clients.estado` de un negocio con la prueba en curso (M2, `PruebaCicloService::CLIENTE_PRUEBA`). */
+    const ESTADO_PRUEBA = PruebaCicloService::CLIENTE_PRUEBA;
 
     /** `leads.status` del lead en prueba (M2). Por slug, con fallback: si no existe en el catálogo, no importa. */
     const LEAD_STATUS_PRUEBA = 'prueba_activa';
@@ -73,17 +73,6 @@ class PruebaDelClienteService
     /** Ruta de C3 relativa a `admin-sync`, tal como la lee la lista blanca del puente. */
     const RUTA_ESTADO_REMOTO = '/prueba/estado';
 
-    /**
-     * Clientes forzados como «en prueba» por los tests: `client_id => ['dias' => int, 'vence_at' => string|null]`.
-     * null = no hay override (se mira la base).
-     *
-     * @var array<int, array<string, mixed>>|null
-     */
-    protected static $forzados = null;
-
-    /** @var bool|null Memo de `Schema::hasColumn('clients', 'estado')` por proceso. */
-    protected static $hay_columna_estado = null;
-
     /** @var ClientAdminSyncPuenteService */
     protected $puente;
 
@@ -96,59 +85,11 @@ class PruebaDelClienteService
     }
 
     /* ------------------------------------------------------------------------------------------
-     | Override para los tests (mientras las columnas de M2 no están en el esquema)
-     |----------------------------------------------------------------------------------------- */
-
-    /**
-     * Fija qué clientes están en prueba y con qué días, sin tocar el esquema.
-     *
-     * @param array<int, array<string, mixed>> $clientes `client_id => ['dias' => 7, 'vence_at' => '2026-11-10T14:00:00-03:00']`.
-     *
-     * @return void
-     */
-    public static function forzar_en_prueba(array $clientes): void
-    {
-        self::$forzados = [];
-        foreach ($clientes as $id => $datos) {
-            self::$forzados[(int) $id] = is_array($datos) ? $datos : [];
-        }
-    }
-
-    /**
-     * Saca el override.
-     *
-     * @return void
-     */
-    public static function restablecer(): void
-    {
-        self::$forzados = null;
-        self::$hay_columna_estado = null;
-    }
-
-    /**
-     * Si la base de este admin ya tiene `clients.estado` (M2 mergeada).
-     *
-     * @return bool
-     */
-    public static function hay_columna_estado(): bool
-    {
-        if (self::$hay_columna_estado === null) {
-            try {
-                self::$hay_columna_estado = Schema::hasColumn('clients', 'estado');
-            } catch (\Throwable $e) {
-                self::$hay_columna_estado = false;
-            }
-        }
-
-        return self::$hay_columna_estado;
-    }
-
-    /* ------------------------------------------------------------------------------------------
      | Quién está en prueba
      |----------------------------------------------------------------------------------------- */
 
     /**
-     * Si el cliente es un negocio en prueba gratuita.
+     * Si el cliente es un negocio en prueba gratuita (en curso o vencida sin contratar, como para M2).
      *
      * @param Client|null $client
      *
@@ -156,38 +97,18 @@ class PruebaDelClienteService
      */
     public function es_cliente_en_prueba(?Client $client): bool
     {
-        if ($client === null) {
-            return false;
-        }
-
-        if (self::$forzados !== null) {
-            return isset(self::$forzados[(int) $client->id]);
-        }
-
-        if (! self::hay_columna_estado()) {
-            return false;
-        }
-
-        return (string) $client->getAttribute('estado') === self::ESTADO_PRUEBA;
+        return PruebaCicloService::esta_en_prueba($client);
     }
 
     /**
-     * Todos los clientes en prueba, activos. Vacío si el admin todavía no tiene la columna.
+     * Todos los clientes en prueba (en curso o vencida), activos.
      *
      * @return Collection<int, Client>
      */
     public function clientes_en_prueba(): Collection
     {
-        if (self::$forzados !== null) {
-            return Client::query()->whereIn('id', array_keys(self::$forzados))->orderBy('id')->get();
-        }
-
-        if (! self::hay_columna_estado()) {
-            return new Collection();
-        }
-
         return Client::query()
-            ->where('estado', self::ESTADO_PRUEBA)
+            ->whereIn('estado', PruebaCicloService::ESTADOS_EN_PRUEBA)
             ->where('is_active', true)
             ->orderBy('id')
             ->get();
@@ -278,31 +199,27 @@ class PruebaDelClienteService
      */
     public function datos(Client $client): array
     {
-        $dias     = self::DIAS_POR_DEFECTO;
-        $vence_at = null;
+        $dias = self::DIAS_POR_DEFECTO;
 
-        if (self::$forzados !== null && isset(self::$forzados[(int) $client->id])) {
-            $forzado = self::$forzados[(int) $client->id];
-            $dias     = isset($forzado['dias']) && (int) $forzado['dias'] > 0 ? (int) $forzado['dias'] : $dias;
-            $vence_at = isset($forzado['vence_at']) ? $forzado['vence_at'] : null;
-        } else {
-            $crudo = $client->getAttribute('trial_days');
-            if (is_numeric($crudo) && (int) $crudo > 0) {
-                $dias = (int) $crudo;
-            }
-            $vence_at = $client->getAttribute('trial_ends_at');
+        $crudo = $client->trial_days;
+        if (is_numeric($crudo) && (int) $crudo > 0) {
+            $dias = (int) $crudo;
         }
 
-        $vence = $this->a_carbon($vence_at);
+        /* M2 la deja `prueba_vencida` cuando vence (por el cron o por el `prueba.vencida` de la instancia): vale
+           aunque la fecha no diga lo mismo (por ejemplo, si el admin no tiene `trial_ends_at`). */
+        $vencida_por_estado = (string) $client->estado === PruebaCicloService::CLIENTE_PRUEBA_VENCIDA;
+
+        $vence = $this->a_carbon($client->trial_ends_at);
 
         if ($vence === null) {
             return [
                 'dias'           => $dias,
                 'vence_at'       => null,
                 'inicio_at'      => null,
-                'dias_restantes' => null,
+                'dias_restantes' => $vencida_por_estado ? 0 : null,
                 'dia_actual'     => null,
-                'vencida'        => false,
+                'vencida'        => $vencida_por_estado,
             ];
         }
 
@@ -322,9 +239,9 @@ class PruebaDelClienteService
             'dias'           => $dias,
             'vence_at'       => $vence->toIso8601String(),
             'inicio_at'      => $inicio->toIso8601String(),
-            'dias_restantes' => $restantes,
+            'dias_restantes' => $vencida_por_estado ? 0 : $restantes,
             'dia_actual'     => $dia_actual,
-            'vencida'        => $vence->isPast(),
+            'vencida'        => $vence->isPast() || $vencida_por_estado,
         ];
     }
 
@@ -554,7 +471,7 @@ class PruebaDelClienteService
 
         return [
             'es_prueba'           => true,
-            'estado'              => self::ESTADO_PRUEBA,
+            'estado'              => (string) $client->estado,
             'client_id'           => (int) $client->id,
             'lead_id'             => $lead !== null ? (int) $lead->id : null,
             'dias'                => $datos['dias'],

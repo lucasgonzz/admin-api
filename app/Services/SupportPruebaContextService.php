@@ -2,25 +2,39 @@
 
 namespace App\Services;
 
-use App\Models\SupportTicket;
+use App\Models\Client;
+use App\Models\Lead;
+use App\Models\TrialInstance;
+use App\Services\Prueba\PruebaContextoSoporteService;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Arma el bloque `prueba` que recibe Martín (el soporte de Codex) en el contexto de un ticket cuando el
- * cliente es un negocio en PRUEBA GRATUITA (misión cruzada prueba-martin-importacion, 3/11/2026).
+ * Lo que Martín (el soporte de Codex) necesita saber de un negocio en PRUEBA GRATUITA además de lo que
+ * trae el bloque base (misión cruzada prueba-martin-importacion, 3/11/2026).
  *
- * Con este bloque Martín lee además `prueba.md`: se presenta una sola vez, ofrece la migración gratis,
- * pide el Excel o el PDF, sugiere el próximo hito que falta y sabe cuántos días quedan. Sin el bloque
- * (null), el cliente no está en prueba y Martín atiende como siempre.
+ * El bloque `prueba` del contexto de un ticket lo arma `PruebaContextoSoporteService` (misión
+ * prueba-alta-instancia): estado, vencimiento, días restantes, URL, instancia y los hitos que el admin
+ * registró de los eventos de C2. Este servicio NO arma otro bloque: se registra como EXTENSIÓN de ese
+ * (`PruebaContextoSoporteService::extender()`, una vez por proceso desde `registrar()`) y le suma las claves
+ * con las que Martín lee `prueba.md`:
+ *
+ *  - `dias`, `dia_actual`: cuánto dura la prueba y en qué día va (desde 1).
+ *  - `hitos_fuente`, `proximo_hito`, `proximo_hito_label`, `semilla_presente`: la lectura EN VIVO del sistema
+ *    del negocio (C3, `GET admin-sync/prueba/estado`, por el puente del admin con la clave del cliente);
+ *    si la instancia no contesta, lo mismo armado con los eventos de C2 (`hitos_fuente = admin`).
+ *  - `bienvenida_enviada`, `bienvenida_en_cola`, `ultimo_empujon_at`: qué WhatsApps de la prueba ya salieron,
+ *    para que Martín se presente una sola vez.
  *
  * Reglas:
- *  - **Nunca lanza.** El contexto se arma en cada `claim` y en cada `GET tickets/{id}`; ante un error el
- *    bloque lo DICE (`error`) en vez de volver null, porque null significa «no está en prueba».
- *  - Los hitos salen de la instancia (C3) cuando contesta, y si no de los eventos de C2 (`hitos_fuente`).
+ *  - **Nunca lanza.** El contexto se arma en cada `claim` y en cada `GET tickets/{id}`; ante un error las
+ *    claves de este servicio vienen en null y el bloque lo DICE (`error`), sin tumbar la base de M2.
  *  - Sin datos personales de más: ni teléfonos ni claves. Los días y los hitos alcanzan.
  */
 class SupportPruebaContextService
 {
+    /** @var bool Si la extensión ya quedó registrada en este proceso (se registra una sola vez). */
+    protected static $registrada = false;
+
     /** @var PruebaDelClienteService */
     protected $pruebas;
 
@@ -33,49 +47,71 @@ class SupportPruebaContextService
     }
 
     /**
-     * El bloque `prueba` del contexto, o null si el cliente del ticket no está en prueba.
+     * Registra la extensión en `PruebaContextoSoporteService` (desde `AppServiceProvider::boot()`). Idempotente
+     * por proceso; `$forzar` la vuelve a registrar (los tests, que vacían las extensiones entre casos).
      *
-     * @param SupportTicket $ticket
+     * @param bool $forzar
      *
-     * @return array<string, mixed>|null
+     * @return void
      */
-    public function bloque_para_el_ticket(SupportTicket $ticket): ?array
+    public static function registrar(bool $forzar = false): void
+    {
+        if (self::$registrada && ! $forzar) {
+            return;
+        }
+
+        PruebaContextoSoporteService::extender(function (array $base, Client $client, ?Lead $lead, ?TrialInstance $instancia) {
+            return app(SupportPruebaContextService::class)->extension($base, $client, $lead, $instancia);
+        });
+
+        self::$registrada = true;
+    }
+
+    /**
+     * Las claves que se le suman al bloque base. Nunca lanza.
+     *
+     * @param array<string, mixed> $base      El bloque de `PruebaContextoSoporteService` (no se pisa ninguna de sus claves).
+     * @param Client               $client
+     * @param Lead|null            $lead
+     * @param TrialInstance|null   $instancia
+     *
+     * @return array<string, mixed>
+     */
+    public function extension(array $base, Client $client, ?Lead $lead, ?TrialInstance $instancia = null): array
     {
         try {
-            $ticket->loadMissing('client');
-            $client = $ticket->client;
-
-            if (! $this->pruebas->es_cliente_en_prueba($client)) {
-                return null;
-            }
-
-            $lead    = $this->pruebas->lead_del_cliente($client);
+            $lead    = $lead !== null ? $lead : $this->pruebas->lead_del_cliente($client);
             $resumen = $this->pruebas->resumen($client, $lead, true);
 
             return [
-                'estado'             => 'prueba',
                 'dias'               => $resumen['dias'],
-                'vence_at'           => $resumen['vence_at'],
-                'dias_restantes'     => $resumen['dias_restantes'],
                 'dia_actual'         => $resumen['dia_actual'],
-                'vencida'            => $resumen['vencida'],
                 'semilla_presente'   => $resumen['semilla_presente'],
-                'hitos'              => $resumen['hitos'],
                 'hitos_fuente'       => $resumen['hitos_fuente'],
                 'proximo_hito'       => $resumen['proximo_hito'],
                 'proximo_hito_label' => $resumen['proximo_hito_label'],
                 'bienvenida_enviada' => $resumen['bienvenida_enviada'],
                 'bienvenida_en_cola' => $resumen['bienvenida_en_cola'],
                 'ultimo_empujon_at'  => $resumen['ultimo_empujon_at'],
-                'lead_id'            => $resumen['lead_id'],
             ];
         } catch (\Throwable $e) {
-            Log::channel('daily')->warning('SupportPruebaContextService: no se pudo armar el bloque de la prueba.', [
-                'ticket_id' => (int) $ticket->id,
+            Log::channel('daily')->warning('SupportPruebaContextService: no se pudo armar el seguimiento de la prueba.', [
+                'client_id' => (int) $client->id,
                 'error'     => $e->getMessage(),
             ]);
 
-            return ['estado' => 'prueba', 'error' => 'No se pudo leer el estado de la prueba en esta consulta.'];
+            return [
+                'dias'               => null,
+                'dia_actual'         => null,
+                'semilla_presente'   => null,
+                'hitos_fuente'       => null,
+                'proximo_hito'       => null,
+                'proximo_hito_label' => null,
+                'bienvenida_enviada' => null,
+                'bienvenida_en_cola' => null,
+                'ultimo_empujon_at'  => null,
+                'error'              => 'No se pudo leer el seguimiento de la prueba en esta consulta (los días y la URL siguen valiendo).',
+            ];
         }
     }
 }

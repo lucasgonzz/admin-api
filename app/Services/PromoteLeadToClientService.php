@@ -6,6 +6,7 @@ use App\Models\Admin;
 use App\Models\Client;
 use App\Models\ClientApi;
 use App\Models\Lead;
+use App\Services\Prueba\PruebaCicloService;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
@@ -65,6 +66,18 @@ class PromoteLeadToClientService
      */
     public function run(Lead $lead, Admin $creator, string $suggested_subdomain = ''): Lead
     {
+        /* 🔴 Un lead con la prueba gratuita en curso o vencida (misión prueba-alta-instancia, 3/11/2026,
+           decisión D6): CONTRATA. Ya tiene su Client (`estado = prueba`), sus dos ClientApi y su instancia en
+           el VPS, que ES su sistema definitivo. Acá no se crea nada ni se corre ningún user setup remoto (un
+           `migrate:fresh` le vaciaría lo que cargó en la prueba): el cliente pasa a `activo`, el ERP se entera
+           de que ya no vence (C3), la instancia se despierta si dormía y el lead queda `cerrado_ganado`. Las
+           tareas del proceso `lead_a_cliente` sí se crean, como en toda promoción, y las cuotas del contrato las
+           genera `ClientContratoService` igual que siempre (M5 pone los planes). */
+        $client_en_prueba = $lead->promoted_client_id ? Client::find($lead->promoted_client_id) : null;
+        if (PruebaCicloService::esta_en_prueba($client_en_prueba)) {
+            return $this->contratar_prueba($lead, $client_en_prueba, $creator);
+        }
+
         // Marcar el lead como cerrado_ganado si aún no lo está (sin tocar api_url del lead).
         if ($lead->status !== 'cerrado_ganado') {
             $cambios = ['status' => 'cerrado_ganado'];
@@ -101,6 +114,45 @@ class PromoteLeadToClientService
             /* Crear las dos ClientApis y asignar la activa. */
             $this->create_initial_client_apis($client, $slug);
         }
+
+        return $lead->refresh();
+    }
+
+    /**
+     * La promoción de un cliente en PRUEBA (D6): sin user setup, sin ClientApis nuevas, sin reinstalar.
+     *
+     * Orden: primero el cliente (`PruebaCicloService::contratar()`: estado, instancia, C3) y recién después el
+     * lead a `cerrado_ganado`. Así el observer de Meta, que corre en el `save()` del lead, ya ve al cliente
+     * `activo` y registra el `Purchase` (mientras estaba en prueba no contaba como compra).
+     */
+    private function contratar_prueba(Lead $lead, Client $client, Admin $creator): Lead
+    {
+        $resultado = app(PruebaCicloService::class)->contratar($client);
+
+        $cambios = ['status' => 'cerrado_ganado'];
+        /* El user setup NO se corre en una prueba, pero la columna tiene que decir que el sistema ya está
+           configurado: es la señal que leen los candados (`lead_sin_user_setup`) para no volver a vaciar un
+           sistema en uso. `exitoso` es lo que deja una instalación terminada. */
+        if (! in_array((string) $lead->user_setup_status, UserSetupCandadoService::ESTADOS_DEL_LEAD_QUE_YA_CONFIGURARON, true)) {
+            $cambios['user_setup_status'] = 'exitoso';
+        }
+        $lead->update($cambios);
+
+        try {
+            $this->task_service->create_from_templates('lead_a_cliente', $creator);
+        } catch (\Throwable $e) {
+            Log::error('PromoteLeadToClientService: no se pudieron crear las tareas al contratar una prueba.', ['lead_id' => $lead->id, 'error' => $e->getMessage()]);
+        }
+
+        /* El contrato viaja con el cliente, como en una promoción común (misión modulo-cobranzas): se copia
+           y se generan las cuotas desde su financiación. Atrapa y loguea adentro. */
+        app(ClientContratoService::class)->inicializar_desde_lead($lead, $client);
+
+        Log::info('PromoteLeadToClientService: cliente en prueba contratado.', [
+            'lead_id'   => $lead->id,
+            'client_id' => $client->id,
+            'c3'        => isset($resultado['estado']) ? $resultado['estado'] : null,
+        ]);
 
         return $lead->refresh();
     }

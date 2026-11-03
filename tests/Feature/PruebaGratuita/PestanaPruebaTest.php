@@ -7,8 +7,9 @@ use Illuminate\Support\Facades\Http;
 use Laravel\Sanctum\Sanctum;
 
 /**
- * La pestaña «Prueba» del admin: `GET admin/client/{id}/prueba`, `GET admin/lead/{id}/prueba` y el botón
- * «Avisar a Tomás» (misión cruzada prueba-martin-importacion, 3/11/2026).
+ * El seguimiento de la pestaña «Prueba» del admin: `GET admin/client/{id}/prueba/seguimiento`,
+ * `GET admin/lead/{id}/prueba/seguimiento` y el botón «Avisar a Tomás» (misión cruzada
+ * prueba-martin-importacion, 3/11/2026). La solapa en sí (`GET/PUT .../prueba`) es de M2.
  */
 class PestanaPruebaTest extends BaseDeLaPrueba
 {
@@ -27,10 +28,11 @@ class PestanaPruebaTest extends BaseDeLaPrueba
 
         $this->fakear_http(['*/admin-sync/prueba/estado' => Http::response($this->estado_de_la_instancia(['ingreso', 'importo', 'articulo_creado']), 200)]);
 
-        $respuesta = $this->getJson('/api/admin/client/' . $client->id . '/prueba');
+        $respuesta = $this->getJson('/api/admin/client/' . $client->id . '/prueba/seguimiento');
         $respuesta->assertStatus(200);
 
         $this->assertTrue($respuesta->json('es_prueba'));
+        $this->assertSame('prueba', $respuesta->json('estado'));
         $this->assertSame(7, $respuesta->json('dias'));
         $this->assertSame(6, $respuesta->json('dias_restantes'));
         $this->assertSame('instancia', $respuesta->json('hitos_fuente'));
@@ -56,7 +58,7 @@ class PestanaPruebaTest extends BaseDeLaPrueba
 
         $this->fakear_http(['*/admin-sync/prueba/estado' => Http::response([], 404)]);
 
-        $respuesta = $this->getJson('/api/admin/lead/' . $lead->id . '/prueba');
+        $respuesta = $this->getJson('/api/admin/lead/' . $lead->id . '/prueba/seguimiento');
         $respuesta->assertStatus(200);
         $this->assertTrue($respuesta->json('es_prueba'));
         $this->assertSame((int) $client->id, $respuesta->json('client_id'));
@@ -71,7 +73,7 @@ class PestanaPruebaTest extends BaseDeLaPrueba
 
         $client = $this->crear_cliente('+5493417770004', false, 'otra-clave');
 
-        $respuesta = $this->getJson('/api/admin/client/' . $client->id . '/prueba');
+        $respuesta = $this->getJson('/api/admin/client/' . $client->id . '/prueba/seguimiento');
         $respuesta->assertStatus(200);
         $this->assertFalse($respuesta->json('es_prueba'));
         Http::assertNothingSent();
@@ -107,6 +109,6 @@ class PestanaPruebaTest extends BaseDeLaPrueba
     {
         $client = $this->cliente_en_prueba();
 
-        $this->getJson('/api/admin/client/' . $client->id . '/prueba')->assertStatus(401);
+        $this->getJson('/api/admin/client/' . $client->id . '/prueba/seguimiento')->assertStatus(401);
     }
 }

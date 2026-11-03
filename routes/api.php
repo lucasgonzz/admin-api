@@ -95,6 +95,19 @@ Route::post('landing/agenda/reservas', [\App\Http\Controllers\LandingAgendaContr
     ->withoutMiddleware('throttle:api')
     ->middleware('throttle:landing-agenda-reservas');
 
+/*
+| Prueba gratuita de 7 días desde la landing (misión prueba-alta-instancia, 3/11/2026, contrato C6): el
+| formulario «Empezá tu prueba gratis» da de alta la prueba y la animación consulta el estado. Públicas,
+| con cubetas propias por IP (`RouteServiceProvider`) y sin la de todo /api, como la agenda. Contrato en
+| `LandingPruebaController`.
+*/
+Route::post('landing/prueba/alta', [\App\Http\Controllers\LandingPruebaController::class, 'alta'])
+    ->withoutMiddleware('throttle:api')
+    ->middleware('throttle:landing-prueba-alta');
+Route::get('landing/prueba/{uuid}/estado', [\App\Http\Controllers\LandingPruebaController::class, 'estado'])
+    ->withoutMiddleware('throttle:api')
+    ->middleware('throttle:landing-prueba-estado');
+
 Route::post('webhook/whatsapp', [WhatsappWebhookController::class, 'receive'])
     ->withoutMiddleware('throttle:api')
     ->middleware('throttle:whatsapp-webhook');
@@ -1033,12 +1046,25 @@ Route::prefix('admin')->group(function () {
         Route::put('client/{clientId}/candado-sesion', [ClientSessionLockController::class, 'update_json']);
         /* Botón "Reintentar sincronización" de la pestaña Candado de sesión. */
         Route::post('client/{clientId}/candado-sesion/sync', [ClientSessionLockController::class, 'sync_json']);
-        /* Pestaña «Prueba» de la ficha del cliente y del modal del lead (misión cruzada prueba-martin-importacion,
-           3/11/2026): días que quedan, hitos (C3, en vivo contra la instancia) y los WhatsApps de la prueba; el
-           POST manda el aviso manual a Tomás. */
-        Route::get('client/{clientId}/prueba', [\App\Http\Controllers\PruebaController::class, 'client_json']);
+        /* Prueba gratuita (misión prueba-alta-instancia, 3/11/2026): los días de prueba de un cliente o de un lead en
+           prueba (el PUT escribe trial_days/trial_ends_at y le avisa al ERP por C3), y el pool de instancias
+           `prueba-NN` del VPS con sus acciones (dormir, despertar, borrar con respaldo, reintentar, mantener). */
+        Route::get('client/{clientId}/prueba', [\App\Http\Controllers\PruebaInstanciaController::class, 'prueba_del_cliente_json']);
+        Route::put('client/{clientId}/prueba', [\App\Http\Controllers\PruebaInstanciaController::class, 'cambiar_dias_del_cliente_json']);
+        Route::get('lead/{leadId}/prueba', [\App\Http\Controllers\PruebaInstanciaController::class, 'prueba_del_lead_json']);
+        Route::put('lead/{leadId}/prueba', [\App\Http\Controllers\PruebaInstanciaController::class, 'cambiar_dias_del_lead_json']);
+        Route::get('prueba/instancias', [\App\Http\Controllers\PruebaInstanciaController::class, 'index_json']);
+        Route::post('prueba/instancias/mantener', [\App\Http\Controllers\PruebaInstanciaController::class, 'mantener_json']);
+        Route::post('prueba/instancias/{id}/dormir', [\App\Http\Controllers\PruebaInstanciaController::class, 'dormir_json']);
+        Route::post('prueba/instancias/{id}/despertar', [\App\Http\Controllers\PruebaInstanciaController::class, 'despertar_json']);
+        Route::post('prueba/instancias/{id}/borrar', [\App\Http\Controllers\PruebaInstanciaController::class, 'borrar_json']);
+        Route::post('prueba/instancias/{id}/reintentar', [\App\Http\Controllers\PruebaInstanciaController::class, 'reintentar_json']);
+        /* Seguimiento de la prueba (misión cruzada prueba-martin-importacion, 3/11/2026), debajo de la solapa de M2:
+           hitos (C3, en vivo contra la instancia, con los eventos de C2 de respaldo), próximo paso, los WhatsApps de
+           la prueba y el botón «Avisar a Tomás» (POST, sin tope). */
+        Route::get('client/{clientId}/prueba/seguimiento', [\App\Http\Controllers\PruebaController::class, 'client_json']);
         Route::post('client/{clientId}/prueba/avisar-a-tomas', [\App\Http\Controllers\PruebaController::class, 'avisar_a_tomas_client_json']);
-        Route::get('lead/{id}/prueba', [\App\Http\Controllers\PruebaController::class, 'lead_json'])->whereNumber('id');
+        Route::get('lead/{id}/prueba/seguimiento', [\App\Http\Controllers\PruebaController::class, 'lead_json'])->whereNumber('id');
         Route::post('lead/{id}/prueba/avisar-a-tomas', [\App\Http\Controllers\PruebaController::class, 'avisar_a_tomas_lead_json'])->whereNumber('id');
         /* Boton Gestionar extensiones (mision extensiones-desde-el-admin, 15/10/2026): pide al empresa-api del cliente un acceso de un solo uso al configurador. */
         Route::post('client/{clientId}/extensiones/acceso', [\App\Http\Controllers\ClientExtensionesAccesoController::class, 'acceso_json']);

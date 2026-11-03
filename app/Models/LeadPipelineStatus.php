@@ -34,12 +34,19 @@ class LeadPipelineStatus extends Model
         'demo_pendiente_de_ingreso'    => 'Demo pendiente de ingreso',
         'demo_pendiente_de_terminar'   => 'Demo pendiente de terminar',
         'demo_realizada'               => 'Demo realizada',
+        // Prueba gratuita de 7 días en curso (misión prueba-alta-instancia, 3/11/2026): el lead tiene su
+        // propia instancia y un Client en estado `prueba`. Sale de acá al contratar (cerrado_ganado) o
+        // cuando se borra la instancia sin contratar (cerrado_perdido).
+        'prueba_activa'                => 'Prueba activa',
         'closer_activo'                => 'Closer activo',
         'mail2_enviado'                => 'Mail2 enviado',
         'cerrado_ganado'               => 'Cerrado ganado',
         'cerrado_perdido'              => 'Cerrado perdido',
         'en_pausa'                     => 'En pausa',
     ];
+
+    /** Slug del estado de la prueba gratuita en curso. */
+    public const PRUEBA_ACTIVA = 'prueba_activa';
 
     /**
      * Color de fondo del badge por slug (hex) para admin-spa.
@@ -59,6 +66,7 @@ class LeadPipelineStatus extends Model
         'demo_pendiente_de_ingreso'    => '#dc3545',
         'demo_pendiente_de_terminar'   => '#dc3545',
         'demo_realizada'               => '#0d6efd',
+        'prueba_activa'                => '#20c997',
         'closer_activo'                => '#6f42c1',
         'mail2_enviado'                => '#adb5bd',
         'cerrado_ganado'               => '#495057',
@@ -79,6 +87,7 @@ class LeadPipelineStatus extends Model
         'demo_pendiente_de_ingreso'  => 'Demo',
         'demo_pendiente_de_terminar' => 'Demo',
         'demo_realizada'             => 'Demo',
+        'prueba_activa'              => 'Prueba',
         'closer_activo'              => 'Cierre',
         'cerrado_ganado'             => 'Cierre',
         'cerrado_perdido'            => 'Fin',

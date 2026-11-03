@@ -309,6 +309,17 @@ class DemoHitosService
     }
 
     /**
+     * {@see resolver_momento()} para los llamadores de afuera: los eventos `prueba.*` del contrato C2
+     * (misión prueba-alta-instancia, 3/11/2026) usan la MISMA regla de fecha que los de la demo.
+     *
+     * @param array<string, mixed> $evento
+     */
+    public static function momento_del_evento(array $evento): Carbon
+    {
+        return self::resolver_momento($evento);
+    }
+
+    /**
      * Momento del evento: el que declara la instancia si es parseable, y si no el de recepción.
      *
      * @param array<string, mixed> $evento
