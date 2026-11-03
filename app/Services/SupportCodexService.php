@@ -1001,6 +1001,55 @@ class SupportCodexService
         $case->save();
     }
 
+    /** El clic pide trabajo durable; nunca fabrica una respuesta ni consume el entrante. */
+    public function request_manual_attention(int $id): array
+    {
+        return DB::transaction(function () use ($id) {
+            $ticket = SupportTicket::lockForUpdate()->findOrFail($id);
+            $case = SupportCodexCase::where('support_ticket_id', $id)->lockForUpdate()->first();
+            $result = function (string $status, string $code, string $message) {
+                return ['status' => $status, 'code' => $code, 'message' => $message];
+            };
+            if (! SupportCodexSettings::manages($ticket) || $ticket->status !== 'open'
+                || ! $ticket->claude_auto_reply) {
+                return $result('blocked', 'agent_disabled', 'Bloqueado: el agente está apagado o el ticket no está habilitado para Codex.');
+            }
+            $this->invalidate_stale_approval($ticket);
+            $operation = SupportCodexOperation::where('support_ticket_id', $id)
+                ->whereNotIn('status', ['sent', 'reconciled_sent', 'reconciled_not_sent', 'cancelled'])
+                ->orderByDesc('created_at')->first();
+            if ($operation !== null) {
+                return $operation->status === 'awaiting_approval'
+                    ? $result('awaiting_approval', 'approval_required', 'Pendiente de aprobación: revisá el borrador de Martín en la conversación.')
+                    : $result('blocked', 'unfinished_operation', 'Bloqueado: hay un envío en curso o incierto que debe conciliarse antes de reintentar.');
+            }
+            if ($case !== null && $case->lease_expires_at !== null && $case->lease_expires_at->isFuture()) {
+                return $result('in_progress', 'active_lease', 'En curso: Martín ya está atendiendo este ticket desde Codex.');
+            }
+            $last = $this->last_real_message($id);
+            if ($last === null || $last->sender_type !== 'user'
+                || ($case !== null && (int) $last->id <= (int) $case->handled_message_id)) {
+                return $result('blocked', 'no_pending_inbound', 'Sin consulta pendiente: el último mensaje ya fue atendido o es una respuesta del equipo.');
+            }
+            if (! app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone)['open']) {
+                return $result('blocked', 'whatsapp_window_closed', 'Bloqueado: venció la ventana de WhatsApp; hace falta un nuevo mensaje del cliente o una plantilla aprobada.');
+            }
+            $can_resume_human_pause = $case !== null && $this->is_human_reply_pause($case) && empty($case->mission);
+            if ($this->pending_reason($ticket, $case) === null && ! $can_resume_human_pause) {
+                return $result('blocked', 'review_required', 'Bloqueado: el ticket tiene una misión o revisión pendiente que requiere intervención.');
+            }
+            // Reutilizamos el estado que consulta pending. No usar resume(): consumiría el
+            // entrante; tampoco liberar una revisión técnica ni una reserva del monitor.
+            if ($case === null || $can_resume_human_pause) {
+                $case = $case ?: new SupportCodexCase(['support_ticket_id' => $id]);
+                $case->state = 'ready';
+                $case->review_reason = null;
+                $case->save();
+            }
+            return $result('queued', 'pending_inbound', 'En cola: Martín tomará la consulta pendiente en la próxima consulta del monitor de Codex.');
+        });
+    }
+
     public function assert_current(SupportTicket $ticket, array $input, bool $check_unfinished = true): SupportCodexCase
     {
         $this->assert_managed($ticket);

@@ -357,4 +357,134 @@ class ControlYVerificacionDeSoporteCodexTest extends TestCase
         $this->assertCount(1, $this->transport->sent);
     }
 
+
+    private function request_manual(SupportTicket $ticket)
+    {
+        return $this->actingAs($this->admin, 'sanctum')
+            ->postJson('/api/admin/support-ticket/' . $ticket->id . '/suggest');
+    }
+
+    public function test_boton_manual_encola_pausa_humana_y_monitor_toma_una_sola_reserva(): void
+    {
+        $ticket = $this->ticket();
+        $last = SupportMessage::where('support_ticket_id', $ticket->id)->max('id');
+        SupportCodexCase::create(['support_ticket_id' => $ticket->id, 'state' => 'manual_review',
+            'review_reason' => SupportCodexCase::HUMAN_REPLY_REVIEW_REASON, 'expected_message_id' => $last,
+            'thread_id' => 'hilo-conservado', 'handled_message_id' => 0]);
+        $this->request_manual($ticket)->assertOk()->assertJsonPath('codex_attention.status', 'queued');
+        $this->request_manual($ticket)->assertOk()->assertJsonPath('codex_attention.status', 'queued');
+        $this->getJson($this->base . '/pending', $this->headers)->assertOk()
+            ->assertJsonPath('tickets.0.expected_message_id', $last);
+        $claim = $this->claim($ticket);
+        $this->assertSame('hilo-conservado', $claim['ticket']['thread_id']);
+        $this->request_manual($ticket)->assertOk()->assertJsonPath('codex_attention.status', 'in_progress');
+        $this->postJson($this->base . '/tickets/' . $ticket->id . '/claim', ['worker_id' => 'otra-pc', 'expected_message_id' => $last], $this->headers)->assertStatus(423);
+        $this->assertSame(0, (int) SupportCodexCase::where('support_ticket_id', $ticket->id)->value('handled_message_id'));
+        $this->assertCount(0, $this->transport->sent);
+    }
+
+    public function test_boton_manual_respeta_agente_apagado_y_encender_retoma_el_entrante(): void
+    {
+        $ticket = $this->ticket();
+        $ticket->claude_auto_reply = false;
+        $ticket->save();
+        $this->request_manual($ticket)->assertOk()->assertJsonPath('codex_attention.code', 'agent_disabled');
+        $this->assertFalse($ticket->fresh()->claude_auto_reply);
+        $this->actingAs($this->admin, 'sanctum')->postJson('/api/admin/support-ticket/' . $ticket->id . '/toggle-claude-auto-reply')->assertOk();
+        $this->getJson($this->base . '/pending', $this->headers)->assertOk()->assertJsonPath('tickets.0.id', $ticket->id);
+        $this->claim($ticket);
+        $this->assertCount(0, $this->transport->sent);
+    }
+
+    public function test_boton_manual_muestra_aprobacion_sin_duplicar_borrador_o_envio(): void
+    {
+        $ticket = $this->ticket();
+        $this->verification($ticket);
+        $reply = $this->reply($ticket, $this->claim($ticket))->assertOk()->json();
+        $this->request_manual($ticket)->assertOk()->assertJsonPath('codex_attention.status', 'awaiting_approval');
+        $this->request_manual($ticket)->assertOk()->assertJsonPath('codex_attention.status', 'awaiting_approval');
+        $this->assertSame(1, SupportCodexOperation::where('support_ticket_id', $ticket->id)->count());
+        $this->assertSame('awaiting_approval', SupportCodexOperation::where('operation_id', $reply['operation']['id'])->firstOrFail()->status);
+        $this->assertCount(0, $this->transport->sent);
+    }
+
+    public function test_boton_manual_no_revive_un_mensaje_atendido(): void
+    {
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket))->assertOk();
+        $this->request_manual($ticket)->assertOk()->assertJsonPath('codex_attention.code', 'no_pending_inbound');
+        $this->assertCount(1, $this->transport->sent);
+    }
+
+    public function test_boton_manual_conserva_revision_tecnica_y_reserva_vencida(): void
+    {
+        $ticket = $this->ticket();
+        $case = SupportCodexCase::create(['support_ticket_id' => $ticket->id, 'state' => 'manual_review',
+            'review_reason' => 'Error técnico; revisión requerida',
+            'lease_hash' => 'conservar', 'lease_expires_at' => now()->subMinute()]);
+        $this->request_manual($ticket)->assertOk()->assertJsonPath('codex_attention.code', 'review_required');
+        $this->assertSame('conservar', $case->fresh()->lease_hash);
+        $this->assertSame('manual_review', $case->fresh()->state);
+    }
+
+    public function test_boton_manual_no_reintenta_envios_sending_o_unknown(): void
+    {
+        foreach (['sending', 'unknown'] as $status) {
+            $ticket = $this->ticket();
+            $reply = $this->reply($ticket, $this->claim($ticket))->assertOk()->json();
+            $operation = SupportCodexOperation::where('operation_id', $reply['operation']['id'])->firstOrFail();
+            $operation->status = $status;
+            $operation->save();
+            $this->request_manual($ticket)->assertOk()->assertJsonPath('codex_attention.code', 'unfinished_operation');
+            $this->assertSame($status, $operation->fresh()->status);
+        }
+        $this->assertCount(2, $this->transport->sent);
+    }
+
+    public function test_boton_manual_bloquea_ventana_whatsapp_vencida(): void
+    {
+        $ticket = $this->ticket();
+        Carbon::setTestNow(now()->addHours(25));
+        $this->request_manual($ticket)->assertOk()->assertJsonPath('codex_attention.code', 'whatsapp_window_closed');
+        $this->assertCount(0, $this->transport->sent);
+        $this->assertSame(0, SupportCodexCase::where('support_ticket_id', $ticket->id)->count());
+    }
+
+    public function test_boton_manual_preserva_estados_ya_elegibles_y_mision(): void
+    {
+        foreach (['awaiting_confirmation', 'mission_pending', 'manual_review'] as $state) {
+            $ticket = $this->ticket();
+            $case = SupportCodexCase::create(['support_ticket_id' => $ticket->id, 'state' => $state,
+                'mission' => $state === 'mission_pending' ? 'Revisar caso' : null,
+                'review_reason' => $state === 'manual_review' ? 'Disparo de conversación sin confirmar; conciliar en Codex' : null,
+                'expected_message_id' => 0, 'handled_message_id' => 0]);
+            $this->request_manual($ticket)->assertOk()->assertJsonPath('codex_attention.status', 'queued');
+            $this->assertSame($state, $case->fresh()->state);
+            $this->assertSame($case->mission, $case->fresh()->mission);
+            $this->claim($ticket);
+        }
+        $this->assertCount(0, $this->transport->sent);
+    }
+
+    public function test_boton_manual_invalida_solo_aprobacion_obsoleta_y_retoma_entrante_nuevo(): void
+    {
+        $ticket = $this->ticket();
+        $this->verification($ticket);
+        $reply = $this->reply($ticket, $this->claim($ticket))->assertOk()->json();
+        $last = $this->inbound($ticket);
+        $this->request_manual($ticket)->assertOk()->assertJsonPath('codex_attention.status', 'queued');
+        $this->assertSame('cancelled', SupportCodexOperation::where('operation_id', $reply['operation']['id'])->firstOrFail()->status);
+        $this->assertSame($last->id, $this->claim($ticket)['ticket']['expected_message_id']);
+        $this->assertCount(0, $this->transport->sent);
+    }
+
+    public function test_solicitud_manual_no_elude_corte_global_de_codex(): void
+    {
+        $ticket = $this->ticket();
+        AdminSetting::set(SupportCodexSettings::KEY_ACTIVATED_AFTER_ID, (string) SupportMessage::max('id'));
+        $result = app(SupportCodexService::class)->request_manual_attention($ticket->id);
+        $this->assertSame('blocked', $result['status']);
+        $this->assertSame(0, SupportCodexCase::where('support_ticket_id', $ticket->id)->count());
+        $this->assertCount(0, $this->transport->sent);
+    }
 }

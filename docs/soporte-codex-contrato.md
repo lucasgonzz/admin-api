@@ -213,3 +213,12 @@ El scheduler corre `support:check-codex-health` cada minuto en segundo plano. Co
 `support:check-codex-health --prueba-correo` manda una prueba al destinatario fijo sin armar/modificar la vigilancia ni sus incidentes. SMTP aceptado no prueba lectura ni llegada a bandeja. Si el proceso muere entre aceptación SMTP y commit de la marca puede salir un duplicado al reintentar; no hay garantía exactly-once del correo. El monitor mantiene sus frenos de no repetir respuestas WhatsApp inciertas.
 
 Límite: esta vigilancia detecta PC apagada, red caída o proceso/circuito local enfermo mientras el admin y su scheduler/correo funcionan. Una caída simultánea del VPS o del SMTP no puede avisarse por ese mismo canal; se conserva el reintento y registro del fallo.
+
+
+## Solicitud manual desde Sugerencia de la IA (02/11/2026)
+
+POST `/api/admin/support-ticket/{id}/suggest` conserva las claves de sugerencia anteriores y, para tickets administrados por Codex, agrega `codex_attention: {status, code, message}`. Estados: `queued`, `in_progress`, `awaiting_approval`, `blocked`. El texto de `reasoning` conserva un resultado legible para SPA anteriores. Es el resultado puntual de la solicitud; los eventos de mensajes invalidan el aviso de la SPA.
+
+La solicitud bloquea ticket y caso igual que claim/reply, relee elegibilidad y no enciende el agente. Solo libera una pausa humana segura para el último entrante pendiente; conserva estados ya elegibles, hilo, misión y handled_message_id. El estado durable ready es el mismo que consulta el monitor: no hay una segunda cola ni un envío directo. Clics repetidos no crean operaciones ni reservas. Una reserva activa informa en curso; una aprobación válida se conserva; una aprobación obsoleta se invalida igual que en pending. Operaciones sin terminar, revisiones técnicas y ventana WhatsApp vencida mantienen sus guardas.
+
+El encendido del agente sigue usando agent_toggled: retoma la pausa humana pendiente sin necesitar otro entrante. No usar resume para este objetivo porque consume el último mensaje.
