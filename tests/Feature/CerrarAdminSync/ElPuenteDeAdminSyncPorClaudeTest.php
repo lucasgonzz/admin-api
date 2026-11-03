@@ -13,11 +13,11 @@ use Tests\Fakes\HttpFactorySinSalida;
 
 /**
  * `POST claude/clients/{id}/admin-sync/puente` (A3, misión `cerrar-admin-sync`, 10/10/2026): el admin reenvía UN pedido de una lista blanca
- * de siete entradas a `admin-sync/*` del `empresa-api` del cliente, con la clave del cliente, y devuelve lo que contestó.
+ * de ocho entradas a `admin-sync/*` del `empresa-api` del cliente (siete de la misión original más `GET /prueba/estado`, C3 de la prueba gratuita, 3/11/2026), con la clave del cliente, y devuelve lo que contestó.
  *
  * Es el hermano de `catalogo/puente` y se prueba con el mismo criterio. En orden de importancia:
  *
- *  1. 🔴 **La lista blanca es la única puerta.** Las siete entradas pasan; cualquier otra combinación de método y ruta (las demás rutas de
+ *  1. 🔴 **La lista blanca es la única puerta.** Las ocho entradas pasan; cualquier otra combinación de método y ruta (las demás rutas de
  *     `admin-sync`, `..`, una barra de más, un segmento de más, un método que no corresponde) es 422 y NO le pega al cliente.
  *  2. 🔴 **La clave del cliente viaja en el header y NO sale por ningún lado**: ni en la respuesta, ni en un error, ni en el log.
  *  3. 🔴 **El HTTP del cliente viaja adentro** (200 `puente: true` con su `status`), incluido un 3xx que NO se sigue y un 202.
@@ -138,11 +138,11 @@ class ElPuenteDeAdminSyncPorClaudeTest extends BaseDelCatalogoPorClaude
     }
 
     /* ------------------------------------------------------------------------------------------
-     | 2. La lista blanca: las siete entradas pasan
+     | 2. La lista blanca: las ocho entradas pasan
      |----------------------------------------------------------------------------------------- */
 
     /**
-     * Las siete entradas de la lista blanca: método, ruta que pide quien llama y la URL que tiene que recibir el cliente (shared hosting:
+     * Las ocho entradas de la lista blanca: método, ruta que pide quien llama y la URL que tiene que recibir el cliente (shared hosting:
      * la API vive bajo `/public`).
      *
      * @return array<string, array<int, string>>
@@ -159,6 +159,7 @@ class ElPuenteDeAdminSyncPorClaudeTest extends BaseDelCatalogoPorClaude
             'GET mostrador/contexto/{n}'    => ['GET', '/mostrador/contexto/4242', $base . '/mostrador/contexto/4242'],
             'PUT mostrador/memoria/{n}'     => ['PUT', '/mostrador/memoria/4242', $base . '/mostrador/memoria/4242'],
             'PUT update-default-version'    => ['PUT', '/update-default-version', $base . '/update-default-version'],
+            'GET prueba/estado'             => ['GET', '/prueba/estado', $base . '/prueba/estado'],
             'GET reportes con varios dígitos' => ['GET', '/mostrador/reportes/1234567890', $base . '/mostrador/reportes/1234567890'],
         ];
     }
@@ -335,11 +336,11 @@ class ElPuenteDeAdminSyncPorClaudeTest extends BaseDelCatalogoPorClaude
     }
 
     /**
-     * La lista blanca que se devuelve en el 422 son EXACTAMENTE las siete entradas del servicio.
+     * La lista blanca que se devuelve en el 422 son EXACTAMENTE las ocho entradas del servicio.
      *
      * @return void
      */
-    public function test_el_422_trae_las_siete_entradas_de_la_lista_blanca(): void
+    public function test_el_422_trae_las_ocho_entradas_de_la_lista_blanca(): void
     {
         Http::fake();
 
@@ -347,7 +348,7 @@ class ElPuenteDeAdminSyncPorClaudeTest extends BaseDelCatalogoPorClaude
 
         $respuesta->assertStatus(422);
         $this->assertSame(ClientAdminSyncPuenteService::rutas_permitidas(), $respuesta->json('rutas_permitidas'));
-        $this->assertCount(7, $respuesta->json('rutas_permitidas'));
+        $this->assertCount(8, $respuesta->json('rutas_permitidas'));
     }
 
     /**
@@ -651,7 +652,7 @@ class ElPuenteDeAdminSyncPorClaudeTest extends BaseDelCatalogoPorClaude
 
     /**
      * Los parámetros que `config/claude_catalog.php` declara para A3 son EXACTAMENTE la lista cerrada del controlador, y el catálogo nombra
-     * las siete entradas de la lista blanca del servicio.
+     * las ocho entradas de la lista blanca del servicio.
      *
      * @return void
      */
