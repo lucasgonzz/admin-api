@@ -1,6 +1,9 @@
 <?php
 
 return [
+    'support_codex_scheduled_upgrades' => [
+        'enabled' => env('SUPPORT_CODEX_SCHEDULED_UPGRADES_ENABLED', false),
+    ],
 
     /*
     |--------------------------------------------------------------------------

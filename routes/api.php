@@ -377,6 +377,12 @@ Route::middleware('claude.task.key')
         Route::post('support-codex/tickets/{id}/release', 'Api\ClaudeSupportCodexController@release');
         Route::post('support-codex/tickets/{id}/resume', 'Api\ClaudeSupportCodexController@resume');
         Route::post('support-codex/tickets/{id}/mission-started', 'Api\ClaudeSupportCodexController@mission_started');
+        Route::get('support-codex/tickets/{id}/scheduled-upgrade', 'Api\ClaudeSupportScheduledUpgradeController@show')
+            ->whereNumber('id');
+        Route::post('support-codex/tickets/{id}/schedule-upgrade', 'Api\ClaudeSupportScheduledUpgradeController@store')
+            ->whereNumber('id');
+        Route::post('support-codex/tickets/{id}/verify-scheduled-upgrade', 'Api\ClaudeSupportScheduledUpgradeController@verify')
+            ->whereNumber('id');
         Route::post('support-codex/tickets/{id}/mission-fix-evidence', 'Api\ClaudeSupportCodexController@mission_fix_evidence')
             ->whereNumber('id');
         Route::post('support-codex/tickets/{id}/diagnostic', 'Api\ClaudeSupportCodexController@diagnostic');

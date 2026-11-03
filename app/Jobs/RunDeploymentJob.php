@@ -7,13 +7,16 @@ use App\Events\DeploymentLogCreated;
 use App\Models\ClientVersionUpgrade;
 use App\Models\DeploymentLog;
 use App\Services\DeploymentService;
+use App\Services\SupportScheduledUpgradeService;
 use Illuminate\Queue\MaxAttemptsExceededException;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Cache;
 
 /**
  * Job en cola que ejecuta el deployment de un upgrade (SSH + etapas).
@@ -61,12 +64,13 @@ class RunDeploymentJob implements ShouldQueue
      * @var string|null
      */
     private $resume_from_step;
+    private $support_schedule_id;
 
     /**
      * @param  string|ClientVersionUpgrade  $upgrade_uuid
      * @param  string|null                  $resume_from_step
      */
-    public function __construct($upgrade_uuid, $resume_from_step = null)
+    public function __construct($upgrade_uuid, $resume_from_step = null, ?int $support_schedule_id = null)
     {
         if ($upgrade_uuid instanceof ClientVersionUpgrade) {
             $upgrade_uuid = $upgrade_uuid->uuid;
@@ -74,6 +78,7 @@ class RunDeploymentJob implements ShouldQueue
 
         $this->upgrade_uuid = (string) $upgrade_uuid;
         $this->resume_from_step = $resume_from_step;
+        $this->support_schedule_id = $support_schedule_id;
     }
 
     /**
@@ -86,13 +91,39 @@ class RunDeploymentJob implements ShouldQueue
         $upgrade = ClientVersionUpgrade::where('uuid', $this->upgrade_uuid)
             ->with(['client', 'target_client_api', 'from_version', 'to_version'])
             ->firstOrFail();
+        if ($this->support_schedule_id === null && SupportScheduledUpgradeService::owns_upgrade((int) $upgrade->id)) {
+            Log::warning('Se descartó un arranque sin acuerdo de soporte.', ['upgrade_id' => $upgrade->id]);
+            return;
+        }
 
         $service = new DeploymentService($upgrade);
+        $lock = Cache::lock('client-deployment-' . $upgrade->client_id, self::TIMEOUT_SEGUNDOS + 60);
+        $locked = false;
 
         try {
+            $locked = $lock->block(10);
+            if ($this->support_schedule_id !== null) {
+                $scheduled = app(SupportScheduledUpgradeService::class);
+                $row = $scheduled->prepare_job($this->support_schedule_id, $upgrade, $this->resume_from_step);
+                if ($row === null) {
+                    return;
+                }
+                $service->configure_support_schedule(
+                    $row->artifacts,
+                    function () use ($scheduled, $row) { $scheduled->before_live_write($row->id); },
+                    function () use ($scheduled, $row) { $scheduled->before_staging($row->id); },
+                    function (string $step) use ($scheduled, $row) { $scheduled->before_continuation($row->id, $step); }
+                );
+            }
             $service->connect();
             $service->run($this->resume_from_step);
         } catch (\Throwable $e) {
+            if ($e instanceof LockTimeoutException && ! ClientVersionUpgrade::where('client_id', $upgrade->client_id)
+                ->where('id', '!=', $upgrade->id)->where('deployment_status', 'running')->exists()) {
+                // La misma etapa ya puede estar ejecutándose. Este job no cambia su estado.
+                Log::warning('Se omitió una ejecución simultánea del mismo upgrade.', ['upgrade_id' => $upgrade->id]);
+                return;
+            }
             $upgrade->refresh();
             if (
                 $upgrade->deployment_status !== 'failed'
@@ -102,6 +133,10 @@ class RunDeploymentJob implements ShouldQueue
                 $upgrade->update(['deployment_status' => 'failed']);
             }
             throw $e;
+        } finally {
+            if ($locked) {
+                $lock->release();
+            }
         }
     }
 

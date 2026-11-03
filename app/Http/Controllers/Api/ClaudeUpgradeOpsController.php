@@ -14,6 +14,7 @@ use App\Models\Version;
 use App\Services\ClientScheduleResolver;
 use App\Services\ClientVersionUpgradeCreationService;
 use App\Services\DeploymentService;
+use App\Services\SupportScheduledUpgradeService;
 use App\Services\VersionPathService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -1757,24 +1758,7 @@ class ClaudeUpgradeOpsController extends Controller
      */
     private function quedan_seeders_o_comandos_pendientes(ClientVersionUpgrade $upgrade)
     {
-        $upgrade->loadMissing('update_commands.version_command', 'update_seeders');
-
-        $seeder_pendiente = $upgrade->update_seeders->contains(function ($update_seeder) {
-            return ! (bool) $update_seeder->skipped && $update_seeder->status !== 'exitoso';
-        });
-
-        if ($seeder_pendiente) {
-            return true;
-        }
-
-        return $upgrade->update_commands->contains(function ($update_command) {
-            $version_command = $update_command->version_command;
-
-            return $version_command !== null
-                && ! (bool) $version_command->run_manually
-                && ! (bool) $update_command->skipped
-                && in_array($update_command->status, ['fallido', 'pendiente'], true);
-        });
+        return DeploymentService::upgrade_has_pending_automatic_tasks($upgrade);
     }
 
     /**
@@ -2355,11 +2339,13 @@ class ClaudeUpgradeOpsController extends Controller
      */
     private function buscar_upgrade($route_id)
     {
-        if (is_numeric($route_id)) {
-            return ClientVersionUpgrade::where('id', (int) $route_id)->first();
+        $upgrade = is_numeric($route_id)
+            ? ClientVersionUpgrade::where('id', (int) $route_id)->first()
+            : ClientVersionUpgrade::where('uuid', (string) $route_id)->first();
+        if ($upgrade !== null) {
+            SupportScheduledUpgradeService::assert_manual_deployment_allowed($upgrade);
         }
-
-        return ClientVersionUpgrade::where('uuid', (string) $route_id)->first();
+        return $upgrade;
     }
 
     /**

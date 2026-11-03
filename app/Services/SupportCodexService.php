@@ -186,7 +186,7 @@ class SupportCodexService
             'reason' => $this->pending_reason($ticket, $case, true),
             // El helper debe verificar esta capacidad ANTES de pedir el modo nuevo: un admin
             // anterior ignoraría el campo y ejecutaría el resume que consume la consulta.
-            'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true],
+            'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled()],
             'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
             'window' => app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone),
@@ -1171,9 +1171,9 @@ class SupportCodexService
     }
 
     /** Retomar es una acción expresa de Lucas; no vuelve a procesar mensajes viejos. */
-    public function resume(int $id, array $input): array
+    public function resume(int $id, array $input, string $origen = 'Retomado por Lucas'): array
     {
-        return DB::transaction(function () use ($id, $input) {
+        return DB::transaction(function () use ($id, $input, $origen) {
             $ticket = SupportTicket::where('id', $id)->lockForUpdate()->findOrFail($id);
             $this->assert_managed($ticket);
             $case = SupportCodexCase::firstOrCreate(['support_ticket_id' => $id]);
@@ -1210,7 +1210,7 @@ class SupportCodexService
             }
             $case->state = ! empty($input['request_confirmation']) ? 'ready_to_confirm' : 'ready';
             $case->handled_message_id = (int) $last->id;
-            $case->review_reason = mb_substr('Retomado por Lucas: ' . $input['reason'], 0, 500);
+            $case->review_reason = mb_substr($origen . ': ' . $input['reason'], 0, 500);
             $case->review_requested_message_id = null;
             $case->lease_hash = null;
             $case->lease_expires_at = null;

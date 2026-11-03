@@ -5,9 +5,11 @@ namespace App\Services;
 use App\Models\ClientVersionUpgrade;
 use App\Models\SupportCodexCase;
 use App\Models\SupportCodexMissionFixEvidence;
+use App\Models\SupportCodexScheduledUpgrade;
 use App\Models\SupportCodexUpgradeAgreement;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
+use App\Models\Version;
 use Carbon\Carbon;
 
 /** Inspección sin efectos. Un resultado de esta lectura no autoriza encolar ni tocar el ERP. */
@@ -26,7 +28,7 @@ class SupportUpgradePreflight
         $this->ssh = $ssh;
     }
 
-    public function inspect(int $agreement_id): array
+    public function inspect(int $agreement_id, ?SupportCodexScheduledUpgrade $scheduled = null, bool $planning = false, ?int $continuation_margin = null, bool $read_activity = true): array
     {
         $agreement = SupportCodexUpgradeAgreement::with('operation')->find($agreement_id);
         if ($agreement === null || $agreement->accepted_at === null || empty($agreement->confirmation_message_id)) {
@@ -67,19 +69,39 @@ class SupportUpgradePreflight
             || (int) $api->id !== $client->resolver_frente_principal_client_api_id()) {
             return $this->blocked('frente_o_cliente_no_elegible');
         }
+        if ($scheduled !== null) {
+            $version = Version::find($scheduled->version_id);
+            if ($version === null || $version->status !== 'published' || $version->version !== $scheduled->version) {
+                return $this->blocked('version_no_disponible');
+            }
+            if ((int) $client->id !== (int) $scheduled->client_id || (int) $api->id !== (int) $scheduled->client_api_id
+                || (int) $client->current_version_id !== (int) $scheduled->from_version_id) {
+                return $this->blocked('cambio_frente_o_version_origen');
+            }
+        }
 
-        if (ClientVersionUpgrade::where('client_id', $client->id)
-            ->whereIn('deployment_status', ['running', 'paused', 'paused_post_tasks'])->exists()) {
+        $other = ClientVersionUpgrade::where('client_id', $client->id)
+            ->whereIn('deployment_status', ['running', 'paused', 'paused_post_tasks']);
+        if ($scheduled !== null && $scheduled->upgrade_id !== null) {
+            $other->where('id', '!=', $scheduled->upgrade_id);
+        }
+        if ($other->exists()) {
             return $this->blocked('otro_despliegue_en_curso');
         }
 
         $now = now();
         $start = Carbon::parse($agreement->starts_at_utc, 'UTC');
         $end = Carbon::parse($agreement->ends_at_utc, 'UTC');
-        $minutes = (int) $agreement->minimum_minutes;
-        if ($minutes < 1 || $minutes > 1440 || $now->lessThan($start) || $now->greaterThanOrEqualTo($end)
-            || $now->copy()->addMinutes($minutes)->greaterThan($end)) {
+        $agreed_minutes = (int) $agreement->minimum_minutes;
+        $minutes = $planning ? max(45, $agreed_minutes) : ($continuation_margin ?? 45);
+        $check_from = $planning ? $start->copy() : $now->copy()->startOfMinute();
+        $remaining_from = $planning ? $check_from : $now;
+        if ($agreed_minutes < 1 || $agreed_minutes > 1440 || (! $planning && $now->lessThan($start))
+            || $now->greaterThanOrEqualTo($end) || $remaining_from->copy()->addMinutes($minutes)->greaterThan($end)) {
             return $this->blocked('ventana_inactiva_o_sin_margen');
+        }
+        if (! $planning && $continuation_margin === null && $now->greaterThan($start->copy()->addMinutes(5))) {
+            return $this->blocked('hora_acordada_vencida');
         }
         if (SupportCodexUpgradeAgreement::where('id', '!=', $agreement->id)->whereNotNull('accepted_at')
             ->whereIn('support_ticket_id', SupportTicket::select('id')->where('client_id', $client->id))
@@ -88,25 +110,31 @@ class SupportUpgradePreflight
             return $this->blocked('otro_acuerdo_superpuesto');
         }
 
-        $minute = $now->copy()->setTimezone(self::TIMEZONE)->startOfMinute();
+        $minute = $check_from->copy()->setTimezone(self::TIMEZONE);
         $current = $this->schedule->primera_ventana_cerrada($client, $minute, $minutes, self::TIMEZONE)['window'];
         if ($current === null || $current['starts_at'] !== $minute->toIso8601String()
             || Carbon::parse($current['ends_at'])->lessThan($end)) {
             return $this->blocked('horario_cambio');
         }
-
-        try {
-            $activity = $this->ssh->read_upgrade_activity_for($api, (int) $client->user_id);
-        } catch (\Throwable $error) {
-            return $this->blocked('actividad_no_verificada');
-        }
-        if ($activity['usuarios_activos'] > 0 || $activity['ventas_recientes'] > 0) {
-            return $this->blocked('actividad_reciente');
+        if ($planning) {
+            return ['ready' => true, 'reason' => null, 'client' => $client, 'api' => $api, 'agreement' => $agreement];
         }
 
-        // Todavía no existe la vinculación durable evidencia → release publicado exacto.
-        // Tampoco se verifica aquí el tráfico HTTP, las migraciones ni la segunda guarda del worker.
-        return $this->blocked('version_no_vinculada');
+        if ($read_activity) {
+            try {
+                $activity = $this->ssh->read_upgrade_activity_for($api, (int) $client->user_id);
+            } catch (\Throwable $error) {
+                return $this->blocked('actividad_no_verificada');
+            }
+            if ($activity['usuarios_activos'] > 0 || $activity['ventas_recientes'] > 0) {
+                return $this->blocked('actividad_reciente');
+            }
+        }
+
+        if ($scheduled === null) {
+            return $this->blocked('version_no_vinculada');
+        }
+        return ['ready' => true, 'reason' => null, 'client' => $client, 'api' => $api, 'agreement' => $agreement];
     }
 
     private function blocked(string $reason): array

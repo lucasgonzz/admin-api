@@ -8,6 +8,7 @@ use App\Models\Client;
 use App\Models\ClientApi;
 use App\Models\ClientVersionUpgrade;
 use App\Services\DeploymentService;
+use App\Services\SupportScheduledUpgradeService;
 use Illuminate\Http\Request;
 
 /**
@@ -56,6 +57,7 @@ class DeploymentController extends BaseController
     public function start_json($id)
     {
         $upgrade = $this->find_upgrade_by_route_id($id);
+        SupportScheduledUpgradeService::assert_manual_deployment_allowed($upgrade);
 
         // No permitir solapar con un deployment en curso.
         if (in_array($upgrade->deployment_status, $this->active_deployment_statuses, true)) {
@@ -98,6 +100,7 @@ class DeploymentController extends BaseController
     public function start_post_closure_json($id)
     {
         $upgrade = $this->find_upgrade_by_route_id($id);
+        SupportScheduledUpgradeService::assert_manual_deployment_allowed($upgrade);
 
         if ($upgrade->deployment_status !== 'paused') {
             return response()->json([
@@ -152,6 +155,7 @@ class DeploymentController extends BaseController
     public function configure_system_json($id)
     {
         $upgrade = $this->find_upgrade_by_route_id($id);
+        SupportScheduledUpgradeService::assert_manual_deployment_allowed($upgrade);
 
         /* 🔴 Misión `un-solo-frente` (14/10/2026): un despliegue en el lugar que no llegó al `artisan
            up` no se cierra. Medido por el verificador: sobre un `failed` con el cliente en `down`, este
@@ -196,6 +200,7 @@ class DeploymentController extends BaseController
     public function retry_commands_json($id)
     {
         $upgrade = $this->find_upgrade_by_route_id($id);
+        SupportScheduledUpgradeService::assert_manual_deployment_allowed($upgrade);
 
         if ($upgrade->deployment_status === 'running') {
             return response()->json([
