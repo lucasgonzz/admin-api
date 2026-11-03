@@ -100,6 +100,12 @@ class ClientMensualidadSyncService
             /** Conteos vivos: empleados, ecommerce, mercado_libre, tienda_nube. */
             $conteos = is_array($data['conteos'] ?? null) ? $data['conteos'] : [];
 
+            /* C5 (programa «Prueba gratuita de 7 días», 3/11/2026): las operaciones del mes
+             * (ventas + compras + gastos) que el empresa-api manda en la clave OPCIONAL
+             * `operaciones_mes`. Un cliente con una versión anterior no la manda: queda null, la
+             * cuota sugerida también, y todo lo demás sigue igual. No se persiste nada. */
+            $operaciones_mes = $this->leer_operaciones_mes($data['operaciones_mes'] ?? null);
+
             return [
                 'soportado' => true,
                 // Conteos vivos mapeados a los campos locales de mensualidad (cantidad_empleados y toggles).
@@ -116,6 +122,9 @@ class ClientMensualidadSyncService
                 'payment_expired_at'   => $data['payment_expired_at'] ?? null,
                 // Datos fiscales para pre-cargar los campos de facturación si están vacíos en admin.
                 'afip_information'     => $data['afip_information'] ?? null,
+                // C5: operaciones del mes y la cuota de Gestión que sale de ellas (plan + excedentes + usuarios).
+                'operaciones_mes'      => $operaciones_mes,
+                'cuota_sugerida'       => $operaciones_mes !== null ? $this->cuota_sugerida($client, $operaciones_mes) : null,
             ];
         } catch (\Throwable $exception) {
             Log::warning('ClientMensualidadSyncService::traer_del_cliente exception: ' . $exception->getMessage());
@@ -194,6 +203,89 @@ class ClientMensualidadSyncService
 
             return $this->no_soportado('Error al conectar con el empresa-api del cliente: ' . $exception->getMessage());
         }
+    }
+
+    /**
+     * Lee la clave `operaciones_mes` de C5 con tolerancia: tiene que ser un objeto con al menos
+     * un número; `total` se toma si viene y si no se suma de ventas + compras + gastos. Cualquier
+     * otra cosa (ausente, null, un texto, un objeto vacío) es null: el empresa-api es viejo.
+     *
+     * @param mixed $valor
+     *
+     * @return array{mes: string|null, ventas: int, compras: int, gastos: int, total: int}|null
+     */
+    public function leer_operaciones_mes($valor): ?array
+    {
+        if (! is_array($valor)) {
+            return null;
+        }
+
+        $numero = function ($clave) use ($valor) {
+            return isset($valor[$clave]) && is_numeric($valor[$clave]) ? max(0, (int) $valor[$clave]) : null;
+        };
+
+        $ventas = $numero('ventas');
+        $compras = $numero('compras');
+        $gastos = $numero('gastos');
+        $total = $numero('total');
+
+        if ($ventas === null && $compras === null && $gastos === null && $total === null) {
+            return null;
+        }
+
+        if ($total === null) {
+            $total = (int) $ventas + (int) $compras + (int) $gastos;
+        }
+
+        return [
+            'mes'     => isset($valor['mes']) && is_string($valor['mes']) && preg_match('/^\d{4}-\d{2}$/', $valor['mes']) ? $valor['mes'] : null,
+            'ventas'  => (int) $ventas,
+            'compras' => (int) $compras,
+            'gastos'  => (int) $gastos,
+            'total'   => $total,
+        ];
+    }
+
+    /**
+     * La cuota de Gestión que sale de las operaciones del mes: el plan del contrato del cliente
+     * (si es uno de los vigentes por operaciones) con su abono pactado, o, si el contrato no tiene
+     * plan vigente, el plan que corresponde a esas operaciones a precio de lista. Siempre con los
+     * usuarios extra del contrato. Es una sugerencia para Lucas, no se guarda ni se factura sola.
+     *
+     * @param Client $client
+     * @param array  $operaciones_mes Salida de `leer_operaciones_mes()`.
+     *
+     * @return array
+     */
+    public function cuota_sugerida(Client $client, array $operaciones_mes): array
+    {
+        $plan_del_contrato = is_string($client->contract_plan_gestion)
+            && isset(ContractPreciosService::PLANES_GESTION[$client->contract_plan_gestion])
+            && $client->contract_plan_gestion !== 'a_medida';
+
+        $plan = $plan_del_contrato
+            ? $client->contract_plan_gestion
+            : ContractPreciosService::plan_por_operaciones((int) $operaciones_mes['total']);
+
+        $abono_pactado = null;
+        if ($plan_del_contrato) {
+            $precios = $client->contract_precios_sistemas;
+            $pactado = is_array($precios) ? ($precios['gestion']['mensualidad'] ?? null) : null;
+            if ($pactado !== null && $pactado !== '') {
+                $abono_pactado = ClientContratoService::monto_desde_texto($pactado);
+            }
+        }
+
+        $cuota = ContractPreciosService::cuota_mensual(
+            $plan,
+            (int) $operaciones_mes['total'],
+            (int) ($client->contract_usuarios_extra ?? 0),
+            $abono_pactado
+        );
+        $cuota['plan_del_contrato'] = $plan_del_contrato;
+        $cuota['mes'] = $operaciones_mes['mes'];
+
+        return $cuota;
     }
 
     /**
