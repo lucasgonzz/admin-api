@@ -179,6 +179,34 @@ class OficinaIngestPorClaudeTest extends TestCase
     }
 
     /**
+     * La tabla es un espejo del pool: los slots que dejan de venir se borran (el pool se achicó). Pero un
+     * reporte con `slots` vacío no vacía la oficina: solo actualiza el pulso.
+     *
+     * @return void
+     */
+    public function test_los_slots_que_dejan_de_venir_se_borran(): void
+    {
+        $this->postJson('/api/claude/local/oficina', $this->reporte(), $this->headers())->assertStatus(200);
+        $this->assertSame(35, LocalOficinaSlot::query()->count());
+
+        $mas_chico          = $this->reporte();
+        $mas_chico['slots'] = array_slice($mas_chico['slots'], 0, 30);
+        $this->postJson('/api/claude/local/oficina', $mas_chico, $this->headers())
+            ->assertStatus(200)
+            ->assertJsonPath('slots', 30);
+
+        $this->assertSame(range(1, 30), LocalOficinaSlot::query()->orderBy('slot')->pluck('slot')->all());
+
+        $vacio          = $this->reporte();
+        $vacio['slots'] = [];
+        $this->postJson('/api/claude/local/oficina', $vacio, $this->headers())
+            ->assertStatus(200)
+            ->assertJsonPath('slots', 0);
+
+        $this->assertSame(30, LocalOficinaSlot::query()->count(), 'Un reporte vacío no borra la oficina.');
+    }
+
+    /**
      * Un `estado` fuera del enum es 422 con `error` y `errors` por campo, y no se escribe NADA: ni los otros
      * 34 slots ni el pulso.
      *

@@ -194,14 +194,20 @@ class EscenaService
             $por_estado[$negocio['estado']]++;
         }
 
-        $slots_libres     = 0;
-        $misiones_en_curso = 0;
-        foreach ($oficina['slots'] as $slot) {
-            if ($slot['estado'] === 'libre') {
-                $slots_libres++;
-            }
-            if ($slot['estado'] === 'trabajando') {
-                $misiones_en_curso++;
+        /* Sin filas de slots (el reporter nunca mandó nada) no se sabe cuántos hay libres ni cuántas misiones
+           corren: van en null y la SPA pinta «—». `slots_total` sí queda en 35, que es el pool de hoy. */
+        $slots_libres      = null;
+        $misiones_en_curso = null;
+        if (count($oficina['slots']) > 0) {
+            $slots_libres      = 0;
+            $misiones_en_curso = 0;
+            foreach ($oficina['slots'] as $slot) {
+                if ($slot['estado'] === 'libre') {
+                    $slots_libres++;
+                }
+                if ($slot['estado'] === 'trabajando') {
+                    $misiones_en_curso++;
+                }
             }
         }
 
@@ -1071,7 +1077,8 @@ class EscenaService
      * `oficina`: el pulso del reporter local, el planificador y las mesas (una por slot).
      *
      * - `reporter.ok`: hubo pulso en los últimos 5 minutos. Sin pulso no se manda nada: es un panel.
-     * - `planificador.estado`: `trabajando` si algún slot está en fase `tomado` o `plan`.
+     * - `planificador.estado`: `trabajando` si algún slot que está TRABAJANDO va en fase `tomado` o `plan`. Un
+     *   slot colgado o huérfano que quedó en esa fase no tiene a nadie planificando.
      * - `slots`: las filas de `local_oficina_slots` ordenadas por slot, con los campos del contrato A más
      *   `reportado_at`.
      *
@@ -1086,7 +1093,7 @@ class EscenaService
         $planificando = false;
 
         foreach (LocalOficinaSlot::query()->orderBy('slot')->get() as $fila) {
-            if (in_array($fila->fase, ['tomado', 'plan'], true)) {
+            if ($fila->estado === 'trabajando' && in_array($fila->fase, ['tomado', 'plan'], true)) {
                 $planificando = true;
             }
 

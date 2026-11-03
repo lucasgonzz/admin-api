@@ -14,7 +14,8 @@ use Illuminate\Support\Facades\Validator;
  * 3/11/2026, contrato A del plan: `POST api/claude/local/oficina`).
  *
  * Dos escrituras, las dos idempotentes:
- *   1. Un upsert por `slot` en `local_oficina_slots` (una sola consulta para los 35).
+ *   1. Un upsert por `slot` en `local_oficina_slots` (una sola consulta para los 35), y el borrado de los
+ *      slots que no vinieron en el reporte (solo si el reporte trae alguno).
  *   2. El pulso del reporter en `admin_settings`, clave {@see self::PULSO_KEY}:
  *      `{"last_seen_at", "version", "host", "slots_total", "sesiones"}`. Con eso la escena sabe si el
  *      reporter está vivo (`oficina.reporter.ok`, menos de 5 minutos).
@@ -145,6 +146,11 @@ class OficinaIngestService
                     'proyecto', 'estado', 'rama', 'mision', 'fase', 'claim_iniciado_at',
                     'ultima_actividad_at', 'sucios', 'agentes', 'reportado_at',
                 ]);
+
+                /* La tabla es un ESPEJO del pool: el reporter manda todos los slots siempre, así que uno que
+                   dejó de venir ya no existe (el pool se achicó) y su mesa no se puede seguir dibujando.
+                   🔴 Solo con `slots` no vacío: un reporte vacío (pool.json ilegible) no puede vaciar la oficina. */
+                LocalOficinaSlot::query()->whereNotIn('slot', array_column($filas, 'slot'))->delete();
             }
 
             AdminSetting::set(self::PULSO_KEY, json_encode($pulso));

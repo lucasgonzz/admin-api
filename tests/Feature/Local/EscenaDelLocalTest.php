@@ -370,9 +370,14 @@ class EscenaDelLocalTest extends TestCase
             array_keys($escena['resumen'])
         );
         foreach ($escena['resumen'] as $clave => $valor) {
+            if (in_array($clave, ['slots_libres', 'misiones_en_curso'], true)) {
+                continue;
+            }
             $this->assertIsInt($valor, 'resumen.' . $clave . ' tiene que ser entero.');
         }
         $this->assertSame(35, $escena['resumen']['slots_total'], 'Sin reportes, la oficina se dibuja con 35 slots.');
+        $this->assertNull($escena['resumen']['slots_libres'], 'Sin reportes no se sabe cuántos hay libres.');
+        $this->assertNull($escena['resumen']['misiones_en_curso']);
 
         $negocio = $this->negocio_de($escena, (int) $client->id);
         $this->assertNotNull($negocio);
@@ -864,6 +869,38 @@ class EscenaDelLocalTest extends TestCase
         $this->assertSame(1, $escena['resumen']['misiones_en_curso']);
         $this->assertSame(34, $escena['resumen']['slots_libres']);
         $this->assertSame(35, $escena['resumen']['slots_total']);
+    }
+
+    /**
+     * Sin filas de slots (el reporter nunca mandó) `slots_libres` y `misiones_en_curso` van en null (la SPA pinta
+     * «—») y `slots_total` en 35. Con filas, el planificador trabaja solo si el slot en fase `tomado`/`plan` está
+     * TRABAJANDO: uno colgado o huérfano en esa fase no planifica nada.
+     *
+     * @return void
+     */
+    public function test_sin_slots_el_resumen_no_inventa_y_el_planificador_mira_solo_slots_trabajando(): void
+    {
+        $admin = $this->crear_admin();
+
+        $resumen = $this->escena($admin)['resumen'];
+        $this->assertNull($resumen['slots_libres']);
+        $this->assertNull($resumen['misiones_en_curso']);
+        $this->assertSame(35, $resumen['slots_total']);
+
+        LocalOficinaSlot::create(['slot' => 3, 'estado' => 'colgado', 'mision' => 'vieja', 'fase' => 'plan', 'sucios' => 0, 'agentes' => []]);
+        LocalOficinaSlot::create(['slot' => 4, 'estado' => 'huerfano', 'rama' => 'algo', 'fase' => 'tomado', 'sucios' => 0, 'agentes' => []]);
+        LocalOficinaSlot::create(['slot' => 5, 'estado' => 'libre', 'sucios' => 0, 'agentes' => []]);
+
+        $escena = $this->escena($admin);
+        $this->assertSame('libre', $escena['oficina']['planificador']['estado'], 'Un slot colgado o huérfano en fase plan/tomado no tiene planificador.');
+        $this->assertSame(1, $escena['resumen']['slots_libres']);
+        $this->assertSame(0, $escena['resumen']['misiones_en_curso']);
+        $this->assertSame(3, $escena['resumen']['slots_total']);
+
+        LocalOficinaSlot::create(['slot' => 6, 'estado' => 'trabajando', 'mision' => 'nueva', 'fase' => 'tomado', 'sucios' => 0, 'agentes' => []]);
+        $escena = $this->escena($admin);
+        $this->assertSame('trabajando', $escena['oficina']['planificador']['estado']);
+        $this->assertSame(1, $escena['resumen']['misiones_en_curso']);
     }
 
     /**
