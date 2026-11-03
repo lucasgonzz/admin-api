@@ -314,6 +314,17 @@ class Kernel extends ConsoleKernel
         // que tenga que llegar a tiempo, y el umbral es de 45 minutos.
         $schedule->command('deployments:vencer-colgados')->everyFiveMinutes();
 
+        /* Prueba gratuita de 7 días (misión prueba-alta-instancia, 3/11/2026). Las tres hablan con el VPS por
+           SSH y por eso van con `withoutOverlapping` y en segundo plano: el pool encola jobs (barato), vencer
+           para el supervisor de cada instancia vencida, y el borrado respalda y da de baja sitios. Sin instancias
+           libres el alta devuelve 409 `sin_capacidad`, así que mantener-pool corre seguido. */
+        $schedule->exec(self::artisan_sin_el_lock_del_cron('pruebas:mantener-pool'))
+            ->everyTenMinutes()->withoutOverlapping(30)->runInBackground();
+        $schedule->exec(self::artisan_sin_el_lock_del_cron('pruebas:vencer'))
+            ->everyTenMinutes()->withoutOverlapping(30)->runInBackground();
+        $schedule->exec(self::artisan_sin_el_lock_del_cron('pruebas:borrar'))
+            ->dailyAt('04:40')->withoutOverlapping(120)->runInBackground();
+
         // Genera el reporte diario del agente a la hora configurada en admin_settings.
         // La hora se lee cada vez que corre el scheduler; si cambió desde la última corrida, usa la nueva.
         $report_hour = (int) \App\Models\AdminSetting::get('agent_report_hour', 8);

@@ -2536,7 +2536,12 @@ class LeadController extends Controller
         $lead = Lead::findOrFail($id);
 
         // Verificar que el lead no esté ya vinculado a un Client para evitar duplicados.
-        if ($lead->promoted_client_id) {
+        // 🔴 Salvo que ese Client sea su PRUEBA GRATUITA (misión prueba-alta-instancia, 3/11/2026): ahí promover es
+        // CONTRATAR, y lo resuelve el servicio sin crear nada ni correr ningún user setup (decisión D6).
+        $client_en_prueba = $lead->promoted_client_id
+            ? \App\Services\Prueba\PruebaCicloService::esta_en_prueba(\App\Models\Client::find($lead->promoted_client_id))
+            : false;
+        if ($lead->promoted_client_id && ! $client_en_prueba) {
             return response()->json([
                 'message' => 'El lead ya tiene un Client de producción vinculado. Para reinstalar el sistema usá "Correr user setup".',
                 'model'   => $this->fullModel('lead', $lead->id),

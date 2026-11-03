@@ -416,6 +416,26 @@ return [
         'branding_work_path' => env('DEPLOY_TIENDA_BRANDING_WORK_PATH', '/home/builds/tienda-branding'),
     ],
 
+    // Prueba gratuita de 7 días (misión prueba-alta-instancia, 3/11/2026): el pool de instancias
+    // `prueba-NN` del VPS y el alta desde la landing. Lo consumen App\Services\Prueba\*.
+    'prueba' => [
+        // 🔴 Interruptor PROPIO de escritura del DNS de las pruebas (decisión D9), independiente de
+        // HOSTINGER_DNS_WRITE_ENABLED: apagado por default. Prenderlo habilita escribir y borrar los A
+        // records de `<slug>`, `api-<slug>`, `tienda-<slug>`, `api-tienda-<slug>` y los del pool en la
+        // zona de comerciocity.com (lista blanca, respaldo y verificación en PruebaDnsService).
+        'dns_write_enabled' => (bool) env('PRUEBA_DNS_WRITE_ENABLED', false),
+
+        // WhatsApp de soporte que ve el negocio en la pantalla de vencimiento, si no hay
+        // `admin_settings.prueba_whatsapp_soporte`.
+        'whatsapp_soporte' => env('PRUEBA_WHATSAPP_SOPORTE', ''),
+
+        // Segundos de espera del POST admin-sync/demo-setup de una prueba (el mismo techo que las demos).
+        'demo_setup_timeout' => env('PRUEBA_DEMO_SETUP_TIMEOUT', env('CLIENT_API_DEMO_SETUP_TIMEOUT', 900)),
+
+        // Segundos de espera de las llamadas cortas al ERP de una prueba (C3: prueba/vencimiento y prueba/estado).
+        'erp_timeout' => env('PRUEBA_ERP_TIMEOUT', 20),
+    ],
+
     // API pública de Hostinger (developers.hostinger.com): subdominios, bases de datos, cronjobs
     // y zonas DNS de la cuenta de shared hosting. La consume App\Services\HostingerApiClient.
     //

@@ -10,6 +10,7 @@ use App\Services\DemoCicloAdminNotificationService;
 use App\Services\DemoHitosService;
 use App\Services\GoogleCalendarOAuthService;
 use App\Services\LeadBroadcastService;
+use App\Services\Prueba\PruebaHitosService;
 use App\Services\WhatsappSendService;
 use Carbon\Carbon;
 use Illuminate\Database\QueryException;
@@ -58,6 +59,13 @@ class DemoEventosController extends Controller
         if (! $lead instanceof Lead) {
             return response()->json(['error' => 'no autorizado'], 401);
         }
+
+        /* Contrato C2 de la prueba gratuita (misión prueba-alta-instancia, 3/11/2026): además del lote de
+           siempre, se acepta la forma PLANA del plan del programa, `{ tipo, datos?, ocurrido_at?, uuid? }` (un
+           evento solo, `tipo` en vez de `nombre`). Se normaliza al lote ANTES de validar, así todo lo que sigue
+           es el mismo código. Sin `uuid`, un `prueba.*` se deduplica por (lead, tipo) salvo `prueba.ingreso`, que
+           se repite a propósito: ver uuid_implicito(). */
+        $this->normalizar_forma_plana($request, $lead);
 
         /* Tres cosas que la validación tiene que cerrar, y las tres se pagan caro si faltan:
          *
@@ -176,6 +184,20 @@ class DemoEventosController extends Controller
                 $this->avanzar_pipeline_por_ingreso_real($lead);
             }
 
+            /* Un `prueba.*` (contrato C2, misión prueba-alta-instancia) marca su propio hito de tipo `prueba` y,
+               si es el vencimiento, duerme la instancia. No pasa por DemoHitosService: el roadmap de la demo es
+               otra cosa (clips y tutoriales) y ninguno de sus hitos espera estos eventos. */
+            if (PruebaHitosService::es_tipo_de_prueba((string) $evento['nombre'])) {
+                $movidos += app(PruebaHitosService::class)->aplicar(
+                    $lead,
+                    (string) $evento['nombre'],
+                    DemoHitosService::momento_del_evento($evento),
+                    isset($evento['datos']) && is_array($evento['datos']) ? $evento['datos'] : []
+                );
+
+                continue;
+            }
+
             // Un evento que no le corresponde a ningún hito del plan queda guardado igual y no
             // rompe nada: el crudo alimenta el brief del closer aunque hoy no lo sepamos leer.
             $movidos += DemoHitosService::aplicar($lead, $evento);
@@ -195,6 +217,60 @@ class DemoEventosController extends Controller
             'duplicados' => $duplicados,
             'hitos'      => $movidos,
         ], 200);
+    }
+
+    /**
+     * Convierte `{ tipo, datos?, ocurrido_at?, uuid? }` (la forma plana del contrato C2 de la prueba, un
+     * evento por POST) en el lote `{ eventos: [ { uuid, nombre, ... } ] }` que valida `store_json()`.
+     *
+     * Si el body ya trae `eventos` no se toca nada. Si trae `tipo` pero no `eventos`, se arma el lote de
+     * un elemento; el `uuid` que falte se deduce ({@see uuid_implicito()}). Un body sin ninguna de las dos
+     * claves sigue su camino y falla en la validación de siempre (422 por `eventos`).
+     */
+    protected function normalizar_forma_plana(Request $request, Lead $lead): void
+    {
+        if ($request->has('eventos') || ! $request->has('tipo')) {
+            return;
+        }
+
+        $tipo = $request->input('tipo');
+        if (! is_string($tipo) || trim($tipo) === '') {
+            return;
+        }
+
+        $uuid = $request->input('uuid');
+        if (! is_string($uuid) || trim($uuid) === '') {
+            $uuid = $this->uuid_implicito($lead, trim($tipo), $request->input('ocurrido_at'));
+        }
+
+        $evento = [
+            'uuid'   => $uuid,
+            'nombre' => trim($tipo),
+        ];
+        if ($request->has('clip_id')) {
+            $evento['clip_id'] = $request->input('clip_id');
+        }
+        if ($request->has('ocurrido_at')) {
+            $evento['ocurrido_at'] = $request->input('ocurrido_at');
+        }
+        if ($request->has('datos')) {
+            $evento['datos'] = $request->input('datos');
+        }
+
+        $request->merge(['eventos' => [$evento]]);
+    }
+
+    /**
+     * El `uuid` de un evento plano que no trajo uno: para un `prueba.*` que se emite UNA vez por prueba
+     * (importó, vendió, venció...) es fijo por (lead, tipo), así un reenvío cuenta como duplicado; para
+     * `prueba.ingreso` (se repite en cada ingreso) y para cualquier otro tipo lleva además el momento.
+     */
+    protected function uuid_implicito(Lead $lead, string $tipo, $ocurrido_at): string
+    {
+        $repetible = $tipo === 'prueba.ingreso' || ! PruebaHitosService::es_tipo_de_prueba($tipo);
+        $semilla   = $lead->id . '|' . $tipo . ($repetible ? '|' . (is_scalar($ocurrido_at) ? (string) $ocurrido_at : microtime(true)) : '');
+
+        return 'auto-' . substr(hash('sha256', $semilla), 0, 40);
     }
 
     /**

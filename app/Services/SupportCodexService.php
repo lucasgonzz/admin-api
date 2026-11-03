@@ -14,6 +14,7 @@ use App\Models\SupportCodexUpgradeAgreement;
 use App\Models\SupportCodexOperation;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
+use App\Services\Prueba\PruebaContextoSoporteService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Symfony\Component\HttpKernel\Exception\HttpException;
@@ -191,6 +192,10 @@ class SupportCodexService
             'expected_message_id' => $last ? (int) $last->id : null,
             'window' => app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone),
             'client_context' => app(SupportClientContextService::class)->bloque_para_el_prompt($ticket),
+            /* La prueba gratuita del cliente (misión prueba-alta-instancia, 3/11/2026): estado, vencimiento, días
+             * restantes y los hitos `prueba.*` recibidos por C2. Solo datos; el protocolo de Martín para un negocio en
+             * prueba lo escribe M4. null = el cliente no es una prueba. */
+            'prueba' => app(PruebaContextoSoporteService::class)->bloque_para_el_cliente($ticket->client),
             /* La implementación del sistema y de la tienda (abierta, o cerrada hace ≤ 30 días), para que
              * Martín siga la conversación de la implementación donde la dejó Lucas. null = no tiene. */
             'implementation' => app(SupportImplementationContextService::class)->bloque_para_el_ticket($ticket),

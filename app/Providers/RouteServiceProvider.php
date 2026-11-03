@@ -70,6 +70,17 @@ class RouteServiceProvider extends ServiceProvider
             return Limit::perHour(max(1, (int) config('landing_agenda.reservas_por_hora', 10)))
                 ->by('landing-agenda-reservas:' . $request->ip());
         });
+        /* Prueba gratuita desde la landing (misión prueba-alta-instancia, 3/11/2026): el alta con la misma
+           cubeta por hora que las reservas (pocas por IP, que es lo que una persona hace) y el estado con la de
+           los turnos (la animación lo consulta cada pocos segundos durante unos minutos). */
+        RateLimiter::for('landing-prueba-alta', function (Request $request) {
+            return Limit::perHour(max(1, (int) config('landing_agenda.reservas_por_hora', 10)))
+                ->by('landing-prueba-alta:' . $request->ip());
+        });
+        RateLimiter::for('landing-prueba-estado', function (Request $request) {
+            return Limit::perMinute(max(1, (int) config('landing_agenda.turnos_por_minuto', 30)))
+                ->by('landing-prueba-estado:' . $request->ip());
+        });
         RateLimiter::for('demo-chat', function (Request $request) {
             // Todas las demos del VPS comparten IP: cada conversación necesita su propia cuota.
             // Throttle puede ejecutarse antes del middleware de identidad. El hash no revela la clave;

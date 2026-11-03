@@ -95,6 +95,19 @@ Route::post('landing/agenda/reservas', [\App\Http\Controllers\LandingAgendaContr
     ->withoutMiddleware('throttle:api')
     ->middleware('throttle:landing-agenda-reservas');
 
+/*
+| Prueba gratuita de 7 días desde la landing (misión prueba-alta-instancia, 3/11/2026, contrato C6): el
+| formulario «Empezá tu prueba gratis» da de alta la prueba y la animación consulta el estado. Públicas,
+| con cubetas propias por IP (`RouteServiceProvider`) y sin la de todo /api, como la agenda. Contrato en
+| `LandingPruebaController`.
+*/
+Route::post('landing/prueba/alta', [\App\Http\Controllers\LandingPruebaController::class, 'alta'])
+    ->withoutMiddleware('throttle:api')
+    ->middleware('throttle:landing-prueba-alta');
+Route::get('landing/prueba/{uuid}/estado', [\App\Http\Controllers\LandingPruebaController::class, 'estado'])
+    ->withoutMiddleware('throttle:api')
+    ->middleware('throttle:landing-prueba-estado');
+
 Route::post('webhook/whatsapp', [WhatsappWebhookController::class, 'receive'])
     ->withoutMiddleware('throttle:api')
     ->middleware('throttle:whatsapp-webhook');
@@ -1024,6 +1037,19 @@ Route::prefix('admin')->group(function () {
         Route::put('client/{clientId}/candado-sesion', [ClientSessionLockController::class, 'update_json']);
         /* Botón "Reintentar sincronización" de la pestaña Candado de sesión. */
         Route::post('client/{clientId}/candado-sesion/sync', [ClientSessionLockController::class, 'sync_json']);
+        /* Prueba gratuita (misión prueba-alta-instancia, 3/11/2026): los días de prueba de un cliente o de un lead en
+           prueba (el PUT escribe trial_days/trial_ends_at y le avisa al ERP por C3), y el pool de instancias
+           `prueba-NN` del VPS con sus acciones (dormir, despertar, borrar con respaldo, reintentar, mantener). */
+        Route::get('client/{clientId}/prueba', [\App\Http\Controllers\PruebaInstanciaController::class, 'prueba_del_cliente_json']);
+        Route::put('client/{clientId}/prueba', [\App\Http\Controllers\PruebaInstanciaController::class, 'cambiar_dias_del_cliente_json']);
+        Route::get('lead/{leadId}/prueba', [\App\Http\Controllers\PruebaInstanciaController::class, 'prueba_del_lead_json']);
+        Route::put('lead/{leadId}/prueba', [\App\Http\Controllers\PruebaInstanciaController::class, 'cambiar_dias_del_lead_json']);
+        Route::get('prueba/instancias', [\App\Http\Controllers\PruebaInstanciaController::class, 'index_json']);
+        Route::post('prueba/instancias/mantener', [\App\Http\Controllers\PruebaInstanciaController::class, 'mantener_json']);
+        Route::post('prueba/instancias/{id}/dormir', [\App\Http\Controllers\PruebaInstanciaController::class, 'dormir_json']);
+        Route::post('prueba/instancias/{id}/despertar', [\App\Http\Controllers\PruebaInstanciaController::class, 'despertar_json']);
+        Route::post('prueba/instancias/{id}/borrar', [\App\Http\Controllers\PruebaInstanciaController::class, 'borrar_json']);
+        Route::post('prueba/instancias/{id}/reintentar', [\App\Http\Controllers\PruebaInstanciaController::class, 'reintentar_json']);
         /* Boton Gestionar extensiones (mision extensiones-desde-el-admin, 15/10/2026): pide al empresa-api del cliente un acceso de un solo uso al configurador. */
         Route::post('client/{clientId}/extensiones/acceso', [\App\Http\Controllers\ClientExtensionesAccesoController::class, 'acceso_json']);
         /* Extension unica "Agentes de IA" (mision agentes-ia-extension-unica, 22/10/2026): el GET lee si el cliente la tiene y el POST
