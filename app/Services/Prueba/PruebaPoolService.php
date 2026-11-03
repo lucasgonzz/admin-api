@@ -10,6 +10,7 @@ use App\Models\Version;
 use App\Services\UserIdBlockAllocatorService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 /**
  * El pool de instancias pre-armadas (decisión D1 del plan de `prueba-alta-instancia`, 3/11/2026).
@@ -62,6 +63,13 @@ class PruebaPoolService
             return [];
         }
 
+        $motivo = $this->motivo_para_no_encolar();
+        if ($motivo !== null) {
+            Log::warning('PruebaPoolService: faltan ' . $faltan . ' pero no se encola: ' . $motivo);
+
+            return [];
+        }
+
         $version        = $this->version_publicada_de_empresa();
         $version_tienda = $this->version_publicada_de_tienda();
 
@@ -78,6 +86,55 @@ class PruebaPoolService
         Log::info('PruebaPoolService: armado encolado.', ['nombres' => $nombres, 'version' => $version, 'tienda' => $version_tienda]);
 
         return $nombres;
+    }
+
+    /**
+     * Por qué NO corresponde encolar un armado ahora, o null si corresponde (chequeo C1, 3/11/2026): con el
+     * interruptor de DNS apagado cada corrida del scheduler fabricaría una `fallida` y quemaría un bloque de
+     * 100 user_id; y una `fallida` sin asignar se destraba con «Reintentar» (o se borra), no armando otra al lado.
+     */
+    public function motivo_para_no_encolar(): ?string
+    {
+        if (! app(PruebaDnsService::class)->write_enabled()) {
+            return 'el interruptor PRUEBA_DNS_WRITE_ENABLED está apagado: sin DNS no se arma ninguna instancia (se prende cuando el pool entra en servicio).';
+        }
+
+        $fallida = TrialInstance::where('estado', TrialInstance::ESTADO_FALLIDA)->whereNull('client_id')->orderBy('id')->first();
+        if ($fallida !== null) {
+            return 'hay una instancia fallida sin asignar (' . $fallida->nombre . ', etapa ' . $fallida->etapa . '): reintentala o borrala desde /pruebas antes de armar otra.';
+        }
+
+        return null;
+    }
+
+    /** Reserva un bloque si la instancia no tiene (se liberó por un fallo en `dns` y ahora se reintenta). */
+    public function asegurar_bloque(TrialInstance $instancia): int
+    {
+        if ($instancia->user_id) {
+            return (int) $instancia->user_id;
+        }
+        $instancia->user_id = $this->reservar_bloque($instancia->nombre);
+        $instancia->save();
+
+        return (int) $instancia->user_id;
+    }
+
+    /**
+     * Devuelve el bloque de `user_id` de una instancia que no llegó a usarlo (falló en `dns`, o se borra sin
+     * haberse asignado nunca): se saca la fila de `user_id_blocks` y la instancia queda sin `user_id`.
+     */
+    public function liberar_bloque(TrialInstance $instancia): void
+    {
+        if (! $instancia->user_id) {
+            return;
+        }
+        UserIdBlock::where('block_start', (int) $instancia->user_id)
+            ->where('source', self::SOURCE_BLOQUE)
+            ->whereNull('lead_id')
+            ->whereNull('client_id')
+            ->delete();
+        $instancia->user_id = null;
+        $instancia->save();
     }
 
     /**
@@ -124,6 +181,8 @@ class PruebaPoolService
             $instancia->estado      = TrialInstance::ESTADO_ASIGNANDO;
             $instancia->lead_id     = $lead_id;
             $instancia->alias_slug  = PruebaNombres::assert_slug($slug);
+            /* El uuid propio del seguimiento de ESTA prueba (lo devuelve el alta y lo lee la landing). */
+            $instancia->seguimiento_uuid = (string) Str::uuid();
             $instancia->etapa       = 'reservada';
             $instancia->progreso    = 5;
             $instancia->error       = null;

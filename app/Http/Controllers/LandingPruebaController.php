@@ -82,7 +82,9 @@ class LandingPruebaController extends Controller
             'telefono'   => ['required', 'string', 'max:30'],
             'email'      => ['required', 'string', 'email:filter', 'max:120'],
             'empresa'    => ['required', 'string', 'min:2', 'max:120', 'not_regex:/[\x00-\x1F\x7F]/'],
-            'password'   => ['required', 'string', 'min:8', 'max:72'],
+            /* 120 como la landing, que corta ahí: bcrypt usa los primeros 72 bytes y el resto no cambia el hash,
+               así que un `max:72` acá solo daría un 422 sorpresa a quien escribió una contraseña larga. */
+            'password'   => ['required', 'string', 'min:8', 'max:120'],
             'rubro'      => ['nullable', 'string', 'in:' . implode(',', array_keys(DemoIndustriaCatalogo::OPCIONES))],
             'atribucion' => ['nullable', 'array'],
         ];
@@ -208,6 +210,8 @@ class LandingPruebaController extends Controller
     private static function mensajes(): array
     {
         return [
+            'password.min' => 'Revisá la contraseña: es demasiado corta.',
+            'password.max' => 'Revisá la contraseña: es demasiado larga.',
             'required'  => 'Completá :attribute.',
             'string'    => 'Revisá :attribute.',
             'min'       => 'Revisá :attribute: es demasiado corto.',

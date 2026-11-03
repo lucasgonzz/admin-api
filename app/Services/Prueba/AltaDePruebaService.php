@@ -77,6 +77,7 @@ class AltaDePruebaService
      */
     public function alta(array $datos, ?array $contexto_web = null): array
     {
+        $this->hosts_tomados = null;
         $telefono = WhatsappNormalizer::normalize((string) $datos['telefono']);
         $lead     = BuscadorDeLeadPorTelefono::buscar($telefono);
 
@@ -96,6 +97,9 @@ class AltaDePruebaService
             $this->avisar_sin_capacidad();
 
             return $this->respuesta(409, ['code' => self::CODIGO_SIN_CAPACIDAD, 'codigo' => self::CODIGO_SIN_CAPACIDAD, 'mensaje' => $e->getMessage()]);
+        } catch (SlugDePruebaImposibleException $e) {
+            /* También deshizo la transacción. Es un 422 sobre `empresa`, con la forma del C6. */
+            return $this->respuesta(422, ['mensaje' => $e->getMessage(), 'errores' => ['empresa' => [$e->getMessage()]]]);
         }
 
         /** @var Lead $lead_listo */
@@ -117,7 +121,9 @@ class AltaDePruebaService
             'slug'      => $instancia->alias_slug,
         ]);
 
-        return $this->respuesta(201, ['uuid' => (string) $lead_listo->uuid, 'meta_eventos' => $meta_eventos]);
+        /* El uuid PROPIO de la prueba (`trial_instances.seguimiento_uuid`), no el del lead: el del lead ya viaja en los
+           links públicos de la demo (`demo/{uuid}`) y no tiene por qué abrir el seguimiento de la prueba. */
+        return $this->respuesta(201, ['uuid' => (string) $instancia->seguimiento_uuid, 'meta_eventos' => $meta_eventos]);
     }
 
     /**
@@ -279,7 +285,7 @@ class AltaDePruebaService
             'name'               => $nombre !== '' ? $nombre : 'Cliente',
             'company_name'       => $empresa !== '' ? $empresa : null,
             'user_id'            => (int) $instancia->user_id,
-            'slug'               => $this->slug_unico_de_cliente($slug),
+            'slug'               => $slug, // el mismo que el alias, siempre: proponer_slug() ya lo cotejó con clients.slug
             'api_url'            => 'https://' . $hosts['erp_api'],
             'api_key'            => Str::random(40),
             'inbound_api_key'    => Str::random(40),
@@ -332,16 +338,22 @@ class AltaDePruebaService
 
     /**
      * El slug de la prueba desde el nombre de la empresa (o del contacto): `Str::slug` acotado a la
-     * expresión de `PruebaNombres`, único entre las instancias vivas y las `ClientApi` que ya existen.
+     * expresión de `PruebaNombres`, sin prefijos de host, y libre entre todo lo que ya ocupa un host.
      * Sin IA: el alta es público y sincrónico, y una sugerencia de Haiku tarda segundos y sale a la red.
+     *
+     * @throws SlugDePruebaImposibleException Si del nombre no queda nada con qué armar un slug.
      */
     public function proponer_slug(string $empresa, string $contacto = ''): string
     {
         $base = Str::slug($empresa !== '' ? $empresa : $contacto);
         $base = (string) preg_replace('/[^a-z0-9-]/', '', $base);
+        /* B1 (chequeo independiente, 3/11/2026): «Tienda Lola» → `lola`, «API Ferretotal» → `ferretotal`. Un slug con
+           prefijo de host sería la tienda o la API de OTRA prueba o de un cliente. Si no queda nada («Tienda API»), 422. */
+        $base = PruebaNombres::sin_prefijos_de_host($base);
         $base = trim(substr($base, 0, 20), '-');
-        if ($base === '' || preg_match(PruebaNombres::REGEX_SLUG, $base) !== 1) {
-            $base = 'negocio' . random_int(100, 999);
+        /* «Tienda API» → `api`, «Tienda» → `tienda`: la palabra pelada tampoco sirve (`api-2` volvería a ser un prefijo). */
+        if ($base === '' || preg_match(PruebaNombres::REGEX_SLUG, $base) !== 1 || PruebaNombres::es_palabra_de_prefijo($base)) {
+            throw new SlugDePruebaImposibleException($empresa !== '' ? $empresa : $contacto);
         }
 
         $candidato = $base;
@@ -356,37 +368,95 @@ class AltaDePruebaService
         throw new \RuntimeException('No se pudo armar un slug libre para "' . $empresa . '".');
     }
 
-    /** ¿Alguien ya usa `<slug>.comerciocity.com`? Instancias vivas, ClientApi y demos. */
+    /**
+     * ¿Alguien ya usa alguno de los CUATRO hosts del candidato (`<slug>`, `api-<slug>`, `tienda-<slug>`,
+     * `api-tienda-<slug>`)? Se cotejan contra los cuatro de cada instancia viva (nombre y alias), los cuatro de
+     * cada `clients.slug`, y los hosts de `client_apis`, `client_ecommerces` y `demos`. Un slug reservado, con
+     * prefijo de host o con nombre de pool cuenta como tomado. Una sola regla: el slug del cliente ES el alias.
+     */
     private function slug_tomado(string $slug): bool
     {
-        if (TrialInstance::where('alias_slug', $slug)->where('estado', '!=', TrialInstance::ESTADO_BORRADA)->exists()) {
-            return true;
-        }
-
-        $host = $slug . '.' . PruebaNombres::dominio();
-
-        if (ClientApi::where('spa_url', 'like', '%//' . $host)->orWhere('spa_url', 'like', '%//' . $host . '/')->exists()) {
-            return true;
-        }
-
-        /* Un slug reservado (`www`, `demo`, un nombre del pool) cuenta como tomado: se le pone sufijo. */
         if (! PruebaNombres::es_slug_valido($slug)) {
             return true;
         }
 
-        return DB::table('demos')->where('erp_spa_url', 'like', '%' . $host . '%')->exists();
-    }
-
-    private function slug_unico_de_cliente(string $base): string
-    {
-        $slug = $base;
-        $i    = 2;
-        while (Client::where('slug', $slug)->exists()) {
-            $slug = $base . '-' . $i;
-            $i++;
+        $tomados = $this->hosts_tomados();
+        foreach (PruebaNombres::hosts($slug) as $host) {
+            if (isset($tomados[$host])) {
+                return true;
+            }
         }
 
-        return $slug;
+        return false;
+    }
+
+    /** @var array<string, true>|null Memo de hosts_tomados() durante UN alta (el candidato prueba hasta 99 sufijos). */
+    private $hosts_tomados = null;
+
+    /**
+     * Todos los hosts ocupados hoy, como claves del array.
+     *
+     * @return array<string, true>
+     */
+    private function hosts_tomados(): array
+    {
+        if ($this->hosts_tomados !== null) {
+            return $this->hosts_tomados;
+        }
+
+        $hosts = [];
+        $sumar_base = function ($base) use (&$hosts) {
+            $base = strtolower(trim((string) $base));
+            if ($base === '') {
+                return;
+            }
+            foreach (PruebaNombres::hosts($base) as $host) {
+                $hosts[$host] = true;
+            }
+        };
+        $sumar_url = function ($url) use (&$hosts) {
+            $host = self::host_de((string) $url);
+            if ($host !== '') {
+                $hosts[$host] = true;
+            }
+        };
+
+        foreach (TrialInstance::where('estado', '!=', TrialInstance::ESTADO_BORRADA)->get(['nombre', 'alias_slug']) as $instancia) {
+            $sumar_base($instancia->nombre);
+            $sumar_base($instancia->alias_slug);
+        }
+        foreach (Client::query()->whereNotNull('slug')->pluck('slug') as $slug_cliente) {
+            $sumar_base($slug_cliente);
+        }
+        foreach (ClientApi::query()->get(['url', 'spa_url']) as $api) {
+            $sumar_url($api->url);
+            $sumar_url($api->spa_url);
+        }
+        foreach (DB::table('client_ecommerces')->get(['domain', 'api_url', 'spa_url']) as $tienda) {
+            $sumar_url($tienda->domain);
+            $sumar_url($tienda->api_url);
+            $sumar_url($tienda->spa_url);
+        }
+        foreach (DB::table('demos')->get(['erp_spa_url', 'erp_api_url', 'ecommerce_spa_url', 'ecommerce_api_url']) as $demo) {
+            $sumar_url($demo->erp_spa_url);
+            $sumar_url($demo->erp_api_url);
+            $sumar_url($demo->ecommerce_spa_url);
+            $sumar_url($demo->ecommerce_api_url);
+        }
+
+        return $this->hosts_tomados = $hosts;
+    }
+
+    /** El host de una URL o de un dominio pelado: minúsculas, sin esquema, puerto ni ruta. */
+    private static function host_de(string $valor): string
+    {
+        $valor = trim($valor);
+        if ($valor === '') {
+            return '';
+        }
+        $host = parse_url(strpos($valor, '//') === false ? 'https://' . $valor : $valor, PHP_URL_HOST);
+
+        return strtolower(trim((string) $host, '. '));
     }
 
     /**

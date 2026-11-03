@@ -35,7 +35,7 @@ class AltaDePruebaTest extends BaseDePruebaGratuita
         /* El píxel de la landing dispara con los MISMOS ids que la CAPI del admin: Lead y StartTrial. */
         $this->assertSame(['Lead', 'StartTrial'], array_column($respuesta->json('meta_eventos'), 'nombre'));
 
-        $lead = Lead::where('uuid', $uuid)->first();
+        $lead = $this->lead_del_alta($uuid);
         $this->assertNotNull($lead);
         $this->assertSame(LeadPipelineStatus::PRUEBA_ACTIVA, $lead->status);
         $this->assertSame(LeadOrigenService::ORIGEN_LANDING, $lead->origen);
@@ -120,6 +120,71 @@ class AltaDePruebaTest extends BaseDePruebaGratuita
         /* Y un nombre largo se recorta a 20 sin perder la unicidad ni la forma. */
         $this->postear_alta(['empresa' => 'Distribuidora Mayorista del Litoral Sur S.R.L.', 'telefono' => '3444000002'])->assertStatus(201);
         $this->assertSame('distribuidora-mayori', TrialInstance::where('nombre', 'prueba-02')->value('alias_slug'));
+    }
+
+    public function test_el_slug_no_lleva_prefijo_de_host_y_no_pisa_la_tienda_ni_la_api_de_otro(): void
+    {
+        $this->crear_instancia_libre('prueba-01', 900100);
+        $this->crear_instancia_libre('prueba-02', 900200);
+        $this->crear_instancia_libre('prueba-03', 900300);
+        $this->crear_instancia_libre('prueba-04', 900400);
+
+        /* «Tienda Lola» no puede ser `tienda-lola`: sería la tienda de la prueba `lola`. Queda `lola`, y el cliente lleva el MISMO slug. */
+        $this->postear_alta(['empresa' => 'Tienda Lola', 'telefono' => '3444000011'])->assertStatus(201);
+        $this->assertSame('lola', TrialInstance::where('nombre', 'prueba-01')->value('alias_slug'));
+        $this->assertSame('lola', Client::where('company_name', 'Tienda Lola')->value('slug'), 'El slug del cliente ES el alias.');
+
+        /* «API Ferretotal» → `ferretotal`, que es el slug de un cliente real (sus cuatro hosts cuentan como tomados) → `ferretotal-2`. */
+        Client::create(['name' => 'Ferre Total', 'is_active' => true, 'api_url' => '', 'api_key' => Str::random(40), 'inbound_api_key' => Str::random(40), 'slug' => 'ferretotal']);
+        $this->postear_alta(['empresa' => 'API Ferretotal', 'telefono' => '3444000012'])->assertStatus(201);
+        $this->assertSame('ferretotal-2', TrialInstance::where('nombre', 'prueba-02')->value('alias_slug'));
+
+        /* La tienda de un cliente en `tienda-pepe.comerciocity.com` ocupa uno de los cuatro hosts de `pepe`: «Pepe» → `pepe-2`. */
+        $pepe = Client::create(['name' => 'Pepe Real', 'is_active' => true, 'api_url' => '', 'api_key' => Str::random(40), 'inbound_api_key' => Str::random(40), 'slug' => 'pepe-real-' . uniqid()]);
+        ClientEcommerce::create(['client_id' => $pepe->id, 'domain' => 'tienda-pepe.comerciocity.com', 'api_url' => 'https://api-tienda-pepe.comerciocity.com', 'spa_url' => 'https://tienda-pepe.comerciocity.com', 'status' => 'active']);
+        $this->postear_alta(['empresa' => 'Pepe', 'telefono' => '3444000013'])->assertStatus(201);
+        $this->assertSame('pepe-2', TrialInstance::where('nombre', 'prueba-03')->value('alias_slug'));
+
+        /* Y el alias de otra prueba viva también: «Lola» → `lola-2`. */
+        $this->postear_alta(['empresa' => 'Lola', 'telefono' => '3444000014'])->assertStatus(201);
+        $this->assertSame('lola-2', TrialInstance::where('nombre', 'prueba-04')->value('alias_slug'));
+    }
+
+    public function test_una_empresa_que_solo_dice_tienda_o_api_da_422_sobre_empresa_sin_dejar_nada(): void
+    {
+        $this->crear_instancia_libre('prueba-01', 900100);
+
+        $respuesta = $this->postear_alta(['empresa' => 'Tienda API', 'telefono' => '3444000021']);
+
+        $respuesta->assertStatus(422);
+        $this->assertArrayHasKey('empresa', $respuesta->json('errores'));
+        $this->assertNull(Lead::where('phone', '+5493444000021')->first(), 'La transacción se deshizo: no queda lead.');
+        $this->assertSame(TrialInstance::ESTADO_LIBRE, TrialInstance::where('nombre', 'prueba-01')->value('estado'));
+    }
+
+    public function test_el_uuid_del_alta_es_el_de_seguimiento_de_la_prueba_y_no_el_del_lead(): void
+    {
+        $instancia = $this->crear_instancia_libre('prueba-01', 900100);
+        $uuid      = $this->postear_alta()->json('uuid');
+        $lead      = $this->lead_del_alta($uuid);
+        $instancia->refresh();
+
+        $this->assertSame($uuid, $instancia->seguimiento_uuid);
+        $this->assertNotSame($uuid, (string) $lead->uuid, 'El uuid del lead viaja en los links públicos de la demo: no abre el seguimiento.');
+        $this->getJson('/api/landing/prueba/' . $uuid . '/estado')->assertStatus(200);
+        $this->getJson('/api/landing/prueba/' . $lead->uuid . '/estado')->assertStatus(404);
+    }
+
+    public function test_la_contrasena_acepta_hasta_120_y_el_mensaje_del_minimo_habla_de_la_contrasena(): void
+    {
+        $this->crear_instancia_libre('prueba-01', 900100);
+
+        $corta = $this->postear_alta(['password' => 'abc1234', 'telefono' => '3444000031']);
+        $corta->assertStatus(422);
+        $this->assertSame(['Revisá la contraseña: es demasiado corta.'], $corta->json('errores.password'));
+
+        $this->postear_alta(['password' => str_repeat('a', 121), 'telefono' => '3444000032'])->assertStatus(422);
+        $this->postear_alta(['password' => str_repeat('a', 120), 'telefono' => '3444000033'])->assertStatus(201);
     }
 
     public function test_un_telefono_con_prueba_en_curso_da_409_ya_tiene_prueba(): void
@@ -216,7 +281,7 @@ class AltaDePruebaTest extends BaseDePruebaGratuita
         $respuesta = $this->postear_alta();
 
         $respuesta->assertStatus(201);
-        $this->assertSame((string) $lead->uuid, $respuesta->json('uuid'));
+        $this->assertSame((int) $lead->id, (int) $this->lead_del_alta($respuesta->json('uuid'))->id, 'Se reusó el lead existente (el uuid devuelto es el de seguimiento de la prueba).');
         $lead->refresh();
         $this->assertSame('Lucas Viejo', $lead->contact_name);
         $this->assertSame('viejo@example.com', $lead->email);
@@ -237,7 +302,7 @@ class AltaDePruebaTest extends BaseDePruebaGratuita
     {
         $instancia = $this->crear_instancia_libre();
         $uuid      = $this->postear_alta()->json('uuid');
-        $lead      = Lead::where('uuid', $uuid)->first();
+        $lead      = $this->lead_del_alta($uuid);
 
         $instancia->refresh();
         $instancia->update(['estado' => TrialInstance::ESTADO_ASIGNADA, 'etapa' => 'lista', 'progreso' => 100]);

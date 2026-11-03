@@ -80,12 +80,21 @@ class PruebaInstanciaController extends Controller
         });
     }
 
-    /** Vuelve a encolar el armado (del pool o de la asignación) de una instancia fallida. */
-    public function reintentar_json($id): JsonResponse
+    /**
+     * Vuelve a encolar el armado (del pool o de la asignación) de una instancia fallida. Si lo que falló fue el
+     * BORRADO (etapa `borrando`), reintentar es volver a borrar (respaldo, sitios, DNS), no armarla de nuevo
+     * (chequeo C3, 3/11/2026).
+     */
+    public function reintentar_json($id, PruebaCicloService $ciclo): JsonResponse
     {
-        return $this->accion($id, function (TrialInstance $instancia) {
+        return $this->accion($id, function (TrialInstance $instancia) use ($ciclo) {
             if ($instancia->estado !== TrialInstance::ESTADO_FALLIDA) {
                 throw new \RuntimeException('Solo se reintenta una instancia fallida.');
+            }
+            if ((string) $instancia->etapa === 'borrando') {
+                $ciclo->borrar($instancia, 'reintento del borrado desde el panel');
+
+                return;
             }
             if ($instancia->client_id) {
                 ArmarPruebaJob::dispatch($instancia->id);

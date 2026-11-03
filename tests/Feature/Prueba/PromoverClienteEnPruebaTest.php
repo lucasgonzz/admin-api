@@ -19,7 +19,7 @@ class PromoverClienteEnPruebaTest extends BaseDePruebaGratuita
     {
         $instancia = $this->crear_instancia_libre('prueba-01', 900100);
         $uuid      = $this->postear_alta()->json('uuid');
-        $lead      = Lead::where('uuid', $uuid)->first();
+        $lead      = $this->lead_del_alta($uuid);
         $client    = Client::find($lead->promoted_client_id);
 
         $instancia->refresh();

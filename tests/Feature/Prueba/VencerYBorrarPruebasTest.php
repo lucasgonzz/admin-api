@@ -2,11 +2,13 @@
 
 namespace Tests\Feature\Prueba;
 
+use App\Jobs\ArmarPruebaJob;
 use App\Models\Client;
 use App\Models\Lead;
 use App\Models\TrialInstance;
 use App\Services\Prueba\PruebaCicloService;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\Queue;
 
 /**
  * D4 y D7: vencer (dormir), despertar y borrar con respaldo.
@@ -18,7 +20,7 @@ class VencerYBorrarPruebasTest extends BaseDePruebaGratuita
     {
         $instancia = $this->crear_instancia_libre('prueba-01', 900100);
         $uuid      = $this->postear_alta()->json('uuid');
-        $lead      = Lead::where('uuid', $uuid)->first();
+        $lead      = $this->lead_del_alta($uuid);
         $client    = Client::find($lead->promoted_client_id);
 
         $instancia->refresh();
@@ -112,6 +114,34 @@ class VencerYBorrarPruebasTest extends BaseDePruebaGratuita
         $this->assertSame(PruebaCicloService::CLIENTE_PRUEBA_BORRADA, $client->estado);
         $this->assertFalse((bool) $client->is_active);
         $this->assertSame('cerrado_perdido', Lead::find($lead->id)->status);
+    }
+
+    public function test_reintentar_un_borrado_a_medias_vuelve_a_borrar_y_no_arma_la_instancia(): void
+    {
+        [$instancia] = $this->prueba_lista('2026-10-03 10:00:00');
+        $instancia->update(['estado' => TrialInstance::ESTADO_FALLIDA, 'etapa' => 'borrando', 'error' => 'Borrado fallido (baja): prueba-borrar.sh falló: mysqldump']);
+
+        $this->vps->responder('prueba-borrar.sh', ['ok' => true, 'respaldo' => '/root/respaldos-pruebas/prueba-test-20261103-1600', 'etapas' => []]);
+        $todos = ['api-prueba-test', 'prueba-test', 'tienda-prueba-test', 'api-tienda-prueba-test', 'api-prueba-01', 'prueba-01', 'tienda-prueba-01', 'api-tienda-prueba-01'];
+        $this->hostinger->responder_secuencia('/api/dns/v1/zones/', [
+            $this->zona($todos),
+            $this->zona(array_slice($todos, 4)),
+            $this->zona(array_slice($todos, 4)),
+            $this->zona([]),
+        ], 'GET');
+        $this->hostinger->responder('/api/dns/v1/zones/', [], 'DELETE');
+        $this->hostinger->responder('/api/dns/v1/snapshots/', [], 'GET');
+
+        /* El alta de prueba_lista() ya encoló UN ArmarPruebaJob: reintentar el borrado no tiene que sumar otro. */
+        $armados_antes = count(Queue::pushed(ArmarPruebaJob::class));
+
+        $this->actingAs($this->admin, 'sanctum')->postJson('/api/admin/prueba/instancias/' . $instancia->id . '/reintentar')->assertStatus(200);
+
+        $this->assertCount($armados_antes, Queue::pushed(ArmarPruebaJob::class), 'Reintentar un borrado a medias no vuelve a armar la instancia.');
+        $instancia->refresh();
+        $this->assertSame(TrialInstance::ESTADO_BORRADA, $instancia->estado);
+        $this->assertSame('/root/respaldos-pruebas/prueba-test-20261103-1600', $instancia->respaldo_ruta);
+        $this->assertSame(["bash /root/prueba-gratuita/prueba-borrar.sh 'prueba-01' 'prueba-test'"], $this->vps->comandos);
     }
 
     public function test_pruebas_borrar_no_toca_una_prueba_vencida_hace_menos_de_la_gracia(): void

@@ -23,6 +23,14 @@ class PruebasMantenerPoolCommand extends Command
         $minimo = $this->option('minimo');
         $minimo = $minimo === null || trim((string) $minimo) === '' ? null : (int) $minimo;
 
+        $objetivo = $minimo === null ? PruebaSettings::pool_minimo() : $minimo;
+        $motivo   = $objetivo > PruebaPoolService::libres_o_creando() ? $pool->motivo_para_no_encolar() : null;
+        if ($motivo !== null) {
+            $this->warn('No se encola: ' . $motivo);
+
+            return 0;
+        }
+
         try {
             $nombres = $pool->mantener($minimo);
         } catch (\Throwable $e) {

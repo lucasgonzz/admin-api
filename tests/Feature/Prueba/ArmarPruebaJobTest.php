@@ -83,7 +83,7 @@ class ArmarPruebaJobTest extends BaseDePruebaGratuita
         $this->assertStringNotContainsString('clave-de-prueba-123', implode("\n", $this->vps->comandos));
 
         /* Y la landing ya ve `lista` con la URL de ingreso. */
-        $this->getJson('/api/landing/prueba/' . $lead->uuid . '/estado')
+        $this->getJson('/api/landing/prueba/' . $instancia->fresh()->seguimiento_uuid . '/estado')
             ->assertJson(['estado' => 'lista', 'url_ingreso' => 'https://prueba-test.comerciocity.com/demo/ingreso?t=' . $lead->demo_ingreso_token]);
     }
 
@@ -104,7 +104,7 @@ class ArmarPruebaJobTest extends BaseDePruebaGratuita
         $this->assertSame('fallido', Lead::find($lead->id)->demo_setup_status);
         $this->assertSame(['prueba-asignar.sh'], $this->vps->scripts_corridos(), 'El SSL no corrió: se frenó antes.');
 
-        $this->getJson('/api/landing/prueba/' . $lead->uuid . '/estado')->assertJson(['estado' => 'fallida']);
+        $this->getJson('/api/landing/prueba/' . $instancia->fresh()->seguimiento_uuid . '/estado')->assertJson(['estado' => 'fallida']);
 
         /* Reintento: el ERP ya anda. Arranca en demo_setup (no vuelve a escribir DNS ni alias). */
         $this->erp = [];

@@ -2,6 +2,7 @@
 
 namespace App\Services\Prueba;
 
+use App\Models\TrialInstance;
 use App\Services\DnsZoneRecords;
 use App\Services\HostingerApiClient;
 use Illuminate\Support\Facades\Log;
@@ -37,16 +38,21 @@ class PruebaDnsService
     /**
      * Crea los A records que falten para una base (slug del negocio o nombre del pool).
      *
-     * @param string $base Slug (`lacava`) o nombre (`prueba-01`).
+     * @param string             $base      Slug (`lacava`) o nombre (`prueba-01`).
+     * @param TrialInstance|null $instancia La instancia que escribe: un label que YA existe apuntando al VPS se
+     *                                      acepta solo si figura en sus `dns_labels` (reintento de la etapa `dns`);
+     *                                      si no, es de otra prueba o de un cliente y se frena (chequeo B1, 3/11/2026).
+     *                                      Sin instancia, ningún label existente se da por propio.
      *
-     * @return array<int, string> Labels que se escribieron (vacío si ya estaban todos).
+     * @return array<int, string> Labels que se escribieron (vacío si ya estaban todos y eran propios).
      */
-    public function crear_registros(string $base): array
+    public function crear_registros(string $base, ?TrialInstance $instancia = null): array
     {
         $this->assert_write_enabled();
 
         $permitidos = $this->labels_permitidos($base);
         $ip         = $this->ip_del_vps();
+        $propios    = $instancia !== null ? $instancia->dns_labels_escritos() : [];
 
         $zona_antes = new DnsZoneRecords($this->hostinger()->get_dns_zone());
         $antes      = $zona_antes->pares();
@@ -59,8 +65,16 @@ class PruebaDnsService
 
                 continue;
             }
-            if (in_array($ip, $existentes[$label], true)) {
+            if (in_array($ip, $existentes[$label], true) && in_array($label, $propios, true)) {
+                /* Lo escribió esta misma instancia (reintento de la etapa `dns`): está bien que ya esté. */
                 continue;
+            }
+            if (in_array($ip, $existentes[$label], true)) {
+                throw new \RuntimeException(
+                    'El A record "' . $label . '" ya existe en la zona de ' . $this->dominio() . ' apuntando al VPS, pero no lo '
+                    . 'escribió ' . ($instancia !== null ? 'la instancia ' . $instancia->nombre : 'ninguna instancia conocida')
+                    . ': es de otra prueba o de un cliente. No se reusa un nombre ajeno; elegí otro slug o miralo en hPanel → DNS.'
+                );
             }
 
             throw new \RuntimeException(
@@ -79,6 +93,15 @@ class PruebaDnsService
         $this->assert_lista_blanca($registros, $permitidos);
         $this->assert_cardinalidad(count($registros));
 
+        $nombres = array_map(function ($registro) {
+            return (string) $registro['name'];
+        }, $registros);
+
+        /* ANTES del PUT: si el PUT escribe y después falla la verificación, el reintento los encuentra anotados. */
+        if ($instancia !== null) {
+            $instancia->registrar_dns_labels($nombres);
+        }
+
         $respaldo = $this->respaldar_zona($zona_antes, 'alta-' . $base);
 
         $this->hostinger()->put_dns_zone($registros);
@@ -95,10 +118,6 @@ class PruebaDnsService
             throw new \RuntimeException($mensaje);
         }
 
-        $nombres = array_map(function ($registro) {
-            return (string) $registro['name'];
-        }, $registros);
-
         Log::info('PruebaDnsService: A records escritos.', ['base' => $base, 'labels' => $nombres, 'respaldo' => $respaldo]);
 
         return $nombres;
@@ -107,16 +126,22 @@ class PruebaDnsService
     /**
      * Borra los A records de una base (slug o nombre del pool) que existan y apunten al VPS.
      *
-     * Un label que apunta a OTRA IP no se borra: no es nuestro.
+     * Un label que apunta a OTRA IP no se borra: no es nuestro. Y con una instancia que tiene anotado qué labels
+     * escribió (`dns_labels`), se borran SOLO esos; una instancia anterior a esa anotación (sin labels) borra lo
+     * que apunte al VPS, como antes.
      *
      * @return array<int, string> Labels borrados.
      */
-    public function borrar_registros(string $base): array
+    public function borrar_registros(string $base, ?TrialInstance $instancia = null): array
     {
         $this->assert_write_enabled();
 
         $permitidos = $this->labels_permitidos($base);
         $ip         = $this->ip_del_vps();
+        $propios    = $instancia !== null ? $instancia->dns_labels_escritos() : [];
+        if ($propios !== []) {
+            $permitidos = array_values(array_intersect($permitidos, $propios));
+        }
 
         $zona_antes = new DnsZoneRecords($this->hostinger()->get_dns_zone());
         $antes      = $zona_antes->pares();
@@ -167,6 +192,10 @@ class PruebaDnsService
         $nombres = array_map(function ($filtro) {
             return (string) $filtro['name'];
         }, $filtros);
+
+        if ($instancia !== null) {
+            $instancia->olvidar_dns_labels($nombres);
+        }
 
         Log::info('PruebaDnsService: A records borrados.', ['base' => $base, 'labels' => $nombres, 'respaldo' => $respaldo]);
 

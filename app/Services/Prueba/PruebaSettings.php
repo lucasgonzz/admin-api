@@ -28,7 +28,8 @@ class PruebaSettings
     /** WhatsApp de soporte que ve el negocio en la pantalla de vencimiento (viaja en C1 y en C6). */
     const KEY_WHATSAPP_SOPORTE = 'prueba_whatsapp_soporte';
 
-    const DEFAULT_POOL_MINIMO         = 3;
+    /** 0 hasta que Lucas prenda el pool desde admin_settings: sin DNS ni plantilla, un mínimo > 0 solo fabrica fallidas. */
+    const DEFAULT_POOL_MINIMO         = 0;
     const DEFAULT_MAX_ACTIVAS         = 25;
     const DEFAULT_DIAS                = 7;
     const DEFAULT_DIAS_GRACIA_BORRADO = 30;

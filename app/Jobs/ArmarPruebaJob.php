@@ -107,7 +107,7 @@ class ArmarPruebaJob implements ShouldQueue
 
         switch ($etapa) {
             case 'dns':
-                app(PruebaDnsService::class)->crear_registros($slug);
+                app(PruebaDnsService::class)->crear_registros($slug, $instancia);
                 break;
 
             case 'env':
