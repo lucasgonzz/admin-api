@@ -274,6 +274,131 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         ];
     }
 
+    public function test_upgrade_acordado_requiere_la_propuesta_citada_y_conserva_la_mision(): void
+    {
+        [$ticket, $case, $data] = $this->preparar_propuesta_upgrade();
+        $base = $this->base . '/tickets/' . $ticket->id;
+        $reply = $this->postJson($base . '/upgrade-proposal', $data, $this->headers)->assertOk()
+            ->assertJsonPath('operation.status', 'sent')->json();
+        $offer_id = $reply['operation']['message_id'];
+        $this->assertStringContainsString('26/10/2026 a las 13:00', SupportMessage::findOrFail($offer_id)->body);
+        $this->postJson($base . '/upgrade-proposal', $data, $this->headers)->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->assertCount(2, $this->deliveries->bodies);
+        $this->getJson($this->base . '/pending?supports_upgrade_agreement=1', $this->headers)->assertJsonCount(0, 'tickets');
+
+        $wrong = $this->inbound($ticket, 'Sí, confirmo');
+        $wrong->update(['reply_to_message_id' => $case->last_reply_id, 'whatsapp_message_id' => 'wamid.entrada-equivocada']);
+        $claim = $this->claim($ticket);
+        $accept = ['lease_token' => $claim['lease_token'], 'expected_message_id' => $wrong->id, 'proposal_operation_id' => $data['operation_id']];
+        $this->postJson($base . '/upgrade-agreement', $accept, $this->headers)->assertStatus(422);
+
+        $right = $this->inbound($ticket, 'Dale!');
+        $right->update(['reply_to_message_id' => $offer_id, 'whatsapp_message_id' => 'wamid.entrada-acuerdo']);
+        $this->postJson($base . '/upgrade-agreement', $accept, $this->headers)->assertStatus(409);
+        $this->postJson($base . '/claim', [
+            'worker_id' => 'pc-lucas', 'expected_message_id' => $right->id, 'lease_token' => $claim['lease_token'],
+        ], $this->headers)->assertOk();
+        $accept['expected_message_id'] = $right->id;
+        $result = $this->postJson($base . '/upgrade-agreement', $accept, $this->headers)->assertOk()
+            ->assertJsonPath('upgrade_agreement.status', 'accepted')
+            ->assertJsonPath('upgrade_agreement.confirmation_message_id', $right->id)->json();
+        $this->postJson($base . '/upgrade-agreement', $accept, $this->headers)->assertOk()
+            ->assertJsonPath('upgrade_agreement.accepted_at', $result['upgrade_agreement']['accepted_at']);
+        $this->getJson($base, $this->headers)->assertOk()->assertJsonPath('ticket.upgrade_agreement.proposal_message_id', $offer_id);
+        $this->assertSame($case->mission, $case->fresh()->mission);
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->assertCount(2, $this->deliveries->bodies);
+    }
+
+    public function test_upgrade_acordado_sin_cita_exige_fecha_y_revalida_horario_y_mision(): void
+    {
+        [$ticket, $case, $data] = $this->preparar_propuesta_upgrade();
+        $base = $this->base . '/tickets/' . $ticket->id;
+        $this->postJson($base . '/upgrade-proposal', array_replace($data, ['ends_at' => '2026-10-26T16:01:00-03:00']), $this->headers)->assertStatus(409);
+        $this->postJson($base . '/upgrade-proposal', $data, $this->headers)->assertOk()->assertJsonPath('operation.status', 'sent');
+        $message = $this->inbound($ticket, 'Sí, confirmo');
+        $message->update(['whatsapp_message_id' => 'wamid.acuerdo-canonico']);
+        $claim = $this->claim($ticket);
+        $accept = ['lease_token' => $claim['lease_token'], 'expected_message_id' => $message->id, 'proposal_operation_id' => $data['operation_id']];
+        $this->postJson($base . '/upgrade-agreement', $accept, $this->headers)->assertStatus(422);
+
+        $message->update(['body' => 'Confirmo la actualización del 26/10/2026 a las 13:00']);
+        $this->cargar_turnos_de_upgrade($ticket, 'lunes', [['08:00', '21:00']]);
+        $this->postJson($base . '/upgrade-agreement', $accept, $this->headers)->assertStatus(409);
+        ClientScheduleDay::where('client_id', $ticket->client_id)->where('day_key', 'lunes')->delete();
+        $mission = $case->mission;
+        $case->fresh()->update(['mission' => 'Otra corrección pendiente.']);
+        $this->postJson($base . '/upgrade-agreement', $accept, $this->headers)->assertStatus(409);
+        $case->fresh()->update(['mission' => $mission]);
+        $this->postJson($base . '/upgrade-agreement', $accept, $this->headers)->assertOk()
+            ->assertJsonPath('upgrade_agreement.status', 'accepted');
+    }
+
+    public function test_upgrade_acordado_preserva_la_aprobacion_y_el_texto_exacto(): void
+    {
+        [$ticket, $case, $data] = $this->preparar_propuesta_upgrade();
+        $ticket->update(['requiere_verificacion_mensajes' => true]);
+        $base = $this->base . '/tickets/' . $ticket->id;
+        $draft = $this->postJson($base . '/upgrade-proposal', $data, $this->headers)->assertOk()
+            ->assertJsonPath('operation.status', 'awaiting_approval')->json();
+        $this->assertCount(1, $this->deliveries->bodies);
+        $admin = Admin::create(['name' => 'Lucas', 'email' => uniqid('propuesta') . '@test.local', 'password' => bcrypt('prueba')]);
+        $path = '/api/admin/support-message/' . $draft['operation']['message_id'] . '/approve-ai-draft';
+        $this->actingAs($admin, 'sanctum')->postJson($path, ['body' => 'Podemos actualizar a las 14:00.'])->assertStatus(422);
+        $this->assertCount(1, $this->deliveries->bodies);
+        $this->postJson($path)->assertOk()->assertJsonPath('delivered', true);
+        $this->assertCount(2, $this->deliveries->bodies);
+    }
+
+    public function test_upgrade_acordado_reofrece_una_ventana_vencida_solo_sin_envio_incierto(): void
+    {
+        [$ticket, $case, $data] = $this->preparar_propuesta_upgrade();
+        $base = $this->base . '/tickets/' . $ticket->id;
+        $sent = $this->postJson($base . '/upgrade-proposal', $data, $this->headers)->assertOk()->json();
+        Carbon::setTestNow(Carbon::parse('2026-10-26T13:01:00-03:00'));
+        $operation = SupportCodexOperation::where('operation_id', $data['operation_id'])->firstOrFail();
+        $operation->update(['status' => 'unknown']);
+        $pending = $this->base . '/pending?supports_upgrade_agreement=1';
+        $this->getJson($pending, $this->headers)->assertJsonCount(0, 'tickets');
+        $operation->update(['status' => 'sent']);
+        $this->getJson($pending, $this->headers)->assertJsonPath('tickets.0.reason', 'fix_ready_for_upgrade');
+        $claim = $this->postJson($base . '/claim', [
+            'worker_id' => 'pc-lucas', 'expected_message_id' => $sent['operation']['message_id'], 'supports_upgrade_agreement' => true,
+        ], $this->headers)->assertOk()->json();
+        $next = array_replace($data, [
+            'operation_id' => $data['operation_id'] . '-nueva', 'lease_token' => $claim['lease_token'],
+            'expected_message_id' => $sent['operation']['message_id'],
+            'starts_at' => '2026-10-26T21:00:00-03:00', 'ends_at' => '2026-10-27T08:00:00-03:00',
+        ]);
+        $this->postJson($base . '/upgrade-proposal', $next, $this->headers)->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->getJson($pending, $this->headers)->assertJsonCount(0, 'tickets');
+    }
+
+    private function preparar_propuesta_upgrade(): array
+    {
+        Carbon::setTestNow(Carbon::parse('2026-10-26T12:00:00-03:00'));
+        $ticket = $this->ticket();
+        $this->cargar_turnos_de_upgrade($ticket, 'todos', [['08:00', '13:00'], ['16:00', '21:00']]);
+        $case = $this->prepare_mission($ticket);
+        $this->register_mission($ticket, $case)->assertOk();
+        $base = $this->base . '/tickets/' . $ticket->id;
+        $evidence = $this->mission_evidence($case);
+        $this->postJson($base . '/mission-fix-evidence', $evidence, $this->headers)->assertOk();
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
+        $this->getJson($this->base . '/pending?supports_upgrade_agreement=1', $this->headers)->assertOk()
+            ->assertJsonPath('tickets.0.reason', 'fix_ready_for_upgrade');
+        $claim = $this->postJson($base . '/claim', [
+            'worker_id' => 'pc-lucas', 'expected_message_id' => $case->last_reply_id, 'supports_upgrade_agreement' => true,
+        ], $this->headers)->assertOk()->json();
+        return [$ticket, $case, [
+            'lease_token' => $claim['lease_token'], 'expected_message_id' => $case->last_reply_id,
+            'operation_id' => 'propuesta-upgrade-' . $ticket->id, 'thread_id' => $claim['ticket']['thread_id'],
+            'supports_human_approval' => true, 'mission_thread_id' => $evidence['mission_thread_id'],
+            'mission_hash' => $evidence['mission_hash'], 'minimum_minutes' => 180,
+            'starts_at' => '2026-10-26T13:00:00-03:00', 'ends_at' => '2026-10-26T16:00:00-03:00',
+        ]];
+    }
+
     public function test_mision_pendiente_y_necesidad_humana_se_serializan_por_separado(): void
     {
         $ticket = $this->ticket();

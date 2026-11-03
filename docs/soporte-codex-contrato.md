@@ -145,6 +145,16 @@ El cuerpo agrega `estado: verificada`, `informe` relativo con forma `informes/AA
 
 Repetir la misma evidencia es idempotente. Si la evidencia cambia para esa misma misión, el admin devuelve 409. La respuesta y `ticket.mission_fix_evidence` en el contexto permiten conciliar el registro. El contexto solo devuelve la evidencia que todavía corresponde a la misión vigente. Este registro no cambia el caso, la reserva ni el ticket y no envía mensajes, propone horarios, publica releases ni programa actualizaciones.
 
+### Propuesta y acuerdo de actualización
+
+Con `ticket.capabilities.upgrade_agreement=true`, el monitor puede pedir `GET pending?supports_upgrade_agreement=1` y pasar `supports_upgrade_agreement: true` al tomar o renovar una reserva. Si hay evidencia vigente, el dueño está en el ticket y WhatsApp admite el envío, el admin puede devolver `reason: fix_ready_for_upgrade` cuando falta proponer una ventana o la última propuesta venció sin aceptación y con resultado terminal. Un entrante nuevo conserva prioridad y un envío inconcluso impide volver a proponer. Los monitores que omiten el opt-in solo ven los motivos anteriores.
+
+`POST tickets/{id}/upgrade-proposal` recibe `lease_token`, `expected_message_id`, `operation_id`, `thread_id` y `supports_human_approval` opcionales como en reply, más `mission_thread_id`, `mission_hash`, `starts_at`, `ends_at` y `minimum_minutes`. El servidor vuelve a comprobar la evidencia y la ventana, genera el texto con fecha y hora de Argentina y usa la operación de reply. El intento durable y la propuesta se guardan juntos. Si corresponde aprobar, se conserva el texto exacto en el borrador. La respuesta tiene la misma forma de reply.
+
+`POST tickets/{id}/upgrade-agreement` recibe `lease_token`, `expected_message_id` (el entrante con la aceptación) y `proposal_operation_id`. Revalida que sea la última propuesta enviada para el arreglo vigente, el último mensaje del dueño, la ventana futura y el texto efectivamente enviado. WhatsApp conserva la cita como `reply_to_message_id` dentro del ticket. La aceptación usa esa cita a la propuesta más una afirmación inequívoca, o la frase con fecha y hora exactas si no hay cita. Un sí a otro mensaje se rechaza.
+
+La respuesta y `ticket.upgrade_agreement` muestran `proposal_operation_id`, `proposal_message_id`, `status`, `starts_at`, `ends_at`, `timezone`, `confirmation_message_id` y `accepted_at`. La aceptación repetida del mismo entrante conserva el acuerdo existente. La misión sigue vinculada y el ticket abierto. Esta etapa no programa ni arranca una actualización.
+
 `POST tickets/{id}/diagnostic` con `{lease_token,query:string}` consulta el ERP correspondiente a ese ticket, sin pasar por un modelo de API. Devuelve `{data:<payload remoto>,queried_at}`. Es el lector existente `admin-sync/sistema-query` (stock, ventas, facturas, clientes), no SQL arbitrario. Si no hay acceso/configuración/datos válidos devuelve 502, nunca un resultado vacío presentado como éxito. Las claves permanecen en el servidor. No acepta client_id, owner ni URL del consumidor.
 
 ## Respuesta idempotente

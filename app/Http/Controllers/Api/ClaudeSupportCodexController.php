@@ -12,6 +12,7 @@ use App\Services\SistemaQueryService;
 use App\Services\SupportCodexDiagnosticService;
 use App\Services\SupportCodexService;
 use App\Services\SupportCodexSettings;
+use App\Services\SupportCodexUpgradeAgreementService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -43,9 +44,9 @@ class ClaudeSupportCodexController extends Controller
             'last_success_at' => $state['last_success_at'] ?? null]);
     }
 
-    public function pending(SupportCodexService $service)
+    public function pending(Request $request, SupportCodexService $service)
     {
-        return response()->json($service->pending());
+        return response()->json($service->pending($request->boolean('supports_upgrade_agreement')));
     }
 
     public function claim(Request $request, $id, SupportCodexService $service)
@@ -57,6 +58,7 @@ class ClaudeSupportCodexController extends Controller
             'thread_id' => 'sometimes|string|max:150',
             'dispatch_recovery' => 'sometimes|boolean',
             'execution_id' => 'required_if:dispatch_recovery,true|uuid',
+            'supports_upgrade_agreement' => 'sometimes|boolean',
         ]);
         return response()->json($service->claim((int) $id, $data));
     }
@@ -113,6 +115,35 @@ class ClaudeSupportCodexController extends Controller
         });
 
         return response()->json($resultado);
+    }
+
+    public function upgrade_proposal(Request $request, $id, SupportCodexService $service, SupportCodexUpgradeAgreementService $agreements)
+    {
+        $data = $request->validate([
+            'lease_token' => 'required|string|min:32|max:128',
+            'expected_message_id' => 'required|integer|min:1',
+            'operation_id' => 'required|string|max:120|regex:/^[a-zA-Z0-9_-]+$/',
+            'thread_id' => 'sometimes|string|max:150',
+            'supports_human_approval' => 'sometimes|boolean',
+            'mission_thread_id' => ['required', 'string', 'max:150', 'regex:/\A[a-zA-Z0-9_-]+\z/'],
+            'mission_hash' => ['required', 'string', 'regex:/\A[0-9a-f]{64}\z/'],
+            'starts_at' => 'required|date_format:Y-m-d\TH:i:sP',
+            'ends_at' => 'required|date_format:Y-m-d\TH:i:sP',
+            'minimum_minutes' => 'required|integer|between:1,1440',
+        ]);
+
+        return response()->json($service->reply((int) $id, $agreements->proposal_input($data)));
+    }
+
+    public function upgrade_agreement(Request $request, $id, SupportCodexService $service, SupportCodexUpgradeAgreementService $agreements)
+    {
+        $data = $request->validate([
+            'lease_token' => 'required|string|min:32|max:128',
+            'expected_message_id' => 'required|integer|min:1',
+            'proposal_operation_id' => 'required|string|max:120|regex:/^[a-zA-Z0-9_-]+$/',
+        ]);
+
+        return response()->json($agreements->accept((int) $id, $data, $service));
     }
 
     /**
