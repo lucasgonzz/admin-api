@@ -439,17 +439,41 @@ class EscenaService
             ];
         }
 
-        /* 5. Leads: los mensajes de la última hora, sin los eventos de estado del hilo. */
-        foreach (DB::table('lead_messages')
-            ->where('created_at', '>=', $desde_leads)
-            ->where(function ($q) {
-                $q->where('is_status_event', false)->orWhereNull('is_status_event');
-            })
-            ->select('id', 'lead_id', 'sender', 'status', 'sent_at', 'created_at')
-            ->orderByDesc('id')
-            ->limit(self::TOPE_FILAS_POR_FUENTE)
-            ->get() as $fila) {
-            $creado = $this->ts($fila->created_at);
+        /* 5. Leads: los mensajes de la última hora, sin los eventos de estado del hilo. 🔴 La ventana mira
+           `created_at >= desde` O `sent_at >= desde` (los del sistema): una sugerencia escrita hace horas y
+           aprobada ahora se ENVÍA ahora, y eso es el agente comercial trabajando. Son dos consultas, cada una
+           por su índice (lm_created_at_idx y lm_sent_at_idx), unidas por id: un OR en una sola le haría
+           recorrer la tabla entera. */
+        $sin_eventos_de_estado = function ($q) {
+            $q->where('is_status_event', false)->orWhereNull('is_status_event');
+        };
+        $columnas_de_leads = ['id', 'lead_id', 'sender', 'status', 'sent_at', 'created_at'];
+
+        $filas_de_leads = [];
+        foreach ([
+            DB::table('lead_messages')
+                ->where('created_at', '>=', $desde_leads)
+                ->where($sin_eventos_de_estado)
+                ->select($columnas_de_leads)
+                ->orderByDesc('id')
+                ->limit(self::TOPE_FILAS_POR_FUENTE)
+                ->get(),
+            DB::table('lead_messages')
+                ->where('sent_at', '>=', $desde_leads)
+                ->where('sender', 'sistema')
+                ->where($sin_eventos_de_estado)
+                ->select($columnas_de_leads)
+                ->orderByDesc('id')
+                ->limit(self::TOPE_FILAS_POR_FUENTE)
+                ->get(),
+        ] as $tanda) {
+            foreach ($tanda as $fila) {
+                $filas_de_leads[(int) $fila->id] = $fila;
+            }
+        }
+
+        foreach ($filas_de_leads as $fila) {
+            $creado  = $this->ts($fila->created_at);
             $enviado = $this->ts($fila->sent_at);
 
             $fuentes['leads'][] = [

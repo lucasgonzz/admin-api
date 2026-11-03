@@ -9,6 +9,8 @@ use App\Models\Client;
 use App\Models\ClientAssistantMessage;
 use App\Models\ClientScheduleDay;
 use App\Models\ClientScheduleRange;
+use App\Models\Lead;
+use App\Models\LeadMessage;
 use App\Models\LocalOficinaSlot;
 use App\Models\SupportCodexCase;
 use App\Models\SupportMessage;
@@ -812,6 +814,67 @@ class EscenaDelLocalTest extends TestCase
         $this->assertSame('/tareas', $tarea['ruta']);
 
         $this->assertNotNull($this->evento_de($escena, 'esc-' . $delegado->id), 'La delegación de hace 3 minutos es un evento.');
+    }
+
+    /**
+     * 🔴 Una sugerencia escrita hace 2 horas y aprobada (enviada) hace 1 minuto es el agente comercial trabajando
+     * AHORA: la ventana mira `created_at` o `sent_at`. Deja un evento `lead_respuesta` a la hora del envío. Una
+     * que se envió hace 2 horas no deja evento.
+     *
+     * @return void
+     */
+    public function test_el_comercial_cuenta_una_sugerencia_vieja_enviada_recien(): void
+    {
+        $admin = $this->crear_admin();
+        $lead  = Lead::create(['contact_name' => 'Lead aprobado tarde', 'phone' => '54911' . random_int(1000000, 9999999), 'status' => 'calificado']);
+
+        $reciente = $this->mensaje_a_lead($lead, 120, 1);
+        $viejo    = $this->mensaje_a_lead($lead, 120, 115);
+
+        $escena = $this->escena($admin);
+
+        $this->assertSame('trabajando', $this->agente_de($escena, 'comercial')['estado']);
+
+        $evento = $this->evento_de($escena, 'lm-' . $reciente);
+        $this->assertNotNull($evento, 'La sugerencia aprobada recién aparece como evento.');
+        $this->assertSame('lead_respuesta', $evento['tipo']);
+        $this->assertSame('comercial', $evento['agente']);
+        $this->assertNull($evento['client_id']);
+        $this->assertSame(
+            \Carbon\Carbon::parse((string) DB::table('lead_messages')->where('id', $reciente)->value('sent_at'), config('app.timezone'))->getTimestamp(),
+            strtotime($evento['ocurrido_at']),
+            'El evento va a la hora del envío, no a la de la sugerencia.'
+        );
+
+        $this->assertNull($this->evento_de($escena, 'lm-' . $viejo), 'Enviada hace casi dos horas: no es un evento de los últimos 10 minutos.');
+    }
+
+    /**
+     * Mensaje del agente comercial a un lead, enviado.
+     *
+     * @param Lead $lead
+     * @param int  $creado_hace  Minutos desde que se escribió (sugirió).
+     * @param int  $enviado_hace Minutos desde que se envió.
+     *
+     * @return int
+     */
+    private function mensaje_a_lead(Lead $lead, int $creado_hace, int $enviado_hace): int
+    {
+        $mensaje = LeadMessage::create([
+            'lead_id'         => $lead->id,
+            'sender'          => 'sistema',
+            'content'         => 'Te paso la propuesta',
+            'status'          => 'enviado',
+            'kind'            => 'text',
+            'is_status_event' => false,
+            'is_error'        => false,
+        ]);
+
+        $creado  = AppTime::now()->subMinutes($creado_hace)->format('Y-m-d H:i:s');
+        $enviado = AppTime::now()->subMinutes($enviado_hace)->format('Y-m-d H:i:s');
+        DB::table('lead_messages')->where('id', $mensaje->id)->update(['created_at' => $creado, 'updated_at' => $enviado, 'sent_at' => $enviado]);
+
+        return (int) $mensaje->id;
     }
 
     /**
