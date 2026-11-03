@@ -49,8 +49,38 @@ class ContextoDePruebaParaSoporteTest extends BaseDePruebaGratuita
         $this->assertSame('https://prueba-test.comerciocity.com', $contexto['prueba']['url']);
         $this->assertSame('prueba-01', $contexto['prueba']['instancia']['nombre']);
         $this->assertSame((int) $lead->id, $contexto['prueba']['lead_id']);
-        $this->assertSame(['prueba.ingreso'], array_keys($contexto['prueba']['hitos']));
-        $this->assertSame('2026-11-03T15:30:00-03:00', $contexto['prueba']['hitos']['prueba.ingreso']['ocurrido_at']);
+        // Los hitos van con la clave corta, sin `prueba.` (así los leen M4 y Martín); el evento entero queda adentro.
+        $this->assertSame(['ingreso'], array_keys($contexto['prueba']['hitos']));
+        $this->assertSame('prueba.ingreso', $contexto['prueba']['hitos']['ingreso']['evento']);
+        $this->assertSame('2026-11-03T15:30:00-03:00', $contexto['prueba']['hitos']['ingreso']['ocurrido_at']);
+        $this->assertSame('https://prueba-test.comerciocity.com/demo/ingreso?t=' . $lead->demo_ingreso_token, $contexto['prueba']['url_ingreso']);
+    }
+
+    public function test_otro_servicio_le_suma_claves_al_bloque_sin_tocar_la_base(): void
+    {
+        $this->crear_instancia_libre('prueba-01', 900100);
+        $uuid   = $this->postear_alta()->json('uuid');
+        $lead   = Lead::where('uuid', $uuid)->first();
+        $client = Client::find($lead->promoted_client_id);
+
+        PruebaContextoSoporteService::extender(function (array $base, Client $c, ?Lead $l, ?TrialInstance $i) {
+            // Lo que M4 suma de verdad se calcula de otro lado; acá solo importa que llegue la base entera y se fusione.
+            return ['dia_actual' => 1, 'proximo_hito' => 'importo', 'hitos_fuente' => array_keys($base['hitos']), 'instancia_vista' => $i ? $i->nombre : null];
+        });
+
+        try {
+            $bloque = app(PruebaContextoSoporteService::class)->bloque_para_el_cliente($client, ['semilla_presente' => true]);
+        } finally {
+            PruebaContextoSoporteService::sin_extensiones();
+        }
+
+        $this->assertSame('prueba', $bloque['estado']);
+        $this->assertSame(1, $bloque['dia_actual']);
+        $this->assertSame('importo', $bloque['proximo_hito']);
+        $this->assertSame([], $bloque['hitos_fuente']);
+        $this->assertSame('prueba-01', $bloque['instancia_vista']);
+        $this->assertTrue($bloque['semilla_presente']);
+        $this->assertSame([], $bloque['hitos']);
     }
 
     public function test_un_cliente_que_no_es_una_prueba_no_trae_bloque(): void

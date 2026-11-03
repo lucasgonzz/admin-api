@@ -184,6 +184,9 @@ class DemoEventosController extends Controller
                 $this->avanzar_pipeline_por_ingreso_real($lead);
             }
 
+            /* M4 (Martín e importación) engancha ACÁ su hook de seguimiento de la prueba (bienvenida, empujones,
+               aviso a Tomás): antes del `continue` de abajo, porque después de él un `prueba.*` no sigue. */
+
             /* Un `prueba.*` (contrato C2, misión prueba-alta-instancia) marca su propio hito de tipo `prueba` y,
                si es el vencimiento, duerme la instancia. No pasa por DemoHitosService: el roadmap de la demo es
                otra cosa (clips y tutoriales) y ninguno de sus hitos espera estos eventos. */
