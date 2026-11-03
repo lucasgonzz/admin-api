@@ -110,7 +110,11 @@ class ClientMensualidadSyncService
                 'soportado' => true,
                 // Conteos vivos mapeados a los campos locales de mensualidad (cantidad_empleados y toggles).
                 'cantidad_empleados'   => (int) ($conteos['empleados'] ?? 0),
-                'tiene_ecommerce'      => (int) ($conteos['ecommerce'] ?? 0) > 0,
+                /* El conteo vivo sale de la propiedad `online` del dueño en el empresa-api del cliente, que
+                 * puede estar vacía aunque la tienda exista (Ferre Total y Masquito). Si pasara solo eso,
+                 * «Traer del cliente» desmarcaba el check. La ficha del cliente en admin (su tienda con la
+                 * URL cargada) también cuenta: alcanza con una de las dos fuentes. */
+                'tiene_ecommerce'      => (int) ($conteos['ecommerce'] ?? 0) > 0 || $this->ficha_tiene_ecommerce($client),
                 'tiene_mercado_libre'  => (int) ($conteos['mercado_libre'] ?? 0) > 0,
                 'tiene_tienda_nube'    => (int) ($conteos['tienda_nube'] ?? 0) > 0,
                 // Precios ya guardados en el cliente, por si Lucas quiere ofrecerlos como referencia.
@@ -131,6 +135,23 @@ class ClientMensualidadSyncService
 
             return $this->no_soportado('Error al conectar con el empresa-api del cliente: ' . $exception->getMessage());
         }
+    }
+
+    /**
+     * Indica si la ficha del cliente en admin declara una tienda online: tiene ClientEcommerce con la
+     * URL del SPA o de la API cargada. Es el ancla del check «Tiene e-commerce» de la mensualidad
+     * cuando el empresa-api del cliente no lo informa.
+     *
+     * @param  Client $client Cliente de la mensualidad.
+     * @return bool
+     */
+    protected function ficha_tiene_ecommerce(Client $client): bool
+    {
+        /** Tienda online del cliente (como máximo una); null si nunca se cargó. */
+        $tienda = $client->client_ecommerce;
+
+        return $tienda !== null
+            && (trim((string) ($tienda->spa_url ?? '')) !== '' || trim((string) ($tienda->api_url ?? '')) !== '');
     }
 
     /**
