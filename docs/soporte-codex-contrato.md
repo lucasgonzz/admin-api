@@ -129,6 +129,14 @@ Solo lectura, sin reserva (no cambia nada del caso). El cliente sale del ticket,
 
 Los últimos 100 mensajes reales se devuelven en orden cronológico; no incluye borradores. Los adjuntos traen `{id,mime,size,download_path}`; `GET tickets/{id}/attachments/{attachment_id}` sirve el binario con la misma autenticación y valida su pertenencia al ticket.
 
+### Primera ventana de cierre para proponer una actualización
+
+Con `ticket.capabilities.upgrade_window=true`, `GET tickets/{id}/upgrade-window` recibe `expected_message_id`, `minimum_minutes` (entero de 1 a 1440) y `not_before` opcional (ISO 8601 con offset y segundos, por ejemplo `2026-11-03T13:00:00-03:00`). El header `X-Support-Lease-Token` lleva la reserva activa de ese ticket. La clave de ingesta, el ticket abierto en soporte automático y el permiso del contacto para consultar el sistema siguen siendo obligatorios. Un mensaje posterior invalida la lectura con 409 `stale_message`.
+
+Devuelve `window: {starts_at, ends_at, timezone}` y `reason: null`, o `window: null` y `reason: sin_configurar|sin_ventana_suficiente`. Busca desde el mayor instante entre el reloj del admin y `not_before`, redondeado hacia arriba al minuto, durante un máximo de siete días calendario. Reutiliza la precedencia de la fila del día sobre `todos` e incluye recesos y días explícitamente cerrados. El fin excluye la próxima apertura y se limita al primer día sin horario comprobable o al horizonte de búsqueda.
+
+La ventana sirve para conversar con el negocio. La aceptación, el preflight, la actividad actual y la programación se verifican por separado. La consulta solo lee y el cliente se toma del ticket.
+
 `POST tickets/{id}/diagnostic` con `{lease_token,query:string}` consulta el ERP correspondiente a ese ticket, sin pasar por un modelo de API. Devuelve `{data:<payload remoto>,queried_at}`. Es el lector existente `admin-sync/sistema-query` (stock, ventas, facturas, clientes), no SQL arbitrario. Si no hay acceso/configuración/datos válidos devuelve 502, nunca un resultado vacío presentado como éxito. Las claves permanecen en el servidor. No acepta client_id, owner ni URL del consumidor.
 
 ## Respuesta idempotente

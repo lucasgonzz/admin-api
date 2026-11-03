@@ -7,10 +7,14 @@ use App\Models\SupportCodexCase;
 use App\Models\SupportCodexOperation;
 use App\Models\SupportMessageAttachment;
 use App\Models\SupportTicket;
+use App\Services\ClientScheduleResolver;
+use App\Services\SistemaQueryService;
 use App\Services\SupportCodexDiagnosticService;
 use App\Services\SupportCodexService;
 use App\Services\SupportCodexSettings;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 
 /** Puente del monitor local. Todo acceso conserva el cliente que figura en el ticket. */
@@ -79,6 +83,36 @@ class ClaudeSupportCodexController extends Controller
     public function history($id, SupportCodexService $service)
     {
         return response()->json($service->history(SupportTicket::findOrFail($id)));
+    }
+
+    public function upgrade_window(Request $request, $id, SupportCodexService $service, ClientScheduleResolver $resolver)
+    {
+        $data = $request->validate([
+            'minimum_minutes' => 'required|integer|between:1,1440',
+            'not_before' => 'sometimes|date_format:Y-m-d\TH:i:sP',
+            'expected_message_id' => 'required|integer|min:1',
+        ]);
+        $resultado = DB::transaction(function () use ($request, $id, $service, $resolver, $data) {
+            $ticket = SupportTicket::with('client', 'client_employee')->lockForUpdate()->findOrFail($id);
+            $service->assert_current($ticket, [
+                'lease_token' => (string) $request->header('X-Support-Lease-Token'),
+                'expected_message_id' => $data['expected_message_id'],
+                'action' => 'responder',
+            ]);
+            abort_unless($ticket->client !== null && SistemaQueryService::client_employee_can_query($ticket->client, $ticket->client_employee), 403, 'Este contacto no tiene permiso para consultar datos del negocio.');
+
+            $desde = now();
+            if (isset($data['not_before'])) {
+                $pedido = Carbon::parse($data['not_before']);
+                if ($pedido->greaterThan($desde)) {
+                    $desde = $pedido;
+                }
+            }
+
+            return $resolver->primera_ventana_cerrada($ticket->client, $desde, (int) $data['minimum_minutes'], 'America/Argentina/Buenos_Aires');
+        });
+
+        return response()->json($resultado);
     }
 
     /**

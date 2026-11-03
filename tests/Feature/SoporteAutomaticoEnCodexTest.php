@@ -8,6 +8,8 @@ use App\Models\AdminSetting;
 use App\Models\Admin;
 use App\Models\Client;
 use App\Models\ClientEmployee;
+use App\Models\ClientScheduleDay;
+use App\Models\ClientScheduleRange;
 use App\Models\SupportCodexCase;
 use App\Models\SupportCodexOperation;
 use App\Models\SupportMessage;
@@ -118,6 +120,67 @@ class SoporteAutomaticoEnCodexTest extends TestCase
             'action' => 'responder', 'body' => 'Probá abrir Ventas.',
             'thread_id' => 'thread-ticket-' . $ticket->id,
         ], $extra), $this->headers);
+    }
+
+    public function test_ventana_de_upgrade_encuentra_el_receso_y_reserva_la_noche_si_no_alcanza(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-10-26T12:00:00-03:00'));
+        $ticket = $this->ticket();
+        $this->cargar_turnos_de_upgrade($ticket, 'todos', [['08:00', '13:00'], ['16:00', '21:00']]);
+        $claim = $this->claim($ticket);
+        $this->assertTrue($claim['ticket']['capabilities']['upgrade_window']);
+        $url = $this->base . '/tickets/' . $ticket->id . '/upgrade-window?expected_message_id=' . $claim['ticket']['expected_message_id'];
+        $headers = $this->headers + ['X-Support-Lease-Token' => $claim['lease_token']];
+
+        $this->getJson($url . '&minimum_minutes=180', $headers)->assertOk()
+            ->assertJsonPath('window.starts_at', '2026-10-26T13:00:00-03:00')
+            ->assertJsonPath('window.ends_at', '2026-10-26T16:00:00-03:00');
+        $this->getJson($url . '&minimum_minutes=181', $headers)->assertOk()
+            ->assertJsonPath('window.starts_at', '2026-10-26T21:00:00-03:00')
+            ->assertJsonPath('window.ends_at', '2026-10-27T08:00:00-03:00');
+        $this->getJson($url . '&minimum_minutes=150&not_before=' . urlencode('2026-10-26T13:15:01-03:00'), $headers)->assertOk()
+            ->assertJsonPath('window.starts_at', '2026-10-26T13:16:00-03:00');
+        $this->getJson($url . '&minimum_minutes=180', $this->headers)->assertStatus(423);
+        $this->getJson($url . '&minimum_minutes=180', ['Accept' => 'application/json'])->assertUnauthorized();
+        $this->inbound($ticket, 'Hoy abrimos durante el receso.');
+        $stale = $this->getJson($url . '&minimum_minutes=180', $headers)->assertStatus(409);
+        $this->assertStringStartsWith('stale_message:', $stale->json('message'));
+        $this->assertSame([], $this->deliveries->bodies);
+    }
+
+    public function test_ventana_de_upgrade_respeta_el_dia_propio_y_no_supone_que_un_dia_sin_horario_esta_cerrado(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-10-26T12:00:00-03:00'));
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        $url = $this->base . '/tickets/' . $ticket->id . '/upgrade-window?minimum_minutes=120&expected_message_id=' . $claim['ticket']['expected_message_id'];
+        $headers = $this->headers + ['X-Support-Lease-Token' => $claim['lease_token']];
+        $this->getJson($url, $headers)->assertOk()->assertExactJson(['window' => null, 'reason' => 'sin_configurar']);
+
+        $this->cargar_turnos_de_upgrade($ticket, 'lunes', [['08:00', '23:00']]);
+        $this->getJson($url, $headers)->assertOk()->assertExactJson(['window' => null, 'reason' => 'sin_configurar']);
+
+        $this->cargar_turnos_de_upgrade($ticket, 'todos', [['08:00', '13:00'], ['16:00', '21:00']]);
+        $this->cargar_turnos_de_upgrade($ticket, 'martes', []);
+        $this->getJson($url, $headers)->assertOk()
+            ->assertJsonPath('window.starts_at', '2026-10-26T23:00:00-03:00')
+            ->assertJsonPath('window.ends_at', '2026-10-28T08:00:00-03:00');
+    }
+
+    private function cargar_turnos_de_upgrade(SupportTicket $ticket, string $dia, array $turnos): void
+    {
+        $horario = new ClientScheduleDay();
+        $horario->client_id = $ticket->client_id;
+        $horario->day_key = $dia;
+        $horario->save();
+        foreach ($turnos as $orden => [$desde, $hasta]) {
+            $rango = new ClientScheduleRange();
+            $rango->client_schedule_day_id = $horario->id;
+            $rango->start_time = $desde;
+            $rango->end_time = $hasta;
+            $rango->sort_order = $orden;
+            $rango->save();
+        }
     }
 
     private function toggle_agent(SupportTicket $ticket): void
@@ -1291,6 +1354,8 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         $this->postJson($this->base . '/tickets/' . $ticket->id . '/diagnostic', [
             'lease_token' => $claim['lease_token'], 'query' => 'ventas y caja del negocio',
         ], $this->headers)->assertStatus(403);
+        $this->getJson($this->base . '/tickets/' . $ticket->id . '/upgrade-window?minimum_minutes=180&expected_message_id=' . $claim['ticket']['expected_message_id'],
+            $this->headers + ['X-Support-Lease-Token' => $claim['lease_token']])->assertStatus(403);
         Http::assertNothingSent();
     }
 
