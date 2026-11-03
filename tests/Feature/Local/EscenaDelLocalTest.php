@@ -186,6 +186,33 @@ class EscenaDelLocalTest extends TestCase
     }
 
     /**
+     * Fila del hilo del dueño con el asistente, con `created_at` hace `$minutos` minutos.
+     *
+     * @param Client $client
+     * @param string $estado
+     * @param int    $minutos
+     * @param string $direccion
+     *
+     * @return ClientAssistantMessage
+     */
+    private function mensaje_al_asistente(Client $client, string $estado, int $minutos, string $direccion = ClientAssistantMessage::DIRECCION_ENTRANTE): ClientAssistantMessage
+    {
+        $fila = ClientAssistantMessage::create([
+            'client_id' => $client->id,
+            'telefono'  => '+5493417770997',
+            'direccion' => $direccion,
+            'tipo'      => 'text',
+            'texto'     => 'mensaje de prueba',
+            'estado'    => $estado,
+        ]);
+
+        $cuando = AppTime::now()->subMinutes($minutos)->format('Y-m-d H:i:s');
+        DB::table('client_assistant_messages')->where('id', $fila->id)->update(['created_at' => $cuando, 'updated_at' => $cuando]);
+
+        return $fila;
+    }
+
+    /**
      * Pide la escena (sin cache) y devuelve el JSON.
      *
      * @param Admin $admin
@@ -509,6 +536,39 @@ class EscenaDelLocalTest extends TestCase
         $this->assertSame('soporte', $evento['agente']);
         $this->assertSame((int) $reciente->id, $evento['client_id']);
         $this->assertSame('ticket #' . $ticket->id, $evento['detalle']);
+    }
+
+    /**
+     * 🔴 `agrupado` es un estado FINAL (la foto viajó pegada a otra fila): no deja al dueño en el mostrador, no
+     * lo pone en `atendiendo` y no suma pendientes. `recibido` sí: lo pone en el Asistente y al robot a trabajar.
+     *
+     * @return void
+     */
+    public function test_agrupado_no_cuenta_y_recibido_pone_al_cliente_en_el_asistente(): void
+    {
+        $admin    = $this->crear_admin();
+        $agrupado = $this->crear_cliente('Solo una foto agrupada');
+        $recibido = $this->crear_cliente('Le acaba de escribir');
+
+        $antes = $this->agente_de($this->escena($admin), 'asistente')['pendientes'];
+
+        $this->mensaje_al_asistente($agrupado, ClientAssistantMessage::ESTADO_AGRUPADO, 1);
+        $this->mensaje_al_asistente($recibido, ClientAssistantMessage::ESTADO_RECIBIDO, 1);
+
+        $escena    = $this->escena($admin);
+        $asistente = $this->agente_de($escena, 'asistente');
+
+        $this->assertNull($this->negocio_de($escena, (int) $agrupado->id)['estacion'], 'Una fila agrupada no lo deja en el mostrador.');
+        $this->assertNotContains((int) $agrupado->id, $asistente['atendiendo']);
+        $this->assertSame($antes, $asistente['pendientes'], 'Ni la fila agrupada ni la recibida suman pendientes.');
+
+        $this->assertSame('asistente', $this->negocio_de($escena, (int) $recibido->id)['estacion']);
+        $this->assertSame('trabajando', $asistente['estado']);
+        $this->assertContains((int) $recibido->id, $asistente['atendiendo']);
+
+        // Un `esperando` sí suma un pendiente.
+        $this->mensaje_al_asistente($agrupado, ClientAssistantMessage::ESTADO_ESPERANDO, 1);
+        $this->assertSame($antes + 1, $this->agente_de($this->escena($admin), 'asistente')['pendientes']);
     }
 
     /**

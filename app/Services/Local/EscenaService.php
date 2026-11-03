@@ -113,10 +113,14 @@ class EscenaService
     /** Las seis estaciones del mostrador, en el orden en que se devuelven (contrato B). */
     const ESTACIONES = ['soporte', 'facturas', 'negocio', 'asistente', 'informes', 'comercial'];
 
-    /** Estados del asistente que dejan al cliente esperando en el mostrador. */
+    /**
+     * Estados del asistente que dejan al cliente esperando en el mostrador.
+     *
+     * 🔴 `agrupado` NO está: es un estado FINAL (la foto viajó pegada a otra fila, que es la que sigue su
+     * curso). Contarlo dejaría al dueño parado en el mostrador por una fila que ya terminó.
+     */
     const ASISTENTE_PENDIENTES = [
         ClientAssistantMessage::ESTADO_ESPERANDO,
-        ClientAssistantMessage::ESTADO_AGRUPADO,
         ClientAssistantMessage::ESTADO_RECIBIDO,
         ClientAssistantMessage::ESTADO_ENVIADO,
     ];
@@ -127,10 +131,9 @@ class EscenaService
         ClientAssistantMessage::ESTADO_ENVIADO,
     ];
 
-    /** Estados del asistente que esperan otra cosa del dueño (una foto, agruparse con el texto). */
+    /** Estado del asistente que espera otra cosa del dueño (una foto que acompañe al texto). Sin `agrupado`. */
     const ASISTENTE_EN_ESPERA = [
         ClientAssistantMessage::ESTADO_ESPERANDO,
-        ClientAssistantMessage::ESTADO_AGRUPADO,
     ];
 
     /** Columnas de `clients` que lee la escena. 🔴 Lista blanca: nunca el modelo entero. */
@@ -706,7 +709,7 @@ class EscenaService
      *
      * - `trabajando`: hay mensajes en `recibido` o `enviado` (pensando una respuesta), o la PC de Lucas está
      *   generando una imagen que pidió un dueño (`ia_imagen_pedidos` en `reservado`).
-     * - `pendientes`: mensajes en `esperando` / `agrupado` (esperan una foto o juntarse con el texto).
+     * - `pendientes`: mensajes en `esperando` (esperan una foto del dueño). `agrupado` no cuenta: es final.
      * - `atendiendo`: los clientes con algún mensaje esperando respuesta.
      *
      * @param array<string, mixed> $fuentes
