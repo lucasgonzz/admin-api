@@ -449,15 +449,9 @@ class EscenaDelLocalTest extends TestCase
             'lease_expires_at'  => AppTime::now()->addMinutes(10),
         ]);
 
-        // Además tiene un mensaje al asistente esperando: soporte gana.
-        ClientAssistantMessage::create([
-            'client_id' => $client->id,
-            'telefono'  => '+5493417770999',
-            'direccion' => ClientAssistantMessage::DIRECCION_ENTRANTE,
-            'tipo'      => 'text',
-            'texto'     => 'cuánto vendí hoy',
-            'estado'    => ClientAssistantMessage::ESTADO_ENVIADO,
-        ]);
+        // Además le escribió al asistente hace 20 minutos (sigue en «enviado»). La reserva empezó hace 5
+        // (vence en 10, dura 15): es lo más reciente, así que está en Soporte.
+        $this->mensaje_al_asistente($client, ClientAssistantMessage::ESTADO_ENVIADO, 20);
 
         $this->pulso_de_soporte();
         $escena = $this->escena($admin);
@@ -536,6 +530,123 @@ class EscenaDelLocalTest extends TestCase
         $this->assertSame('soporte', $evento['agente']);
         $this->assertSame((int) $reciente->id, $evento['client_id']);
         $this->assertSame('ticket #' . $ticket->id, $evento['detalle']);
+    }
+
+    /**
+     * Segundos de la `created_at` de una fila, leída de la base en la hora del admin.
+     *
+     * @param string $tabla
+     * @param int    $id
+     *
+     * @return int
+     */
+    private function ts_de(string $tabla, int $id): int
+    {
+        return \Carbon\Carbon::parse((string) DB::table($tabla)->where('id', $id)->value('created_at'), config('app.timezone'))->getTimestamp();
+    }
+
+    /**
+     * 🔴 La estación es la del agente al que el cliente le habló ÚLTIMO, no una prioridad fija: con soporte hace
+     * 10 minutos y el asistente hace 2, está en el Asistente; al revés, en Soporte. `estacion_desde_at` es la
+     * hora de esa última interacción.
+     *
+     * @return void
+     */
+    public function test_la_estacion_es_la_de_la_interaccion_mas_reciente(): void
+    {
+        $admin = $this->crear_admin();
+
+        $al_asistente = $this->crear_cliente('Último al asistente');
+        $this->mensaje_del_cliente($this->crear_ticket($al_asistente), 10);
+        $fila = $this->mensaje_al_asistente($al_asistente, ClientAssistantMessage::ESTADO_RECIBIDO, 2);
+
+        $a_soporte = $this->crear_cliente('Último a soporte');
+        $ticket    = $this->crear_ticket($a_soporte);
+        $mensaje   = $this->mensaje_del_cliente($ticket, 2);
+        $this->mensaje_al_asistente($a_soporte, ClientAssistantMessage::ESTADO_RECIBIDO, 10);
+
+        $escena = $this->escena($admin);
+
+        $uno = $this->negocio_de($escena, (int) $al_asistente->id);
+        $this->assertSame('asistente', $uno['estacion']);
+        $this->assertSame($this->ts_de('client_assistant_messages', (int) $fila->id), strtotime($uno['estacion_desde_at']));
+
+        $dos = $this->negocio_de($escena, (int) $a_soporte->id);
+        $this->assertSame('soporte', $dos['estacion']);
+        $this->assertSame('ticket #' . $ticket->id, $dos['estacion_detalle']);
+        $this->assertSame($this->ts_de('support_messages', (int) $mensaje->id), strtotime($dos['estacion_desde_at']));
+
+        // Un mensaje del cliente en un ticket CERRADO no lo lleva a Soporte.
+        $cerrado = $this->crear_cliente('Ticket cerrado');
+        $this->mensaje_del_cliente($this->crear_ticket($cerrado, 'closed'), 1);
+        $this->assertNull($this->negocio_de($this->escena($admin), (int) $cerrado->id)['estacion']);
+    }
+
+    /**
+     * Facturas y negocio también son estaciones (contrato C): un `escaneo` reciente lleva al cliente a Facturas
+     * y un `agente_negocio` reciente al robot del negocio, con su detalle, y entran en la misma regla de «la
+     * más reciente gana». Los robots trabajan con esos clientes en `atendiendo`.
+     *
+     * @return void
+     */
+    public function test_un_escaneo_reciente_lleva_al_cliente_a_facturas(): void
+    {
+        $admin = $this->crear_admin();
+
+        $escanea = $this->crear_cliente('Escanea ahora');
+        $this->mensaje_del_cliente($this->crear_ticket($escanea), 5);
+        $this->actividad($escanea, 'escaneo', 1);
+
+        $bot = $this->crear_cliente('Su bot atiende');
+        $this->actividad($bot, 'agente_negocio', 3);
+
+        $viejo = $this->crear_cliente('Escaneó hace rato');
+        $this->actividad($viejo, 'escaneo', 15);
+
+        $escena = $this->escena($admin);
+
+        $uno = $this->negocio_de($escena, (int) $escanea->id);
+        $this->assertSame('facturas', $uno['estacion'], 'El escaneo de hace 1 minuto es más nuevo que el ticket de hace 5.');
+        $this->assertSame('escaneando una factura', $uno['estacion_detalle']);
+
+        $dos = $this->negocio_de($escena, (int) $bot->id);
+        $this->assertSame('negocio', $dos['estacion']);
+        $this->assertSame('atendiendo a sus clientes', $dos['estacion_detalle']);
+
+        $this->assertNull($this->negocio_de($escena, (int) $viejo->id)['estacion'], 'Un escaneo de hace 15 minutos ya no cuenta.');
+
+        $facturas = $this->agente_de($escena, 'facturas');
+        $this->assertSame('trabajando', $facturas['estado']);
+        $this->assertContains((int) $escanea->id, $facturas['atendiendo']);
+        $this->assertNotContains((int) $viejo->id, $facturas['atendiendo']);
+
+        $negocio = $this->agente_de($escena, 'negocio');
+        $this->assertSame('trabajando', $negocio['estado']);
+        $this->assertContains((int) $bot->id, $negocio['atendiendo']);
+    }
+
+    /**
+     * Una fila de `local_actividad_clientes` de hace `$minutos` minutos.
+     *
+     * @param Client $client
+     * @param string $tipo
+     * @param int    $minutos
+     *
+     * @return int Id de la fila.
+     */
+    private function actividad(Client $client, string $tipo, int $minutos): int
+    {
+        $cuando = AppTime::now()->subMinutes($minutos)->format('Y-m-d H:i:s');
+
+        return (int) DB::table('local_actividad_clientes')->insertGetId([
+            'client_id'   => $client->id,
+            'tipo'        => $tipo,
+            'usuario'     => null,
+            'detalle'     => null,
+            'ocurrido_at' => $cuando,
+            'huella'      => sha1($tipo . $cuando . $client->id),
+            'created_at'  => $cuando,
+        ]);
     }
 
     /**

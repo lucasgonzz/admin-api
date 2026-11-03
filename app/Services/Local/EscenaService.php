@@ -12,6 +12,7 @@ use App\Models\LocalOficinaSlot;
 use App\Models\SupportTicket;
 use App\Services\ClientScheduleResolver;
 use App\Services\SupportCodexHealthService;
+use App\Services\SupportCodexService;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 
@@ -112,6 +113,12 @@ class EscenaService
 
     /** Las seis estaciones del mostrador, en el orden en que se devuelven (contrato B). */
     const ESTACIONES = ['soporte', 'facturas', 'negocio', 'asistente', 'informes', 'comercial'];
+
+    /**
+     * Las estaciones a las que puede caminar un negocio (`negocios[].estacion`). Gana la de la interacción más
+     * reciente; este orden solo desempata cuando dos tienen la misma hora.
+     */
+    const ESTACIONES_DE_NEGOCIO = ['soporte', 'asistente', 'facturas', 'negocio'];
 
     /**
      * Estados del asistente que dejan al cliente esperando en el mostrador.
@@ -356,7 +363,7 @@ class EscenaService
                 // Un borrador de la IA sin aprobar no le llegó a nadie: no es una respuesta.
                 $q->where('m.is_ai_suggestion_draft', false)->orWhereNull('m.is_ai_suggestion_draft');
             })
-            ->select('m.id', 'm.support_ticket_id', 'm.sender_type', 'm.created_at', 't.client_id')
+            ->select('m.id', 'm.support_ticket_id', 'm.sender_type', 'm.created_at', 't.client_id', 't.status')
             ->orderByDesc('m.id')
             ->limit(self::TOPE_FILAS_POR_FUENTE)
             ->get() as $fila) {
@@ -365,22 +372,26 @@ class EscenaService
                 'ticket_id'   => (int) $fila->support_ticket_id,
                 'client_id'   => $fila->client_id === null ? null : (int) $fila->client_id,
                 'sender_type' => (string) $fila->sender_type,
+                'abierto'     => (string) $fila->status === SupportTicket::STATUS_ABIERTO,
                 'ts'          => $this->ts($fila->created_at),
             ];
         }
 
-        /* Reservas vigentes de Martín (el caso tiene `lease_expires_at` en el futuro). */
+        /* Reservas vigentes de Martín (el caso tiene `lease_expires_at` en el futuro). La reserva dura
+           SupportCodexService::LEASE_MINUTES (y se renueva por ese mismo plazo), así que su inicio es el
+           vencimiento menos ese plazo. */
         foreach (DB::table('support_codex_cases as c')
             ->join('support_tickets as t', 't.id', '=', 'c.support_ticket_id')
             ->where('c.lease_expires_at', '>', $this->db_ahora())
-            ->select('t.id as ticket_id', 't.client_id', 't.status', 't.last_client_message_at', 'c.updated_at')
+            ->select('t.id as ticket_id', 't.client_id', 't.status', 'c.lease_expires_at')
             ->get() as $fila) {
+            $vence = $this->ts($fila->lease_expires_at);
+
             $fuentes['soporte_leases'][] = [
-                'ticket_id'      => (int) $fila->ticket_id,
-                'client_id'      => $fila->client_id === null ? null : (int) $fila->client_id,
-                'abierto'        => (string) $fila->status === SupportTicket::STATUS_ABIERTO,
-                'ultimo_cliente' => $this->ts($fila->last_client_message_at),
-                'caso_ts'        => $this->ts($fila->updated_at),
+                'ticket_id' => (int) $fila->ticket_id,
+                'client_id' => $fila->client_id === null ? null : (int) $fila->client_id,
+                'abierto'   => (string) $fila->status === SupportTicket::STATUS_ABIERTO,
+                'inicio'    => $vence === null ? null : $vence - SupportCodexService::LEASE_MINUTES * 60,
             ];
         }
 
@@ -508,98 +519,111 @@ class EscenaService
     }
 
     /**
-     * Una estación por cliente, con prioridad soporte > asistente.
+     * Una estación por cliente: 🔴 la del agente al que le habló ÚLTIMO (pedido de Lucas: «si después le pide
+     * algo al agente personal, camina hasta ese; si vuelve a escribir a soporte, vuelve»). No hay prioridad
+     * fija: cada estación propone la hora de la última interacción del cliente dentro de su ventana y gana la
+     * más nueva. `desde` es esa hora.
      *
-     * - `soporte`: un ticket abierto con reserva vigente de Martín, o un mensaje del cliente en los últimos
-     *   15 minutos.
-     * - `asistente`: un mensaje al asistente esperando respuesta (de la última hora), o una respuesta del
-     *   asistente en los últimos 5 minutos.
+     * - `soporte`: el último mensaje del cliente en un ticket ABIERTO (últimos 15 minutos), o el inicio de una
+     *   reserva vigente de Martín sobre un ticket abierto (vencimiento − LEASE_MINUTES).
+     * - `asistente`: la última fila del hilo con el asistente que sigue activa (esperando / recibido / enviado,
+     *   de la última hora) o que se respondió en los últimos 5 minutos.
+     * - `facturas`: un `escaneo` avisado por el sistema del cliente en los últimos 10 minutos.
+     * - `negocio`: un `agente_negocio` avisado por el sistema del cliente en los últimos 10 minutos.
+     *
+     * A igual hora decide el orden de {@see self::ESTACIONES_DE_NEGOCIO}, solo para que el resultado no
+     * dependa del orden de lectura.
      *
      * @param array<string, mixed> $fuentes
      *
-     * @return array<int, array{estacion: string, desde: int|null, detalle: string|null}>
+     * @return array<int, array{estacion: string, desde: int, detalle: string|null}>
      */
     private function estaciones_por_cliente(array $fuentes)
     {
-        $estaciones = [];
+        $candidatas = [];
 
-        // Mensajes del cliente en los últimos 15 minutos: el primero (desde cuándo) y el último ticket.
-        $mensajes = [];
         foreach ($fuentes['soporte_mensajes'] as $fila) {
-            if ($fila['sender_type'] !== 'user' || $fila['client_id'] === null || $fila['ts'] === null) {
+            if ($fila['sender_type'] !== 'user' || ! $fila['abierto'] || $fila['client_id'] === null || $fila['ts'] === null) {
                 continue;
             }
-            $id = $fila['client_id'];
-            if (! isset($mensajes[$id])) {
-                $mensajes[$id] = ['desde' => $fila['ts'], 'ultimo' => $fila['ts'], 'ultimo_id' => $fila['id'], 'ticket_id' => $fila['ticket_id']];
-                continue;
-            }
-            $mensajes[$id]['desde'] = min($mensajes[$id]['desde'], $fila['ts']);
-            // El ticket del mensaje más nuevo (a igual hora, el de id mayor): no depende del orden de lectura.
-            if ($fila['ts'] > $mensajes[$id]['ultimo']
-                || ($fila['ts'] === $mensajes[$id]['ultimo'] && $fila['id'] > $mensajes[$id]['ultimo_id'])) {
-                $mensajes[$id]['ultimo']    = $fila['ts'];
-                $mensajes[$id]['ultimo_id'] = $fila['id'];
-                $mensajes[$id]['ticket_id'] = $fila['ticket_id'];
-            }
+            $this->proponer_estacion($candidatas, $fila['client_id'], 'soporte', $fila['ts'], 'ticket #' . $fila['ticket_id']);
         }
 
-        // Reservas vigentes sobre tickets abiertos: la del caso más reciente de cada cliente.
-        $reservas = [];
         foreach ($fuentes['soporte_leases'] as $fila) {
-            if (! $fila['abierto'] || $fila['client_id'] === null) {
+            if (! $fila['abierto'] || $fila['client_id'] === null || $fila['inicio'] === null) {
                 continue;
             }
-            $id = $fila['client_id'];
-            if (! isset($reservas[$id]) || (int) $fila['caso_ts'] > (int) $reservas[$id]['caso_ts']) {
-                $reservas[$id] = $fila;
-            }
+            $inicio = min($fila['inicio'], $this->ahora_ts);
+            $this->proponer_estacion($candidatas, $fila['client_id'], 'soporte', $inicio, 'ticket #' . $fila['ticket_id']);
         }
 
-        foreach ($reservas as $id => $reserva) {
-            $desde = isset($mensajes[$id]) ? $mensajes[$id]['desde'] : null;
-            if ($desde === null) {
-                $desde = $reserva['ultimo_cliente'] !== null ? $reserva['ultimo_cliente'] : $reserva['caso_ts'];
-            }
-            $estaciones[$id] = ['estacion' => 'soporte', 'desde' => $desde, 'detalle' => 'ticket #' . $reserva['ticket_id']];
-        }
-
-        foreach ($mensajes as $id => $mensaje) {
-            if (isset($estaciones[$id])) {
-                continue;
-            }
-            $estaciones[$id] = ['estacion' => 'soporte', 'desde' => $mensaje['desde'], 'detalle' => 'ticket #' . $mensaje['ticket_id']];
-        }
-
-        // Asistente: esperando respuesta (la fila más vieja dice desde cuándo), o respondido hace poco.
         $respondido_desde = $this->ahora_ts - self::VENTANA_RESPONDIDO_MIN * 60;
-        $esperando  = [];
-        $respondido = [];
         foreach ($fuentes['asistente'] as $fila) {
             if ($fila['ts'] === null) {
                 continue;
             }
-            $id = $fila['client_id'];
             if (in_array($fila['estado'], self::ASISTENTE_PENDIENTES, true)) {
-                $esperando[$id] = isset($esperando[$id]) ? min($esperando[$id], $fila['ts']) : $fila['ts'];
+                $this->proponer_estacion($candidatas, $fila['client_id'], 'asistente', $fila['ts'], 'esperando al asistente');
             } elseif ($fila['estado'] === ClientAssistantMessage::ESTADO_RESPONDIDO && $fila['ts'] >= $respondido_desde) {
-                $respondido[$id] = isset($respondido[$id]) ? min($respondido[$id], $fila['ts']) : $fila['ts'];
+                $this->proponer_estacion($candidatas, $fila['client_id'], 'asistente', $fila['ts'], 'el asistente respondió');
             }
         }
 
-        foreach ($esperando as $id => $desde) {
-            if (! isset($estaciones[$id])) {
-                $estaciones[$id] = ['estacion' => 'asistente', 'desde' => $desde, 'detalle' => 'esperando al asistente'];
+        $actividad_desde = $this->ahora_ts - self::VENTANA_ESCANEO_MIN * 60;
+        foreach ($fuentes['actividad'] as $fila) {
+            if ($fila['ts'] === null || $fila['ts'] < $actividad_desde) {
+                continue;
+            }
+            if ($fila['tipo'] === LocalActividadCliente::TIPO_ESCANEO) {
+                $this->proponer_estacion($candidatas, $fila['client_id'], 'facturas', $fila['ts'], 'escaneando una factura');
+            } elseif ($fila['tipo'] === LocalActividadCliente::TIPO_AGENTE_NEGOCIO) {
+                $this->proponer_estacion($candidatas, $fila['client_id'], 'negocio', $fila['ts'], 'atendiendo a sus clientes');
             }
         }
 
-        foreach ($respondido as $id => $desde) {
-            if (! isset($estaciones[$id])) {
-                $estaciones[$id] = ['estacion' => 'asistente', 'desde' => $desde, 'detalle' => 'el asistente respondió'];
+        $estaciones = [];
+        foreach ($candidatas as $id => $por_estacion) {
+            $ganadora = null;
+            foreach (self::ESTACIONES_DE_NEGOCIO as $estacion) {
+                if (! isset($por_estacion[$estacion])) {
+                    continue;
+                }
+                // Estricto: a igual hora se queda la que vino antes en ESTACIONES_DE_NEGOCIO.
+                if ($ganadora === null || $por_estacion[$estacion]['ts'] > $ganadora['desde']) {
+                    $ganadora = [
+                        'estacion' => $estacion,
+                        'desde'    => $por_estacion[$estacion]['ts'],
+                        'detalle'  => $por_estacion[$estacion]['detalle'],
+                    ];
+                }
+            }
+            if ($ganadora !== null) {
+                $estaciones[$id] = $ganadora;
             }
         }
 
         return $estaciones;
+    }
+
+    /**
+     * Anota que el cliente interactuó con una estación a cierta hora, quedándose con la más nueva de esa
+     * estación (y su detalle).
+     *
+     * @param array<int, array<string, array{ts: int, detalle: string|null}>> $candidatas
+     * @param int                                                          $client_id
+     * @param string                                                       $estacion
+     * @param int                                                          $ts
+     * @param string|null                                                  $detalle
+     *
+     * @return void
+     */
+    private function proponer_estacion(array &$candidatas, $client_id, $estacion, $ts, $detalle)
+    {
+        $id = (int) $client_id;
+
+        if (! isset($candidatas[$id][$estacion]) || $ts > $candidatas[$id][$estacion]['ts']) {
+            $candidatas[$id][$estacion] = ['ts' => (int) $ts, 'detalle' => $detalle];
+        }
     }
 
     /**
