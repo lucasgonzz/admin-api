@@ -217,10 +217,9 @@ class SupportMessageController extends BaseController
      *    correría desde el origen del admin.
      *  - `?disposition=attachment` fuerza la descarga; `?playable=1` en un audio que Safari no
      *    reproduce (ogg/webm/amr) sirve la copia `.m4a` si hay ffmpeg, o el original si no.
-     *  - 🔴 El disco es SIEMPRE `public`: la columna `attachments.disk` la puede escribir el cliente
-     *    (metadata remota del ERP) y servir lo que ella diga dejaba leer `storage/app/`. Además el
-     *    archivo real tiene que quedar adentro de la raíz del disco `public` (si no, 404). Ver
-     *    {@see SupportAttachmentFileResolver}.
+     *  - Los adjuntos habituales se resuelven adentro de `public` con {@see SupportAttachmentFileResolver}.
+     *    Para un archivo saliente de Codex, el servidor verifica el mensaje de origen y la ruta privada
+     *    dedicada al ticket antes de resolverlo. La metadata remota del ERP puede definir `attachments.disk`.
      *
      * @param Request    $request Petición con la firma en la query (la valida el middleware `signed`).
      * @param int|string $id      Id de support_message_attachments.
@@ -237,11 +236,13 @@ class SupportMessageController extends BaseController
         // Adjunto pedido (404 si el id no existe).
         $attachment = SupportMessageAttachment::query()->findOrFail($id);
 
-        // Ruta relativa dentro del disco `public` (la columna `disk` se ignora a propósito: ver el docblock).
+        // Ruta relativa dentro de la raíz correspondiente al adjunto.
         $relative_path = trim((string) ($attachment->path ?? ''));
 
-        // Archivo real adentro de la raíz de `public`; ruta con `..`, absoluta, directorio o fuera de la raíz: 404.
-        $absolute_path = app(SupportAttachmentFileResolver::class)->resolve($relative_path);
+        // Una ruta fuera de la raíz verificada devuelve 404.
+        $absolute_path = \App\Services\SupportCodexOutboundAttachment::is_private($attachment)
+            ? \App\Services\SupportCodexOutboundAttachment::resolve_private($attachment)
+            : app(SupportAttachmentFileResolver::class)->resolve($relative_path);
         if ($absolute_path === null) {
             abort(404, 'Adjunto no encontrado.');
         }

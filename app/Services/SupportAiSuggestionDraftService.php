@@ -39,7 +39,25 @@ class SupportAiSuggestionDraftService
 
         foreach ($drafts as $draft) {
             $message_id = (int) $draft->id;
+            $private_attachments = $draft->attachments->filter(function ($attachment) {
+                return SupportCodexOutboundAttachment::is_private($attachment);
+            });
             $draft->delete();
+            foreach ($private_attachments as $attachment) {
+                $path = $attachment->path;
+                $delete = static function () use ($path, $message_id) {
+                    try {
+                        \Illuminate\Support\Facades\Storage::disk('local')->delete($path);
+                    } catch (\Throwable $exception) {
+                        Log::warning('Soporte Codex: no se pudo limpiar el adjunto del borrador.', ['message_id' => $message_id]);
+                    }
+                };
+                if (\Illuminate\Support\Facades\DB::transactionLevel() > 0) {
+                    \Illuminate\Support\Facades\DB::afterCommit($delete);
+                } else {
+                    $delete();
+                }
+            }
             event(new SupportMessageRemoved($message_id, $ticket_id));
         }
 
@@ -74,7 +92,7 @@ class SupportAiSuggestionDraftService
      *
      * @return SupportMessage
      */
-    public function create_draft(SupportTicket $ticket, string $body, int $auto_send_delay_seconds): SupportMessage
+    public function create_draft(SupportTicket $ticket, string $body, int $auto_send_delay_seconds, ?callable $prepare = null): SupportMessage
     {
         $text_body = trim($body);
         $this->delete_drafts_for_ticket((int) $ticket->id);
@@ -96,6 +114,9 @@ class SupportAiSuggestionDraftService
              * borrador y pasa a figurar a nombre del operador que lo mandó. */
             'ai_generated_at'         => now(),
         ]);
+        if ($prepare !== null) {
+            $prepare($message);
+        }
 
         $ticket->ai_pending_suggestion = $text_body;
         $ticket->ai_suggestion_send_at = $auto_send_at;
@@ -104,7 +125,11 @@ class SupportAiSuggestionDraftService
         $loaded = SupportMessage::query()->where('id', $message->id)->withAll()->first();
         if ($loaded !== null) {
             try {
-                event(new SupportMessageReceived($loaded->id));
+                if ($prepare !== null) {
+                    SupportMessageReceived::dispatch_after_commit($loaded->id);
+                } else {
+                    event(new SupportMessageReceived($loaded->id));
+                }
             } catch (\Throwable $exception) {
                 // La conversación se puede recargar; no se pierde un borrador ya persistido por Pusher.
                 Log::channel('daily')->warning('Soporte: borrador guardado sin aviso realtime.', ['ticket_id' => $ticket->id]);

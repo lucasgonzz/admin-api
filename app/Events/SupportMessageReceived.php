@@ -3,10 +3,13 @@
 namespace App\Events;
 
 use App\Models\SupportMessage;
+use App\Services\SupportCodexOutboundAttachment;
 use Illuminate\Broadcasting\Channel;
 use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class SupportMessageReceived implements ShouldBroadcastNow
 {
@@ -70,6 +73,23 @@ class SupportMessageReceived implements ShouldBroadcastNow
             ->withAll()
             ->first();
         if (!is_null($message)) {
+            $public_attachments = $message->attachments->reject(function ($attachment) {
+                return SupportCodexOutboundAttachment::is_private($attachment);
+            });
+            if ($public_attachments->count() !== $message->attachments->count()) {
+                // Los canales de soporte son públicos. El SPA trae el adjunto por la API autenticada.
+                $message->setRelation('attachments', $public_attachments->values());
+                $message->setAttribute('private_attachments_pending', true);
+                $message->setVisible(['id', 'support_ticket_id', 'sender_type', 'read_at', 'private_attachments_pending']);
+            }
+            $cited = $message->reply_to_message;
+            if ($cited !== null && $cited->attachments()->where('disk', 'local')->get()->contains(function ($attachment) {
+                return SupportCodexOutboundAttachment::is_private($attachment);
+            })) {
+                // La cita suele incluir los primeros 300 caracteres del epígrafe.
+                $cited->makeHidden('body');
+                $message->setAttribute('private_attachments_pending', true);
+            }
             $message->loadMissing('ticket.client', 'ticket.client_employee');
             if ($message->ticket) {
                 $message->ticket->loadCount([
@@ -80,6 +100,22 @@ class SupportMessageReceived implements ShouldBroadcastNow
             }
         }
         return $message;
+    }
+
+    public static function dispatch_after_commit(int $message_id): void
+    {
+        $emit = static function () use ($message_id) {
+            try {
+                self::dispatch($message_id);
+            } catch (\Throwable $exception) {
+                Log::warning('Soporte Codex: no se pudo avisar el cambio de mensaje.', ['message_id' => $message_id]);
+            }
+        };
+        if (DB::transactionLevel() > 0) {
+            DB::afterCommit($emit);
+        } else {
+            $emit();
+        }
     }
 
     /**
