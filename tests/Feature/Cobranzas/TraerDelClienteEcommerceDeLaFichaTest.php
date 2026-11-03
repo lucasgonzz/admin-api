@@ -14,7 +14,7 @@ use Illuminate\Support\Facades\Http;
 class TraerDelClienteEcommerceDeLaFichaTest extends BaseDeCobranzas
 {
     /** Cliente con API configurada y, si se pide, tienda cargada en la ficha. */
-    private function cliente(array $tienda = null)
+    private function cliente(?array $tienda = null)
     {
         $client = $this->crear_cliente([
             'api_url' => 'https://api-ecommerce-ficha.test',
