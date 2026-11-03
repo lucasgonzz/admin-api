@@ -113,8 +113,12 @@ class ClientMensualidadSyncService
                 /* El conteo vivo sale de la propiedad `online` del dueño en el empresa-api del cliente, que
                  * puede estar vacía aunque la tienda exista (Ferre Total y Masquito). Si pasara solo eso,
                  * «Traer del cliente» desmarcaba el check. La ficha del cliente en admin (su tienda con la
-                 * URL cargada) también cuenta: alcanza con una de las dos fuentes. */
-                'tiene_ecommerce'      => (int) ($conteos['ecommerce'] ?? 0) > 0 || $this->ficha_tiene_ecommerce($client),
+                 * URL cargada) también cuenta, y el check ya guardado en admin NUNCA lo apaga este botón
+                 * (Masquito no tiene la tienda en la ficha): lo apaga Lucas a mano y lo confirma con Guardar.
+                 * Alcanza con una de las tres fuentes. */
+                'tiene_ecommerce'      => (int) ($conteos['ecommerce'] ?? 0) > 0
+                    || $this->ficha_tiene_ecommerce($client)
+                    || (bool) $client->tiene_ecommerce,
                 'tiene_mercado_libre'  => (int) ($conteos['mercado_libre'] ?? 0) > 0,
                 'tiene_tienda_nube'    => (int) ($conteos['tienda_nube'] ?? 0) > 0,
                 // Precios ya guardados en el cliente, por si Lucas quiere ofrecerlos como referencia.

@@ -61,6 +61,19 @@ class TraerDelClienteEcommerceDeLaFichaTest extends BaseDeCobranzas
         $this->assertTrue($response->json('tiene_ecommerce'));
     }
 
+    public function test_el_check_ya_guardado_no_se_apaga_con_conteo_cero_y_sin_ficha(): void
+    {
+        $this->admin_logueado();
+        $client = $this->cliente();
+        $client->tiene_ecommerce = true;
+        $client->save();
+        $this->responder_con_conteo(0);
+
+        $response = $this->postJson('/api/admin/client/' . $client->id . '/mensualidad/traer-del-cliente');
+
+        $this->assertTrue($response->json('tiene_ecommerce'));
+    }
+
     public function test_sin_conteo_y_sin_ficha_el_check_queda_apagado(): void
     {
         $this->admin_logueado();
