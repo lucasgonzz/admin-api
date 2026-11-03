@@ -248,6 +248,11 @@ Route::withoutMiddleware('throttle:api')
     Route::post('product-facts/{gtin}/claim', [\App\Http\Controllers\SharedProductFactsController::class, 'claim']);
     Route::put('product-facts/{gtin}', [\App\Http\Controllers\SharedProductFactsController::class, 'update']);
     Route::post('serper-usage', [\App\Http\Controllers\SerperUsageController::class, 'store']);
+
+    /* «El local» (misión el-local, 3/11/2026, contrato C): el empresa-api de cada cliente avisa inicios de
+       sesión, uso, escaneos y respuestas del agente del negocio (lo manda la Fase 2). Mismo grupo que
+       serper-usage: la clave X-Admin-Api-Key es obligatoria siempre y es lo único que dice qué cliente es. */
+    Route::post('local/actividad', [\App\Http\Controllers\LocalActividadInboundController::class, 'store']);
 });
 
 Route::middleware('admin.inbound.key')
@@ -745,6 +750,10 @@ Route::middleware('claude.task.key')
         Route::get('ia/versions', 'Api\ClaudeIaAppVersionsController@index');
         Route::post('ia/versions', 'Api\ClaudeIaAppVersionsController@store');
         Route::patch('ia/versions/{id}', 'Api\ClaudeIaAppVersionsController@update');
+
+        /* «El local» (misión el-local, 3/11/2026, contrato A): el reporter local de la PC de Lucas manda cada
+           minuto cómo está cada slot del pool. Upsert por slot + pulso en admin_settings; no toca nada más. */
+        Route::post('local/oficina', 'Api\ClaudeLocalOficinaController@store_json');
 
         /* Plantillas de CLIENTE (soporte). Idempotentes por `template_name`: reenviar la misma
            plantilla actualiza la fila, nunca crea una segunda, y nunca borra las que no vinieron
@@ -1415,6 +1424,10 @@ Route::prefix('admin')->group(function () {
         // Panel de inicio: los tres contadores (tickets sin responder, tickets abiertos hoy y leads
         // sin responder), una consulta por tarjeta.
         Route::get('inicio/tarjetas', [\App\Http\Controllers\Api\InicioController::class, 'tarjetas']);
+
+        /* «El local» (misión el-local, 3/11/2026, contrato B): la escena de la vista /local —negocios,
+           agentes del mostrador, bandeja «Para Lucas», oficinas y eventos—, con cache de 20 s. */
+        Route::get('local/escena', [\App\Http\Controllers\Api\LocalEscenaController::class, 'escena_json']);
 
         /* Agenda personal tipo Structured (misión agenda-admin, 31/10/2026): la vista de abajo de
            las tarjetas del Inicio y la pantalla /agenda. Cada admin ve y opera SOLO sus tareas: una

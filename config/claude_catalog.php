@@ -105,6 +105,22 @@ return [
                 ['nombre' => 'enabled', 'obligatorio' => true, 'validacion' => 'required|boolean', 'que_es' => 'Activa o pausa el puente.'],
             ],
         ],
+        /* Estaba registrada desde el commit 1fcb60a («Vigila el monitor de soporte…») sin entrada acá, y eso
+           tenía en rojo CatalogoDeEndpointsDeClaudeTest en master. La describió la misión el-local (3/11/2026)
+           leyendo ClaudeSupportCodexController::health() y SupportCodexHealthService::heartbeat(). */
+        'POST api/claude/support-codex/health' => [
+            'para_que' => 'Pulso del monitor local de soporte (el de Martín en la PC de Lucas): deja en admin_settings (clave support_codex_monitor_health) la última vez que se lo vio, el estado y el código de error. Con eso el servidor manda el aviso por correo si el monitor calla 5 minutos y «El local» muestra a Soporte apagado. Responde {accepted: true, server_time, last_success_at}.',
+            'escribe' => true, 'peligrosidad' => 'baja',
+            'frenos' => [
+                'Solo escribe una fila de admin_settings, con lock de fila. No toca tickets, leads ni el sistema de ningún cliente.',
+                'status y error_code van contra listas cerradas (422 si no); un status=ok limpia el error y fija last_success_at.',
+            ],
+            'parametros' => [
+                ['nombre' => 'status', 'obligatorio' => false, 'validacion' => 'sometimes|in:ok,error', 'que_es' => 'Cómo está el monitor. Sin esto, ok.'],
+                ['nombre' => 'error_code', 'obligatorio' => false, 'validacion' => 'nullable|in:starting,poll_stale,poll_error,queue_stale,app_error,dispatch_unknown,monitor_error', 'que_es' => 'Qué falla, si status=error.'],
+                ['nombre' => 'monitor_version', 'obligatorio' => false, 'validacion' => 'nullable|string|max:40|regex:/^[A-Za-z0-9_.-]+$/', 'que_es' => 'Versión del monitor local.'],
+            ],
+        ],
         'GET api/claude/support-codex/pending' => [
             'para_que' => 'Lista hasta 50 tickets con mensajes nuevos o confirmación pendiente vencida, sin reservas ocupadas ni envíos ambiguos.',
             'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => [],
@@ -2301,6 +2317,24 @@ return [
             'escribe'      => false,
             'peligrosidad' => 'lectura',
             'frenos'       => [],
+        ],
+        /* «El local» (misión el-local, 3/11/2026, contrato A del plan). Lo llama el reporter local
+           (herramientas/el-local/reporter.py) cada minuto; ver ClaudeLocalOficinaController y OficinaIngestService. */
+        'POST api/claude/local/oficina' => [
+            'para_que'     => 'El reporter local de la PC de Lucas informa cómo está cada slot del pool para dibujar las oficinas de «El local» (/local del admin): upsert por `slot` en local_oficina_slots y pulso del reporter en admin_settings (clave local_reporter_pulso = {last_seen_at, version, host, slots_total, sesiones}). Sin pulso por más de 5 minutos la escena muestra oficina.reporter.ok = false. Responde 200 {ok: true, recibido_at, slots}.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Solo escribe filas del admin (local_oficina_slots y una clave de admin_settings). No toca el sistema de ningún cliente ni le manda nada a nadie.',
+                'Se valida TODO antes de escribir (422 con `errors` por campo y `errores`, como el resto del bloque): un estado, una fase, un rol, un runtime o un estado de agente fuera de los enums, un slot repetido o más de 60 slots / 20 agentes por slot no guardan nada.',
+                'Privacidad: solo forma del trabajo (slot, proyecto, estado, rama, slug de misión, fase, roles y horarios). No hay campo para textos de planes, nombres de chats ni datos de tickets; las claves desconocidas se ignoran.',
+                'Idempotente: reenviar el mismo reporte deja las mismas filas (upsert por slot).',
+            ],
+            'parametros'   => [
+                ['nombre' => 'slots', 'obligatorio' => true, 'validacion' => 'present|array|max:60; cada uno: slot (required|integer|min:1|max:999|distinct), estado (required|in:libre,trabajando,colgado,huerfano), y opcionales proyecto (string ≤ 20), rama (≤ 120), mision (≤ 120), fase (in:tomado,plan,construccion,revision,tests,merge,informe,novedad,cierre), claim_iniciado_at y ultima_actividad_at (date, ISO con zona), sucios (integer 0..65535), agentes (array ≤ 20: rol in:orquestador,planificador,constructor,revisor,verificador,redactor,otro; runtime in:claude,codex; estado in:busy,activo,idle; desde_at date; nombre ≤ 120)', 'que_es' => 'Los slots del pool (los 35 siempre: los libres con estado libre y el resto en null/[]).'],
+                ['nombre' => 'reporter', 'obligatorio' => false, 'validacion' => 'nullable|array: version (≤ 40), host (≤ 120), enviado_at (date), slots_total (integer 0..60)', 'que_es' => 'Quién reporta. slots_total va al pulso (si falta, la cantidad de slots recibidos).'],
+                ['nombre' => 'sesiones', 'obligatorio' => false, 'validacion' => 'nullable|array: claude_busy, claude_idle, codex_activos (integer ≥ 0)', 'que_es' => 'Conteo de sesiones de Claude y Codex en la PC, para el pulso.'],
+            ],
         ],
     ],
 
