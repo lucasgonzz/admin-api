@@ -153,6 +153,22 @@ class Kernel extends ConsoleKernel
             ->withoutOverlapping(60)
             ->runInBackground();
 
+        /* «El local» (misión el-local, 3/11/2026): el logo de cada negocio, leído de `admin-sync/branding` de su
+         * sistema, para dibujarlo como cabeza. 04:10, como dice el plan de la misión. 🔴 En segundo plano y sin
+         * heredar el candado del cron, por lo mismo que el directorio de las 04:15: es un barrido en serie contra
+         * el `empresa-api` de cada cliente (timeout de 6 s cada uno) y en primer plano clavaría `schedule:run`.
+         * `withoutOverlapping(60)` con el número a mano: el default son 24 horas. */
+        $schedule->exec(self::artisan_sin_el_lock_del_cron('local:sincronizar-logos'))
+            ->dailyAt('04:10')
+            ->withoutOverlapping(60)
+            ->runInBackground();
+
+        /* «El local»: borra la actividad de clientes de más de 7 días. Es un DELETE en tandas contra la base del
+         * admin, no le pega a ningún cliente. `withoutOverlapping(30)` por lo mismo que los otros diarios. */
+        $schedule->command('local:podar')
+            ->dailyAt('04:20')
+            ->withoutOverlapping(30);
+
         /* Los pedidos de imagen de la app del agente que quedaron colgados (la PC de Lucas apagada, o caída
          * dos veces con la reserva tomada) se dan por fallidos y se le avisa al sistema del cliente, para que
          * el dueño no vea su imagen «generándose» para siempre (misión cruzada app-ia-y-memoria, 29/10/2026).
