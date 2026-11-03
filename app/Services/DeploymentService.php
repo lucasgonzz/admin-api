@@ -862,11 +862,17 @@ class DeploymentService
                     $this->step_pause_for_crons();
                     return;
                 case 'run_seeders':
+                    if ($this->support_before_continuation !== null && ! $this->en_ventana_de_mantenimiento) {
+                        ($this->support_before_continuation)('run_seeders');
+                    }
                     $this->step_run_seeders();
                     // Marca el paso "Seeders ejecutados" automáticamente.
                     $this->mark_upgrade_step_timestamp('seeders_ejecutados_at');
                     break;
                 case 'run_commands':
+                    if ($this->support_before_continuation !== null && self::upgrade_has_pending_automatic_tasks($this->upgrade)) {
+                        ($this->support_before_continuation)('run_commands');
+                    }
                     $this->step_run_commands();
                     // Marca el paso "Comandos ejecutados" automáticamente.
                     $this->mark_upgrade_step_timestamp('comandos_ejecutados_at');
@@ -880,6 +886,9 @@ class DeploymentService
                 case 'update_default_version':
                     /* En el lugar, el upgrade no se cierra con el sistema en mantenimiento. */
                     $this->assert_sistema_arriba_antes_de_cerrar();
+                    if ($this->support_before_continuation !== null) {
+                        ($this->support_before_continuation)('update_default_version');
+                    }
                     $this->step_update_default_version();
                     // Solo marca "Sistema configurado" si el paso terminó en éxito real. Si degradó a
                     // manual_required, el timestamp queda sin marcar para que se vea pendiente en el
@@ -1303,6 +1312,48 @@ class DeploymentService
         return empty($marca);
     }
 
+    /** Los despliegues acordados usan artefactos fijados y revalidan antes de modificar producción. */
+    public function configure_support_schedule(array $artifacts, callable $before_live_write, ?callable $before_staging = null, ?callable $before_continuation = null): void
+    {
+        $this->support_artifacts = $artifacts;
+        $this->support_before_live_write = $before_live_write;
+        $this->support_before_staging = $before_staging;
+        $this->support_before_continuation = $before_continuation;
+    }
+
+    public static function upgrade_has_pending_automatic_tasks(ClientVersionUpgrade $upgrade): bool
+    {
+        $upgrade->loadMissing('update_commands.version_command', 'update_seeders');
+        if ($upgrade->update_seeders->contains(function ($seeder) {
+            return ! (bool) $seeder->skipped && $seeder->status !== 'exitoso';
+        })) {
+            return true;
+        }
+        return $upgrade->update_commands->contains(function ($command) {
+            return $command->version_command !== null && ! (bool) $command->version_command->run_manually
+                && ! (bool) $command->skipped && in_array($command->status, ['fallido', 'pendiente'], true);
+        });
+    }
+
+    private $support_artifacts = null;
+    private $support_before_live_write = null;
+    private $support_before_staging = null;
+    private $support_before_continuation = null;
+
+    private function assert_support_artifact(string $repo, ?array $asset, ?string $file = null): void
+    {
+        if ($this->support_artifacts === null) {
+            return;
+        }
+        $expected = $this->support_artifacts[$repo] ?? null;
+        $id = $asset === null ? null : basename((string) parse_url($asset['url'], PHP_URL_PATH));
+        if ($expected === null || $asset === null || (string) $expected['id'] !== $id
+            || $expected['name'] !== $asset['name'] || (int) $expected['size'] !== (int) $asset['size']
+            || ($file !== null && ! hash_equals($expected['sha256'], (string) hash_file('sha256', $file)))) {
+            throw new \RuntimeException('El artefacto no coincide con el release acordado: ' . $repo);
+        }
+    }
+
     /**
      * Etapa: deja listo el `dist/` compilado de la SPA para que step_upload_spa() lo despliegue.
      *
@@ -1338,6 +1389,7 @@ class DeploymentService
         $tag        = $this->version_tag();
         $asset_name = "empresa-spa-{$tag}-dist.zip";
         $asset      = $this->release_artifacts()->find_asset('empresa-spa', $tag, $asset_name);
+        $this->assert_support_artifact('empresa-spa', $asset);
 
         if ($asset !== null) {
             /* La URL del SPA se usa recién en step_upload_spa() (config.js), pero se valida acá,
@@ -1346,6 +1398,7 @@ class DeploymentService
 
             $this->ensure_local_deployments_dir();
             $bytes = $this->release_artifacts()->download_asset($asset, $local_zip);
+            $this->assert_support_artifact('empresa-spa', $asset, $local_zip);
             $this->assert_local_zip_file($local_zip, $bytes, 'compile_spa');
             $this->assert_zip_contains_root_file($local_zip, 'index.html', 'compile_spa');
             $this->log(
@@ -2389,6 +2442,9 @@ class DeploymentService
     private function step_upload_spa()
     {
         $this->runtime_preflight('runtime');
+        if ($this->support_before_staging !== null) {
+            ($this->support_before_staging)();
+        }
         /* En el lugar (misión `un-solo-frente`): la API nueva se baja, se verifica y se SUBE al hosting
            ANTES de tocar el SPA vivo. Si GitHub falla acá, no se tocó nada; y entre el SPA nuevo y el
            `down` de upload_api queda solo descomprimir, no una descarga. */
@@ -2447,6 +2503,9 @@ class DeploymentService
         $this->log('upload_spa', 'ZIP subido al hosting');
 
         $this->reconnect_hosting_ssh();
+        if ($this->support_before_live_write !== null) {
+            ($this->support_before_live_write)();
+        }
         if ($this->es_en_el_lugar()) {
             /* El primer comando que modifica el sistema vivo es el despliegue del SPA de abajo. */
             $this->marcar_sistema_tocado('upload_spa');
@@ -2580,10 +2639,12 @@ class DeploymentService
         $asset_name = "empresa-api-{$tag}.zip";
 
         $asset = $this->release_artifacts()->find_asset('empresa-api', $tag, $asset_name);
+        $this->assert_support_artifact('empresa-api', $asset);
 
         if ($asset !== null) {
             $this->ensure_local_deployments_dir();
             $bytes = $this->release_artifacts()->download_asset($asset, $local_zip);
+            $this->assert_support_artifact('empresa-api', $asset, $local_zip);
             $this->assert_local_zip_file($local_zip, $bytes, $step);
             $this->assert_zip_contains_root_file($local_zip, 'artisan', $step);
             $this->runtime_assert_zip($local_zip);

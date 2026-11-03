@@ -7,10 +7,15 @@ use App\Models\SupportCodexCase;
 use App\Models\SupportCodexOperation;
 use App\Models\SupportMessageAttachment;
 use App\Models\SupportTicket;
+use App\Services\ClientScheduleResolver;
+use App\Services\SistemaQueryService;
 use App\Services\SupportCodexDiagnosticService;
 use App\Services\SupportCodexService;
 use App\Services\SupportCodexSettings;
+use App\Services\SupportCodexUpgradeAgreementService;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 
 /** Puente del monitor local. Todo acceso conserva el cliente que figura en el ticket. */
@@ -39,9 +44,9 @@ class ClaudeSupportCodexController extends Controller
             'last_success_at' => $state['last_success_at'] ?? null]);
     }
 
-    public function pending(SupportCodexService $service)
+    public function pending(Request $request, SupportCodexService $service)
     {
-        return response()->json($service->pending());
+        return response()->json($service->pending($request->boolean('supports_upgrade_agreement')));
     }
 
     public function claim(Request $request, $id, SupportCodexService $service)
@@ -53,6 +58,7 @@ class ClaudeSupportCodexController extends Controller
             'thread_id' => 'sometimes|string|max:150',
             'dispatch_recovery' => 'sometimes|boolean',
             'execution_id' => 'required_if:dispatch_recovery,true|uuid',
+            'supports_upgrade_agreement' => 'sometimes|boolean',
         ]);
         return response()->json($service->claim((int) $id, $data));
     }
@@ -79,6 +85,69 @@ class ClaudeSupportCodexController extends Controller
     public function history($id, SupportCodexService $service)
     {
         return response()->json($service->history(SupportTicket::findOrFail($id)));
+    }
+
+    public function upgrade_window(Request $request, $id, SupportCodexService $service, ClientScheduleResolver $resolver)
+    {
+        $data = $request->validate([
+            'minimum_minutes' => 'required|integer|between:1,1440',
+            'not_before' => 'sometimes|date_format:Y-m-d\TH:i:sP',
+            'expected_message_id' => 'required|integer|min:1',
+        ]);
+        $resultado = DB::transaction(function () use ($request, $id, $service, $resolver, $data) {
+            $ticket = SupportTicket::with('client', 'client_employee')->lockForUpdate()->findOrFail($id);
+            $case = $service->assert_current($ticket, [
+                'lease_token' => (string) $request->header('X-Support-Lease-Token'),
+                'expected_message_id' => $data['expected_message_id'],
+                'action' => 'responder',
+            ]);
+            abort_unless($ticket->client !== null && SistemaQueryService::client_employee_can_query($ticket->client, $ticket->client_employee), 403, 'Este contacto no tiene permiso para consultar datos del negocio.');
+
+            $desde = now();
+            if (isset($data['not_before'])) {
+                $pedido = Carbon::parse($data['not_before']);
+                if ($pedido->greaterThan($desde)) {
+                    $desde = $pedido;
+                }
+            }
+            $reoffer = app(SupportCodexUpgradeAgreementService::class)->reoffer_after($ticket, $case);
+            if ($reoffer !== null && $reoffer->greaterThan($desde)) {
+                $desde = $reoffer;
+            }
+
+            return $resolver->primera_ventana_cerrada($ticket->client, $desde, (int) $data['minimum_minutes'], 'America/Argentina/Buenos_Aires');
+        });
+
+        return response()->json($resultado);
+    }
+
+    public function upgrade_proposal(Request $request, $id, SupportCodexService $service, SupportCodexUpgradeAgreementService $agreements)
+    {
+        $data = $request->validate([
+            'lease_token' => 'required|string|min:32|max:128',
+            'expected_message_id' => 'required|integer|min:1',
+            'operation_id' => 'required|string|max:120|regex:/^[a-zA-Z0-9_-]+$/',
+            'thread_id' => 'sometimes|string|max:150',
+            'supports_human_approval' => 'sometimes|boolean',
+            'mission_thread_id' => ['required', 'string', 'max:150', 'regex:/\A[a-zA-Z0-9_-]+\z/'],
+            'mission_hash' => ['required', 'string', 'regex:/\A[0-9a-f]{64}\z/'],
+            'starts_at' => 'required|date_format:Y-m-d\TH:i:sP',
+            'ends_at' => 'required|date_format:Y-m-d\TH:i:sP',
+            'minimum_minutes' => 'required|integer|between:1,1440',
+        ]);
+
+        return response()->json($service->reply((int) $id, $agreements->proposal_input($data)));
+    }
+
+    public function upgrade_agreement(Request $request, $id, SupportCodexService $service, SupportCodexUpgradeAgreementService $agreements)
+    {
+        $data = $request->validate([
+            'lease_token' => 'required|string|min:32|max:128',
+            'expected_message_id' => 'required|integer|min:1',
+            'proposal_operation_id' => 'required|string|max:120|regex:/^[a-zA-Z0-9_-]+$/',
+        ]);
+
+        return response()->json($agreements->accept((int) $id, $data, $service));
     }
 
     /**
@@ -120,6 +189,9 @@ class ClaudeSupportCodexController extends Controller
             'operation_id' => 'required|string|max:120|regex:/^[a-zA-Z0-9_-]+$/',
             'action' => 'required|in:responder,solicitar_confirmacion,cerrar,escalar,pedir_revision',
             'body' => 'required|string|max:3500',
+            'attachment' => 'sometimes|required|array',
+            'attachment.filename' => 'required_with:attachment|string|max:160',
+            'attachment.content_base64' => 'required_with:attachment|string|max:' . \App\Services\SupportCodexOutboundAttachment::MAX_ENCODED_LENGTH,
             'mission' => 'sometimes|nullable|string|max:30000',
             'review_reason' => 'required_if:action,pedir_revision|nullable|string|max:500',
             'thread_id' => 'sometimes|string|max:150',
@@ -182,6 +254,28 @@ class ClaudeSupportCodexController extends Controller
             'mission_hash' => 'required|string|size:64|regex:/^[a-f0-9]{64}$/',
         ]);
         return response()->json($service->mission_started((int) $id, $data));
+    }
+
+    public function mission_fix_evidence(Request $request, $id, SupportCodexService $service)
+    {
+        $repos = 'empresa-api,empresa-spa,admin-api,admin-spa,tienda-api,tienda-spa';
+        $sha = ['required', 'string', 'regex:/\A[0-9a-f]{40}\z/'];
+        $data = $request->validate([
+            'ticket_id' => 'prohibited',
+            'mission_thread_id' => ['required', 'string', 'max:150', 'regex:/\A[a-zA-Z0-9_-]+\z/'],
+            'mission_hash' => ['required', 'string', 'regex:/\A[0-9a-f]{64}\z/'],
+            'informe' => ['required', 'string', 'regex:~\Ainformes/[0-9]{8}-[a-z0-9][a-z0-9-]{0,100}\.md\z~'],
+            'pruebas' => 'required|array|min:1|max:10',
+            'pruebas.*' => 'required|string|min:5|max:500',
+            'commits' => 'required|array:' . $repos . '|min:1|max:6',
+            'commits.*' => $sha,
+            'bases_verificadas' => 'required|array:' . $repos . '|min:1|max:6',
+            'bases_verificadas.*' => $sha,
+            'estado' => 'required|string|in:verificada',
+        ]);
+        unset($data['ticket_id']);
+
+        return response()->json($service->register_mission_fix_evidence((int) $id, $data));
     }
 
     public function reconcile(Request $request, $operation_id, SupportCodexService $service)

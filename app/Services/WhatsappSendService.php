@@ -226,6 +226,10 @@ class WhatsappSendService
         $image_attachment = null;
 
         foreach ($message->attachments as $attachment) {
+            if ($kind === 'document' && SupportCodexOutboundAttachment::is_private($attachment)) {
+                $caption = trim((string) ($message->body ?? ''));
+                return $this->send_document_attachment($to, $attachment, $attachment->display_filename, null, $caption);
+            }
             $mime = strtolower((string) ($attachment->mime ?? ''));
             if ($kind === 'audio' || strpos($mime, 'audio/') === 0) {
                 $audio_attachment = $attachment;
@@ -244,6 +248,10 @@ class WhatsappSendService
             $caption = trim((string) ($message->body ?? ''));
 
             return $this->send_image_attachment($to, $image_attachment, $caption !== '' ? $caption : null);
+        }
+
+        if (in_array($kind, ['document', 'image'], true) && $message->ai_generated_at !== null) {
+            return null;
         }
 
         return $this->send_text($to, (string) ($message->body ?? ''));
@@ -752,7 +760,10 @@ class WhatsappSendService
             return null;
         }
 
-        return $this->send_image_by_media_id($to, $context['phone_number_id'], $context['api_key'], $media_id, $caption);
+        return $this->send_image_by_media_id(
+            $to, $context['phone_number_id'], $context['api_key'], $media_id, $caption, false, null, null,
+            $attachment instanceof \App\Models\SupportMessageAttachment && SupportCodexOutboundAttachment::is_private($attachment)
+        );
     }
 
     /**
@@ -1419,7 +1430,8 @@ class WhatsappSendService
         ?string $caption,
         bool $skip_failure_notification = false,
         ?string $notify_context = null,
-        ?int $segundos = null
+        ?int $segundos = null,
+        bool $one_attempt = false
     ): ?string {
         $contexto = $notify_context !== null ? $notify_context : "Envío de imagen a {$to}";
 
@@ -1437,14 +1449,14 @@ class WhatsappSendService
             // 1024 es el tope de Meta para el caption de una imagen, igual que en send_image_by_link():
             // más largo, rechaza el mensaje entero — y acá el epígrafe lo escribe el asistente de un
             // cliente, así que no hay nadie garantizando el largo del otro lado.
-            $image_payload['caption'] = mb_strimwidth($caption_text, 0, 1024, '…');
+            $image_payload['caption'] = $one_attempt ? $caption_text : mb_strimwidth($caption_text, 0, 1024, '…');
         }
 
         $endpoint = $this->messages_endpoint($phone_number_id);
 
         try {
             $timeout   = $segundos !== null ? $segundos : (int) config('services.client_api.timeout', 15);
-            $reintentos = $segundos !== null ? 1 : (int) config('services.client_api.retries', 2);
+            $reintentos = $segundos !== null || $one_attempt ? 1 : (int) config('services.client_api.retries', 2);
 
             $http = KapsoHttpClient::make($api_key, $timeout);
             $response = $http
@@ -1558,7 +1570,7 @@ class WhatsappSendService
      *
      * @return string|null
      */
-    public function send_document_attachment(string $to, $attachment, ?string $filename = null, ?string $mime = null): ?string
+    public function send_document_attachment(string $to, $attachment, ?string $filename = null, ?string $mime = null, ?string $caption = null): ?string
     {
         $context = $this->resolve_send_context();
         if ($context === null) {
@@ -1597,14 +1609,19 @@ class WhatsappSendService
         if ($upload_filename !== '') {
             $document_payload['filename'] = $upload_filename;
         }
+        if ($caption !== null && $caption !== '') {
+            $document_payload['caption'] = $caption;
+        }
 
         $endpoint = $this->messages_endpoint($context['phone_number_id']);
 
         try {
             $http = KapsoHttpClient::make($context['api_key'], (int) config('services.client_api.timeout', 15));
-            $response = $http
-                ->retry((int) config('services.client_api.retries', 2), 500)
-                ->post($endpoint, [
+            // La operación de Codex registra una entrega incierta y pide conciliación.
+            if ($caption === null) {
+                $http->retry((int) config('services.client_api.retries', 2), 500);
+            }
+            $response = $http->post($endpoint, [
                     'messaging_product' => 'whatsapp',
                     'to'                => $to_digits,
                     'type'              => 'document',

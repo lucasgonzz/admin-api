@@ -208,6 +208,54 @@ class ClientScheduleResolver
         return $detalle['instante'];
     }
 
+    /** Primer intervalo continuo y conocido de cierre, incluidos los recesos del día. */
+    public function primera_ventana_cerrada(Client $client, Carbon $desde, int $minutos, string $timezone): array
+    {
+        $cursor = $desde->copy()->setTimezone($timezone);
+        if ($cursor->second !== 0 || $cursor->microsecond !== 0) {
+            $cursor->addMinute()->startOfMinute();
+        }
+        $dias = $this->resolve_dias($client, $cursor, 7, $timezone);
+        $limite = $cursor->copy()->startOfDay()->addDays(count($dias));
+        $motivo = 'sin_ventana_suficiente';
+
+        foreach ($dias as $dia) {
+            $fecha = Carbon::parse($dia['fecha'], $timezone)->startOfDay();
+            if ($dia['estado'] === self::ESTADO_SIN_CONFIGURAR) {
+                // Solo podemos garantizar el cierre hasta el inicio del primer día desconocido.
+                $limite = $fecha;
+                $motivo = self::MOTIVO_SIN_CONFIGURAR;
+                break;
+            }
+
+            foreach ($dia['rangos'] as $rango) {
+                $apertura = $fecha->copy()->setTimeFromTimeString($rango['desde']);
+                $cierre = $fecha->copy()->setTimeFromTimeString($rango['hasta']);
+                if ($cursor->copy()->addMinutes($minutos)->lessThanOrEqualTo($apertura)) {
+                    return $this->ventana_cerrada($cursor, $apertura, $timezone);
+                }
+                if ($cursor->lessThan($cierre)) {
+                    $cursor = $cierre;
+                }
+            }
+        }
+
+        if ($cursor->copy()->addMinutes($minutos)->lessThanOrEqualTo($limite)) {
+            return $this->ventana_cerrada($cursor, $limite, $timezone);
+        }
+
+        return ['window' => null, 'reason' => $motivo];
+    }
+
+    private function ventana_cerrada(Carbon $inicio, Carbon $fin, string $timezone): array
+    {
+        return ['window' => [
+            'starts_at' => $inicio->toIso8601String(),
+            'ends_at' => $fin->toIso8601String(),
+            'timezone' => $timezone,
+        ], 'reason' => null];
+    }
+
     /**
      * Igual que proximo_cierre(), pero devolviendo también POR QUÉ no hay instante.
      *

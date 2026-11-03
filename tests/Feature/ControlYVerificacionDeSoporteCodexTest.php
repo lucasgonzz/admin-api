@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Events\SupportMessageReceived;
+use App\Events\SupportMessageRead;
 use App\Events\SupportMessageRemoved;
 use App\Events\SupportTicketUpdated;
 use App\Models\Admin;
@@ -18,10 +19,12 @@ use App\Services\SupportAttentionNotificationService;
 use App\Services\SupportCodexService;
 use App\Services\SupportCodexSettings;
 use App\Services\SupportWhatsappOpenerService;
+use App\Services\WhatsappSendService;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 /** Recorre endpoints reales y estado durable; ningún mensaje de prueba sale a WhatsApp. */
@@ -46,10 +49,12 @@ class ControlYVerificacionDeSoporteCodexTest extends TestCase
         $this->admin = Admin::create(['name' => 'Lucas', 'email' => uniqid('control') . '@test.local', 'password' => bcrypt('prueba')]);
         $this->transport = new class extends SupportWhatsappOpenerService {
             public $sent = [];
+            public $sent_attachments = [];
             public function __construct() {}
             public function deliver_follow_up(SupportTicket $ticket, SupportMessage $message, string $name): array
             {
                 $this->sent[] = $message->body;
+                $this->sent_attachments[] = $message->attachments()->first();
                 $message->whatsapp_message_id = 'wamid.control.' . count($this->sent);
                 $message->save();
                 return ['delivery' => 'sent'];
@@ -123,6 +128,95 @@ class ControlYVerificacionDeSoporteCodexTest extends TestCase
         $ticket = $this->ticket();
         $this->reply($ticket, $this->claim($ticket))->assertOk()->assertJsonPath('operation.status', 'sent');
         $this->assertCount(1, $this->transport->sent);
+    }
+
+    public function test_adjunta_documento_privado_y_el_replay_no_reenvia(): void
+    {
+        Storage::fake('local');
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        $document = "%PDF-1.4\nDocumento de prueba\n%%EOF\n";
+        $extra = ['attachment' => ['filename' => 'Factura.pdf', 'content_base64' => base64_encode($document)]];
+
+        $this->reply($ticket, $claim, $extra)->assertOk()
+            ->assertJsonPath('operation.status', 'sent')
+            ->assertJsonPath('ticket.capabilities.outbound_attachments', true);
+        $this->reply($ticket, $claim, $extra)->assertOk()->assertJsonPath('operation.status', 'sent');
+        $extra['attachment']['filename'] = 'Otra.pdf';
+        $conflict = $this->reply($ticket, $claim, $extra)->assertStatus(409);
+        $this->assertStringStartsWith('operation_conflict:', $conflict->json('message'));
+
+        $this->assertCount(1, $this->transport->sent_attachments);
+        $attachment = $this->transport->sent_attachments[0];
+        $this->assertSame('Factura.pdf', $attachment->display_filename);
+        $this->assertSame('document', $attachment->message->kind);
+        $this->assertSame('local', $attachment->disk);
+        $this->assertSame($document, Storage::disk('local')->get($attachment->path));
+        $this->get($attachment->download_url)->assertOk()->assertHeader('Content-Type', 'application/pdf');
+        $this->get($attachment->download_url)->assertOk()->assertHeader('Content-Type', 'application/pdf');
+        foreach ([SupportMessageReceived::class, SupportMessageRead::class] as $event_class) {
+            $event = new $event_class($attachment->support_message_id);
+            $public_message = $event->broadcastWith()['message']->toArray();
+            $this->assertTrue($public_message['private_attachments_pending']);
+            $this->assertArrayNotHasKey('attachments', $public_message);
+            $this->assertArrayNotHasKey('body', $public_message);
+        }
+        $reply = SupportMessage::create([
+            'support_ticket_id' => $ticket->id, 'sender_type' => 'admin', 'kind' => 'text',
+            'body' => 'Respuesta al comprobante.', 'reply_to_message_id' => $attachment->support_message_id,
+        ]);
+        $public_reply = (new SupportMessageReceived($reply->id))->broadcastWith()['message']->toArray();
+        $this->assertSame($attachment->support_message_id, $public_reply['reply_to_message']['id']);
+        $this->assertArrayNotHasKey('body', $public_reply['reply_to_message']);
+
+        $sender = \Mockery::mock(WhatsappSendService::class)->makePartial();
+        $sender->shouldReceive('send_text')->never();
+        $sender->shouldReceive('send_document_attachment')->once()->with(
+            $ticket->whatsapp_phone,
+            \Mockery::on(function ($sent_attachment) use ($attachment) { return $sent_attachment->is($attachment); }),
+            'Factura.pdf', null, 'Probá recargar Ventas.'
+        )->andReturn('wamid.document');
+        $this->assertSame('wamid.document', $sender->send_support_message($ticket->whatsapp_phone, $attachment->message));
+    }
+
+    public function test_rechaza_un_adjunto_con_mime_distinto_del_nombre(): void
+    {
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        $this->reply($ticket, $claim, [
+            'attachment' => ['filename' => 'Factura.pdf', 'content_base64' => base64_encode('Esto no es un PDF.')],
+        ])->assertStatus(422)->assertJsonPath('code', 'invalid_attachment');
+        $this->assertCount(0, $this->transport->sent);
+        $this->assertFalse(SupportCodexOperation::where('support_ticket_id', $ticket->id)->exists());
+    }
+
+    public function test_borrador_con_adjunto_muestra_archivo_y_frena_si_falta_al_aprobar(): void
+    {
+        Storage::fake('local');
+        $ticket = $this->ticket();
+        $this->verification($ticket);
+        $reply = $this->reply($ticket, $this->claim($ticket), [
+            'attachment' => ['filename' => 'Factura.pdf', 'content_base64' => base64_encode("%PDF-1.4\nDocumento\n%%EOF\n")],
+        ])->assertOk()->assertJsonPath('operation.status', 'awaiting_approval')->json();
+
+        $draft = SupportMessage::findOrFail($reply['operation']['message_id']);
+        $attachment = $draft->attachments()->firstOrFail();
+        $operation = SupportCodexOperation::where('message_id', $draft->id)->firstOrFail();
+        $this->assertTrue($operation->approval_payload['requires_attachment']);
+        $this->assertArrayNotHasKey('attachment', $operation->approval_payload);
+        $this->assertSame('Factura.pdf', $attachment->display_filename);
+        $bytes = Storage::disk('local')->get($attachment->path);
+        Storage::disk('local')->delete($attachment->path);
+        $approve_path = '/api/admin/support-message/' . $draft->id . '/approve-ai-draft';
+        $this->actingAs($this->admin, 'sanctum')->postJson($approve_path)->assertStatus(422);
+        $this->assertCount(0, $this->transport->sent);
+        $this->assertSame('awaiting_approval', $operation->fresh()->status);
+
+        Storage::disk('local')->put($attachment->path, $bytes);
+        $this->postJson($approve_path, ['body' => 'Adjunto el comprobante.'])->assertOk()
+            ->assertJsonPath('delivered', true);
+        $this->assertSame(['Adjunto el comprobante.'], $this->transport->sent);
+        $this->assertSame($attachment->id, $this->transport->sent_attachments[0]->id);
     }
 
     public function test_verificacion_guarda_borrador_avisa_y_aprueba_una_sola_vez(): void

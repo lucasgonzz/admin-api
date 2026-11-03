@@ -22,6 +22,10 @@ class Kernel extends ConsoleKernel
         $schedule->exec(self::artisan_sin_el_lock_del_cron('support:check-codex-health'))
             ->everyMinute()->withoutOverlapping(2)->runInBackground();
         $schedule->command('support:notify-attention')->everyMinute()->withoutOverlapping(5);
+        if (\App\Services\SupportScheduledUpgradeService::enabled()) {
+            $schedule->exec(self::artisan_sin_el_lock_del_cron('support:process-scheduled-upgrades'))
+                ->everyMinute()->withoutOverlapping(5)->runInBackground();
+        }
         // Una vez por día alcanza: un cliente se queda sin teléfono cargado una vez, no cada cinco minutos.
         $schedule->command('support:check-clients-without-phone')->dailyAt('09:00');
 

@@ -364,6 +364,16 @@ Route::middleware('claude.task.key')
            hitos-de-implementacion-por-soporte, 26/10/2026). */
         Route::get('support-codex/tickets/{id}/history', 'Api\ClaudeSupportCodexController@history')
             ->whereNumber('id');
+        Route::get('support-codex/tickets/{id}/upgrade-window', 'Api\ClaudeSupportCodexController@upgrade_window')
+            ->whereNumber('id');
+        Route::post('support-codex/tickets/{id}/upgrade-proposal', 'Api\ClaudeSupportCodexController@upgrade_proposal')
+            ->whereNumber('id');
+        Route::post('support-codex/tickets/{id}/upgrade-agreement', 'Api\ClaudeSupportCodexController@upgrade_agreement')
+            ->whereNumber('id');
+        Route::get('support-codex/release-work', 'Api\ClaudeSupportReleaseController@work');
+        Route::post('support-codex/tickets/{id}/release-claim', 'Api\ClaudeSupportReleaseController@claim')->whereNumber('id');
+        Route::post('support-codex/tickets/{id}/release-published', 'Api\ClaudeSupportReleaseController@publish')->whereNumber('id');
+        Route::post('support-codex/tickets/{id}/release-blocked', 'Api\ClaudeSupportReleaseController@block')->whereNumber('id');
         /* Martín deja asentada una nota en la implementación del cliente del ticket: solo agrega a data.actions[]
            de la etapa, con reserva vigente (misión hitos-de-implementacion-por-soporte, 26/10/2026). */
         Route::post('support-codex/tickets/{id}/implementation-note', 'Api\ClaudeSupportCodexController@implementation_note')
@@ -372,6 +382,14 @@ Route::middleware('claude.task.key')
         Route::post('support-codex/tickets/{id}/release', 'Api\ClaudeSupportCodexController@release');
         Route::post('support-codex/tickets/{id}/resume', 'Api\ClaudeSupportCodexController@resume');
         Route::post('support-codex/tickets/{id}/mission-started', 'Api\ClaudeSupportCodexController@mission_started');
+        Route::get('support-codex/tickets/{id}/scheduled-upgrade', 'Api\ClaudeSupportScheduledUpgradeController@show')
+            ->whereNumber('id');
+        Route::post('support-codex/tickets/{id}/schedule-upgrade', 'Api\ClaudeSupportScheduledUpgradeController@store')
+            ->whereNumber('id');
+        Route::post('support-codex/tickets/{id}/verify-scheduled-upgrade', 'Api\ClaudeSupportScheduledUpgradeController@verify')
+            ->whereNumber('id');
+        Route::post('support-codex/tickets/{id}/mission-fix-evidence', 'Api\ClaudeSupportCodexController@mission_fix_evidence')
+            ->whereNumber('id');
         Route::post('support-codex/tickets/{id}/diagnostic', 'Api\ClaudeSupportCodexController@diagnostic');
         Route::get('support-codex/tickets/{id}/attachments/{attachment_id}', 'Api\ClaudeSupportCodexController@attachment');
         Route::get('admins', 'Api\ClaudeTaskIngestController@admins_json');

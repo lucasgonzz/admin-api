@@ -126,6 +126,46 @@ class ReleaseArtifactServiceTest extends TestCase
         return $this->directorio . DIRECTORY_SEPARATOR . 'dist_prueba.zip';
     }
 
+    public function test_release_de_soporte_comprueba_el_arbol_y_el_digest_del_zip(): void
+    {
+        $develop = str_repeat('1', 40);
+        $trigger = str_repeat('2', 40);
+        $tag = str_repeat('3', 40);
+        $tree = str_repeat('4', 40);
+        $tag_tree = $tree;
+        $digest = str_repeat('a', 64);
+        $github_digest = $digest;
+        $name = 'empresa-spa-v4.0.23-dist.zip';
+        Http::fake(function (Request $request) use ($develop, $trigger, $tag, $tree, &$tag_tree, $name, &$github_digest) {
+            $root = '/repos/lucasgonzz/empresa-spa/';
+            $path = parse_url($request->url(), PHP_URL_PATH);
+            $this->assertStringStartsWith($root, $path);
+            $this->assertSame('Bearer ' . self::TOKEN, $request->header('Authorization')[0]);
+            $responses = [
+                'git/ref/tags/v4.0.23' => ['object' => ['type' => 'commit', 'sha' => $tag]],
+                'git/commits/' . $trigger => ['sha' => $trigger, 'tree' => ['sha' => $tree], 'parents' => [['sha' => $develop]],
+                    'message' => 'release: version 4.0.23 [release:4.0.23]'],
+                'git/commits/' . $tag => ['sha' => $tag, 'tree' => ['sha' => $tag_tree]],
+                'git/commits/' . $develop => ['sha' => $develop, 'tree' => ['sha' => $tree]],
+                'compare/' . $trigger . '...' . $tag => ['status' => 'ahead', 'merge_base_commit' => ['sha' => $trigger]],
+                'actions/workflows/release.yml/runs' => ['workflow_runs' => [['head_sha' => $trigger, 'conclusion' => 'success']]],
+                'releases/tags/v4.0.23' => ['assets' => [['id' => 9001, 'name' => $name, 'state' => 'uploaded', 'size' => 4096,
+                    'digest' => 'sha256:' . $github_digest]]],
+            ];
+            $relative = substr($path, strlen($root));
+            $this->assertArrayHasKey($relative, $responses);
+            return Http::response($responses[$relative]);
+        });
+        $artifact = ['id' => 9001, 'name' => $name, 'size' => 4096, 'sha256' => $digest];
+        $service = new ReleaseArtifactService();
+        $this->assertTrue($service->verify_support_release('empresa-spa', '4.0.23', $develop, $trigger, $tag, $artifact));
+        $github_digest = str_repeat('b', 64);
+        $this->assertFalse($service->verify_support_release('empresa-spa', '4.0.23', $develop, $trigger, $tag, $artifact));
+        $github_digest = $digest;
+        $tag_tree = str_repeat('5', 40);
+        $this->assertFalse($service->verify_support_release('empresa-spa', '4.0.23', $develop, $trigger, $tag, $artifact));
+    }
+
     /* ==========================================================================================
      | find_asset
      |========================================================================================= */

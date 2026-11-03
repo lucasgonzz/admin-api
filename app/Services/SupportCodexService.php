@@ -9,6 +9,8 @@ use App\Models\AgentImplementationEvent;
 use App\Models\Implementation;
 use App\Models\ImplementationStage;
 use App\Models\SupportCodexCase;
+use App\Models\SupportCodexMissionFixEvidence;
+use App\Models\SupportCodexUpgradeAgreement;
 use App\Models\SupportCodexOperation;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
@@ -37,7 +39,7 @@ class SupportCodexService
     /** `tipo` de `implementation-note` para la implementación de Agentes de IA (misión `implementacion-agentes-ia`). */
     const NOTE_TYPE_AGENTES = 'agentes';
 
-    public function pending(): array
+    public function pending(bool $supports_upgrade_agreement = false): array
     {
         $settings = SupportCodexSettings::to_array();
         $items = [];
@@ -54,7 +56,7 @@ class SupportCodexService
                 if ($case !== null && $case->lease_expires_at !== null && $case->lease_expires_at->isFuture()) {
                     continue;
                 }
-                $reason = $this->pending_reason($ticket, $case);
+                $reason = $this->pending_reason($ticket, $case, $supports_upgrade_agreement);
                 if ($reason === null) {
                     continue;
                 }
@@ -106,7 +108,7 @@ class SupportCodexService
                 $case->state = trim((string) $case->mission) !== '' ? 'mission_pending' : 'ready';
                 $case->review_reason = null;
             }
-            if ($this->pending_reason($ticket, $case) === null) {
+            if ($this->pending_reason($ticket, $case, ! empty($input['supports_upgrade_agreement'])) === null) {
                 $this->fail(409, 'not_pending', 'El ticket ya fue atendido o necesita revisión humana.');
             }
             $last = $this->last_real_message($id);
@@ -157,6 +159,7 @@ class SupportCodexService
         SupportMessage::apply_mensaje_real_conditions($messages, 'support_messages');
         $messages = $messages->with('attachments')->orderByDesc('id')->limit(100)->get()->reverse()->values();
         $last = $messages->last();
+        $fix_evidence = SupportCodexMissionFixEvidence::current_for($ticket, $case);
         return [
             'id' => (int) $ticket->id,
             'status' => $ticket->status,
@@ -177,11 +180,13 @@ class SupportCodexService
             'thread_id' => $case ? $case->thread_id : null,
             'mission' => $case ? $case->mission : null,
             'mission_lifecycle' => $case ? $case->mission_lifecycle() : null,
+            'mission_fix_evidence' => $fix_evidence === null ? null : $fix_evidence->payload,
+            'upgrade_agreement' => app(SupportCodexUpgradeAgreementService::class)->context($fix_evidence),
             'review_reason' => $case ? $case->review_reason : null,
-            'reason' => $this->pending_reason($ticket, $case),
+            'reason' => $this->pending_reason($ticket, $case, true),
             // El helper debe verificar esta capacidad ANTES de pedir el modo nuevo: un admin
             // anterior ignoraría el campo y ejecutaría el resume que consume la consulta.
-            'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true],
+            'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled()],
             'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
             'window' => app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone),
@@ -198,6 +203,7 @@ class SupportCodexService
                     'sender_type' => $message->sender_type,
                     'body' => $this->cuerpo_para_el_monitor($message),
                     'kind' => $message->kind,
+                    'reply_to_message_id' => $message->reply_to_message_id === null ? null : (int) $message->reply_to_message_id,
                     'created_at' => $message->created_at ? $message->created_at->toIso8601String() : null,
                     'attachments' => $message->attachments->map(function ($attachment) use ($ticket) {
                         return [
@@ -537,6 +543,14 @@ class SupportCodexService
 
     public function reply(int $id, array $input): array
     {
+        $attachment = null;
+        if (isset($input['attachment'])) {
+            if ($input['action'] === 'cerrar' || mb_strlen(trim($input['body'])) > SupportCodexOutboundAttachment::MAX_CAPTION_LENGTH) {
+                $this->fail(422, 'invalid_attachment_caption', 'Usá hasta 1024 caracteres y una acción distinta del cierre para enviar un adjunto.');
+            }
+            $attachment = app(SupportCodexOutboundAttachment::class)->prepare($input['attachment']);
+            unset($input['attachment']);
+        }
         $hash_payload = [
             $id, (int) $input['expected_message_id'], $input['action'], trim($input['body']),
             $input['mission'] ?? null, $input['confirmation_message_id'] ?? null,
@@ -545,10 +559,17 @@ class SupportCodexService
         if ($input['action'] === 'pedir_revision') {
             $hash_payload[] = $input['review_reason'] ?? null;
         }
+        if ($attachment !== null) {
+            $hash_payload[] = [$attachment['filename'], hash('sha256', $attachment['bytes'])];
+        }
+        $proposal = $input['upgrade_proposal'] ?? null;
+        if ($proposal !== null) {
+            $hash_payload[] = $proposal;
+        }
         $hash = hash('sha256', json_encode($hash_payload));
         // La operación se confirma en una transacción ANTES de enviar. Si el proceso cae
         // durante el HTTP, queda sending y requiere conciliación: jamás otro intento ciego.
-        $operation = DB::transaction(function () use ($id, $input, $hash) {
+        $operation = DB::transaction(function () use ($id, $input, $hash, $attachment, $proposal) {
             $ticket = SupportTicket::lockForUpdate()->findOrFail($id);
             $old = SupportCodexOperation::where('operation_id', $input['operation_id'])->first();
             if ($old !== null && $old->status !== 'cancelled') {
@@ -560,7 +581,11 @@ class SupportCodexService
             if ($old !== null && ((int) $old->support_ticket_id !== $id || (int) $old->expected_message_id !== (int) $input['expected_message_id'])) {
                 $this->fail(409, 'operation_conflict', 'La operación cancelada corresponde a otro ticket o mensaje.');
             }
+            if ($old !== null && $proposal === null && SupportCodexUpgradeAgreement::where('support_codex_operation_id', $old->id)->exists()) {
+                $this->fail(409, 'operation_conflict', 'La operación cancelada pertenece a una propuesta de actualización.');
+            }
             $case = $this->assert_current($ticket, $input);
+            $evidence = $proposal === null ? null : app(SupportCodexUpgradeAgreementService::class)->assert_valid_proposal($ticket, $case, $proposal);
             if ($ticket->requiere_verificacion_mensajes && empty($input['supports_human_approval'])) {
                 $this->fail(422, 'verification_required', 'Este ticket exige aprobación. Actualizá el monitor para preparar el borrador.');
             }
@@ -594,9 +619,12 @@ class SupportCodexService
                 'message_id' => null, 'detail' => null, 'approval_payload' => null,
             ]);
             $operation->save();
+            if ($evidence !== null) {
+                app(SupportCodexUpgradeAgreementService::class)->record_proposal($operation, $evidence, $proposal, $input['body']);
+            }
             $operation->wasRecentlyCreated = true;
             if ($ticket->requiere_verificacion_mensajes) {
-                $this->prepare_approval($ticket, $case, $operation, $input);
+                $this->prepare_approval($ticket, $case, $operation, $input, $attachment);
             }
             return $operation;
         });
@@ -604,7 +632,7 @@ class SupportCodexService
             return $this->operation_result($operation);
         }
 
-        return DB::transaction(function () use ($id, $input, $operation) {
+        return DB::transaction(function () use ($id, $input, $operation, $attachment, $proposal) {
             $ticket = SupportTicket::lockForUpdate()->findOrFail($id);
             $operation = SupportCodexOperation::where('id', $operation->id)->lockForUpdate()->first();
             if ($operation->status !== 'sending') {
@@ -612,10 +640,14 @@ class SupportCodexService
             }
             try {
                 $case = $this->assert_current($ticket, $input, false);
+                if ($proposal !== null) {
+                    app(SupportCodexUpgradeAgreementService::class)->assert_valid_proposal($ticket, $case, $proposal);
+                }
             } catch (HttpException $exception) {
                 // El envío aún no empezó: un entrante o una toma humana no son resultado incierto.
                 $operation->status = 'cancelled';
-                $operation->detail = 'La conversación o el agente cambió antes del envío; no se envió.';
+                $operation->detail = $proposal !== null && strpos($exception->getMessage(), 'upgrade_window_changed:') === 0
+                    ? $exception->getMessage() : 'La conversación o el agente cambió antes del envío; no se envió.';
                 $operation->save();
                 return $this->operation_result($operation);
             }
@@ -627,7 +659,7 @@ class SupportCodexService
                     $operation->save();
                     return $this->operation_result($operation);
                 }
-                $this->prepare_approval($ticket, $case, $operation, $input);
+                $this->prepare_approval($ticket, $case, $operation, $input, $attachment);
                 return $this->operation_result($operation);
             }
             // sending ya existe fuera de la transacción: una caída deja un intento ambiguo.
@@ -647,6 +679,17 @@ class SupportCodexService
                 'ai_generated_at' => now(),
                 'delivered_at' => now(),
             ]);
+            if ($attachment !== null) {
+                try {
+                    app(SupportCodexOutboundAttachment::class)->persist($message, $attachment);
+                } catch (\Throwable $exception) {
+                    $message->delete();
+                    $operation->status = 'cancelled';
+                    $operation->detail = 'No se pudo guardar el adjunto. No se envió ningún mensaje.';
+                    $operation->save();
+                    return $this->operation_result($operation);
+                }
+            }
             $operation->message_id = (int) $message->id;
             $result = null;
             try {
@@ -674,7 +717,11 @@ class SupportCodexService
             $case->save();
             $operation->save();
             try {
-                SupportMessageReceived::dispatch((int) $message->id);
+                if ($attachment !== null) {
+                    SupportMessageReceived::dispatch_after_commit((int) $message->id);
+                } else {
+                    SupportMessageReceived::dispatch((int) $message->id);
+                }
                 SupportTicketUpdated::dispatch((int) $ticket->id);
             } catch (\Throwable $exception) {
                 // El canal realtime es accesorio: no revierte un mensaje que WhatsApp ya aceptó.
@@ -689,12 +736,31 @@ class SupportCodexService
         $ticket->save();
     }
 
-    private function prepare_approval(SupportTicket $ticket, SupportCodexCase $case, SupportCodexOperation $operation, array $input): void
+    private function prepare_approval(SupportTicket $ticket, SupportCodexCase $case, SupportCodexOperation $operation, array $input, ?array $attachment): void
     {
         if ($input['action'] === 'cerrar' && mb_stripos($input['body'], 'de nada') === false) {
             $input['body'] = 'De nada! ' . trim($input['body']);
         }
-        $draft = app(SupportAiSuggestionDraftService::class)->create_draft($ticket, trim($input['body']), 0);
+        $draft_service = app(SupportAiSuggestionDraftService::class);
+        $prepare = null;
+        if ($attachment !== null) {
+            $prepare = function (SupportMessage $draft) use ($attachment) {
+                app(SupportCodexOutboundAttachment::class)->persist($draft, $attachment);
+            };
+            $input['requires_attachment'] = true;
+        }
+        try {
+            $draft = $draft_service->create_draft($ticket, trim($input['body']), 0, $prepare);
+        } catch (\RuntimeException $exception) {
+            if ($attachment === null) {
+                throw $exception;
+            }
+            $draft_service->clear_ticket_pending_state($ticket);
+            $operation->status = 'cancelled';
+            $operation->detail = 'No se pudo preparar el adjunto del borrador. No se envió ningún mensaje.';
+            $operation->save();
+            return;
+        }
         $operation->message_id = (int) $draft->id;
         $operation->status = 'awaiting_approval';
         // No se guarda la reserva: la aprobación es humana y revalida el mensaje actual.
@@ -784,6 +850,18 @@ class SupportCodexService
             if ($final === '') {
                 $this->fail(422, 'invalid_body', 'El mensaje no puede quedar vacío.');
             }
+            if (isset($input['upgrade_proposal'])) {
+                if ($final !== $input['body']) {
+                    $this->fail(422, 'proposal_text_changed', 'El texto de una propuesta de actualización debe conservar su horario exacto.');
+                }
+                app(SupportCodexUpgradeAgreementService::class)->assert_valid_proposal($ticket, $case, $input['upgrade_proposal']);
+            }
+            if (! empty($input['requires_attachment'])) {
+                if (mb_strlen($final) > SupportCodexOutboundAttachment::MAX_CAPTION_LENGTH) {
+                    $this->fail(422, 'invalid_attachment_caption', 'El texto del adjunto admite hasta 1024 caracteres.');
+                }
+                $this->assert_approval_attachment($message);
+            }
             if ($message->body !== $final) {
                 $message->ai_original_body = $message->body;
             }
@@ -822,6 +900,12 @@ class SupportCodexService
             $input = $operation->approval_payload;
             try {
                 $this->assert_approval_action($ticket, $case, $input);
+                if (isset($input['upgrade_proposal'])) {
+                    app(SupportCodexUpgradeAgreementService::class)->assert_valid_proposal($ticket, $case, $input['upgrade_proposal']);
+                }
+                if (! empty($input['requires_attachment'])) {
+                    $this->assert_approval_attachment($message);
+                }
             } catch (HttpException $exception) {
                 // Un rechazo conocido previo a la red no es una entrega incierta.
                 $operation->status = 'cancelled';
@@ -860,13 +944,26 @@ class SupportCodexService
             $ticket->ai_suggestion_send_at = null;
             $ticket->save();
             try {
-                SupportMessageReceived::dispatch((int) $message->id);
+                if (! empty($input['requires_attachment'])) {
+                    SupportMessageReceived::dispatch_after_commit((int) $message->id);
+                } else {
+                    SupportMessageReceived::dispatch((int) $message->id);
+                }
                 SupportTicketUpdated::dispatch((int) $ticket->id);
             } catch (\Throwable $exception) {
                 // El envío ya fue aceptado: realtime no puede revertir el resultado durable.
             }
             return $this->operation_result($operation);
         });
+    }
+
+    private function assert_approval_attachment(SupportMessage $message): void
+    {
+        $attachment = $message->attachments()->first();
+        if ($attachment === null || ! SupportCodexOutboundAttachment::is_private($attachment)
+            || SupportCodexOutboundAttachment::resolve_private($attachment) === null) {
+            $this->fail(422, 'missing_attachment', 'El adjunto del borrador no está disponible.');
+        }
     }
 
     private function apply_action(SupportTicket $ticket, SupportCodexCase $case, array $input): void
@@ -1074,9 +1171,9 @@ class SupportCodexService
     }
 
     /** Retomar es una acción expresa de Lucas; no vuelve a procesar mensajes viejos. */
-    public function resume(int $id, array $input): array
+    public function resume(int $id, array $input, string $origen = 'Retomado por Lucas'): array
     {
-        return DB::transaction(function () use ($id, $input) {
+        return DB::transaction(function () use ($id, $input, $origen) {
             $ticket = SupportTicket::where('id', $id)->lockForUpdate()->findOrFail($id);
             $this->assert_managed($ticket);
             $case = SupportCodexCase::firstOrCreate(['support_ticket_id' => $id]);
@@ -1113,7 +1210,7 @@ class SupportCodexService
             }
             $case->state = ! empty($input['request_confirmation']) ? 'ready_to_confirm' : 'ready';
             $case->handled_message_id = (int) $last->id;
-            $case->review_reason = mb_substr('Retomado por Lucas: ' . $input['reason'], 0, 500);
+            $case->review_reason = mb_substr($origen . ': ' . $input['reason'], 0, 500);
             $case->review_requested_message_id = null;
             $case->lease_hash = null;
             $case->lease_expires_at = null;
@@ -1169,6 +1266,48 @@ class SupportCodexService
             // El registro durable no se revierte si el realtime no está disponible.
         }
         return $result;
+    }
+
+    public function register_mission_fix_evidence(int $id, array $input): array
+    {
+        ksort($input['commits']);
+        ksort($input['bases_verificadas']);
+        if (array_keys($input['commits']) !== array_keys($input['bases_verificadas'])) {
+            $this->fail(422, 'invalid_evidence_repositories', 'Las bases verificadas deben corresponder a todos los repositorios de los commits.');
+        }
+        if (array_values($input['pruebas']) !== $input['pruebas']) {
+            $this->fail(422, 'invalid_evidence_tests', 'Las pruebas deben ser una lista.');
+        }
+        ksort($input);
+        $payload_hash = hash('sha256', json_encode($input, JSON_THROW_ON_ERROR));
+
+        return DB::transaction(function () use ($id, $input, $payload_hash) {
+            $ticket = SupportTicket::where('id', $id)->lockForUpdate()->findOrFail($id);
+            if ($ticket->status !== 'open') {
+                $this->fail(409, 'disabled_or_ineligible', 'El ticket cerrado no admite registrar evidencia de una misión.');
+            }
+            $case = SupportCodexCase::where('support_ticket_id', $id)->lockForUpdate()->first();
+            if ($case === null || ($case->mission_lifecycle()['status'] ?? null) !== 'started') {
+                $this->fail(409, 'mission_not_started', 'El ticket no tiene una misión iniciada.');
+            }
+            if ($case->mission_thread_id !== $input['mission_thread_id'] || $case->thread_id === $input['mission_thread_id']) {
+                $this->fail(409, 'mission_thread_conflict', 'La evidencia no corresponde al hilo vigente de la misión.');
+            }
+            if (! hash_equals(hash('sha256', (string) $case->mission), $input['mission_hash'])) {
+                $this->fail(409, 'mission_changed', 'El diagnóstico de la misión cambió.');
+            }
+
+            $evidence = SupportCodexMissionFixEvidence::firstOrCreate([
+                'support_ticket_id' => $id,
+                'mission_thread_id' => $input['mission_thread_id'],
+                'mission_hash' => $input['mission_hash'],
+            ], ['payload_hash' => $payload_hash, 'payload' => $input]);
+            if (! hash_equals($evidence->payload_hash, $payload_hash)) {
+                $this->fail(409, 'mission_evidence_conflict', 'La misión ya tiene evidencia distinta registrada.');
+            }
+
+            return ['mission_fix_evidence' => $evidence->payload];
+        });
     }
 
     public function assert_lease(?SupportCodexCase $case, string $token): void
@@ -1247,7 +1386,7 @@ class SupportCodexService
         });
     }
 
-    private function pending_reason(SupportTicket $ticket, ?SupportCodexCase $case): ?string
+    private function pending_reason(SupportTicket $ticket, ?SupportCodexCase $case, bool $supports_upgrade_agreement = false): ?string
     {
         if ($ticket->status !== 'open' || ($case !== null && $case->state === 'closed')
             || $this->has_unfinished_operation($ticket->id)) {
@@ -1274,6 +1413,11 @@ class SupportCodexService
         }
         if ($last->sender_type === 'user' && ($case === null || (int) $last->id > (int) $case->handled_message_id)) {
             return 'inbound';
+        }
+        if ($supports_upgrade_agreement && $case !== null
+            && app(SupportCodexUpgradeAgreementService::class)->pending_offer($ticket, $case)
+            && app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone)['open']) {
+            return 'fix_ready_for_upgrade';
         }
         if ($case !== null && (int) $last->id === (int) $case->last_reply_id
             && $this->is_follow_up($case, (int) $last->id)

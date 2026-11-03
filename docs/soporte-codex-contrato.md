@@ -129,6 +129,42 @@ Solo lectura, sin reserva (no cambia nada del caso). El cliente sale del ticket,
 
 Los últimos 100 mensajes reales se devuelven en orden cronológico; no incluye borradores. Los adjuntos traen `{id,mime,size,download_path}`; `GET tickets/{id}/attachments/{attachment_id}` sirve el binario con la misma autenticación y valida su pertenencia al ticket.
 
+### Primera ventana de cierre para proponer una actualización
+
+Con `ticket.capabilities.upgrade_window=true`, `GET tickets/{id}/upgrade-window` recibe `expected_message_id`, `minimum_minutes` (entero de 1 a 1440) y `not_before` opcional (ISO 8601 con offset y segundos, por ejemplo `2026-11-03T13:00:00-03:00`). El header `X-Support-Lease-Token` lleva la reserva activa de ese ticket. La clave de ingesta, el ticket abierto en soporte automático y el permiso del contacto para consultar el sistema siguen siendo obligatorios. Un mensaje posterior invalida la lectura con 409 `stale_message`.
+
+Devuelve `window: {starts_at, ends_at, timezone}` y `reason: null`, o `window: null` y `reason: sin_configurar|sin_ventana_suficiente`. Busca desde el mayor instante entre el reloj del admin y `not_before`, redondeado hacia arriba al minuto, durante un máximo de siete días calendario. Reutiliza la precedencia de la fila del día sobre `todos` e incluye recesos y días explícitamente cerrados. El fin excluye la próxima apertura y se limita al primer día sin horario comprobable o al horizonte de búsqueda.
+
+La ventana sirve para conversar con el negocio. La aceptación, el preflight, la actividad actual y la programación se verifican por separado. La consulta solo lee y el cliente se toma del ticket.
+
+### Evidencia de una corrección integrada
+
+Con `ticket.capabilities.mission_fix_evidence=true`, el monitor puede registrar `POST tickets/{id}/mission-fix-evidence` con la clave de ingesta y sin reserva de atención. El ticket debe estar abierto y tener una misión iniciada. El `mission_thread_id` debe coincidir con su hilo vinculado, distinto del chat de soporte, y `mission_hash` con el SHA-256 exacto del diagnóstico vigente. El ticket se toma de la ruta.
+
+El cuerpo agrega `estado: verificada`, `informe` relativo con forma `informes/AAAAMMDD-slug.md`, `pruebas` (lista de 1 a 10 descripciones de 5 a 500 caracteres) y mapas `commits` y `bases_verificadas` con las mismas claves de repositorio y SHAs completos de 40 caracteres hexadecimales en minúscula. Se admiten `empresa-api`, `empresa-spa`, `admin-api`, `admin-spa`, `tienda-api` y `tienda-spa`. El monitor verifica la evidencia y la integración remota antes de enviarla. El admin valida forma y vínculo y conserva la evidencia registrada.
+
+Repetir la misma evidencia es idempotente. Si la evidencia cambia para esa misma misión, el admin devuelve 409. La respuesta y `ticket.mission_fix_evidence` en el contexto permiten conciliar el registro. El contexto solo devuelve la evidencia que todavía corresponde a la misión vigente. Este registro no cambia el caso, la reserva ni el ticket y no envía mensajes, propone horarios, publica releases ni programa actualizaciones.
+
+### Propuesta y acuerdo de actualización
+
+Con `ticket.capabilities.upgrade_agreement=true`, el monitor puede pedir `GET pending?supports_upgrade_agreement=1` y pasar `supports_upgrade_agreement: true` al tomar o renovar una reserva. Si hay evidencia vigente, el dueño está en el ticket y WhatsApp admite el envío, el admin puede devolver `reason: fix_ready_for_upgrade` cuando falta proponer una ventana o la última propuesta venció sin aceptación y con resultado terminal. Un entrante nuevo conserva prioridad y un envío inconcluso impide volver a proponer. Los monitores que omiten el opt-in solo ven los motivos anteriores.
+
+`POST tickets/{id}/upgrade-proposal` recibe `lease_token`, `expected_message_id`, `operation_id`, `thread_id` y `supports_human_approval` opcionales como en reply, más `mission_thread_id`, `mission_hash`, `starts_at`, `ends_at` y `minimum_minutes`. El servidor vuelve a comprobar la evidencia y la ventana, genera el texto con fecha y hora de Argentina y usa la operación de reply. El intento durable y la propuesta se guardan juntos. Si corresponde aprobar, se conserva el texto exacto en el borrador. La respuesta tiene la misma forma de reply.
+
+`POST tickets/{id}/upgrade-agreement` recibe `lease_token`, `expected_message_id` (el entrante con la aceptación) y `proposal_operation_id`. Revalida que sea la última propuesta enviada para el arreglo vigente, el último mensaje del dueño, la ventana futura y el texto efectivamente enviado. WhatsApp conserva la cita como `reply_to_message_id` dentro del ticket. La aceptación usa esa cita a la propuesta más una afirmación inequívoca, o la frase con fecha y hora exactas si no hay cita. Un sí a otro mensaje se rechaza.
+
+La respuesta y `ticket.upgrade_agreement` muestran `proposal_operation_id`, `proposal_message_id`, `status`, `starts_at`, `ends_at`, `timezone`, `confirmation_message_id` y `accepted_at`. La aceptación repetida del mismo entrante conserva el acuerdo existente. La misión sigue vinculada y el ticket abierto. Esta etapa no programa ni arranca una actualización.
+
+### Release de empresa por acuerdo
+
+`GET release-work` lista acuerdos confirmados vigentes que todavía necesitan un release o una programación. Cada entrada contiene el ticket, el cliente, el acuerdo, el entrante de aceptación, la ventana UTC y la evidencia de la misión. `release` es `null` o contiene `version_id`, `version`, `develop` y `status: claimed|published|reusable`. Se prioriza el reclamo de release activo. Si perdió su acuerdo, `blocked_release` identifica el reclamo que se debe conciliar sin disparar otro release.
+
+`POST tickets/{id}/release-claim` recibe `agreement_id`, `draft_version_id`, `draft_version` y `develop` (mapa de SHA completo de `empresa-api` y `empresa-spa`). Solo reclama el borrador vigente y verifica que el arreglo sea ancestro de los candidatos que lo contienen. Si el snapshot carece de borrador, `draft_version_id: null` permite crearlo con el código candidato dentro de la transacción del reclamo. Hay un único reclamo activo para empresa. Repetir la misma identidad devuelve el reclamo. Si el acuerdo es nuevo y la misma evidencia tiene una versión reutilizable publicada, se usa su tupla exacta y se liga al nuevo acuerdo sin otro release de GitHub.
+
+`POST tickets/{id}/release-published` recibe `agreement_id`, `version_id`, `version`, `develop`, `trigger_commits`, `tag_commits` y `artifacts` (`id`, `sha256` sin prefijo, `size`, `name` por repositorio), además de `title` y `description` opcionales. El admin consulta los dos tags, la ascendencia y los árboles exactos, la corrida exitosa de cada workflow y los ZIP con sus digests. Revalida consentimiento y borrador antes de publicar en la misma transacción que el vínculo exacto al acuerdo. El registro del release no ejecuta un upgrade.
+
+`POST tickets/{id}/release-blocked` recibe `agreement_id`, `reason` y `partial`. Conserva el bloqueo si pudo haber efectos en GitHub. Solo libera un reclamo no publicado al verificar ambos `develop` en sus SHAs reservados y ambos tags ausentes. Un release ya publicado conserva su prueba al bloquear una programación vencida y puede reutilizarse después de un nuevo acuerdo.
+
 `POST tickets/{id}/diagnostic` con `{lease_token,query:string}` consulta el ERP correspondiente a ese ticket, sin pasar por un modelo de API. Devuelve `{data:<payload remoto>,queried_at}`. Es el lector existente `admin-sync/sistema-query` (stock, ventas, facturas, clientes), no SQL arbitrario. Si no hay acceso/configuración/datos válidos devuelve 502, nunca un resultado vacío presentado como éxito. Las claves permanecen en el servidor. No acepta client_id, owner ni URL del consumidor.
 
 ## Respuesta idempotente
@@ -229,3 +265,13 @@ El encendido del agente sigue usando agent_toggled: retoma la pausa humana pendi
 `capabilities.natural_thanks_closure=true` permite al helper reconocer el backend compatible antes de pedir un cierre de cortesía. `reply` conserva su contrato: `action=cerrar`, `confirmation_message_id` del último entrante y `body` de despedida. Un agradecimiento natural después de orientación, o como único entrante sin otra consulta pendiente, permite responder de nada y cerrar sin exigir otra confirmación ni afirmar que el cliente probó una solución. Se incluyen cortesías coloquiales y elogios sin nueva consulta. Misiones, revisiones humanas pendientes, solicitudes de información, pruebas futuras, dudas, negaciones y envíos inciertos conservan el caso abierto.
 
 Política anterior modificada por pedido explícito de Lucas: «Gracias» tras «¿Quedó resuelto?» estaba en el dataset de rechazos y en el test `test_agradecer_o_prometer_probar_no_confirma_resolucion`. Ahora tiene regresión positiva de cierre natural; las promesas de probar y condiciones siguen rechazadas. El cierre se aplica únicamente tras entrega confirmada, o después de aprobar el borrador si requiere verificación. Un entrante nuevo invalida el cierre anterior. Los replays idempotentes no repiten la despedida.
+
+## Actualización programada desde soporte
+
+`POST support-codex/tickets/{id}/schedule-upgrade` recibe `agreement_id` y `version_id`. Ambos tienen que corresponder a la corrección vigente y a un release publicado con evidencia. Devuelve `scheduled_upgrade` con el id durable, el horario UTC y el estado. Repetir los mismos IDs devuelve la misma fila. Si el horario ya pasó y todavía no había fila, devuelve 409.
+
+`GET support-codex/tickets/{id}/scheduled-upgrade` devuelve `scheduled_upgrade` o null. Los estados son `scheduled`, `starting`, `post_closure`, `configuring`, `verification_pending`, `verified`, `blocked` y `failed`. El scheduler del admin ejecuta el pipeline en el lugar. Revalida cierre, señales de actividad, acuerdo y versión exacta antes de subir archivos, antes de reemplazar el SPA y antes de las etapas posteriores. El arranque acepta hasta cinco minutos de demora. Los ZIP deben coincidir con los identificadores, tamaños y huellas verificados. Una pérdida de autorización después de tocar producción deja `failed` con motivo `reconciliar_*`. Los arranques y reintentos del carril manual rechazan upgrades ligados a un acuerdo.
+
+`POST support-codex/tickets/{id}/verify-scheduled-upgrade` recibe `agreement_id`, `upgrade_id`, `mission_thread_id`, `mission_hash`, `resultado` (`verificado` o `inconcluso`) y `evidencia` textual de reproducción de solo lectura. `verification_pending` requiere versión/frente/configuración confirmados y comprobación de HTTP. La reproducción verificada permite que el agente pida confirmación al cliente. El ticket sigue abierto y el envío conserva la ventana de WhatsApp. Con capacidad `verification_fallback`, el monitor puede adjuntar `motivo=verificacion_sin_resultado` a un inconcluso. Ese fallback conserva cualquier evidencia que haya llegado antes.
+
+El flag `SUPPORT_CODEX_SCHEDULED_UPGRADES_ENABLED` habilita el comando por minuto y la capacidad `scheduled_upgrade`. El valor por defecto es falso. El scheduler usa la cola `database` del admin y la preparación/reproducción se mantienen en el monitor de soporte.

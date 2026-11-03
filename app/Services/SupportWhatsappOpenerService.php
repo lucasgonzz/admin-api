@@ -316,6 +316,12 @@ class SupportWhatsappOpenerService
 
         $message->loadMissing('attachments');
         $has_attachments = $message->attachments !== null && count($message->attachments) > 0;
+        if (! $window['open'] && $has_attachments
+            && $message->attachments->contains(function ($attachment) {
+                return SupportCodexOutboundAttachment::is_private($attachment);
+            })) {
+            return $this->mark_failed($message, 'La ventana de WhatsApp se cerró antes de enviar el adjunto.', false, false, null);
+        }
 
         // Ventana abierta y sin adjuntos: el texto puede salir partido en varios mensajes.
         //
