@@ -208,6 +208,15 @@ class Kernel extends ConsoleKernel
             ->hourly()
             ->withoutOverlapping(50);
 
+        /* El empujón diario de la prueba gratuita (misión cruzada prueba-martin-importacion, 3/11/2026):
+         * por cada negocio en prueba, como mucho UNA plantilla por el hito que falta, dentro del horario
+         * de atención (10:00 de Argentina; el servicio no manda dos veces el mismo día), nunca después de
+         * vencida ni si el negocio escribió en las últimas 24 h. También avisa a Tomás al día 5.
+         * `withoutOverlapping(30)` con el número puesto a mano, por lo mismo que los de arriba. */
+        $schedule->command('prueba:empujar')
+            ->dailyAt('10:00')
+            ->withoutOverlapping(30);
+
         // Sincroniza desde GitHub identidad, system prompt y protocolo de WhatsApp a la BD.
         // Red de seguridad por si Lucas olvida apretar el botón manual del admin.
         $schedule->command('agent-prompts:sync')->everyTenMinutes();

@@ -10,6 +10,7 @@ use App\Services\DemoCicloAdminNotificationService;
 use App\Services\DemoHitosService;
 use App\Services\GoogleCalendarOAuthService;
 use App\Services\LeadBroadcastService;
+use App\Services\PruebaWhatsappService;
 use App\Services\WhatsappSendService;
 use Carbon\Carbon;
 use Illuminate\Database\QueryException;
@@ -151,6 +152,22 @@ class DemoEventosController extends Controller
             }
 
             $guardados++;
+
+            /* Prueba gratuita (misión cruzada prueba-martin-importacion, 3/11/2026): los eventos `prueba.*`
+             * de una instancia de prueba disparan la bienvenida de Martín (`prueba.ingreso`, la primera vez)
+             * y el aviso a Tomás (`prueba.vencida`). Aditivo y en su propio try: un fallo acá no puede
+             * rechazar el lote, que el emisor reintentaría para siempre. */
+            if (strpos((string) $evento['nombre'], PruebaWhatsappService::PREFIJO_EVENTO) === 0) {
+                try {
+                    app(PruebaWhatsappService::class)->al_recibir_evento($lead, (string) $evento['nombre']);
+                } catch (\Throwable $e) {
+                    Log::warning('DemoEventosController: falló la acción de la prueba gratuita para un evento.', [
+                        'lead_id' => $lead->id,
+                        'nombre'  => $evento['nombre'],
+                        'error'   => $e->getMessage(),
+                    ]);
+                }
+            }
 
             /* 🔴 `demo.setup.completado` se persiste como cualquier otro evento, pero NO pasa por
              * DemoHitosService y no mueve ningún hito. El roadmap es el recorrido del LEAD adentro

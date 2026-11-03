@@ -290,6 +290,78 @@ class ClaudeSupportCodexController extends Controller
         return response()->json($service->reconcile((string) $operation_id, $data));
     }
 
+    /**
+     * Reenvía el Excel del ticket (o uno en base64) a la instancia del cliente en prueba (C4). Ver
+     * `PruebaImportacionService`.
+     *
+     * Body: `attachment_id` (adjunto de ESTE ticket) o `file {filename, content_base64}`; opcionales `model`
+     * (article|client|provider), `provider_id`, `origen`.
+     *
+     * @return \Illuminate\Http\JsonResponse 200 aceptado/analizado_sin_corrida/rechazado · 404 no_es_prueba ·
+     *                                       409 ticket_cerrado/sin_api_key/sin_url · 422 · 502 no_responde
+     */
+    public function import_excel(Request $request, $id, \App\Services\PruebaImportacionService $service)
+    {
+        $data = $request->validate([
+            'attachment_id' => 'sometimes|nullable|integer|min:1',
+            'file' => 'sometimes|required|array',
+            'file.filename' => 'required_with:file|string|max:160',
+            'file.content_base64' => 'required_with:file|string|max:14000000',
+            'model' => 'sometimes|nullable|in:article,client,provider',
+            'provider_id' => 'sometimes|nullable|integer|min:1',
+            'origen' => 'sometimes|nullable|string|max:40',
+        ]);
+        $ticket = SupportTicket::findOrFail($id);
+        $resultado = $service->importar_excel($ticket, $data);
+        return response()->json($resultado, $this->http_de_la_importacion($resultado['estado']));
+    }
+
+    /**
+     * Reenvía fotos (base64, hasta 25 por pedido) a `admin-sync/ai-excel-import/imagenes` de la instancia del
+     * cliente en prueba: el nombre de cada archivo es el código del artículo.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function import_images(Request $request, $id, \App\Services\PruebaImportacionService $service)
+    {
+        $data = $request->validate([
+            'imagenes' => 'required|array|min:1|max:25',
+            'imagenes.*.filename' => 'required|string|max:160',
+            'imagenes.*.content_base64' => 'required|string|max:5600000',
+            'provider_id' => 'sometimes|nullable|integer|min:1',
+            'reemplazar' => 'sometimes|nullable|boolean',
+        ]);
+        $ticket = SupportTicket::findOrFail($id);
+        $resultado = $service->importar_imagenes($ticket, $data);
+        return response()->json($resultado, $this->http_de_la_importacion($resultado['estado']));
+    }
+
+    /**
+     * El HTTP que corresponde a cada `estado` de la importación. Lo que contestó la INSTANCIA viaja adentro
+     * de un 200 (`http` + `cuerpo`), como en el puente: un 422 del cliente no es un 422 del admin.
+     *
+     * @param string $estado
+     *
+     * @return int
+     */
+    private function http_de_la_importacion(string $estado): int
+    {
+        $tabla = [
+            'aceptado' => 200,
+            'analizado_sin_corrida' => 200,
+            'rechazado' => 200,
+            'version_vieja' => 200,
+            'no_es_prueba' => 404,
+            'ticket_cerrado' => 409,
+            'sin_api_key' => 409,
+            'sin_url' => 409,
+            'sin_fuente' => 422,
+            'archivo_invalido' => 422,
+            'no_responde' => 502,
+        ];
+        return isset($tabla[$estado]) ? $tabla[$estado] : 200;
+    }
+
     public function attachment($id, $attachment_id)
     {
         $attachment = SupportMessageAttachment::where('id', $attachment_id)

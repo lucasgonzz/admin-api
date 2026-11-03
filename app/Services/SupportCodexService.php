@@ -70,6 +70,9 @@ class SupportCodexService
                     'thread_id' => $case ? $case->thread_id : null,
                     'reason' => $reason,
                     'state' => $case ? $case->state : 'ready',
+                    // Negocio en prueba gratuita (misión prueba-martin-importacion, 3/11/2026): el monitor
+                    // solo revisa los adjuntos PDF de estos tickets para abrir la tarea de importación.
+                    'prueba' => app(PruebaDelClienteService::class)->es_cliente_en_prueba($ticket->client),
                 ];
                 if (count($items) >= 50) {
                     break;
@@ -171,6 +174,8 @@ class SupportCodexService
                 'api_url' => $ticket->client ? $ticket->client->api_url : null,
                 // El programa local de Martín ubica la bitácora de la implementación por slug cuando no hay estado.json.
                 'slug' => $ticket->client ? $ticket->client->slug : null,
+                // `prueba` si el negocio está en prueba gratuita (misión prueba-martin-importacion, 3/11/2026); si no, null.
+                'estado' => app(PruebaDelClienteService::class)->es_cliente_en_prueba($ticket->client) ? PruebaDelClienteService::ESTADO_PRUEBA : null,
             ],
             'contact_name' => $ticket->resolve_contact_display_name(),
             'contact_role' => $ticket->client_employee_id ? 'employee' : 'owner',
@@ -186,7 +191,7 @@ class SupportCodexService
             'reason' => $this->pending_reason($ticket, $case, true),
             // El helper debe verificar esta capacidad ANTES de pedir el modo nuevo: un admin
             // anterior ignoraría el campo y ejecutaría el resume que consume la consulta.
-            'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled()],
+            'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => true],
             'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
             'window' => app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone),
@@ -194,6 +199,9 @@ class SupportCodexService
             /* La implementación del sistema y de la tienda (abierta, o cerrada hace ≤ 30 días), para que
              * Martín siga la conversación de la implementación donde la dejó Lucas. null = no tiene. */
             'implementation' => app(SupportImplementationContextService::class)->bloque_para_el_ticket($ticket),
+            /* La prueba gratuita del negocio (misión prueba-martin-importacion, 3/11/2026): días que quedan, hitos
+             * (C3) y próximo paso, para que Martín lea `prueba.md` y lo acompañe. null = no está en prueba. */
+            'prueba' => app(SupportPruebaContextService::class)->bloque_para_el_ticket($ticket),
             /* Los tickets anteriores del cliente, resumidos (hasta 5, sin el actual; de un empleado, solo los
              * suyos), para que Martín sepa que existen y los pida con GET .../history si le hacen falta. */
             'previous_tickets' => $this->previous_tickets($ticket),

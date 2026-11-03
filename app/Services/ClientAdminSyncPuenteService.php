@@ -76,6 +76,9 @@ class ClientAdminSyncPuenteService
             '/mostrador/duenos',
             '/mostrador/reportes/{n}',
             '/mostrador/contexto/{n}',
+            /* C3 del programa «Prueba gratuita de 7 días» (misión prueba-martin-importacion, 3/11/2026): el estado
+               de la prueba según la instancia (vence_at, vencida, semilla_presente, hitos). Solo lectura. */
+            '/prueba/estado',
         ],
         'POST' => [
             '/mostrador/hechos',

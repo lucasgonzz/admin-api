@@ -392,6 +392,15 @@ Route::middleware('claude.task.key')
             ->whereNumber('id');
         Route::post('support-codex/tickets/{id}/diagnostic', 'Api\ClaudeSupportCodexController@diagnostic');
         Route::get('support-codex/tickets/{id}/attachments/{attachment_id}', 'Api\ClaudeSupportCodexController@attachment');
+        /* Importación desde el ticket de un negocio en PRUEBA GRATUITA (misión cruzada prueba-martin-importacion,
+           3/11/2026, C4): el admin reenvía el Excel del ticket (`attachment_id`) o uno en base64 (`file`) a
+           `admin-sync/ai-excel-import/analyze` de la instancia del cliente, en segundo plano y con aviso por
+           WhatsApp; `import-images` reenvía fotos (base64) a `admin-sync/ai-excel-import/imagenes`. Solo con el
+           ticket abierto y el cliente en prueba (404 `no_es_prueba`). */
+        Route::post('support-codex/tickets/{id}/import-excel', 'Api\ClaudeSupportCodexController@import_excel')
+            ->whereNumber('id');
+        Route::post('support-codex/tickets/{id}/import-images', 'Api\ClaudeSupportCodexController@import_images')
+            ->whereNumber('id');
         Route::get('admins', 'Api\ClaudeTaskIngestController@admins_json');
         Route::post('task', 'Api\ClaudeTaskIngestController@store_json');
         Route::get('draft-version', 'Api\ClaudeVersionItemsIngestController@draft_version_json');
@@ -1024,6 +1033,13 @@ Route::prefix('admin')->group(function () {
         Route::put('client/{clientId}/candado-sesion', [ClientSessionLockController::class, 'update_json']);
         /* Botón "Reintentar sincronización" de la pestaña Candado de sesión. */
         Route::post('client/{clientId}/candado-sesion/sync', [ClientSessionLockController::class, 'sync_json']);
+        /* Pestaña «Prueba» de la ficha del cliente y del modal del lead (misión cruzada prueba-martin-importacion,
+           3/11/2026): días que quedan, hitos (C3, en vivo contra la instancia) y los WhatsApps de la prueba; el
+           POST manda el aviso manual a Tomás. */
+        Route::get('client/{clientId}/prueba', [\App\Http\Controllers\PruebaController::class, 'client_json']);
+        Route::post('client/{clientId}/prueba/avisar-a-tomas', [\App\Http\Controllers\PruebaController::class, 'avisar_a_tomas_client_json']);
+        Route::get('lead/{id}/prueba', [\App\Http\Controllers\PruebaController::class, 'lead_json'])->whereNumber('id');
+        Route::post('lead/{id}/prueba/avisar-a-tomas', [\App\Http\Controllers\PruebaController::class, 'avisar_a_tomas_lead_json'])->whereNumber('id');
         /* Boton Gestionar extensiones (mision extensiones-desde-el-admin, 15/10/2026): pide al empresa-api del cliente un acceso de un solo uso al configurador. */
         Route::post('client/{clientId}/extensiones/acceso', [\App\Http\Controllers\ClientExtensionesAccesoController::class, 'acceso_json']);
         /* Extension unica "Agentes de IA" (mision agentes-ia-extension-unica, 22/10/2026): el GET lee si el cliente la tiene y el POST

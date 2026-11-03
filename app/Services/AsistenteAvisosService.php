@@ -53,6 +53,12 @@ class AsistenteAvisosService
     const RUTA_AVISADO = 'api/admin-sync/asistente/avisos/avisado';
 
     /**
+     * El tipo del aviso «ya leí tu Excel» de la prueba gratuita (misión prueba-martin-importacion,
+     * 3/11/2026). Es el único tipo que se manda por el ticket de soporte en vez de por el asistente.
+     */
+    const TIPO_IMPORTACION_LISTA = 'importacion_lista';
+
+    /**
      * Horas hacia atrás en las que el dueño tuvo que haberle escrito al asistente para que valga la
      * pena consultarle. Son las 24 hs de la ventana de Meta: fuera de ellas no se le puede mandar
      * texto libre, y el `empresa-api` tampoco ofrece avisos más viejos que eso.
@@ -268,7 +274,34 @@ class AsistenteAvisosService
                 return self::cliente_recibe_avisos($client);
             });
 
+        /* 🔴 LOS NEGOCIOS EN PRUEBA GRATUITA ENTRAN AL BARRIDO AUNQUE NADIE LE HAYA ESCRITO AL ASISTENTE
+         * (misión cruzada prueba-martin-importacion, 3/11/2026). Su aviso es otro: «ya leí tu Excel»
+         * (`importacion_lista`), que nace de un Excel que el negocio le mandó a Martín por el ticket de
+         * soporte, no de una factura al asistente. Van por `enviar_a_cliente_en_prueba()`: con clave, sin
+         * exigir el canal del asistente, y el aviso sale por el ticket. Son pocos (los que están en prueba
+         * esta semana) y cada uno es una consulta HTTP acotada con pausa por 404. */
+        $ya = $clientes->pluck('id')->map(function ($id) {
+            return (int) $id;
+        })->all();
+
+        $en_prueba = app(PruebaDelClienteService::class)->clientes_en_prueba()->filter(function (Client $client) use ($ya) {
+            return trim((string) $client->api_key) !== '' && ! in_array((int) $client->id, $ya, true);
+        });
+
         $resultados = [];
+
+        foreach ($en_prueba as $client) {
+            try {
+                $resultados[] = $this->enviar_a_cliente_en_prueba($client);
+            } catch (\Throwable $exception) {
+                Log::channel('daily')->error('AsistenteAvisos: excepción mandando los avisos de un cliente en prueba.', [
+                    'client_id' => $client->id,
+                    'error'     => $exception->getMessage(),
+                ]);
+
+                $resultados[] = $this->resultado($client, 'error', 0, 0, $exception->getMessage());
+            }
+        }
 
         foreach ($clientes as $client) {
             try {
@@ -357,6 +390,123 @@ class AsistenteAvisosService
     }
 
     /**
+     * Los avisos de un negocio en PRUEBA GRATUITA (misión prueba-martin-importacion, 3/11/2026): se le
+     * consultan igual que a cualquier cliente, pero de lo que traiga solo sale `importacion_lista`, y sale
+     * por el ticket de soporte (texto libre, con la ventana del principal abierta: el negocio acaba de
+     * mandar el Excel por ahí). Los demás tipos (factura, envío fallido, turno) necesitan la conversación
+     * del asistente para contestarse y acá no la hay: quedan `sin_canal` hasta que el dueño le escriba al
+     * asistente, que es el camino de siempre.
+     *
+     * @param Client $client
+     *
+     * @return array{client_id: int, nombre: string, estado: string, avisos: int, enviados: int, detalle: string}
+     */
+    public function enviar_a_cliente_en_prueba(Client $client): array
+    {
+        if (trim((string) $client->api_key) === '') {
+            return $this->resultado($client, 'sin_api_key', 0, 0, 'El cliente no tiene cargada la api_key.');
+        }
+
+        $pausa = Cache::get($this->clave_de_pausa($client));
+        if ($pausa !== null) {
+            return $this->resultado($client, 'en_pausa', 0, 0, 'En pausa hasta la próxima consulta: ' . (string) $pausa);
+        }
+
+        $spa_url    = self::base_del_spa_valida($this->urls->resolve_spa_url($client));
+        $pendientes = $this->traer_avisos($client, $spa_url);
+
+        if ($pendientes['estado'] !== 'ok') {
+            return $this->resultado($client, $pendientes['estado'], 0, 0, $pendientes['detalle']);
+        }
+
+        $avisos = $pendientes['avisos'];
+        if ($avisos === []) {
+            return $this->resultado($client, 'sin_avisos', 0, 0, 'No hay avisos pendientes.');
+        }
+
+        $enviados = 0;
+        $estados  = [];
+        foreach ($avisos as $aviso) {
+            $estado = $aviso['tipo'] === self::TIPO_IMPORTACION_LISTA
+                ? $this->avisar_importacion_por_soporte($client, $aviso, $spa_url)
+                : 'sin_canal';
+
+            $estados[] = $aviso['id'] . '=' . $estado;
+            if ($estado === 'enviado') {
+                $enviados++;
+            }
+        }
+
+        Log::channel('daily')->info('AsistenteAvisos: avisos de un cliente en prueba procesados.', [
+            'client_id' => $client->id,
+            'avisos'    => count($avisos),
+            'enviados'  => $enviados,
+            'estados'   => $estados,
+        ]);
+
+        return $this->resultado($client, $enviados > 0 ? 'enviado' : 'pendiente', count($avisos), $enviados, implode(', ', $estados));
+    }
+
+    /**
+     * Manda el aviso «ya leí tu Excel» por el TICKET DE SOPORTE del dueño (número principal), con el mismo
+     * reclamo en cache y la misma marca del lado del cliente que cualquier otro aviso. Con la ventana del
+     * principal cerrada no sale nada: queda pendiente (el `empresa-api` lo vence a las 24 h).
+     *
+     * @param Client               $client
+     * @param array<string, mixed> $aviso
+     * @param string               $spa_url
+     *
+     * @return string enviado | remarcado | ya_avisado | en_curso | ventana_cerrada | sin_contacto | error | fallido
+     */
+    private function avisar_importacion_por_soporte(Client $client, array $aviso, string $spa_url): string
+    {
+        $clave = $this->clave_de_reclamo($client, (string) $aviso['id']);
+
+        $previo = Cache::get($clave);
+        if ($previo !== null) {
+            return $this->resolver_reclamo_previo($client, $aviso, $clave, $previo);
+        }
+
+        $link    = $this->link_del_aviso($aviso, $spa_url);
+        $mensaje = (string) $aviso['texto'] . ($link !== '' ? "\n\n" . $link : '');
+
+        if (! Cache::add($clave, ['estado' => self::RECLAMO_RECLAMADO], now()->addMinutes(self::MINUTOS_DEL_RECLAMO_EN_CURSO))) {
+            return 'en_curso';
+        }
+
+        try {
+            $salida = app(PruebaWhatsappService::class)->mandar_texto_por_ticket($client, $mensaje);
+        } catch (\Throwable $exception) {
+            $this->registrar_fallo($client, (string) $aviso['id'], $clave, $exception->getMessage());
+
+            throw $exception;
+        }
+
+        if ($salida['enviado'] !== true) {
+            if ($salida['motivo'] === 'ventana_cerrada' || $salida['motivo'] === 'sin_contacto') {
+                /* No salió nada y no es un rechazo de Meta: se suelta el reclamo sin contar un intento. */
+                Cache::forget($clave);
+
+                return (string) $salida['motivo'];
+            }
+
+            return $this->registrar_fallo($client, (string) $aviso['id'], $clave, (string) $salida['motivo']);
+        }
+
+        $whatsapp_message_id = (string) $salida['whatsapp_message_id'];
+
+        Cache::put(
+            $clave,
+            ['estado' => self::RECLAMO_ENVIADO, 'url' => $link, 'whatsapp_message_id' => $whatsapp_message_id],
+            now()->addDays(self::DIAS_DEL_RECLAMO)
+        );
+
+        $this->marcar_y_cerrar_el_reclamo($client, (string) $aviso['id'], $clave, $link, $whatsapp_message_id);
+
+        return 'enviado';
+    }
+
+    /**
      * Manda UN aviso, si se puede, y lo marca del lado del cliente.
      *
      * @param Client                       $client             Cliente dueño del aviso.
@@ -374,6 +524,12 @@ class AsistenteAvisosService
         WhatsappSessionWindowService $ventana,
         string $spa_url
     ): string {
+        /* El aviso de la importación de la prueba sale por el ticket de soporte, tenga o no el dueño una
+         * conversación con el asistente: así lo ve Martín en el mismo hilo donde recibió el Excel. */
+        if ($aviso['tipo'] === self::TIPO_IMPORTACION_LISTA) {
+            return $this->avisar_importacion_por_soporte($client, $aviso, $spa_url);
+        }
+
         $clave = $this->clave_de_reclamo($client, (string) $aviso['id']);
 
         /* Ya hay un reclamo: o alguien lo está mandando, o ya salió. En ningún caso se vuelve a
