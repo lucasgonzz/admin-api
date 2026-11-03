@@ -108,6 +108,25 @@ class ContractPreciosService
     }
 
     /**
+     * ¿El plan guardado en un contrato es uno de la política anterior (por ventas)? Es el mismo
+     * criterio que usa `plan_gestion()` para el PDF: una clave que solo existe en los históricos
+     * (`estandar`, `pro`), o `inicial` con el abono pactado de $34.200. Lo usa la cuota sugerida por
+     * operaciones para no aplicarle excedentes sobre 100 operaciones a un contrato de 300 ventas.
+     *
+     * @param mixed $clave
+     * @param mixed $abono_pactado
+     *
+     * @return bool
+     */
+    public static function es_plan_historico($clave, $abono_pactado = null): bool
+    {
+        if (!is_string($clave) || !isset(self::PLANES_HISTORICOS[$clave])) {
+            return false;
+        }
+        return !isset(self::PLANES_GESTION[$clave]) || self::es_abono_historico($clave, $abono_pactado);
+    }
+
+    /**
      * El plan vigente que corresponde a una cantidad de operaciones por mes.
      *
      * @param int $operaciones

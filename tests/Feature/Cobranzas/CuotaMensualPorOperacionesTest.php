@@ -149,6 +149,46 @@ class CuotaMensualPorOperacionesTest extends BaseDeCobranzas
         $this->assertEqualsWithDelta(85400.0, $response->json('cuota_sugerida.total'), 0.001);
     }
 
+    /**
+     * 🔴 Hallazgo del chequeo independiente (3/11/2026): un contrato con el `inicial` HISTÓRICO
+     * ($34.200, hasta 300 ventas) comparte la clave con el `inicial` vigente (100 operaciones). Si se
+     * lo tomara como vigente, con 200 operaciones sugeriría $34.200 + 100 × $760 = $110.200, que es
+     * falso: ese contrato no tiene excedentes por operaciones. Se lo reconoce como histórico y la
+     * cuota se sugiere por las operaciones, a precio de lista.
+     */
+    public function test_el_inicial_historico_de_300_ventas_no_recibe_excedentes_sobre_100_operaciones(): void
+    {
+        $this->admin_logueado();
+        $client = $this->cliente_con_api([
+            'contract_plan_gestion'     => 'inicial',
+            'contract_precios_sistemas' => ['gestion' => ['licencia' => 800, 'mensualidad' => 34200], 'ecommerce' => ['licencia' => 500, 'mensualidad' => 20000], 'agentes' => ['licencia' => 500, 'mensualidad' => 30000]],
+            'contract_usuarios_extra'   => 0,
+        ]);
+
+        $this->fakear_http([
+            '*/api/admin-sync/mensualidad-info*' => Http::response([
+                'conteos'         => ['empleados' => 1],
+                'operaciones_mes' => ['mes' => '2026-09', 'ventas' => 150, 'compras' => 30, 'gastos' => 20, 'total' => 200],
+            ], 200),
+        ]);
+
+        $response = $this->postJson('/api/admin/client/' . $client->id . '/mensualidad/traer-del-cliente');
+
+        $response->assertStatus(200);
+        $this->assertSame('intermedio', $response->json('cuota_sugerida.plan'));
+        $this->assertFalse($response->json('cuota_sugerida.plan_del_contrato'));
+        $this->assertSame(0, $response->json('cuota_sugerida.excedentes'));
+        $this->assertEqualsWithDelta(85400.0, $response->json('cuota_sugerida.total'), 0.001);
+
+        // El criterio es el mismo que el del PDF.
+        $this->assertTrue(ContractPreciosService::es_plan_historico('inicial', 34200));
+        $this->assertTrue(ContractPreciosService::es_plan_historico('inicial', '34.200'));
+        $this->assertTrue(ContractPreciosService::es_plan_historico('estandar'));
+        $this->assertFalse(ContractPreciosService::es_plan_historico('inicial', 55900));
+        $this->assertFalse(ContractPreciosService::es_plan_historico('inicial'));
+        $this->assertFalse(ContractPreciosService::es_plan_historico('plus', 199400));
+    }
+
     public function test_una_operaciones_mes_rota_se_lee_como_ausente(): void
     {
         $this->admin_logueado();

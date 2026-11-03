@@ -259,21 +259,24 @@ class ClientMensualidadSyncService
      */
     public function cuota_sugerida(Client $client, array $operaciones_mes): array
     {
+        $precios = $client->contract_precios_sistemas;
+        $pactado = is_array($precios) ? ($precios['gestion']['mensualidad'] ?? null) : null;
+
+        /* Un plan de la política anterior (por ventas: `estandar`, `pro`, o el `inicial` de $34.200)
+         * no es un plan por operaciones: no se le aplican excedentes sobre 100 operaciones. Mismo
+         * criterio que `plan_gestion()` para el PDF (hallazgo del chequeo independiente, 3/11/2026). */
         $plan_del_contrato = is_string($client->contract_plan_gestion)
             && isset(ContractPreciosService::PLANES_GESTION[$client->contract_plan_gestion])
-            && $client->contract_plan_gestion !== 'a_medida';
+            && $client->contract_plan_gestion !== 'a_medida'
+            && ! ContractPreciosService::es_plan_historico($client->contract_plan_gestion, $pactado);
 
         $plan = $plan_del_contrato
             ? $client->contract_plan_gestion
             : ContractPreciosService::plan_por_operaciones((int) $operaciones_mes['total']);
 
         $abono_pactado = null;
-        if ($plan_del_contrato) {
-            $precios = $client->contract_precios_sistemas;
-            $pactado = is_array($precios) ? ($precios['gestion']['mensualidad'] ?? null) : null;
-            if ($pactado !== null && $pactado !== '') {
-                $abono_pactado = ClientContratoService::monto_desde_texto($pactado);
-            }
+        if ($plan_del_contrato && $pactado !== null && $pactado !== '') {
+            $abono_pactado = ClientContratoService::monto_desde_texto($pactado);
         }
 
         $cuota = ContractPreciosService::cuota_mensual(
