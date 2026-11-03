@@ -9,6 +9,7 @@ use App\Models\AgentImplementationEvent;
 use App\Models\Implementation;
 use App\Models\ImplementationStage;
 use App\Models\SupportCodexCase;
+use App\Models\SupportCodexMissionFixEvidence;
 use App\Models\SupportCodexOperation;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
@@ -177,11 +178,12 @@ class SupportCodexService
             'thread_id' => $case ? $case->thread_id : null,
             'mission' => $case ? $case->mission : null,
             'mission_lifecycle' => $case ? $case->mission_lifecycle() : null,
+            'mission_fix_evidence' => $this->current_mission_fix_evidence($ticket, $case),
             'review_reason' => $case ? $case->review_reason : null,
             'reason' => $this->pending_reason($ticket, $case),
             // El helper debe verificar esta capacidad ANTES de pedir el modo nuevo: un admin
             // anterior ignoraría el campo y ejecutaría el resume que consume la consulta.
-            'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true],
+            'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true],
             'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
             'window' => app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone),
@@ -1236,6 +1238,61 @@ class SupportCodexService
             // El registro durable no se revierte si el realtime no está disponible.
         }
         return $result;
+    }
+
+    public function register_mission_fix_evidence(int $id, array $input): array
+    {
+        ksort($input['commits']);
+        ksort($input['bases_verificadas']);
+        if (array_keys($input['commits']) !== array_keys($input['bases_verificadas'])) {
+            $this->fail(422, 'invalid_evidence_repositories', 'Las bases verificadas deben corresponder a todos los repositorios de los commits.');
+        }
+        if (array_values($input['pruebas']) !== $input['pruebas']) {
+            $this->fail(422, 'invalid_evidence_tests', 'Las pruebas deben ser una lista.');
+        }
+        ksort($input);
+        $payload_hash = hash('sha256', json_encode($input, JSON_THROW_ON_ERROR));
+
+        return DB::transaction(function () use ($id, $input, $payload_hash) {
+            $ticket = SupportTicket::where('id', $id)->lockForUpdate()->findOrFail($id);
+            if ($ticket->status !== 'open') {
+                $this->fail(409, 'disabled_or_ineligible', 'El ticket cerrado no admite registrar evidencia de una misión.');
+            }
+            $case = SupportCodexCase::where('support_ticket_id', $id)->lockForUpdate()->first();
+            if ($case === null || ($case->mission_lifecycle()['status'] ?? null) !== 'started') {
+                $this->fail(409, 'mission_not_started', 'El ticket no tiene una misión iniciada.');
+            }
+            if ($case->mission_thread_id !== $input['mission_thread_id'] || $case->thread_id === $input['mission_thread_id']) {
+                $this->fail(409, 'mission_thread_conflict', 'La evidencia no corresponde al hilo vigente de la misión.');
+            }
+            if (! hash_equals(hash('sha256', (string) $case->mission), $input['mission_hash'])) {
+                $this->fail(409, 'mission_changed', 'El diagnóstico de la misión cambió.');
+            }
+
+            $evidence = SupportCodexMissionFixEvidence::firstOrCreate([
+                'support_ticket_id' => $id,
+                'mission_thread_id' => $input['mission_thread_id'],
+                'mission_hash' => $input['mission_hash'],
+            ], ['payload_hash' => $payload_hash, 'payload' => $input]);
+            if (! hash_equals($evidence->payload_hash, $payload_hash)) {
+                $this->fail(409, 'mission_evidence_conflict', 'La misión ya tiene evidencia distinta registrada.');
+            }
+
+            return ['mission_fix_evidence' => $evidence->payload];
+        });
+    }
+
+    private function current_mission_fix_evidence(SupportTicket $ticket, ?SupportCodexCase $case): ?array
+    {
+        if ($ticket->status !== 'open' || $case === null || ($case->mission_lifecycle()['status'] ?? null) !== 'started') {
+            return null;
+        }
+
+        $evidence = SupportCodexMissionFixEvidence::where('support_ticket_id', $ticket->id)
+            ->where('mission_thread_id', $case->mission_thread_id)
+            ->where('mission_hash', hash('sha256', (string) $case->mission))->first();
+
+        return $evidence === null ? null : $evidence->payload;
     }
 
     public function assert_lease(?SupportCodexCase $case, string $token): void

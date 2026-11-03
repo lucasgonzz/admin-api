@@ -204,6 +204,76 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         ], $extra), $this->headers);
     }
 
+    public function test_registra_evidencia_de_mision_vigente_sin_retomar_atencion(): void
+    {
+        $ticket = $this->ticket();
+        $case = $this->prepare_mission($ticket);
+        $path = $this->base . '/tickets/' . $ticket->id . '/mission-fix-evidence';
+        $evidence = $this->mission_evidence($case);
+        $this->postJson($path, $evidence, $this->headers)->assertStatus(409);
+        $this->register_mission($ticket, $case)->assertOk()->assertJsonPath('ticket.mission_fix_evidence', null);
+        $before = $case->fresh()->getAttributes();
+        $before_ticket = $ticket->fresh()->getAttributes();
+
+        $this->postJson($path, $evidence, $this->headers)->assertOk()
+            ->assertJsonPath('mission_fix_evidence.estado', 'verificada');
+        $evidence['commits'] = array_reverse($evidence['commits'], true);
+        $this->postJson($path, $evidence, $this->headers)->assertOk();
+        $this->assertSame(1, DB::table('support_codex_mission_fix_evidence')->where('support_ticket_id', $ticket->id)->count());
+        $this->getJson($this->base . '/tickets/' . $ticket->id, $this->headers)->assertOk()
+            ->assertJsonPath('ticket.capabilities.mission_fix_evidence', true)
+            ->assertJsonPath('ticket.mission_fix_evidence.mission_hash', $evidence['mission_hash'])
+            ->assertJsonPath('ticket.mission_fix_evidence.commits.empresa-api', str_repeat('a', 40));
+        $this->assertSame($before, $case->fresh()->getAttributes());
+        $this->assertSame($before_ticket, $ticket->fresh()->getAttributes());
+        $this->assertCount(1, $this->deliveries->bodies);
+
+        $this->postJson($path, array_replace($evidence, ['pruebas' => ['Suite distinta']]), $this->headers)->assertStatus(409);
+        $case->fresh()->update(['mission' => 'Se reemplazó el diagnóstico.']);
+        $this->postJson($path, $evidence, $this->headers)->assertStatus(409);
+        $this->getJson($this->base . '/tickets/' . $ticket->id, $this->headers)->assertOk()
+            ->assertJsonPath('ticket.mission_fix_evidence', null);
+    }
+
+    public function test_evidencia_de_mision_rechaza_identidad_y_campos_invalidos(): void
+    {
+        $ticket = $this->ticket();
+        $case = $this->prepare_mission($ticket);
+        $this->register_mission($ticket, $case)->assertOk();
+        $path = $this->base . '/tickets/' . $ticket->id . '/mission-fix-evidence';
+        $evidence = $this->mission_evidence($case);
+
+        $this->postJson($path, $evidence)->assertUnauthorized();
+        $this->postJson($path, array_replace($evidence, ['mission_thread_id' => $case->thread_id]), $this->headers)->assertStatus(409);
+        foreach ([
+            ['estado' => 'por_verificar'],
+            ['ticket_id' => $ticket->id],
+            ['informe' => '../informe.md'],
+            ['pruebas' => ['nombre' => 'Suite real']],
+            ['commits' => ['repo-ajeno' => str_repeat('a', 40)]],
+            ['commits' => ['empresa-api' => 'corta']],
+            ['bases_verificadas' => ['empresa-spa' => str_repeat('d', 40)]],
+        ] as $invalid) {
+            $this->postJson($path, array_replace($evidence, $invalid), $this->headers)->assertStatus(422);
+        }
+        $ticket->update(['status' => 'closed']);
+        $this->postJson($path, $evidence, $this->headers)->assertStatus(409);
+        $this->assertFalse(DB::table('support_codex_mission_fix_evidence')->where('support_ticket_id', $ticket->id)->exists());
+    }
+
+    private function mission_evidence(SupportCodexCase $case): array
+    {
+        return [
+            'mission_thread_id' => 'tarea-mision-18',
+            'mission_hash' => hash('sha256', $case->mission),
+            'informe' => 'informes/20261103-arreglo-verificado.md',
+            'pruebas' => ['Suite de regresión verificada'],
+            'commits' => ['empresa-api' => str_repeat('a', 40), 'empresa-spa' => str_repeat('b', 40)],
+            'bases_verificadas' => ['empresa-api' => str_repeat('c', 40), 'empresa-spa' => str_repeat('d', 40)],
+            'estado' => 'verificada',
+        ];
+    }
+
     public function test_mision_pendiente_y_necesidad_humana_se_serializan_por_separado(): void
     {
         $ticket = $this->ticket();

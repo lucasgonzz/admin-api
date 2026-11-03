@@ -221,6 +221,28 @@ class ClaudeSupportCodexController extends Controller
         return response()->json($service->mission_started((int) $id, $data));
     }
 
+    public function mission_fix_evidence(Request $request, $id, SupportCodexService $service)
+    {
+        $repos = 'empresa-api,empresa-spa,admin-api,admin-spa,tienda-api,tienda-spa';
+        $sha = ['required', 'string', 'regex:/\A[0-9a-f]{40}\z/'];
+        $data = $request->validate([
+            'ticket_id' => 'prohibited',
+            'mission_thread_id' => ['required', 'string', 'max:150', 'regex:/\A[a-zA-Z0-9_-]+\z/'],
+            'mission_hash' => ['required', 'string', 'regex:/\A[0-9a-f]{64}\z/'],
+            'informe' => ['required', 'string', 'regex:~\Ainformes/[0-9]{8}-[a-z0-9][a-z0-9-]{0,100}\.md\z~'],
+            'pruebas' => 'required|array|min:1|max:10',
+            'pruebas.*' => 'required|string|min:5|max:500',
+            'commits' => 'required|array:' . $repos . '|min:1|max:6',
+            'commits.*' => $sha,
+            'bases_verificadas' => 'required|array:' . $repos . '|min:1|max:6',
+            'bases_verificadas.*' => $sha,
+            'estado' => 'required|string|in:verificada',
+        ]);
+        unset($data['ticket_id']);
+
+        return response()->json($service->register_mission_fix_evidence((int) $id, $data));
+    }
+
     public function reconcile(Request $request, $operation_id, SupportCodexService $service)
     {
         $data = $request->validate([

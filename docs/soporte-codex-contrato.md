@@ -137,6 +137,14 @@ Devuelve `window: {starts_at, ends_at, timezone}` y `reason: null`, o `window: n
 
 La ventana sirve para conversar con el negocio. La aceptación, el preflight, la actividad actual y la programación se verifican por separado. La consulta solo lee y el cliente se toma del ticket.
 
+### Evidencia de una corrección integrada
+
+Con `ticket.capabilities.mission_fix_evidence=true`, el monitor puede registrar `POST tickets/{id}/mission-fix-evidence` con la clave de ingesta y sin reserva de atención. El ticket debe estar abierto y tener una misión iniciada. El `mission_thread_id` debe coincidir con su hilo vinculado, distinto del chat de soporte, y `mission_hash` con el SHA-256 exacto del diagnóstico vigente. El ticket se toma de la ruta.
+
+El cuerpo agrega `estado: verificada`, `informe` relativo con forma `informes/AAAAMMDD-slug.md`, `pruebas` (lista de 1 a 10 descripciones de 5 a 500 caracteres) y mapas `commits` y `bases_verificadas` con las mismas claves de repositorio y SHAs completos de 40 caracteres hexadecimales en minúscula. Se admiten `empresa-api`, `empresa-spa`, `admin-api`, `admin-spa`, `tienda-api` y `tienda-spa`. El monitor verifica la evidencia y la integración remota antes de enviarla. El admin valida forma y vínculo y conserva la evidencia registrada.
+
+Repetir la misma evidencia es idempotente. Si la evidencia cambia para esa misma misión, el admin devuelve 409. La respuesta y `ticket.mission_fix_evidence` en el contexto permiten conciliar el registro. El contexto solo devuelve la evidencia que todavía corresponde a la misión vigente. Este registro no cambia el caso, la reserva ni el ticket y no envía mensajes, propone horarios, publica releases ni programa actualizaciones.
+
 `POST tickets/{id}/diagnostic` con `{lease_token,query:string}` consulta el ERP correspondiente a ese ticket, sin pasar por un modelo de API. Devuelve `{data:<payload remoto>,queried_at}`. Es el lector existente `admin-sync/sistema-query` (stock, ventas, facturas, clientes), no SQL arbitrario. Si no hay acceso/configuración/datos válidos devuelve 502, nunca un resultado vacío presentado como éxito. Las claves permanecen en el servidor. No acepta client_id, owner ni URL del consumidor.
 
 ## Respuesta idempotente

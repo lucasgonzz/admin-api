@@ -369,6 +369,8 @@ Route::middleware('claude.task.key')
         Route::post('support-codex/tickets/{id}/release', 'Api\ClaudeSupportCodexController@release');
         Route::post('support-codex/tickets/{id}/resume', 'Api\ClaudeSupportCodexController@resume');
         Route::post('support-codex/tickets/{id}/mission-started', 'Api\ClaudeSupportCodexController@mission_started');
+        Route::post('support-codex/tickets/{id}/mission-fix-evidence', 'Api\ClaudeSupportCodexController@mission_fix_evidence')
+            ->whereNumber('id');
         Route::post('support-codex/tickets/{id}/diagnostic', 'Api\ClaudeSupportCodexController@diagnostic');
         Route::get('support-codex/tickets/{id}/attachments/{attachment_id}', 'Api\ClaudeSupportCodexController@attachment');
         Route::get('admins', 'Api\ClaudeTaskIngestController@admins_json');
