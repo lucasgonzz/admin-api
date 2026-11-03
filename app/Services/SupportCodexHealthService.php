@@ -16,6 +16,8 @@ class SupportCodexHealthService
     const RECIPIENT = 'lucasgonzalez5500@gmail.com';
     const TIMEOUT_SECONDS = 300;
     const REMINDER_SECONDS = 21600;
+    const TIMEZONE = 'America/Argentina/Buenos_Aires';
+    const RESUME_HOUR = 7;
     const ERROR_CODES = ['starting', 'poll_stale', 'poll_error', 'queue_stale', 'app_error', 'dispatch_unknown', 'monitor_error'];
 
     public function heartbeat(array $data): array
@@ -61,14 +63,22 @@ class SupportCodexHealthService
             if (empty($state['armed_at'])) {
                 return $state;
             }
-            $now = now()->getTimestamp();
-            $silent = $now - (int) $state['last_seen_at'] >= self::TIMEOUT_SECONDS;
-            $failing = ! empty($state['first_error_at']) && $now - (int) $state['first_error_at'] >= self::TIMEOUT_SECONDS;
+            $local = now(self::TIMEZONE);
+            $resume = $local->copy()->setTime(self::RESUME_HOUR, 0);
+            if ($local->lt($resume)) {
+                return $state;
+            }
+            $now = $local->getTimestamp();
+            $resumeAt = $resume->getTimestamp();
+            $silent = $now - max($resumeAt, (int) $state['last_seen_at']) >= self::TIMEOUT_SECONDS;
+            $failing = ! empty($state['first_error_at'])
+                && $now - max($resumeAt, (int) $state['first_error_at']) >= self::TIMEOUT_SECONDS;
             $unhealthy = $silent || $failing;
             $kind = null;
             if ($unhealthy && (empty($state['alert_sent_at']) || $now - (int) $state['alert_sent_at'] >= self::REMINDER_SECONDS)) {
                 $kind = empty($state['alert_sent_at']) ? 'failure' : 'reminder';
-            } elseif (! $unhealthy && ($state['status'] ?? '') === 'ok' && ! empty($state['alert_sent_at'])) {
+            } elseif (! $unhealthy && ($state['status'] ?? '') === 'ok' && ! empty($state['alert_sent_at'])
+                && (int) $state['last_seen_at'] >= $resumeAt) {
                 $kind = 'recovery';
             }
             // Una falla del SMTP se reintenta al minuto siguiente, sin consumir el aviso.
@@ -98,7 +108,7 @@ class SupportCodexHealthService
 
     private function date($timestamp): ?string
     {
-        return $timestamp ? Carbon::createFromTimestamp($timestamp)->timezone('America/Argentina/Buenos_Aires')->format('d/m/Y H:i:s') : null;
+        return $timestamp ? Carbon::createFromTimestamp($timestamp)->timezone(self::TIMEZONE)->format('d/m/Y H:i:s') : null;
     }
 
     private function locked(callable $change): array

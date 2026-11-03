@@ -113,6 +113,43 @@ class SoporteCodexSaludTest extends TestCase
         Mail::assertNothingSent();
     }
 
+    public function test_pausa_diaria_silencia_alertas_y_da_cinco_minutos_desde_las_siete(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-11-03 23:55:00', 'America/Argentina/Buenos_Aires'));
+        $this->pulse();
+
+        foreach (['2026-11-04 00:00:00', '2026-11-04 06:59:59', '2026-11-04 07:00:00', '2026-11-04 07:04:59'] as $date) {
+            Carbon::setTestNow(Carbon::parse($date, 'America/Argentina/Buenos_Aires'));
+            $this->artisan('support:check-codex-health');
+            Mail::assertNothingSent();
+        }
+
+        $this->advance(1);
+        $this->artisan('support:check-codex-health');
+        Mail::assertSent(SupportCodexHealthMail::class, function ($mail) {
+            return $mail->kind === 'failure' && $mail->health['reason'] === 'sin_pulso';
+        });
+    }
+
+    public function test_pausa_diaria_espera_un_pulso_nuevo_antes_de_avisar_la_recuperacion(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-11-03 23:45:00', 'America/Argentina/Buenos_Aires'));
+        $this->pulse();
+        $this->advance(300);
+        $this->artisan('support:check-codex-health');
+        Mail::assertSent(SupportCodexHealthMail::class, 1);
+
+        Carbon::setTestNow(Carbon::parse('2026-11-04 07:00:00', 'America/Argentina/Buenos_Aires'));
+        $this->artisan('support:check-codex-health');
+        Mail::assertSent(SupportCodexHealthMail::class, 1);
+
+        $this->pulse();
+        $this->artisan('support:check-codex-health');
+        Mail::assertSent(SupportCodexHealthMail::class, function ($mail) {
+            return $mail->kind === 'recovery';
+        });
+    }
+
     public function test_prueba_correo_no_arma_ni_modifica_el_monitor(): void
     {
         $this->artisan('support:check-codex-health', ['--prueba-correo' => true])->assertExitCode(0);
