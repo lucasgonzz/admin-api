@@ -163,7 +163,11 @@ class LeadContractPdfService
 
         // El plan solo se muestra si el contrato tiene desglose y Gestión entre los sistemas elegidos.
         $plan_gestion = $desglose !== null && is_array($sistemas_raw) && in_array('gestion', $sistemas_raw, true)
-            ? ContractPreciosService::plan_gestion($lead->contract_plan_gestion)
+            ? ContractPreciosService::plan_gestion(
+                $lead->contract_plan_gestion,
+                /* El abono pactado distingue el `inicial` histórico (300 ventas) del vigente (100 operaciones). */
+                is_array($lead->contract_precios_sistemas) ? ($lead->contract_precios_sistemas['gestion']['mensualidad'] ?? null) : null
+            )
             : null;
 
         $pago_anual = (bool) $lead->contract_pago_anual;
