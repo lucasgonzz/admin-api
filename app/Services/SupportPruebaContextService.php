@@ -65,6 +65,7 @@ class SupportPruebaContextService
                 'proximo_hito'       => $resumen['proximo_hito'],
                 'proximo_hito_label' => $resumen['proximo_hito_label'],
                 'bienvenida_enviada' => $resumen['bienvenida_enviada'],
+                'bienvenida_en_cola' => $resumen['bienvenida_en_cola'],
                 'ultimo_empujon_at'  => $resumen['ultimo_empujon_at'],
                 'lead_id'            => $resumen['lead_id'],
             ];

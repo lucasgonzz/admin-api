@@ -253,7 +253,14 @@ class PruebaWhatsappService
             return ['estado' => 'escribio_hace_poco', 'detalle' => 'El negocio escribió en las últimas 24 h: lo atiende Martín.'];
         }
 
-        $hitos   = $this->pruebas->hitos($client, $lead, true);
+        $hitos = $this->pruebas->hitos($client, $lead, true);
+
+        /* La instancia sabe mejor si venció (C3): aunque el admin no tenga `trial_ends_at`, con `vencida` en
+         * true no se empuja más. */
+        if ($hitos['vencida'] === true) {
+            return ['estado' => 'vencida', 'detalle' => 'La instancia dice que la prueba venció: no se empuja más.'];
+        }
+
         $proximo = PruebaDelClienteService::proximo_hito_faltante($hitos['hitos']);
 
         if ($proximo === null) {
@@ -320,7 +327,20 @@ class PruebaWhatsappService
 
         if ($estado['motivo'] !== null) {
             if ($encolar) {
-                $this->registrar($client, $lead, $plantilla, $hito, PruebaWhatsappEnvio::ESTADO_EN_COLA, null, null, null, $estado['motivo']);
+                /* Una sola fila en cola por plantilla: si ya está, se le refresca el motivo (el evento puede llegar
+                 * varias veces, y el job diario vuelve a pasar por acá cada mañana). */
+                $en_cola = PruebaWhatsappEnvio::query()
+                    ->where('client_id', (int) $client->id)
+                    ->where('plantilla', $plantilla)
+                    ->where('estado', PruebaWhatsappEnvio::ESTADO_EN_COLA)
+                    ->first();
+
+                if ($en_cola !== null) {
+                    $en_cola->detalle = $estado['motivo'];
+                    $en_cola->save();
+                } else {
+                    $this->registrar($client, $lead, $plantilla, $hito, PruebaWhatsappEnvio::ESTADO_EN_COLA, null, null, null, $estado['motivo']);
+                }
             }
 
             return ['estado' => 'en_cola', 'detalle' => $plantilla . ': ' . $estado['motivo']];
@@ -512,7 +532,22 @@ class PruebaWhatsappService
 
         $closer = Admin::query()->where('is_closer', true)->whereNotNull('phone_number')->first();
         if ($closer === null) {
-            $this->registrar($client, $lead, PruebaWhatsappEnvio::PLANTILLA_AVISO_TOMAS, $motivo, PruebaWhatsappEnvio::ESTADO_FALLIDO, null, null, null, 'No hay un closer con teléfono cargado.');
+            /* Un solo `fallido` por motivo: el job diario pasa por acá cada mañana y no tiene que dejar una fila por día. */
+            $ya_fallido = PruebaWhatsappEnvio::query()
+                ->where('client_id', (int) $client->id)
+                ->where('plantilla', PruebaWhatsappEnvio::PLANTILLA_AVISO_TOMAS)
+                ->where('hito', $motivo)
+                ->where('estado', PruebaWhatsappEnvio::ESTADO_FALLIDO)
+                ->exists();
+
+            if (! $ya_fallido) {
+                $this->registrar($client, $lead, PruebaWhatsappEnvio::PLANTILLA_AVISO_TOMAS, $motivo, PruebaWhatsappEnvio::ESTADO_FALLIDO, null, null, null, 'No hay un closer con teléfono cargado.');
+            }
+
+            Log::channel('daily')->warning('PruebaWhatsapp: no hay un admin closer con phone_number; el aviso a Tomás no sale.', [
+                'client_id' => $client->id,
+                'motivo'    => $motivo,
+            ]);
 
             return ['estado' => 'sin_closer', 'detalle' => 'No hay un admin closer con phone_number configurado.'];
         }

@@ -51,7 +51,7 @@ class PruebaPlantillasService
             'uso'  => 'Prueba gratuita: bienvenida de Martín al primer ingreso del negocio (una sola vez).',
         ],
         'cc_prueba_paso_ingreso' => [
-            'body' => 'Hola {{1}}, te escribo de ComercioCity. Tu sistema de prueba ya está listo y todavía no entraste. Entrá cuando puedas con el acceso que te mandamos: en unos minutos ves cómo trabaja. Si no lo encontrás, decime y te lo paso.',
+            'body' => 'Hola {{1}}, te escribo de ComercioCity. Tu sistema de prueba ya está listo y todavía no entraste. Entrá cuando puedas con el acceso que te mandamos: en unos minutos ves cómo trabaja. Si no lo encontrás, escribime por acá y lo vemos.',
             'uso'  => 'Prueba gratuita: el negocio no entró al sistema.',
         ],
         'cc_prueba_paso_importo' => [
@@ -75,7 +75,7 @@ class PruebaPlantillasService
             'uso'  => 'Prueba gratuita: el negocio no registró un pago de cuenta corriente.',
         ],
         'cc_prueba_paso_compra' => [
-            'body' => 'Hola {{1}}, probá cargar una compra a un proveedor desde Compras: el stock sube solo y queda el costo actualizado. Si tenés una factura a mano, mandámela por acá y te muestro cómo la lee el sistema.',
+            'body' => 'Hola {{1}}, probá cargar una compra a un proveedor desde Compras: el stock sube solo y queda el costo actualizado. Si querés te paso un video de cómo se hace.',
             'uso'  => 'Prueba gratuita: el negocio no cargó ninguna compra.',
         ],
         'cc_prueba_paso_gasto' => [
@@ -83,11 +83,11 @@ class PruebaPlantillasService
             'uso'  => 'Prueba gratuita: el negocio no cargó ningún gasto.',
         ],
         'cc_prueba_paso_tienda_pedido' => [
-            'body' => 'Hola {{1}}, tu tienda online ya está armada con tus artículos. Entrá, hacé un pedido de prueba y mirá cómo llega al sistema. Te paso el link si no lo tenés a mano.',
+            'body' => 'Hola {{1}}, tu prueba incluye una tienda online conectada a tu sistema. Entrá desde el sistema, hacé un pedido de prueba y mirá cómo te llega. Si no la encontrás, escribime por acá y te guío.',
             'uso'  => 'Prueba gratuita: el negocio no recibió ningún pedido de la tienda.',
         ],
         'cc_prueba_paso_agente' => [
-            'body' => 'Hola {{1}}, tu agente personal por WhatsApp ya está activo: preguntale cuánto vendiste hoy o pedile que cargue un gasto. Escribile desde el sistema o pedime el número y te lo paso.',
+            'body' => 'Hola {{1}}, probá tu agente personal desde el sistema: preguntale cuánto vendiste hoy o pedile que cargue un gasto. Si no lo encontrás, escribime por acá y te guío.',
             'uso'  => 'Prueba gratuita: el negocio no habló con su agente personal.',
         ],
     ];

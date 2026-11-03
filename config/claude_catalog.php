@@ -235,6 +235,32 @@ return [
             'para_que' => 'Consulta de solo lectura por keywords al ERP del cliente del ticket; sin IA API ni secretos en la respuesta.',
             'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => ['Reserva vigente y cliente/URL resueltos exclusivamente del ticket.'],
         ],
+        'POST api/claude/support-codex/tickets/{id}/import-excel' => [
+            'para_que' => 'Importación desde el ticket de un negocio en PRUEBA GRATUITA (misión prueba-martin-importacion, 3/11/2026, C4): el admin reenvía un Excel del ticket (attachment_id, que ya tiene en su disco: no baja a la PC de Lucas) o uno en base64 (file, el Excel normalizado que arma la tarea del PDF) a POST admin-sync/ai-excel-import/analyze del sistema del cliente, con la clave del cliente, en segundo plano (segundo_plano=1) y con aviso por WhatsApp al terminar (avisar_por_whatsapp=1). Contesta 200 {estado: aceptado (con analysis_uuid) | analizado_sin_corrida (empresa viejo: analizó en el momento, sin corrida) | rechazado, http, cuerpo (lo que contestó la instancia, sin la clave)}; 404 no_es_prueba; 409 ticket_cerrado/sin_api_key/sin_url; 422 sin_fuente/archivo_invalido; 502 no_responde.',
+            'escribe' => true, 'peligrosidad' => 'media',
+            'frenos' => ['Solo con el ticket ABIERTO y el cliente en prueba (clients.estado = prueba): a cualquier otro cliente es 404 y no se le pega a nadie.', 'El adjunto tiene que ser de ESTE ticket y ser un Excel (.xlsx/.xls, hasta 10 MiB); en base64 solo .xlsx/.xls con nombre de archivo válido.', 'No reintenta: un POST a analyze crea una corrida del otro lado.', 'La clave del cliente viaja en el header y se tapa en la respuesta y en el log.'],
+            'parametros' => [
+                ['nombre' => 'attachment_id', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|integer|min:1', 'que_es' => 'Adjunto del ticket a reenviar (uno de los dos: attachment_id o file).'],
+                ['nombre' => 'file', 'obligatorio' => false, 'validacion' => 'sometimes|required|array', 'que_es' => '{filename, content_base64}: el Excel en base64 (la tarea del PDF).'],
+                ['nombre' => 'file.filename', 'obligatorio' => false, 'validacion' => 'required_with:file|string|max:160', 'que_es' => 'Nombre con extensión .xlsx o .xls.'],
+                ['nombre' => 'file.content_base64', 'obligatorio' => false, 'validacion' => 'required_with:file|string|max:14000000', 'que_es' => 'Contenido en base64, hasta 10 MiB decodificado.'],
+                ['nombre' => 'model', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|in:article,client,provider', 'que_es' => 'Modelo del importador (default article).'],
+                ['nombre' => 'provider_id', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|integer|min:1', 'que_es' => 'Id del proveedor en el sistema del cliente, si se sabe.'],
+                ['nombre' => 'origen', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|max:40', 'que_es' => 'martin (Excel del ticket) o pdf (tarea del PDF); va al payload de la corrida.'],
+            ],
+        ],
+        'POST api/claude/support-codex/tickets/{id}/import-images' => [
+            'para_que' => 'Las fotos del catálogo (las saca la tarea del PDF) para los artículos del negocio en PRUEBA GRATUITA del ticket (misión prueba-martin-importacion, 3/11/2026, C4): el admin reenvía hasta 25 imágenes en base64 a POST admin-sync/ai-excel-import/imagenes del sistema del cliente, con su clave; el nombre de cada archivo es el código del artículo (bar_code, provider_code o el del proveedor). Contesta 200 {estado: aceptado | version_vieja (404 de la instancia) | rechazado, http, cuerpo: {asignadas, ya_tenian, sin_articulo, rechazadas}, enviadas, rechazadas_antes_de_enviar}; 404 no_es_prueba; 409; 422; 502.',
+            'escribe' => true, 'peligrosidad' => 'media',
+            'frenos' => ['Solo con el ticket ABIERTO y el cliente en prueba.', 'jpg/jpeg/png/webp, hasta 4 MiB cada una, hasta 25 por pedido; nombres de archivo válidos.', 'No pisa la foto de un artículo que ya tiene salvo reemplazar=1; nunca borra archivos del otro lado.', 'La clave del cliente no sale en la respuesta ni en el log.'],
+            'parametros' => [
+                ['nombre' => 'imagenes', 'obligatorio' => true, 'validacion' => 'required|array|min:1|max:25', 'que_es' => 'Lista de {filename, content_base64}.'],
+                ['nombre' => 'imagenes.*.filename', 'obligatorio' => true, 'validacion' => 'required|string|max:160', 'que_es' => 'Nombre = código del artículo + extensión.'],
+                ['nombre' => 'imagenes.*.content_base64', 'obligatorio' => true, 'validacion' => 'required|string|max:5600000', 'que_es' => 'Contenido en base64, hasta 4 MiB decodificado.'],
+                ['nombre' => 'provider_id', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|integer|min:1', 'que_es' => 'Proveedor para buscar también por su provider_code.'],
+                ['nombre' => 'reemplazar', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|boolean', 'que_es' => 'true pisa la foto de un artículo que ya tiene.'],
+            ],
+        ],
 
         /* ---------------------------------------------------------- Auto-descripción */
 

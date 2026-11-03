@@ -81,8 +81,11 @@ class BienvenidaYAvisosPorEventoTest extends BaseDeLaPrueba
         $this->evento($lead, 'prueba.ingreso')->assertStatus(200);
 
         $this->assertCount(0, $espia->plantillas);
+
+        /* Un segundo ingreso (o el job diario pasando otra vez) no duplica la fila en cola. */
+        $this->evento($lead, 'prueba.ingreso')->assertStatus(200);
         $en_cola = PruebaWhatsappEnvio::where('client_id', $client->id)->get();
-        $this->assertCount(1, $en_cola);
+        $this->assertCount(1, $en_cola, 'Una sola fila en cola por plantilla.');
         $this->assertSame(PruebaWhatsappEnvio::ESTADO_EN_COLA, $en_cola->first()->estado);
         /* El motivo guardado es el del modelo: con `activa = false` (así nacen las creadas por API) es `plantilla_inactiva`. */
         $this->assertSame('plantilla_inactiva', (string) $en_cola->first()->detalle);
@@ -125,6 +128,25 @@ class BienvenidaYAvisosPorEventoTest extends BaseDeLaPrueba
 
         $this->evento($lead, 'prueba.vencida')->assertStatus(200);
         $this->assertCount(1, $espia->textos);
+    }
+
+    /** @test */
+    public function sin_closer_queda_un_solo_fallido_por_motivo(): void
+    {
+        $espia = $this->espiar_sender();
+        $this->crear_config_whatsapp();
+        $this->admin();
+
+        $client = $this->cliente_en_prueba(-1);
+        $lead   = $this->lead_en_prueba($client);
+
+        $this->evento($lead, 'prueba.vencida')->assertStatus(200);
+        $this->evento($lead, 'prueba.vencida')->assertStatus(200);
+
+        $this->assertCount(0, $espia->textos);
+        $fallidos = PruebaWhatsappEnvio::where('client_id', $client->id)->where('plantilla', PruebaWhatsappEnvio::PLANTILLA_AVISO_TOMAS)->get();
+        $this->assertCount(1, $fallidos, 'Un solo fallido por motivo, no uno por evento ni por día.');
+        $this->assertSame(PruebaWhatsappEnvio::ESTADO_FALLIDO, $fallidos->first()->estado);
     }
 
     /** @test */

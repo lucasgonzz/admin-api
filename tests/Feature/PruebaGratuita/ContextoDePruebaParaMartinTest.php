@@ -49,6 +49,7 @@ class ContextoDePruebaParaMartinTest extends BaseDeLaPrueba
         $this->assertSame('importo', $prueba['proximo_hito']);
         $this->assertSame('Importó su información', $prueba['proximo_hito_label']);
         $this->assertFalse($prueba['bienvenida_enviada']);
+        $this->assertFalse($prueba['bienvenida_en_cola']);
         $this->assertSame((int) $lead->id, $prueba['lead_id']);
 
         $this->assertSame('prueba', $respuesta->json('ticket.client.estado'));

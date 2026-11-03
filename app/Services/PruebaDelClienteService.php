@@ -543,6 +543,11 @@ class PruebaDelClienteService
             return $envio->plantilla === PruebaPlantillasService::BIENVENIDA && $envio->estado === PruebaWhatsappEnvio::ESTADO_ENVIADO;
         });
 
+        /* La bienvenida que todavía no salió porque Meta no aprobó la plantilla: va a salir sola; Martín no se presenta. */
+        $bienvenida_en_cola = $bienvenida === null && $envios->first(function ($envio) {
+            return $envio->plantilla === PruebaPlantillasService::BIENVENIDA && $envio->estado === PruebaWhatsappEnvio::ESTADO_EN_COLA;
+        }) !== null;
+
         $ultimo_empujon = $envios->first(function ($envio) {
             return strpos((string) $envio->plantilla, PruebaPlantillasService::PASO_PREFIJO) === 0 && $envio->estado === PruebaWhatsappEnvio::ESTADO_ENVIADO;
         });
@@ -565,6 +570,7 @@ class PruebaDelClienteService
             'proximo_hito'        => $proximo,
             'proximo_hito_label'  => self::label_del_hito($proximo),
             'bienvenida_enviada'  => $bienvenida !== null,
+            'bienvenida_en_cola'  => $bienvenida_en_cola,
             'bienvenida_at'       => $bienvenida !== null && $bienvenida->enviado_at !== null ? $bienvenida->enviado_at->toIso8601String() : null,
             'ultimo_empujon_at'   => $ultimo_empujon !== null && $ultimo_empujon->enviado_at !== null ? $ultimo_empujon->enviado_at->toIso8601String() : null,
             'envios'              => $envios->map(function ($envio) {

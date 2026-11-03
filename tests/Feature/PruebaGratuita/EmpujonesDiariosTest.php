@@ -105,6 +105,24 @@ class EmpujonesDiariosTest extends BaseDeLaPrueba
     }
 
     /** @test */
+    public function si_la_instancia_dice_que_vencio_no_empuja_aunque_el_admin_no_tenga_la_fecha(): void
+    {
+        $espia = $this->espiar_sender();
+        [$client, $lead] = $this->negocio_con_bienvenida();
+        /* El admin sin fecha de vencimiento (M2 sin cargarla todavía): manda lo que diga la instancia. */
+        \App\Services\PruebaDelClienteService::forzar_en_prueba([(int) $client->id => ['dias' => 7, 'vence_at' => null]]);
+
+        $vencida = $this->estado_de_la_instancia(['ingreso']);
+        $vencida['vencida'] = true;
+        $this->fakear_http(['*/admin-sync/prueba/estado' => Http::response($vencida, 200)]);
+
+        $resultado = app(PruebaWhatsappService::class)->empujar($client, $lead);
+
+        $this->assertSame('vencida', $resultado['estado']);
+        $this->assertCount(0, $espia->plantillas);
+    }
+
+    /** @test */
     public function sin_la_plantilla_del_paso_aprobada_no_manda_nada(): void
     {
         $espia = $this->espiar_sender();

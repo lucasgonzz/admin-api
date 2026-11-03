@@ -22,7 +22,7 @@ class AvisoDeImportacionPorSoporteTest extends BaseDeLaPrueba
 {
     const UUID = '9b2c4f1e-7a3d-4c55-9e0b-2f6d8a1c3e70';
     const TEXTO = 'Ya leí "Lista_Proveedor.xlsx". Encontré 412 filas. Entrá al sistema y te aparece la importación lista para que confirmes las columnas y la termines.';
-    const URL = 'https://ferreteria.comerciocity.com/listado?importacion=9b2c4f1e-7a3d-4c55-9e0b-2f6d8a1c3e70';
+    const URL = 'https://ferreteria.comerciocity.com/listado-de-articulos?importacion=9b2c4f1e-7a3d-4c55-9e0b-2f6d8a1c3e70';
 
     /**
      * @param string $tipo
@@ -38,7 +38,7 @@ class AvisoDeImportacionPorSoporteTest extends BaseDeLaPrueba
             'ai_conversation_id' => null,
             'texto'              => self::TEXTO,
             'resumen'            => self::TEXTO,
-            'ruta'               => '/listado?importacion=' . self::UUID,
+            'ruta'               => '/listado-de-articulos?importacion=' . self::UUID,
             'url'                => self::URL,
         ]]];
     }
