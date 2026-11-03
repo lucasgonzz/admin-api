@@ -191,7 +191,7 @@ class EscenaDelLocalTest extends TestCase
             'kind'                   => 'text',
             'body'                   => 'No me deja facturar',
             'is_ai_suggestion_draft' => false,
-            'delivered_at'           => now(),
+            'delivered_at'           => AppTime::now(),
         ]);
 
         $cuando = AppTime::now()->subMinutes($minutos)->format('Y-m-d H:i:s');
@@ -211,7 +211,7 @@ class EscenaDelLocalTest extends TestCase
     {
         AdminSetting::updateOrCreate(
             ['key' => SupportCodexHealthService::KEY],
-            ['value' => json_encode(['last_seen_at' => time() - $hace_segundos, 'status' => 'ok'])]
+            ['value' => json_encode(['last_seen_at' => AppTime::now()->getTimestamp() - $hace_segundos, 'status' => 'ok'])]
         );
     }
 
@@ -1095,6 +1095,77 @@ class EscenaDelLocalTest extends TestCase
         $this->assertSame('actividad', $evento['tipo']);
         $this->assertSame('facturas', $evento['agente']);
         $this->assertSame('escaneo', $evento['detalle']);
+    }
+
+    /**
+     * 🔴 `eventos`: los de los últimos 10 minutos, del más viejo al más nuevo, con ids estables (`sm-<id>`,
+     * `cam-<id>`, `act-<id>`, `lm-<id>`, `esc-<ticket>`) que no cambian entre un cálculo y el siguiente, así la
+     * SPA no repite un globo que ya mostró. Lo de hace más de 10 minutos no está.
+     *
+     * @return void
+     */
+    public function test_los_eventos_van_en_orden_ascendente_con_ids_estables(): void
+    {
+        $admin  = $this->crear_admin();
+        $client = $this->crear_cliente('Eventos en orden');
+        $ticket = $this->crear_ticket($client);
+
+        $viejo   = $this->mensaje_del_cliente($ticket, 12);
+        $soporte = $this->mensaje_del_cliente($ticket, 8);
+        $al_asis = $this->mensaje_al_asistente($client, ClientAssistantMessage::ESTADO_RECIBIDO, 6);
+        $escaneo = $this->actividad($client, 'escaneo', 4);
+
+        $lead    = Lead::create(['contact_name' => 'Lead de eventos', 'phone' => '54911' . random_int(1000000, 9999999), 'status' => 'calificado']);
+        $del_lead = LeadMessage::create([
+            'lead_id' => $lead->id, 'sender' => 'lead', 'content' => 'hola', 'status' => 'enviado',
+            'kind' => 'text', 'is_status_event' => false, 'is_error' => false,
+        ]);
+        $hace_2 = AppTime::now()->subMinutes(2)->format('Y-m-d H:i:s');
+        DB::table('lead_messages')->where('id', $del_lead->id)->update(['created_at' => $hace_2, 'updated_at' => $hace_2]);
+
+        $ticket->escalated_at = AppTime::now()->subMinute();
+        $ticket->save();
+
+        $esperados = [
+            'sm-' . $soporte->id,
+            'cam-' . $al_asis->id,
+            'act-' . $escaneo,
+            'lm-' . $del_lead->id,
+            'esc-' . $ticket->id,
+        ];
+
+        $primera = $this->escena($admin)['eventos'];
+        $segunda = $this->escena($admin)['eventos'];
+
+        $ids = array_column($primera, 'id');
+        $posiciones = [];
+        foreach ($esperados as $id) {
+            $this->assertContains($id, $ids, 'Falta el evento ' . $id . '.');
+            $posiciones[] = array_search($id, $ids, true);
+        }
+        $ordenadas = $posiciones;
+        sort($ordenadas);
+        $this->assertSame($ordenadas, $posiciones, 'Los eventos sembrados salen del más viejo al más nuevo.');
+
+        $tiempos = array_map('strtotime', array_column($primera, 'ocurrido_at'));
+        $copia   = $tiempos;
+        sort($copia);
+        $this->assertSame($copia, $tiempos, 'Toda la lista va en orden ascendente.');
+
+        $this->assertNotContains('sm-' . $viejo->id, $ids, 'Lo de hace 12 minutos ya no es un evento.');
+
+        $this->assertSame(
+            array_values(array_intersect(array_column($segunda, 'id'), $esperados)),
+            array_values(array_intersect($ids, $esperados)),
+            'Los ids y su orden no cambian entre un cálculo y el siguiente.'
+        );
+
+        $por_id = array_combine($ids, $primera);
+        $this->assertSame('ticket_mensaje', $por_id['sm-' . $soporte->id]['tipo']);
+        $this->assertSame('asistente_mensaje', $por_id['cam-' . $al_asis->id]['tipo']);
+        $this->assertSame('actividad', $por_id['act-' . $escaneo]['tipo']);
+        $this->assertSame('lead_mensaje', $por_id['lm-' . $del_lead->id]['tipo']);
+        $this->assertSame('delegado', $por_id['esc-' . $ticket->id]['tipo']);
     }
 
     /**
