@@ -96,7 +96,7 @@ class ClaudeSupportCodexController extends Controller
         ]);
         $resultado = DB::transaction(function () use ($request, $id, $service, $resolver, $data) {
             $ticket = SupportTicket::with('client', 'client_employee')->lockForUpdate()->findOrFail($id);
-            $service->assert_current($ticket, [
+            $case = $service->assert_current($ticket, [
                 'lease_token' => (string) $request->header('X-Support-Lease-Token'),
                 'expected_message_id' => $data['expected_message_id'],
                 'action' => 'responder',
@@ -109,6 +109,10 @@ class ClaudeSupportCodexController extends Controller
                 if ($pedido->greaterThan($desde)) {
                     $desde = $pedido;
                 }
+            }
+            $reoffer = app(SupportCodexUpgradeAgreementService::class)->reoffer_after($ticket, $case);
+            if ($reoffer !== null && $reoffer->greaterThan($desde)) {
+                $desde = $reoffer;
             }
 
             return $resolver->primera_ventana_cerrada($ticket->client, $desde, (int) $data['minimum_minutes'], 'America/Argentina/Buenos_Aires');

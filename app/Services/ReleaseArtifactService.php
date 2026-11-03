@@ -72,6 +72,97 @@ class ReleaseArtifactService
     /** Caracteres del cuerpo de una respuesta de error que se copian al mensaje de la excepción. */
     const CUERPO_MAXIMO_EN_ERROR = 300;
 
+    public function support_fix_is_ancestor(string $repo, string $fix, string $develop): bool
+    {
+        if ($fix === $develop) {
+            return ($this->support_metadata($repo, 'git/commits/' . $fix)['sha'] ?? null) === $fix;
+        }
+
+        $comparison = $this->support_metadata($repo, 'compare/' . $fix . '...' . $develop);
+        return ($comparison['status'] ?? null) === 'ahead' && ($comparison['merge_base_commit']['sha'] ?? null) === $fix;
+    }
+
+    public function verify_support_release(string $repo, string $version, string $develop, string $trigger, string $tag_commit, array $artifact): bool
+    {
+        $tag = 'v' . $version;
+        $ref = $this->support_metadata($repo, 'git/ref/tags/' . rawurlencode($tag));
+        $object = $ref['object'] ?? [];
+        if (($object['type'] ?? null) === 'tag') {
+            $tag_object = $this->support_metadata($repo, 'git/tags/' . rawurlencode((string) ($object['sha'] ?? '')));
+            $object = $tag_object['object'] ?? [];
+        }
+        if (($object['type'] ?? null) !== 'commit' || ($object['sha'] ?? null) !== $tag_commit) {
+            return false;
+        }
+
+        $trigger_data = $this->support_metadata($repo, 'git/commits/' . $trigger);
+        $tag_data = $trigger === $tag_commit ? $trigger_data : $this->support_metadata($repo, 'git/commits/' . $tag_commit);
+        $develop_data = $this->support_metadata($repo, 'git/commits/' . $develop);
+        if (array_column($trigger_data['parents'] ?? [], 'sha') !== [$develop]
+            || strtok((string) ($trigger_data['message'] ?? ''), "\r\n") !== 'release: version ' . $version . ' [release:' . $version . ']'
+            || empty($trigger_data['tree']['sha']) || ($tag_data['tree']['sha'] ?? null) !== $trigger_data['tree']['sha']
+            || ($develop_data['tree']['sha'] ?? null) !== $trigger_data['tree']['sha']
+            || ! $this->support_fix_is_ancestor($repo, $trigger, $tag_commit)) {
+            return false;
+        }
+
+        $runs = $this->support_metadata($repo, 'actions/workflows/release.yml/runs', ['head_sha' => $trigger, 'status' => 'success']);
+        $success = false;
+        foreach ($runs['workflow_runs'] ?? [] as $run) {
+            if (($run['head_sha'] ?? null) === $trigger && ($run['conclusion'] ?? null) === 'success') {
+                $success = true;
+                break;
+            }
+        }
+        if (! $success) {
+            return false;
+        }
+
+        $release = $this->support_metadata($repo, 'releases/tags/' . rawurlencode($tag));
+        $name = $repo . '-' . $tag . ($repo === 'empresa-spa' ? '-dist.zip' : '.zip');
+        foreach ($release['assets'] ?? [] as $asset) {
+            if (($asset['name'] ?? null) === $name && $artifact['name'] === $name && ($asset['state'] ?? null) === 'uploaded'
+                && (int) ($asset['id'] ?? 0) === (int) $artifact['id'] && (int) ($asset['size'] ?? 0) === (int) $artifact['size']
+                && ($asset['digest'] ?? null) === 'sha256:' . $artifact['sha256']) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public function support_release_untouched(string $repo, string $version, string $develop): bool
+    {
+        $branch = $this->support_metadata($repo, 'git/ref/heads/develop');
+        if (($branch['object']['sha'] ?? null) !== $develop) {
+            return false;
+        }
+        $tag = $this->support_metadata($repo, 'git/ref/tags/' . rawurlencode('v' . $version), [], true);
+
+        return $tag === [];
+    }
+
+    private function support_metadata(string $repo, string $path, array $query = [], bool $allow_missing = false): array
+    {
+        if (! in_array($repo, ['empresa-api', 'empresa-spa'], true)) {
+            throw new \InvalidArgumentException('Repositorio ajeno al release de empresa.');
+        }
+        $url = self::GITHUB_API_BASE . '/repos/' . rawurlencode($this->owner()) . '/' . $repo . '/' . $path;
+        try {
+            $response = $this->api_client()->get($url, $query);
+        } catch (ConnectionException $error) {
+            throw new \RuntimeException('No se pudo comprobar la evidencia en GitHub.', 0, $error);
+        }
+        if ($allow_missing && $response->status() === 404) {
+            return [];
+        }
+        if (! $response->successful() || ! is_array($response->json()) || $response->json() === []) {
+            throw new \RuntimeException('No se pudo verificar la evidencia en GitHub.');
+        }
+
+        return $response->json();
+    }
+
     /**
      * Busca un asset por nombre en el release de un tag.
      *

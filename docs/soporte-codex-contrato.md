@@ -155,6 +155,16 @@ Con `ticket.capabilities.upgrade_agreement=true`, el monitor puede pedir `GET pe
 
 La respuesta y `ticket.upgrade_agreement` muestran `proposal_operation_id`, `proposal_message_id`, `status`, `starts_at`, `ends_at`, `timezone`, `confirmation_message_id` y `accepted_at`. La aceptación repetida del mismo entrante conserva el acuerdo existente. La misión sigue vinculada y el ticket abierto. Esta etapa no programa ni arranca una actualización.
 
+### Release de empresa por acuerdo
+
+`GET release-work` lista acuerdos confirmados vigentes que todavía necesitan un release o una programación. Cada entrada contiene el ticket, el cliente, el acuerdo, el entrante de aceptación, la ventana UTC y la evidencia de la misión. `release` es `null` o contiene `version_id`, `version`, `develop` y `status: claimed|published|reusable`. Se prioriza el reclamo de release activo. Si perdió su acuerdo, `blocked_release` identifica el reclamo que se debe conciliar sin disparar otro release.
+
+`POST tickets/{id}/release-claim` recibe `agreement_id`, `draft_version_id`, `draft_version` y `develop` (mapa de SHA completo de `empresa-api` y `empresa-spa`). Solo reclama el borrador vigente y verifica que el arreglo sea ancestro de los candidatos que lo contienen. Si el snapshot carece de borrador, `draft_version_id: null` permite crearlo con el código candidato dentro de la transacción del reclamo. Hay un único reclamo activo para empresa. Repetir la misma identidad devuelve el reclamo. Si el acuerdo es nuevo y la misma evidencia tiene una versión reutilizable publicada, se usa su tupla exacta y se liga al nuevo acuerdo sin otro release de GitHub.
+
+`POST tickets/{id}/release-published` recibe `agreement_id`, `version_id`, `version`, `develop`, `trigger_commits`, `tag_commits` y `artifacts` (`id`, `sha256` sin prefijo, `size`, `name` por repositorio), además de `title` y `description` opcionales. El admin consulta los dos tags, la ascendencia y los árboles exactos, la corrida exitosa de cada workflow y los ZIP con sus digests. Revalida consentimiento y borrador antes de publicar en la misma transacción que el vínculo exacto al acuerdo. El registro del release no ejecuta un upgrade.
+
+`POST tickets/{id}/release-blocked` recibe `agreement_id`, `reason` y `partial`. Conserva el bloqueo si pudo haber efectos en GitHub. Solo libera un reclamo no publicado al verificar ambos `develop` en sus SHAs reservados y ambos tags ausentes. Un release ya publicado conserva su prueba al bloquear una programación vencida y puede reutilizarse después de un nuevo acuerdo.
+
 `POST tickets/{id}/diagnostic` con `{lease_token,query:string}` consulta el ERP correspondiente a ese ticket, sin pasar por un modelo de API. Devuelve `{data:<payload remoto>,queried_at}`. Es el lector existente `admin-sync/sistema-query` (stock, ventas, facturas, clientes), no SQL arbitrario. Si no hay acceso/configuración/datos válidos devuelve 502, nunca un resultado vacío presentado como éxito. Las claves permanecen en el servidor. No acepta client_id, owner ni URL del consumidor.
 
 ## Respuesta idempotente

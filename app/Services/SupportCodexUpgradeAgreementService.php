@@ -70,8 +70,13 @@ class SupportCodexUpgradeAgreementService
     {
         $prior = SupportCodexUpgradeAgreement::where('mission_fix_evidence_id', $evidence->id)
             ->where('support_codex_operation_id', '!=', $operation->id);
-        if ((clone $prior)->whereNotNull('accepted_at')->exists()) {
-            $this->fail(409, 'proposal_already_accepted', 'Ya se acordó una actualización para esta corrección.');
+        foreach ((clone $prior)->whereNotNull('accepted_at')->get() as $accepted) {
+            if (! $this->can_replace_accepted($accepted)) {
+                $this->fail(409, 'proposal_already_accepted', 'Ya se acordó una actualización para esta corrección.');
+            }
+            if ($proposal['starts_at_utc'] < $accepted->ends_at_utc) {
+                $this->fail(409, 'upgrade_window_changed', 'La nueva propuesta debe empezar después de la ventana bloqueada.');
+            }
         }
         if ($prior->where('starts_at_utc', $proposal['starts_at_utc'])->where('ends_at_utc', $proposal['ends_at_utc'])
             ->whereHas('operation', function ($query) { $query->whereIn('status', self::SENT); })->exists()) {
@@ -103,12 +108,40 @@ class SupportCodexUpgradeAgreementService
         if ($evidence === null) {
             return false;
         }
-        $previous = SupportCodexUpgradeAgreement::where('mission_fix_evidence_id', $evidence->id)
-            ->orderByRaw('accepted_at IS NULL')->latest('id')->with('operation')->first();
+        $proposals = SupportCodexUpgradeAgreement::where('mission_fix_evidence_id', $evidence->id);
+        foreach ((clone $proposals)->whereNotNull('accepted_at')->get() as $accepted) {
+            if (! $this->can_replace_accepted($accepted)) {
+                return false;
+            }
+        }
+        $previous = $proposals->latest('id')->with('operation')->first();
 
-        return $previous === null || ($previous->accepted_at === null && $previous->operation !== null
+        return $previous === null || $previous->accepted_at !== null || ($previous->operation !== null
             && in_array($previous->operation->status, array_merge(self::SENT, ['cancelled', 'reconciled_not_sent']), true)
             && Carbon::parse($previous->starts_at_utc, 'UTC')->lessThanOrEqualTo(now()));
+    }
+
+    private function can_replace_accepted(SupportCodexUpgradeAgreement $agreement): bool
+    {
+        $scheduled = DB::table('support_codex_scheduled_upgrades')->where('agreement_id', $agreement->id)->first();
+        if ($scheduled !== null) {
+            return $scheduled->status === 'blocked' && $scheduled->live_touched_at === null;
+        }
+
+        return Carbon::parse($agreement->starts_at_utc, 'UTC')->lessThanOrEqualTo(now())
+            && ! DB::table('support_codex_release_claims')->where('agreement_id', $agreement->id)->whereNotNull('active_key')->exists();
+    }
+
+    public function reoffer_after(SupportTicket $ticket, SupportCodexCase $case): ?Carbon
+    {
+        $evidence = SupportCodexMissionFixEvidence::current_for($ticket, $case);
+        if ($evidence === null) {
+            return null;
+        }
+        $previous = SupportCodexUpgradeAgreement::where('mission_fix_evidence_id', $evidence->id)
+            ->whereNotNull('accepted_at')->latest('id')->first();
+
+        return $previous !== null && $this->can_replace_accepted($previous) ? Carbon::parse($previous->ends_at_utc, 'UTC') : null;
     }
 
     public function context(?SupportCodexMissionFixEvidence $evidence): ?array
@@ -117,7 +150,7 @@ class SupportCodexUpgradeAgreementService
             return null;
         }
         $proposal = SupportCodexUpgradeAgreement::where('mission_fix_evidence_id', $evidence->id)
-            ->orderByRaw('accepted_at IS NULL')->latest('id')->with('operation')->first();
+            ->latest('id')->with('operation')->first();
 
         return $proposal === null || $proposal->operation === null ? null : $this->present($proposal);
     }

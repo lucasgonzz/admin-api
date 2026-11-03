@@ -12,9 +12,12 @@ use App\Models\ClientScheduleDay;
 use App\Models\ClientScheduleRange;
 use App\Models\SupportCodexCase;
 use App\Models\SupportCodexOperation;
+use App\Models\SupportCodexUpgradeAgreement;
 use App\Models\SupportMessage;
 use App\Models\SupportMessageAttachment;
 use App\Models\SupportTicket;
+use App\Models\Version;
+use App\Services\ReleaseArtifactService;
 use App\Services\SupportAiSuggestionService;
 use App\Services\SupportCodexService;
 use App\Services\SupportCodexSettings;
@@ -397,6 +400,147 @@ class SoporteAutomaticoEnCodexTest extends TestCase
             'mission_hash' => $evidence['mission_hash'], 'minimum_minutes' => 180,
             'starts_at' => '2026-10-26T13:00:00-03:00', 'ends_at' => '2026-10-26T16:00:00-03:00',
         ]];
+    }
+
+    public function test_release_de_soporte_publica_solo_el_borrador_reclamado_con_los_dos_artefactos(): void
+    {
+        [$ticket, $agreement, $acceptance_lease] = $this->aceptar_propuesta_para_release();
+        $draft = Version::create(['version' => '99.998.1', 'title' => 'Arreglo', 'status' => 'draft']);
+        $base = $this->base . '/tickets/' . $ticket->id;
+        $github = \Mockery::mock(ReleaseArtifactService::class);
+        $github->shouldReceive('support_fix_is_ancestor')->andReturn(true);
+        $github->shouldReceive('verify_support_release')->with('empresa-api', \Mockery::any(), \Mockery::any(), \Mockery::any(), \Mockery::any(), \Mockery::any())->andReturn(true);
+        $github->shouldReceive('verify_support_release')->with('empresa-spa', \Mockery::any(), \Mockery::any(), \Mockery::any(), \Mockery::any(), \Mockery::any())->andReturn(false, true);
+        $this->app->instance(ReleaseArtifactService::class, $github);
+
+        $this->getJson($this->base . '/release-work')->assertUnauthorized();
+        $this->getJson($this->base . '/release-work', $this->headers)->assertOk()
+            ->assertJsonPath('work.0.agreement_id', $agreement->id)
+            ->assertJsonPath('work.0.release', null);
+        $claim = $this->release_claim_payload($agreement, $draft);
+        $this->postJson($base . '/release-claim', $claim, $this->headers)->assertOk()->assertJsonPath('release.status', 'claimed');
+        $this->postJson($base . '/release-claim', $claim, $this->headers)->assertOk()->assertJsonPath('release.status', 'claimed');
+        $this->postJson($base . '/release-claim', array_replace($claim, ['draft_version' => '99.998.2']), $this->headers)->assertStatus(409);
+
+        $proof = $this->release_proof_payload($agreement, $draft, $claim['develop']);
+        $this->postJson($base . '/release-published', $proof, $this->headers)->assertStatus(422);
+        $this->assertSame('draft', $draft->fresh()->status);
+        $this->postJson($base . '/release-published', $proof, $this->headers)->assertOk()
+            ->assertJsonPath('release.status', 'published')->assertJsonPath('release.version_id', $draft->id);
+        $this->postJson($base . '/release-published', $proof, $this->headers)->assertOk()->assertJsonPath('release.status', 'published');
+        $this->postJson($base . '/release-published', array_replace($proof, ['title' => 'Otra evidencia']), $this->headers)->assertStatus(409);
+        $this->assertSame('published', $draft->fresh()->status);
+        $this->assertDatabaseHas('support_codex_release_claims', ['agreement_id' => $agreement->id, 'version_id' => $draft->id, 'active_key' => null]);
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->assertCount(2, $this->deliveries->bodies);
+
+        DB::table('support_codex_scheduled_upgrades')->insert([
+            'agreement_id' => $agreement->id, 'support_ticket_id' => $ticket->id, 'client_id' => $ticket->client_id,
+            'client_api_id' => 1, 'from_version_id' => 1, 'version_id' => $draft->id, 'version' => $draft->version,
+            'artifacts' => json_encode($proof['artifacts']), 'status' => 'blocked',
+            'starts_at_utc' => $agreement->starts_at_utc, 'ends_at_utc' => $agreement->ends_at_utc,
+        ]);
+        $this->getJson($base . '/upgrade-window?minimum_minutes=180&expected_message_id=' . $agreement->confirmation_message_id,
+            $this->headers + ['X-Support-Lease-Token' => $acceptance_lease])->assertOk()
+            ->assertJsonPath('window.starts_at', '2026-10-26T21:00:00-03:00');
+        $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->firstOrFail();
+        $evidence = $this->mission_evidence($case);
+        $offer = $this->postJson($base . '/upgrade-proposal', [
+            'lease_token' => $acceptance_lease, 'expected_message_id' => $agreement->confirmation_message_id,
+            'operation_id' => 'propuesta-nueva-' . $ticket->id, 'mission_thread_id' => $evidence['mission_thread_id'],
+            'mission_hash' => $evidence['mission_hash'], 'minimum_minutes' => 180,
+            'starts_at' => '2026-10-26T21:00:00-03:00', 'ends_at' => '2026-10-27T08:00:00-03:00',
+        ], $this->headers)->assertOk()->assertJsonPath('operation.status', 'sent')->json('operation');
+        $inbound = $this->inbound($ticket, 'Sí, confirmo');
+        $inbound->update(['reply_to_message_id' => $offer['message_id'], 'whatsapp_message_id' => 'wamid.reoferta-' . $ticket->id]);
+        $lease = $this->claim($ticket);
+        $this->postJson($base . '/upgrade-agreement', ['expected_message_id' => $inbound->id, 'lease_token' => $lease['lease_token'],
+            'proposal_operation_id' => $offer['id']], $this->headers)->assertOk();
+        $this->getJson($this->base . '/release-work', $this->headers)->assertOk()->assertJsonPath('work.0.release.status', 'reusable');
+        $new_agreement = SupportCodexUpgradeAgreement::where('support_ticket_id', $ticket->id)->latest('id')->firstOrFail();
+        $this->postJson($base . '/release-claim', $this->release_claim_payload($new_agreement, $draft), $this->headers)->assertOk()
+            ->assertJsonPath('release.status', 'published')->assertJsonPath('release.version_id', $draft->id);
+    }
+
+    public function test_release_de_soporte_corta_si_cambia_el_acuerdo_o_el_borrador(): void
+    {
+        [$ticket, $agreement] = $this->aceptar_propuesta_para_release();
+        $draft = Version::create(['version' => '99.998.3', 'title' => 'Arreglo', 'status' => 'draft']);
+        $base = $this->base . '/tickets/' . $ticket->id;
+        $github = \Mockery::mock(ReleaseArtifactService::class);
+        $github->shouldReceive('support_fix_is_ancestor')->andReturn(true);
+        $github->shouldReceive('verify_support_release')->andReturn(true);
+        $this->app->instance(ReleaseArtifactService::class, $github);
+        $claim = $this->release_claim_payload($agreement, $draft);
+        $this->postJson($base . '/release-claim', $claim, $this->headers)->assertOk();
+
+        Version::create(['version' => '99.998.4', 'title' => 'Otro borrador', 'status' => 'draft']);
+        $proof = $this->release_proof_payload($agreement, $draft, $claim['develop']);
+        $this->postJson($base . '/release-published', $proof, $this->headers)->assertStatus(409);
+        $this->inbound($ticket, 'No actualicen hoy.');
+        $response = $this->postJson($base . '/release-published', $proof, $this->headers)->assertStatus(409);
+        $this->assertStringStartsWith('release_agreement_changed:', $response->json('message'));
+        $this->assertSame('draft', $draft->fresh()->status);
+        $this->getJson($this->base . '/release-work', $this->headers)->assertJsonCount(0, 'work');
+    }
+
+    public function test_release_de_soporte_reserva_codigo_de_borrador_vacio_y_preserva_candado_ambiguo(): void
+    {
+        [$ticket, $agreement] = $this->aceptar_propuesta_para_release();
+        Version::where('status', 'draft')->update(['status' => 'archived']);
+        $base = $this->base . '/tickets/' . $ticket->id;
+        $github = \Mockery::mock(ReleaseArtifactService::class);
+        $github->shouldReceive('support_fix_is_ancestor')->andReturn(true);
+        $github->shouldReceive('support_release_untouched')->twice()->andReturn(true);
+        $this->app->instance(ReleaseArtifactService::class, $github);
+        $claim = ['agreement_id' => $agreement->id, 'draft_version_id' => null, 'draft_version' => '99.998.5',
+            'develop' => ['empresa-api' => str_repeat('e', 40), 'empresa-spa' => str_repeat('f', 40)]];
+        $claimed = $this->postJson($base . '/release-claim', $claim, $this->headers)->assertOk()->assertJsonPath('release.version', '99.998.5');
+        $draft = Version::findOrFail($claimed->json('release.version_id'));
+        $this->postJson($base . '/release-claim', $claim, $this->headers)->assertOk()->assertJsonPath('release.version_id', $draft->id);
+        $this->assertSame('99.998.5', $draft->version);
+
+        $failure = ['agreement_id' => $agreement->id, 'reason' => 'workflow_failed', 'partial' => true];
+        $this->postJson($base . '/release-blocked', $failure, $this->headers)->assertOk()->assertJsonPath('active', true);
+        $this->getJson($this->base . '/release-work', $this->headers)->assertOk()->assertJsonCount(0, 'work')
+            ->assertJsonPath('blocked_release.version', '99.998.5');
+        $failure['partial'] = false;
+        $this->postJson($base . '/release-blocked', $failure, $this->headers)->assertOk()->assertJsonPath('active', false);
+        $this->assertSame('draft', $draft->fresh()->status);
+    }
+
+    private function aceptar_propuesta_para_release(): array
+    {
+        [$ticket, , $data] = $this->preparar_propuesta_upgrade();
+        $base = $this->base . '/tickets/' . $ticket->id;
+        $offer = $this->postJson($base . '/upgrade-proposal', $data, $this->headers)->assertOk()->json('operation');
+        $inbound = $this->inbound($ticket, 'Sí, confirmo');
+        $inbound->update(['reply_to_message_id' => $offer['message_id'], 'whatsapp_message_id' => 'wamid.acuerdo-' . $ticket->id]);
+        $lease = $this->claim($ticket);
+        $this->postJson($base . '/upgrade-agreement', [
+            'expected_message_id' => $inbound->id, 'lease_token' => $lease['lease_token'], 'proposal_operation_id' => $offer['id'],
+        ], $this->headers)->assertOk();
+
+        return [$ticket, SupportCodexUpgradeAgreement::where('support_ticket_id', $ticket->id)->firstOrFail(), $lease['lease_token']];
+    }
+
+    private function release_claim_payload(SupportCodexUpgradeAgreement $agreement, Version $version): array
+    {
+        return ['agreement_id' => $agreement->id, 'draft_version_id' => $version->id, 'draft_version' => $version->version,
+            'develop' => ['empresa-api' => str_repeat('e', 40), 'empresa-spa' => str_repeat('f', 40)]];
+    }
+
+    private function release_proof_payload(SupportCodexUpgradeAgreement $agreement, Version $version, array $develop): array
+    {
+        return [
+            'agreement_id' => $agreement->id, 'version_id' => $version->id, 'version' => $version->version, 'develop' => $develop,
+            'trigger_commits' => ['empresa-api' => str_repeat('1', 40), 'empresa-spa' => str_repeat('2', 40)],
+            'tag_commits' => ['empresa-api' => str_repeat('3', 40), 'empresa-spa' => str_repeat('4', 40)],
+            'artifacts' => [
+                'empresa-api' => ['id' => 1, 'sha256' => str_repeat('a', 64), 'size' => 1024, 'name' => 'empresa-api-v' . $version->version . '.zip'],
+                'empresa-spa' => ['id' => 2, 'sha256' => str_repeat('b', 64), 'size' => 2048, 'name' => 'empresa-spa-v' . $version->version . '-dist.zip'],
+            ],
+        ];
     }
 
     public function test_mision_pendiente_y_necesidad_humana_se_serializan_por_separado(): void
