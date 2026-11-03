@@ -89,6 +89,13 @@ class EscenaService
     /** Tolerancia para horas que vienen del reloj de otro sistema (un minuto adelantado no es el futuro). */
     const TOLERANCIA_RELOJ_SEG = 60;
 
+    /**
+     * Madrugada (hora Argentina, [00:00, 06:00)): un negocio SIN horario cargado se presume cerrado (regla de
+     * Lucas del 2/11/2026 para las actualizaciones de madrugada). Fuera de esa franja queda `sin_horario`.
+     */
+    const MADRUGADA_DESDE = '00:00';
+    const MADRUGADA_HASTA = '06:00';
+
     /** Ventana de los informes de la mañana del asistente (hora Argentina). */
     const INFORMES_DESDE = '08:30';
     const INFORMES_HASTA = '08:45';
@@ -477,6 +484,10 @@ class EscenaService
      * `negocios`: los clientes activos ordenados por nombre, con su estado de horario, si están activos y en
      * qué estación del mostrador están.
      *
+     * `estado` sale de {@see ClientScheduleResolver::estado_en()}: `abierto` / `cerrado`, y `sin_configurar` se
+     * publica como `sin_horario`, salvo de madrugada (00:00 a 06:00, hora Argentina), cuando un negocio sin
+     * horario se presume `cerrado`.
+     *
      * @param array<int, Client>   $clientes Clientes activos por id.
      * @param array<string, mixed> $fuentes  Lo leído en leer_fuentes().
      *
@@ -488,9 +499,15 @@ class EscenaService
         $activo_desde = $this->ahora_ts - self::VENTANA_ACTIVO_MIN * 60;
 
         $negocios = [];
+        $hora      = $this->ahora->copy()->setTimezone(self::ZONA)->format('H:i');
+        $madrugada = $hora >= self::MADRUGADA_DESDE && $hora < self::MADRUGADA_HASTA;
+
         foreach ($clientes as $id => $client) {
             $horario = $this->horarios->estado_en($client, $this->ahora, self::ZONA);
-            $estado  = $horario === ClientScheduleResolver::ESTADO_SIN_CONFIGURAR ? 'sin_horario' : $horario;
+            $estado  = $horario;
+            if ($horario === ClientScheduleResolver::ESTADO_SIN_CONFIGURAR) {
+                $estado = $madrugada ? ClientScheduleResolver::ESTADO_CERRADO : 'sin_horario';
+            }
 
             $ultima   = isset($fuentes['ultima'][$id]) ? $fuentes['ultima'][$id] : null;
             $estacion = isset($estaciones[$id]) ? $estaciones[$id] : null;

@@ -16,6 +16,7 @@ use App\Models\SupportTicket;
 use App\Services\Local\EscenaService;
 use App\Services\Local\OficinaIngestService;
 use App\Services\SupportCodexHealthService;
+use Carbon\Carbon;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -58,6 +59,33 @@ class EscenaDelLocalTest extends TestCase
         LocalOficinaSlot::query()->delete();
         AdminSetting::where('key', OficinaIngestService::PULSO_KEY)->delete();
         AdminSetting::where('key', SupportCodexHealthService::KEY)->delete();
+    }
+
+    /**
+     * Suelta el reloj congelado de los tests que lo congelan.
+     *
+     * @return void
+     */
+    protected function tearDown(): void
+    {
+        Carbon::setTestNow();
+
+        parent::tearDown();
+    }
+
+    /**
+     * Congela el reloj (AppTime::now() usa Carbon::now(), que respeta setTestNow) en una hora de hoy, en hora
+     * Argentina.
+     *
+     * @param string $hora 'H:i'.
+     *
+     * @return void
+     */
+    private function congelar_a_las(string $hora): void
+    {
+        Carbon::setTestNow(null);
+        $momento = AppTime::now()->setTimeFromTimeString($hora . ':00');
+        Carbon::setTestNow($momento);
     }
 
     /* ------------------------------------------------------------------------------------------
@@ -400,6 +428,9 @@ class EscenaDelLocalTest extends TestCase
      */
     public function test_el_estado_de_cada_negocio_sale_de_su_horario(): void
     {
+        // A las 15:00: de madrugada un negocio sin horario sale cerrado (ver el test de abajo).
+        $this->congelar_a_las('15:00');
+
         $admin    = $this->crear_admin();
         $abierto  = $this->crear_cliente('Zeta abierto');
         $cerrado  = $this->crear_cliente('Alfa cerrado');
@@ -427,6 +458,29 @@ class EscenaDelLocalTest extends TestCase
         $this->assertFalse($sin_nada['activo_reciente']);
         $this->assertNull($sin_nada['ultima_actividad_at']);
         $this->assertNull($sin_nada['estacion']);
+    }
+
+    /**
+     * 🔴 De madrugada (00:00 inclusive a 06:00 exclusive, hora Argentina) un negocio SIN horario cargado se
+     * presume cerrado (regla de Lucas del 2/11/2026); a las 06:00 y de día vuelve a `sin_horario`. Un negocio con
+     * horario no cambia por esto.
+     *
+     * @return void
+     */
+    public function test_sin_horario_de_madrugada_cuenta_como_cerrado(): void
+    {
+        $admin   = $this->crear_admin();
+        $sin     = $this->crear_cliente('Sin horario de madrugada');
+        $abierto = $this->crear_cliente('Abierto las 24 horas');
+        $this->abierto_todo_el_dia($abierto);
+
+        foreach (['03:00' => 'cerrado', '00:00' => 'cerrado', '05:59' => 'cerrado', '06:00' => 'sin_horario', '15:00' => 'sin_horario'] as $hora => $esperado) {
+            $this->congelar_a_las($hora);
+            $escena = $this->escena($admin);
+
+            $this->assertSame($esperado, $this->negocio_de($escena, (int) $sin->id)['estado'], 'A las ' . $hora . ' un negocio sin horario sale ' . $esperado . '.');
+            $this->assertSame('abierto', $this->negocio_de($escena, (int) $abierto->id)['estado'], 'A las ' . $hora . ' el que tiene horario sigue su horario.');
+        }
     }
 
     /**
