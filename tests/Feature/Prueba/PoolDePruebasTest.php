@@ -3,9 +3,11 @@
 namespace Tests\Feature\Prueba;
 
 use App\Jobs\CrearInstanciaDePoolJob;
+use App\Models\AdminSetting;
 use App\Models\TrialInstance;
 use App\Models\UserIdBlock;
 use App\Services\Prueba\PruebaPoolService;
+use App\Services\Prueba\PruebaSettings;
 use App\Services\UserIdBlockAllocatorService;
 use Illuminate\Support\Facades\Queue;
 
@@ -119,6 +121,63 @@ class PoolDePruebasTest extends BaseDePruebaGratuita
         $this->assertStringContainsString('siteUser', (string) $instancia->error);
         $this->assertSame([], $this->vps->archivos);
         $this->assertSame(0, PruebaPoolService::libres_o_creando());
+    }
+
+    public function test_mantener_pool_no_encola_con_el_dns_apagado_ni_con_una_fallida_sin_asignar_ni_con_minimo_0(): void
+    {
+        /* Interruptor apagado (el default en producción): avisa y no fabrica filas ni quema bloques de user_id. */
+        config(['services.prueba.dns_write_enabled' => false]);
+        $bloques_antes = UserIdBlock::count();
+        $this->artisan('pruebas:mantener-pool')->assertExitCode(0);
+        $this->assertSame(0, TrialInstance::count());
+        $this->assertSame($bloques_antes, UserIdBlock::count());
+        Queue::assertNothingPushed();
+
+        /* Con el DNS prendido pero una fallida sin asignar: tampoco (se destraba con «Reintentar» o borrándola). */
+        config(['services.prueba.dns_write_enabled' => true]);
+        $fallida = app(PruebaPoolService::class)->crear_fila('4.3.99', '1.9.99');
+        $fallida->update(['estado' => TrialInstance::ESTADO_FALLIDA, 'etapa' => 'crear', 'error' => 'clpctl: algo']);
+        $this->artisan('pruebas:mantener-pool')->assertExitCode(0);
+        $this->assertSame(1, TrialInstance::count());
+        Queue::assertNothingPushed();
+
+        /* Mínimo 0, que es el default hasta que Lucas prenda el pool desde admin_settings: no hay nada que armar. */
+        $fallida->delete();
+        AdminSetting::set(PruebaSettings::KEY_POOL_MINIMO, '0');
+        $this->assertSame(0, PruebaSettings::DEFAULT_POOL_MINIMO);
+        $this->artisan('pruebas:mantener-pool')->assertExitCode(0);
+        $this->assertSame(0, TrialInstance::count());
+        Queue::assertNothingPushed();
+    }
+
+    public function test_si_falla_en_dns_se_libera_el_bloque_de_user_id_y_el_reintento_reserva_otro(): void
+    {
+        $instancia = app(PruebaPoolService::class)->crear_fila('4.3.99', '1.9.99');
+        $user_id   = (int) $instancia->user_id;
+        $this->assertNotNull(UserIdBlock::where('block_start', $user_id)->first());
+
+        /* La zona ya tiene `prueba-01` apuntando al VPS y esta instancia no lo escribió: frena en `dns`, antes de tocar el VPS. */
+        $this->hostinger->responder('/api/dns/v1/zones/', $this->zona(['prueba-01']), 'GET');
+        (new CrearInstanciaDePoolJob($instancia->id))->handle();
+
+        $instancia->refresh();
+        $this->assertSame(TrialInstance::ESTADO_FALLIDA, $instancia->estado);
+        $this->assertSame('dns', $instancia->etapa);
+        $this->assertNull($instancia->user_id, 'El bloque se devolvió.');
+        $this->assertNull(UserIdBlock::where('block_start', $user_id)->first());
+        $this->assertSame([], $this->vps->scripts_corridos());
+
+        /* El reintento reserva un bloque de nuevo antes de arrancar, y esta vez pasa el DNS (falla recién en `crear`). */
+        $this->hostinger->limpiar();
+        $this->zona_antes_y_despues(['prueba-01', 'api-prueba-01', 'tienda-prueba-01', 'api-tienda-prueba-01']);
+        $this->vps->fallar('pool-crear.sh', 'fallo simulado');
+        (new CrearInstanciaDePoolJob($instancia->id))->handle();
+
+        $instancia->refresh();
+        $this->assertSame('crear', $instancia->etapa);
+        $this->assertNotNull($instancia->user_id);
+        $this->assertNotNull(UserIdBlock::where('block_start', (int) $instancia->user_id)->where('source', PruebaPoolService::SOURCE_BLOQUE)->first());
+        $this->assertSame(['api-prueba-01', 'prueba-01', 'tienda-prueba-01', 'api-tienda-prueba-01'], $instancia->dns_labels_escritos());
     }
 
     public function test_el_proximo_nombre_saltea_los_que_existen_y_reusa_los_borrados(): void

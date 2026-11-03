@@ -3,6 +3,7 @@
 namespace App\Jobs;
 
 use App\Models\TrialInstance;
+use App\Services\Prueba\PruebaPoolService;
 use App\Services\Prueba\PruebaDnsService;
 use App\Services\Prueba\PruebaEnvService;
 use App\Services\Prueba\PruebaVpsService;
@@ -71,9 +72,12 @@ class CrearInstanciaDePoolJob implements ShouldQueue
         $instancia->error  = null;
         $instancia->save();
 
+        /* Un reintento después de un fallo en `dns` vuelve sin bloque (se liberó): se reserva uno de nuevo. */
+        app(PruebaPoolService::class)->asegurar_bloque($instancia);
+
         try {
             $this->marcar($instancia, 'dns');
-            app(PruebaDnsService::class)->crear_registros($instancia->nombre);
+            app(PruebaDnsService::class)->crear_registros($instancia->nombre, $instancia);
 
             $this->marcar($instancia, 'crear');
             $resultado = app(PruebaVpsService::class)->pool_crear(
@@ -99,6 +103,11 @@ class CrearInstanciaDePoolJob implements ShouldQueue
             $instancia->estado = TrialInstance::ESTADO_FALLIDA;
             $instancia->error  = mb_substr($e->getMessage(), 0, 4000);
             $instancia->save();
+
+            if ((string) $instancia->etapa === 'dns') {
+                /* Falló antes de tocar el VPS: el bloque de user_id vuelve a estar disponible (chequeo C1). */
+                app(PruebaPoolService::class)->liberar_bloque($instancia);
+            }
 
             Log::error('CrearInstanciaDePoolJob: falló.', ['instancia' => $instancia->nombre, 'etapa' => $instancia->etapa, 'error' => $e->getMessage()]);
         }

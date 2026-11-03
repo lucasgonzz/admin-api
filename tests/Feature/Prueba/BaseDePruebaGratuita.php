@@ -6,6 +6,7 @@ use App\Models\Admin;
 use App\Models\AdminSetting;
 use App\Models\ClientSshCredential;
 use App\Models\EnvTemplate;
+use App\Models\Lead;
 use App\Models\TrialInstance;
 use App\Models\Version;
 use App\Services\HostingerApiClient;
@@ -247,6 +248,14 @@ abstract class BaseDePruebaGratuita extends TestCase
     protected function postear_alta(array $cambios = [])
     {
         return $this->postJson('/api/landing/prueba/alta', $this->cuerpo($cambios), ['User-Agent' => 'Mozilla/5.0 (prueba)']);
+    }
+
+    /** El lead de un alta a partir del uuid de seguimiento que devolvió el POST (no es el uuid del lead). */
+    protected function lead_del_alta(string $uuid): Lead
+    {
+        $instancia = TrialInstance::where('seguimiento_uuid', $uuid)->orderByDesc('id')->firstOrFail();
+
+        return Lead::findOrFail($instancia->lead_id);
     }
 
     /** La zona DNS del fake: `[['name', 'type', 'content']]`. */

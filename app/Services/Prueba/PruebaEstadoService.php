@@ -39,13 +39,15 @@ class PruebaEstadoService
      */
     public function estado(string $uuid): ?array
     {
-        $lead = Lead::where('uuid', $uuid)->first();
-        if ($lead === null) {
+        /* El uuid PROPIO de la prueba (`trial_instances.seguimiento_uuid`), no el del lead: el del lead viaja en los
+           links públicos de la demo y no abre el seguimiento de la prueba. */
+        $instancia = TrialInstance::where('seguimiento_uuid', $uuid)->orderByDesc('id')->first();
+        if ($instancia === null || ! $instancia->lead_id) {
             return null;
         }
 
-        $instancia = TrialInstance::where('lead_id', $lead->id)->orderByDesc('id')->first();
-        if ($instancia === null) {
+        $lead = Lead::find($instancia->lead_id);
+        if ($lead === null) {
             return null;
         }
 

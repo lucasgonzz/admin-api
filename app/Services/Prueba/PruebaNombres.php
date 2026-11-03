@@ -29,6 +29,13 @@ class PruebaNombres
      */
     const RESERVADOS = ['www', 'api', 'admin', 'api-admin', 'demo', 'demo2', 'demo3', 'tienda', 'ia', 'mail', 'ftp', 'cpanel', 'webmail', 'ns1', 'ns2'];
 
+    /**
+     * Los prefijos de host, del más largo al más corto: un slug NO puede empezar con ninguno, porque
+     * `tienda-lola` sería la tienda de la prueba `lola` y `api-ferretotal` la API de un cliente real
+     * (chequeo independiente B1, 3/11/2026). `sin_prefijos_de_host()` los recorta del nombre de la empresa.
+     */
+    const PREFIJOS_DE_HOST = ['api-tienda-', 'tienda-', 'api-'];
+
     /** Prefijos de los cuatro sitios, en el orden del JSON de los scripts. */
     const PREFIJOS = [
         'erp_api'    => 'api-',
@@ -47,7 +54,51 @@ class PruebaNombres
         return is_string($slug)
             && preg_match(self::REGEX_SLUG, $slug) === 1
             && ! in_array($slug, self::RESERVADOS, true)
-            && ! self::es_nombre_valido($slug);
+            && ! self::es_nombre_valido($slug)
+            && ! self::empieza_con_prefijo_de_host($slug);
+    }
+
+    /** ¿Es la palabra pelada de un prefijo (`api`, `tienda`, `api-tienda`)? Con cualquier sufijo vuelve a ser un prefijo. */
+    public static function es_palabra_de_prefijo(string $slug): bool
+    {
+        foreach (self::PREFIJOS_DE_HOST as $prefijo) {
+            if ($slug === rtrim($prefijo, '-')) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** ¿El slug empieza con `api-`, `tienda-` o `api-tienda-`? Entonces pisa el host de otro. */
+    public static function empieza_con_prefijo_de_host(string $slug): bool
+    {
+        foreach (self::PREFIJOS_DE_HOST as $prefijo) {
+            if (strpos($slug, $prefijo) === 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Recorta del principio todos los prefijos de host, las veces que haga falta: «Tienda Lola» → `lola`,
+     * «Tienda API Pepe» → `pepe`, «Tienda API» → `` (vacío: el llamador rechaza).
+     */
+    public static function sin_prefijos_de_host(string $slug): string
+    {
+        $slug = ltrim($slug, '-');
+        while ($slug !== '' && self::empieza_con_prefijo_de_host($slug)) {
+            foreach (self::PREFIJOS_DE_HOST as $prefijo) {
+                if (strpos($slug, $prefijo) === 0) {
+                    $slug = ltrim(substr($slug, strlen($prefijo)), '-');
+                    break;
+                }
+            }
+        }
+
+        return $slug;
     }
 
     public static function es_nombre_valido($nombre): bool

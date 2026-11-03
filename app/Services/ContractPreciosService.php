@@ -9,28 +9,199 @@ use Illuminate\Validation\ValidationException;
 class ContractPreciosService
 {
     /**
-     * Planes de Gestión por ventas mensuales (política del 26/10/2026). El abono de cada plan lo
-     * precarga la SPA y es editable por contrato; acá viven el nombre y el límite para el PDF.
-     * `limite` null = sin tope (a medida: más de 7.000 ventas por mes, importe libre).
+     * Planes de Gestión por OPERACIONES mensuales (ventas + compras + gastos), política del
+     * 3/11/2026 (programa «Prueba gratuita de 7 días», misión prueba-precios-landing). Copian los
+     * cortes de Contagram un 5 % más baratos, redondeados a la centena para abajo; el abono es el
+     * precio final (no se le suma IVA). Son los mismos que publica comerciocity.com, donde se muestran
+     * con el 50 % de descuento de los primeros tres meses (ver DESCUENTO_INICIAL).
+     *
+     * El abono de cada plan lo precarga la SPA y es editable por contrato; acá viven el nombre, el
+     * rango (`desde`/`limite`), los usuarios incluidos y el precio de la operación excedente, que es
+     * lo que usa `cuota_mensual()`. `limite` null = sin tope (a medida: más de 3.000 operaciones por
+     * mes, importe libre).
+     *
+     * 🔴 Gestión ya no tiene licencia (pago único): la precarga de la SPA la deja en 0. Tienda y
+     * Agentes conservan la suya (USD 800 cada una, la mitad si contrata durante la prueba).
      */
     const PLANES_GESTION = [
+        'inicial'    => ['nombre' => 'Inicial',    'desde' => 0,   'limite' => 100,  'abono' => 55900,  'usuarios' => 1, 'excedente' => 760],
+        'intermedio' => ['nombre' => 'Intermedio', 'desde' => 101, 'limite' => 250,  'abono' => 85400,  'usuarios' => 2, 'excedente' => 570],
+        'plus'       => ['nombre' => 'Plus',       'desde' => 251, 'limite' => 500,  'abono' => 199400, 'usuarios' => 2, 'excedente' => 190],
+        'empresa'    => ['nombre' => 'Empresa',    'desde' => 501, 'limite' => 3000, 'abono' => 263000, 'usuarios' => 3, 'excedente' => 76],
+        'a_medida'   => ['nombre' => 'A medida',   'desde' => 3001, 'limite' => null, 'abono' => null,  'usuarios' => 3, 'excedente' => null],
+    ];
+
+    /**
+     * Los planes de la política anterior (26/10/2026, por VENTAS mensuales), que siguen siendo
+     * válidos en los contratos que los eligieron: un contrato viejo tiene que poder regenerar el
+     * MISMO PDF que firmó, con «ventas por mes» y no «operaciones». `inicial` existe en las dos
+     * políticas con otro rango: el histórico se reconoce por su abono pactado (ver `plan_gestion()`).
+     */
+    const PLANES_HISTORICOS = [
         'inicial'  => ['nombre' => 'Inicial',  'limite' => 300,  'abono' => 34200],
         'estandar' => ['nombre' => 'Estándar', 'limite' => 1500, 'abono' => 71500],
         'pro'      => ['nombre' => 'Pro',      'limite' => 7000, 'abono' => 105600],
-        'a_medida' => ['nombre' => 'A medida', 'limite' => null, 'abono' => null],
     ];
 
-    /** Texto del plan para el PDF, o null si la clave no es un plan conocido. */
-    public static function plan_gestion($clave): ?array
+    /** Cada usuario adicional, por mes, en cualquier plan (Contagram $32.000 × 0,95 → $30.400). */
+    const USUARIO_EXTRA = 30400;
+
+    /** El descuento de bienvenida: 50 % del abono durante los primeros 3 meses (Lucas, 3/11/2026). */
+    const DESCUENTO_INICIAL = ['porcentaje' => 50, 'meses' => 3];
+
+    /**
+     * Texto del plan para el PDF, o null si la clave no es un plan conocido (vigente ni histórico).
+     *
+     * Con `$abono_pactado` (el importe de Gestión guardado en `contract_precios_sistemas`), un
+     * `inicial` de $34.200 se lee como el histórico de 300 ventas y no como el vigente de 100
+     * operaciones: el PDF de un contrato firmado antes del 3/11/2026 no cambia.
+     *
+     * @param mixed      $clave
+     * @param mixed|null $abono_pactado
+     *
+     * @return array|null
+     */
+    public static function plan_gestion($clave, $abono_pactado = null): ?array
     {
-        if (!is_string($clave) || !isset(self::PLANES_GESTION[$clave])) {
+        if (!is_string($clave)) {
             return null;
         }
-        $plan = self::PLANES_GESTION[$clave];
-        $limite = $plan['limite'] === null
-            ? 'más de '.number_format(self::PLANES_GESTION['pro']['limite'], 0, ',', '.').' ventas por mes'
-            : 'hasta '.number_format($plan['limite'], 0, ',', '.').' ventas por mes';
-        return ['clave' => $clave, 'nombre' => $plan['nombre'], 'limite' => $limite];
+        $historico = isset(self::PLANES_HISTORICOS[$clave]) ? self::PLANES_HISTORICOS[$clave] : null;
+        $vigente = isset(self::PLANES_GESTION[$clave]) ? self::PLANES_GESTION[$clave] : null;
+
+        if ($historico !== null && ($vigente === null || self::es_abono_historico($clave, $abono_pactado))) {
+            return [
+                'clave'  => $clave,
+                'nombre' => $historico['nombre'],
+                'limite' => 'hasta '.number_format($historico['limite'], 0, ',', '.').' ventas por mes',
+            ];
+        }
+        if ($vigente === null) {
+            return null;
+        }
+        if ($vigente['limite'] === null) {
+            $limite = 'más de '.number_format(self::PLANES_GESTION['empresa']['limite'], 0, ',', '.').' operaciones por mes';
+        } elseif ($vigente['desde'] === 0) {
+            $limite = 'hasta '.number_format($vigente['limite'], 0, ',', '.').' operaciones por mes';
+        } else {
+            $limite = 'de '.number_format($vigente['desde'], 0, ',', '.').' a '.number_format($vigente['limite'], 0, ',', '.').' operaciones por mes';
+        }
+        return ['clave' => $clave, 'nombre' => $vigente['nombre'], 'limite' => $limite];
+    }
+
+    /**
+     * ¿Este abono pactado es el del plan histórico con la misma clave? Solo decide para las claves
+     * que existen en las dos políticas (hoy, `inicial`).
+     *
+     * @param string $clave
+     * @param mixed  $abono_pactado
+     *
+     * @return bool
+     */
+    private static function es_abono_historico(string $clave, $abono_pactado): bool
+    {
+        if (!isset(self::PLANES_HISTORICOS[$clave]) || !isset(self::PLANES_GESTION[$clave])) {
+            return false;
+        }
+        $abono = ClientContratoService::monto_desde_texto($abono_pactado);
+        return $abono > 0 && abs($abono - (float) self::PLANES_HISTORICOS[$clave]['abono']) < 0.01;
+    }
+
+    /**
+     * ¿El plan guardado en un contrato es uno de la política anterior (por ventas)? Es el mismo
+     * criterio que usa `plan_gestion()` para el PDF: una clave que solo existe en los históricos
+     * (`estandar`, `pro`), o `inicial` con el abono pactado de $34.200. Lo usa la cuota sugerida por
+     * operaciones para no aplicarle excedentes sobre 100 operaciones a un contrato de 300 ventas.
+     *
+     * @param mixed $clave
+     * @param mixed $abono_pactado
+     *
+     * @return bool
+     */
+    public static function es_plan_historico($clave, $abono_pactado = null): bool
+    {
+        if (!is_string($clave) || !isset(self::PLANES_HISTORICOS[$clave])) {
+            return false;
+        }
+        return !isset(self::PLANES_GESTION[$clave]) || self::es_abono_historico($clave, $abono_pactado);
+    }
+
+    /**
+     * El plan vigente que corresponde a una cantidad de operaciones por mes.
+     *
+     * @param int $operaciones
+     *
+     * @return string Clave de PLANES_GESTION.
+     */
+    public static function plan_por_operaciones(int $operaciones): string
+    {
+        $operaciones = max(0, $operaciones);
+        foreach (self::PLANES_GESTION as $clave => $plan) {
+            if ($plan['limite'] !== null && $operaciones <= $plan['limite']) {
+                return $clave;
+            }
+        }
+        return 'a_medida';
+    }
+
+    /**
+     * La cuota mensual de Gestión de un plan para las operaciones del mes: el abono más los
+     * excedentes (cada operación por encima del límite, al precio del plan) más los usuarios extra.
+     *
+     * El sistema del cliente no frena nada al pasarse: el excedente se cobra con la mensualidad.
+     * Para `a_medida`, o un plan desconocido, no hay excedente (el importe es libre) y el abono es el
+     * pactado.
+     *
+     * @param string     $plan           Clave de PLANES_GESTION.
+     * @param int        $operaciones    Ventas + compras + gastos del mes.
+     * @param int        $usuarios_extra Usuarios por encima de los incluidos en el plan.
+     * @param float|null $abono_pactado  El abono del contrato si difiere del de lista (editable).
+     *
+     * @return array{plan: string, nombre: string, abono: float, operaciones: int, limite: int|null, excedentes: int, precio_excedente: float, importe_excedentes: float, usuarios_extra: int, precio_usuario_extra: float, importe_usuarios: float, total: float}
+     */
+    public static function cuota_mensual(string $plan, int $operaciones, int $usuarios_extra = 0, ?float $abono_pactado = null): array
+    {
+        $datos = isset(self::PLANES_GESTION[$plan]) ? self::PLANES_GESTION[$plan] : self::PLANES_GESTION['a_medida'];
+        $clave = isset(self::PLANES_GESTION[$plan]) ? $plan : 'a_medida';
+        $abono = $abono_pactado !== null ? (float) $abono_pactado : (float) ($datos['abono'] ?? 0);
+        $operaciones = max(0, $operaciones);
+        $usuarios_extra = max(0, $usuarios_extra);
+
+        $excedentes = 0;
+        $precio_excedente = (float) ($datos['excedente'] ?? 0);
+        if ($datos['limite'] !== null && $operaciones > $datos['limite']) {
+            $excedentes = $operaciones - $datos['limite'];
+        }
+        $importe_excedentes = round($excedentes * $precio_excedente, 2);
+        $importe_usuarios = round($usuarios_extra * self::USUARIO_EXTRA, 2);
+
+        return [
+            'plan'                 => $clave,
+            'nombre'               => $datos['nombre'],
+            'abono'                => round($abono, 2),
+            'operaciones'          => $operaciones,
+            'limite'               => $datos['limite'],
+            'excedentes'           => $excedentes,
+            'precio_excedente'     => $precio_excedente,
+            'importe_excedentes'   => $importe_excedentes,
+            'usuarios_extra'       => $usuarios_extra,
+            'precio_usuario_extra' => (float) self::USUARIO_EXTRA,
+            'importe_usuarios'     => $importe_usuarios,
+            'total'                => round($abono + $importe_excedentes + $importe_usuarios, 2),
+        ];
+    }
+
+    /**
+     * El abono con el descuento de bienvenida (los primeros 3 meses al 50 %): lo que muestra la
+     * landing.
+     *
+     * @param float $abono
+     *
+     * @return float
+     */
+    public static function abono_con_descuento_inicial(float $abono): float
+    {
+        return round($abono * (100 - self::DESCUENTO_INICIAL['porcentaje']) / 100, 2);
     }
 
     public static function reglas(): array
@@ -40,11 +211,13 @@ class ContractPreciosService
                 $fallar('El importe admite hasta dos decimales.');
             }
         };
+        /* Vigentes e históricos: guardar un contrato viejo sin tocarle el plan no puede dar 422. */
+        $planes = array_unique(array_merge(array_keys(self::PLANES_GESTION), array_keys(self::PLANES_HISTORICOS)));
         $reglas = [
             'contract_precios_sistemas' => ['nullable', 'array:gestion,ecommerce,agentes', 'size:3'],
             'contract_descuento_conjunto' => ['nullable', 'numeric', 'min:0', 'max:999999999', $centavos],
             'contract_mes_gratis' => ['nullable', 'boolean'],
-            'contract_plan_gestion' => ['nullable', 'string', 'in:'.implode(',', array_keys(self::PLANES_GESTION))],
+            'contract_plan_gestion' => ['nullable', 'string', 'in:'.implode(',', $planes)],
             'contract_pago_anual' => ['nullable', 'boolean'],
             'contract_descuento_anual' => ['nullable', 'numeric', 'min:0', 'max:100', $centavos],
             'contract_meses_actualizacion' => ['nullable', 'integer', 'min:1', 'max:60'],

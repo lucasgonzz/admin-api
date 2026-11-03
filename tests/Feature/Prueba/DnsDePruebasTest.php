@@ -42,20 +42,35 @@ class DnsDePruebasTest extends BaseDePruebaGratuita
 
     public function test_crear_escribe_solo_los_que_faltan_y_no_repunta_un_nombre_ajeno(): void
     {
-        /* `lacava` ya apunta al VPS; `api-lacava` falta; los de la tienda faltan. */
+        /* `lacava` ya apunta al VPS pero NADIE conocido lo escribió: es de otra prueba o de un cliente. Frena sin escribir (B1). */
+        $this->hostinger->responder('/api/dns/v1/zones/', $this->zona(['lacava']), 'GET');
+        try {
+            app(PruebaDnsService::class)->crear_registros('lacava');
+            $this->fail('Tendría que frenar.');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('no lo escribió', $e->getMessage());
+        }
+        $this->assertSame([], $this->hostinger->escrituras());
+
+        /* La misma zona, pero la instancia tiene `lacava` anotado como escrito por ella (reintento de la etapa `dns`):
+           lo saltea y escribe los tres que faltan. */
+        $instancia = $this->crear_instancia_libre('prueba-01', 900100);
+        $instancia->registrar_dns_labels(['lacava']);
+        $this->hostinger->limpiar();
         $this->hostinger->responder_secuencia('/api/dns/v1/zones/', [
             $this->zona(['lacava']),
             $this->zona(['lacava', 'api-lacava', 'tienda-lacava', 'api-tienda-lacava']),
         ], 'GET');
         $this->hostinger->responder('/api/dns/v1/zones/', [], 'PUT');
 
-        $escritos = app(PruebaDnsService::class)->crear_registros('lacava');
+        $escritos = app(PruebaDnsService::class)->crear_registros('lacava', $instancia);
 
         $this->assertSame(['api-lacava', 'tienda-lacava', 'api-tienda-lacava'], $escritos);
         $puts = $this->hostinger->llamadas_de('PUT');
         $this->assertCount(1, $puts);
         $this->assertFalse($puts[0]['body']['overwrite']);
         $this->assertSame(['api-lacava', 'tienda-lacava', 'api-tienda-lacava'], array_column($puts[0]['body']['zone'], 'name'));
+        $this->assertSame(['lacava', 'api-lacava', 'tienda-lacava', 'api-tienda-lacava'], $instancia->fresh()->dns_labels_escritos(), 'Los anota como propios antes del PUT.');
 
         /* Un nombre que apunta a OTRA IP frena sin escribir. */
         $this->hostinger->limpiar();

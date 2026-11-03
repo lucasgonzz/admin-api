@@ -54,10 +54,43 @@ class TrialInstance extends Model
         'asignada_at' => 'datetime',
         'lista_at'    => 'datetime',
         'borrada_at'  => 'datetime',
+        'dns_labels'  => 'array',
     ];
 
     /** La contraseña cifrada del dueño no sale nunca serializada. */
     protected $hidden = ['password_cifrada'];
+
+    /**
+     * Los labels de A records que esta instancia escribió (del nombre del pool y del slug). Es lo único que
+     * `PruebaDnsService` acepta como «propio» si el label ya existe en la zona.
+     *
+     * @return array<int, string>
+     */
+    public function dns_labels_escritos(): array
+    {
+        $labels = $this->dns_labels;
+
+        return is_array($labels) ? array_values(array_unique(array_map('strval', $labels))) : [];
+    }
+
+    /**
+     * Anota labels como escritos por esta instancia. Se llama ANTES del PUT a la zona: si el PUT llega a
+     * escribir y después falla la verificación, el reintento los encuentra anotados y no los toma por ajenos.
+     *
+     * @param array<int, string> $labels
+     */
+    public function registrar_dns_labels(array $labels): void
+    {
+        $this->dns_labels = array_values(array_unique(array_merge($this->dns_labels_escritos(), array_map('strval', $labels))));
+        $this->save();
+    }
+
+    /** Saca labels de la lista de escritos (después de borrarlos de la zona). */
+    public function olvidar_dns_labels(array $labels): void
+    {
+        $this->dns_labels = array_values(array_diff($this->dns_labels_escritos(), array_map('strval', $labels)));
+        $this->save();
+    }
 
     public function scopeWithAll($query)
     {

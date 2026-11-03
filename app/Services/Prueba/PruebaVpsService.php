@@ -248,7 +248,7 @@ class PruebaVpsService
             /* El runner ya armó el mensaje (exit y salida recortada). Si la salida traía el JSON de error del
                script, se prefiere ese texto, que está en castellano. */
             $json = self::json_de_la_ultima_linea($e->getMessage());
-            $detalle = is_array($json) && isset($json['error']) ? (string) $json['error'] : $e->getMessage();
+            $detalle = is_array($json) && isset($json['error']) ? (string) $json['error'] : self::sin_secretos($e->getMessage());
 
             throw new \RuntimeException($script . ' falló: ' . $detalle, 0, $e);
         }
@@ -256,7 +256,8 @@ class PruebaVpsService
         $json = self::json_de_la_ultima_linea($salida);
 
         if (! is_array($json)) {
-            throw new \RuntimeException($script . ' no devolvió un JSON en su última línea: ' . substr(trim($salida), -300));
+            /* Lo crudo puede traer el JSON de `pool-crear.sh` con `db.pass`: se tapa antes de que viaje a `trial_instances.error`. */
+            throw new \RuntimeException($script . ' no devolvió un JSON en su última línea: ' . self::sin_secretos(substr(trim($salida), -300)));
         }
 
         if (empty($json['ok'])) {
@@ -270,6 +271,17 @@ class PruebaVpsService
         ]);
 
         return $json;
+    }
+
+    /**
+     * Tapa lo que un JSON de `pool-crear.sh` o un `.env` podrían traer antes de que un texto crudo viaje en una
+     * excepción (y de ahí a `trial_instances.error`, al log y al panel): `"pass":"…"`, `DB_PASSWORD=…`, `password=…`.
+     */
+    public static function sin_secretos(string $texto): string
+    {
+        $texto = (string) preg_replace('/"(pass|password|db_password|app_key)"\s*:\s*"[^"]*"/i', '"$1":"***"', $texto);
+
+        return (string) preg_replace('/\b(DB_PASSWORD|APP_KEY|ADMIN_API_INBOUND_KEY|ADMIN_API_OUTBOUND_KEY|password|pw)=\S+/i', '$1=***', $texto);
     }
 
     /**

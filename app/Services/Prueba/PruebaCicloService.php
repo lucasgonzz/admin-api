@@ -231,9 +231,9 @@ class PruebaCicloService
             $respaldo  = isset($resultado['respaldo']) ? (string) $resultado['respaldo'] : '';
 
             if ($slug !== '') {
-                app(PruebaDnsService::class)->borrar_registros($slug);
+                app(PruebaDnsService::class)->borrar_registros($slug, $instancia);
             }
-            app(PruebaDnsService::class)->borrar_registros($instancia->nombre);
+            app(PruebaDnsService::class)->borrar_registros($instancia->nombre, $instancia);
         } catch (\Throwable $e) {
             $instancia->estado = TrialInstance::ESTADO_FALLIDA;
             $instancia->error  = 'Borrado fallido (' . $motivo . '): ' . $e->getMessage();
@@ -250,6 +250,11 @@ class PruebaCicloService
             $instancia->password_cifrada = null;
             $instancia->error         = null;
             $instancia->save();
+
+            if (! $instancia->client_id) {
+                /* Nunca se asignó: el bloque de user_id vuelve a estar disponible (chequeo C1). */
+                app(PruebaPoolService::class)->liberar_bloque($instancia);
+            }
 
             if ($instancia->client_id) {
                 Client::query()->whereKey($instancia->client_id)->update([
