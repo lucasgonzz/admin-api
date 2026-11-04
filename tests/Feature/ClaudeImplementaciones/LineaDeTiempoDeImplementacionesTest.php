@@ -3,6 +3,7 @@
 namespace Tests\Feature\ClaudeImplementaciones;
 
 use App\Models\AgentImplementation;
+use App\Models\AgentImplementationStage;
 use App\Models\EcommerceImplementation;
 use App\Models\EcommerceImplementationStage;
 use App\Models\ImplementationMail;
@@ -31,7 +32,12 @@ class LineaDeTiempoDeImplementacionesTest extends BaseDeImplementaciones
             'created_at' => now()->subDays(3),
             'form_submitted_at' => now()->subDays(2),
         ]);
-        $sistema->stages()->where('stage_number', 1)->update(['status' => 'completed', 'completed_at' => now()->subDays(2)]);
+        $inicio = now()->subDays(3)->startOfMinute();
+        $sistema->stages()->where('stage_number', 1)->update([
+            'status' => 'completed',
+            'started_at' => $inicio,
+            'completed_at' => now()->subDays(2),
+        ]);
         ImplementationStageConfig::updateOrCreate(['stage_number' => 6], ['name' => 'Capacitación']);
 
         $tienda = EcommerceImplementation::create(['client_id' => $cliente->id]);
@@ -69,15 +75,43 @@ class LineaDeTiempoDeImplementacionesTest extends BaseDeImplementaciones
         $this->assertSame(['sistema', 'tienda', 'agentes'], $ramas->keys()->all());
         $this->assertCount(7, $ramas['sistema']['stages']);
         $this->assertSame('completed', $ramas['sistema']['stages'][0]['status']);
+        $this->assertSame($inicio->copy()->utc()->toIso8601String(), $ramas['sistema']['stages'][0]['started_at']);
         $this->assertSame('Formulario de implementación', $ramas['sistema']['stages'][0]['completed_source']);
         $this->assertStringStartsWith('Catálogo', $ramas['sistema']['stages'][5]['name']);
         $this->assertSame('Conversación de implementación', $ramas['tienda']['stages'][0]['sent_source']);
         $this->assertSame('Conversación de implementación', $ramas['tienda']['stages'][0]['completed_source']);
+        $this->assertNull($ramas['tienda']['stages'][0]['started_at']);
         $this->assertNull($ramas['tienda']['stages'][0]['sent_ticket_id']);
         $this->assertSame($agentes->id, $ramas['agentes']['id']);
+        $this->assertSame($agentes->stages()->first()->started_at->utc()->toIso8601String(), $ramas['agentes']['stages'][0]['started_at']);
         $this->assertSame('skipped', $ramas['agentes']['stages'][1]['status']);
         $this->assertNull($ramas['agentes']['stages'][1]['completed_at']);
         $respuesta->assertDontSee('dato-reservado')->assertDontSee('Contenido privado del hilo');
+    }
+
+    public function test_una_etapa_omitida_de_agentes_solo_muestra_un_inicio_anterior(): void
+    {
+        $cliente = $this->crear_cliente();
+        $servicio = app(AgentImplementationService::class);
+        $agentes = $servicio->create($cliente, AgentImplementation::CAMINO_NUEVO)['implementation'];
+        $inicio_anterior = now()->subHour()->startOfMinute();
+        $agentes->stages()->where('stage_number', 3)->update([
+            'status' => AgentImplementationStage::STATUS_IN_PROGRESS,
+            'started_at' => $inicio_anterior,
+        ]);
+
+        $servicio->update_stage($agentes, 2, AgentImplementationStage::STATUS_SKIPPED);
+        $servicio->update_stage($agentes, 3, AgentImplementationStage::STATUS_SKIPPED);
+
+        $respuesta = $this->actingAs($this->crear_admin(), 'sanctum')->getJson(self::URI)->assertOk();
+        $etapas = collect($respuesta->json('data'))->firstWhere('id', $cliente->id)['implementations'][0]['stages'];
+
+        $this->assertSame(AgentImplementationStage::STATUS_SKIPPED, $etapas[1]['status']);
+        $this->assertNull($etapas[1]['started_at']);
+        $this->assertNull($etapas[1]['completed_at']);
+        $this->assertSame(AgentImplementationStage::STATUS_SKIPPED, $etapas[2]['status']);
+        $this->assertSame($inicio_anterior->copy()->utc()->toIso8601String(), $etapas[2]['started_at']);
+        $this->assertNull($etapas[2]['completed_at']);
     }
 
     public function test_enlaza_envios_confirmados_y_no_convierte_notas_o_fallas_en_evidencia(): void

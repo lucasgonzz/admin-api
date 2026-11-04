@@ -171,11 +171,19 @@ class ImplementationTimelineService
             $mail_at = $mails->get($key);
             $sent_at = $operation['at'] ?? max($whatsapp_at, $mail_at);
             $completed = $stage->status === 'completed';
+            $started_at = $this->iso($stage->started_at);
+
+            // Al omitir una etapa de agentes sin empezarla, el servicio guarda el mismo instante en ambas fechas.
+            if ($type === 'agentes' && $stage->status === AgentImplementationStage::STATUS_SKIPPED
+                && $started_at !== null && $started_at === $this->iso($stage->completed_at)) {
+                $started_at = null;
+            }
 
             return [
                 'number' => $number,
                 'name' => $this->stage_name($stage, $type),
                 'status' => $stage->status,
+                'started_at' => $started_at,
                 'sent_at' => $sent_at,
                 'sent_ticket_id' => $operation['ticket_id'] ?? null,
                 'sent_source' => $operation !== null
