@@ -1308,16 +1308,41 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         $claim = $this->claim($ticket);
         $this->reply($ticket, $claim, ['action' => 'cerrar', 'confirmation_message_id' => $message->id])->assertStatus(422);
         $this->assertSame('open', $ticket->fresh()->status);
-        // Una respuesta rechazada no consume la reserva: se libera antes de otro turno.
+        // El rechazo de fondo frena el mismo mensaje sin crear una operación ni cerrar.
+        $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->firstOrFail();
+        $this->assertSame('manual_review', $case->state);
+        $this->assertSame($message->id, (int) $case->expected_message_id);
+        $this->assertNull($case->lease_expires_at);
+        $this->assertTrue((bool) $ticket->fresh()->support_attention_enabled);
+        $this->assertCount(1, $this->deliveries->bodies);
+        $this->assertSame(0, SupportCodexOperation::where('support_ticket_id', $ticket->id)->where('action', 'cerrar')->count());
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(0, 'tickets');
         $this->postJson($this->base . '/tickets/' . $ticket->id . '/release', [
             'lease_token' => $claim['lease_token'],
-        ], $this->headers)->assertOk();
+        ], $this->headers)->assertStatus(423);
         $message = $this->inbound($ticket, 'Sí, ya quedó resuelto, muchas gracias.');
+        $this->getJson($this->base . '/pending', $this->headers)->assertJsonCount(1, 'tickets');
         $claim = $this->claim($ticket);
         $this->reply($ticket, $claim, [
             'action' => 'cerrar', 'confirmation_message_id' => $message->id, 'body' => 'Queda cerrado el caso.',
         ])->assertOk()->assertJsonPath('ticket.status', 'closed');
         $this->assertStringContainsString('De nada', end($this->deliveries->bodies));
+    }
+
+    public function test_anduvo_perfecto_cierra_con_el_mensaje_correcto_tras_dar_los_pasos(): void
+    {
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), ['body' => 'En Tesorería abrí la caja en dólares y después registrá el pago en Planes de pago.'])
+            ->assertOk();
+        $message = $this->inbound($ticket, 'Anduvo perfecto gracias');
+        $claim = $this->claim($ticket);
+        $payload = ['action' => 'cerrar', 'confirmation_message_id' => $message->id, 'body' => 'De nada!'];
+        $this->reply($ticket, $claim, array_merge($payload, ['confirmation_message_id' => $message->id - 1]))
+            ->assertStatus(422);
+        $this->assertCount(1, $this->deliveries->bodies);
+        $this->reply($ticket, $claim, $payload)->assertOk()
+            ->assertJsonPath('operation.status', 'sent')->assertJsonPath('ticket.status', 'closed');
+        $this->assertSame(['En Tesorería abrí la caja en dólares y después registrá el pago en Planes de pago.', 'De nada!'], $this->deliveries->bodies);
     }
 
     public function test_envio_no_confirmado_no_se_reintenta_ni_cierra(): void
@@ -1407,6 +1432,7 @@ class SoporteAutomaticoEnCodexTest extends TestCase
             'afirmación con futuro' => ['solicitar_confirmacion', '¿Quedó resuelto?', 'Todo normal, lo voy a probar mañana'],
             'pregunta del cliente' => ['solicitar_confirmacion', '¿Quedó resuelto?', '¿Todo normal?'],
             'pregunta sobre arreglo' => ['solicitar_confirmacion', '¿Quedó resuelto?', '¿Ya lo arreglamos?'],
+            'anduvo con consulta nueva' => ['responder', 'Probá abrir la caja.', 'Anduvo perfecto gracias y cómo imprimo'],
             'tarea negada' => ['solicitar_confirmacion', 'Pudiste ver los cheques?', 'No pude verlos'],
             'tarea con dificultad' => ['solicitar_confirmacion', 'Pudiste ver los cheques?', 'Pude verlos pero falta uno'],
             'tarea dudosa' => ['solicitar_confirmacion', 'Pudiste ver los cheques?', 'Creo que pude verlos bien'],
@@ -1862,6 +1888,13 @@ class SoporteAutomaticoEnCodexTest extends TestCase
             $message = $this->inbound($ticket, 'Gracias');
             $this->reply($ticket, $this->claim($ticket), ['action' => 'cerrar', 'confirmation_message_id' => $message->id])->assertStatus(422);
             $this->assertSame('open', $ticket->fresh()->status);
+            $current = $case->fresh();
+            if ($pending === 'mission') {
+                $this->assertSame('Corregir cuotas', $current->mission);
+            } else {
+                $this->assertSame('Lucas debe revisar', $current->review_reason);
+                $this->assertSame((int) $case->last_reply_id, (int) $current->review_requested_message_id);
+            }
         }
     }
 

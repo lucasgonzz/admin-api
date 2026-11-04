@@ -26,6 +26,8 @@ class SupportCodexService
 {
     const LEASE_MINUTES = 15;
 
+    private const CONFIRMATION_REVIEW_REASON = 'El cierre fue rechazado porque el mensaje no confirma el resultado. Revisar sin volver a pedir confirmación.';
+
     /**
      * Cuántos tickets ANTERIORES del cliente viajan en `previous_tickets` y en `history` (misión
      * `hitos-de-implementacion-por-soporte`, 26/10/2026). Cinco alcanzan para saber dónde quedó una
@@ -604,7 +606,22 @@ class SupportCodexService
                 $this->fail(422, 'verification_required', 'Este ticket exige aprobación. Actualizá el monitor para preparar el borrador.');
             }
             if ($input['action'] === 'cerrar') {
-                $this->assert_confirmation($ticket, $case, $input);
+                $confirmation = $this->confirmation_message($ticket, $input);
+                if (! $this->confirms_resolution($ticket, $case, $confirmation)) {
+                    if (! empty($input['thread_id'])) {
+                        $this->bind_thread($case, $input['thread_id']);
+                    }
+                    $case->state = 'manual_review';
+                    if (! $case->is_agent_requested_review()) {
+                        $case->review_reason = self::CONFIRMATION_REVIEW_REASON;
+                        $case->review_requested_message_id = null;
+                    }
+                    $case->lease_hash = null;
+                    $case->lease_expires_at = null;
+                    $case->save();
+                    $this->request_attention($ticket);
+                    return null;
+                }
             }
             if ($input['action'] === 'escalar' && empty(trim((string) ($input['mission'] ?? '')))) {
                 $this->fail(422, 'mission_required', 'El escalado requiere el texto de la misión preparada.');
@@ -642,6 +659,10 @@ class SupportCodexService
             }
             return $operation;
         });
+        if ($operation === null) {
+            // El freno del entrante queda confirmado antes de devolver el rechazo del cierre.
+            $this->fail(422, 'confirmation_required', 'El mensaje no confirma de forma suficiente que el caso quedó resuelto.');
+        }
         if (! $operation->wasRecentlyCreated || $operation->status === 'awaiting_approval') {
             return $this->operation_result($operation);
         }
@@ -1421,7 +1442,8 @@ class SupportCodexService
         if ($case !== null && $case->state === 'manual_review') {
             // La procedencia durable distingue pedir_revision de errores de envío, conciliación
             // o pausas técnicas. Un entrante no borra el motivo: solo permite que Martín lo lea.
-            return ($this->is_human_reply_pause($case) || $case->is_agent_requested_review() || $this->is_dispatch_review($case)) && $last->sender_type === 'user'
+            return ($this->is_human_reply_pause($case) || $case->is_agent_requested_review() || $this->is_dispatch_review($case)
+                || $case->review_reason === self::CONFIRMATION_REVIEW_REASON) && $last->sender_type === 'user'
                 && (int) $last->id > max((int) $case->expected_message_id, (int) $case->handled_message_id)
                 ? 'inbound' : null;
         }
@@ -1497,11 +1519,23 @@ class SupportCodexService
 
     private function assert_confirmation(SupportTicket $ticket, SupportCodexCase $case, array $input): void
     {
+        if (! $this->confirms_resolution($ticket, $case, $this->confirmation_message($ticket, $input))) {
+            $this->fail(422, 'confirmation_required', 'El mensaje no confirma de forma suficiente que el caso quedó resuelto.');
+        }
+    }
+
+    private function confirmation_message(SupportTicket $ticket, array $input): SupportMessage
+    {
         $message = $this->last_real_message($ticket->id);
         if ($message === null || $message->sender_type !== 'user'
             || (int) ($input['confirmation_message_id'] ?? 0) !== (int) $message->id) {
             $this->fail(422, 'confirmation_required', 'El cierre requiere el último mensaje de confirmación del cliente.');
         }
+        return $message;
+    }
+
+    private function confirms_resolution(SupportTicket $ticket, SupportCodexCase $case, SupportMessage $message): bool
+    {
         $body = Str::ascii(mb_strtolower(trim((string) $message->body)));
         $negative = strpos($body, '?') !== false
             || preg_match('/\b(no|nunca|tampoco|todavia|aun|sigue|pero|falta|error|problema|dificultad|manana|luego|despues|probare|probar|voy|cuando|veremos|ojala|deberia|podria|creo|supongo|parece|quizas|parcialmente|parcial|incompleto|incompleta|algunos|algunas)\b/', $body)
@@ -1527,6 +1561,7 @@ class SupportCodexService
         // actual/pasado, o una respuesta breve al pedido de verificar ese resultado.
         $resolved = preg_match('/\b(ya )?(esta|quedo) (resuelt[oa]|solucionad[oa]|bien|funcionando)\b/', $body)
             || preg_match('/\b(ya|ahora) (funciona|anda|funciono)\b/', $body)
+            || preg_match('/^(?:(?:ya|ahora)[,.!\s]+)?(?:anduvo|funciono)(?:[,.!\s]+(?:bien|perfecto|correctamente))?(?:[,.!\s]+(?:muchas\s+)?gracias)?[.!\s]*$/', $body)
             || preg_match('/^(si[,.! ]+)?(ya )?lo (arreglamos|arregle|solucionamos|solucione)([,.! ]+(muchas )?gracias)?[!. ]*$/', $body)
             || preg_match('/^(si[,.! ]+)?(ya )?(resuelt[oa]|solucionad[oa])[,.! ]*(muchas )?gracias[!. ]*$/', $body);
         $short_answer = $answer_to_resolution
@@ -1580,9 +1615,8 @@ class SupportCodexService
         $own_error = $question !== null && $question->id < $message->id
             && $this->acknowledges_own_error_after_guidance($body, $question_body);
         $natural_thanks = $this->natural_thanks_can_close($ticket, $case, $message, $body);
-        if ((! $own_error && $negative) || (! $resolved && ! $short_answer && ! $task_completed && ! $implicit_completed && ! $own_error && ! $natural_thanks)) {
-            $this->fail(422, 'confirmation_required', 'El mensaje no confirma de forma suficiente que el caso quedó resuelto.');
-        }
+        return ($own_error || ! $negative)
+            && ($resolved || $short_answer || $task_completed || $implicit_completed || $own_error || $natural_thanks);
     }
 
     /**
