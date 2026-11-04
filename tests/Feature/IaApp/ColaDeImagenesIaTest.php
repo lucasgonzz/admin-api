@@ -211,16 +211,17 @@ class ColaDeImagenesIaTest extends BaseDeLaAppIa
     {
         $client = $this->crear_cliente('openai-sin-plan');
         $consulta = ['client_uuid' => $client->uuid, 'consultar_capacidades' => true];
-        $cuerpo = $this->alta($client, ['requiere_openai' => true]);
+        $cuerpo = $this->alta($client);
+        $ruta = '/api/inbound/ia-imagenes/openai';
 
-        $this->postJson('/api/inbound/ia-imagenes', $consulta, $this->clave($client))
+        $this->postJson($ruta, $consulta, $this->clave($client))
             ->assertStatus(503)->assertJsonPath('code', 'imagenes_no_disponibles');
-        $this->postJson('/api/inbound/ia-imagenes', $cuerpo, $this->clave($client))
+        $this->postJson($ruta, $cuerpo, $this->clave($client))
             ->assertStatus(503)->assertJsonPath('code', 'imagenes_no_disponibles');
         config(['ia_app.imagenes.openai_enabled' => true, 'ia_app.imagenes.openai_api_key' => 'simulada']);
-        $this->postJson('/api/inbound/ia-imagenes', $consulta, $this->clave($client))
+        $this->postJson($ruta, $consulta, $this->clave($client))
             ->assertOk()->assertExactJson(['proveedor' => 'openai', 'acepta_referencia' => true]);
-        $this->postJson('/api/inbound/ia-imagenes', $cuerpo, $this->clave($client))
+        $this->postJson($ruta, $cuerpo, $this->clave($client))
             ->assertStatus(422)->assertJsonPath('code', 'sin_plan_imagenes');
         $this->assertDatabaseMissing('ia_imagen_pedidos', ['client_id' => $client->id]);
     }

@@ -23,6 +23,13 @@ use Illuminate\Support\Facades\Validator;
  */
 class IaImagenesController extends Controller
 {
+    public function alta_openai(Request $request, IaImagenesService $imagenes)
+    {
+        $request->merge(['requiere_openai' => true]);
+
+        return $this->alta($request, $imagenes);
+    }
+
     /* ==============================================================================================
      | C2.1 · POST api/inbound/ia-imagenes
      |============================================================================================= */

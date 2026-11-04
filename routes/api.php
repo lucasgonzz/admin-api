@@ -281,6 +281,7 @@ Route::middleware('admin.inbound.key')
            empresa-api del cliente da de alta un pedido de imagen para que lo genere la PC de Lucas.
            Idempotente por uuid; el client_uuid del body tiene que ser el del sistema que resolvió la clave. */
         Route::post('ia-imagenes', 'Api\IaImagenesController@alta');
+        Route::post('ia-imagenes/openai', 'Api\IaImagenesController@alta_openai');
     });
 
 /*
