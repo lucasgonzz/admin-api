@@ -35,8 +35,7 @@ use Illuminate\Support\Facades\DB;
  *     necesita y si no la pediría de a un cliente.
  *
  * 🔴 PRIVACIDAD. La escena no lleva ningún texto de un mensaje: solo quién, qué tipo de cosa y cuándo. Lo único
- * con texto libre es el título de la bandeja «Para Lucas» (las primeras 70 letras de una misión, el motivo de
- * una revisión), que es exactamente lo que Lucas tiene que ver para decidir qué abrir.
+ * con texto libre es el título de la bandeja «Para Lucas», recortado a las primeras 70 letras de la misión.
  *
  * Todas las horas salen de {@see AppTime::now()} (zona America/Argentina/Buenos_Aires) y se devuelven ISO-8601
  * con zona.
@@ -114,9 +113,6 @@ class EscenaService
 
     /** Largo de la misión en el título de la bandeja (contrato B). */
     const LETRAS_DE_MISION = 70;
-
-    /** Largo máximo del resto de los títulos de la bandeja. */
-    const LETRAS_DE_TITULO = 120;
 
     /** Las seis estaciones del mostrador, en el orden en que se devuelven (contrato B). */
     const ESTACIONES = ['soporte', 'facturas', 'negocio', 'asistente', 'informes', 'comercial'];
@@ -911,211 +907,47 @@ class EscenaService
     }
 
     /**
-     * `bandeja` «Para Lucas»: lo que Soporte y los demás le dejaron a Lucas en el mostrador, los más nuevos
-     * primero y con tope de {@see self::TOPE_BANDEJA}. El `total` que devuelve (→ `resumen.para_lucas`) es el
-     * real, contado fuente por fuente, sin ese tope.
-     *
-     * Fuentes (cada una con su propio tope, así ninguna puede tapar a las demás en la consulta):
-     *   - `support_codex_cases.state = mission_pending` → `mision_pendiente`. 🔴 Sin las que Lucas ya inició
-     *     (`mission_started_at` cargado): «cuando Lucas la inicia, la misión pasa a las oficinas» (pedido de
-     *     Lucas, §0 del plan). El caso sigue en `mission_pending` después de iniciarla, así que sin este filtro
-     *     la carpeta quedaría en la bandeja para siempre.
-     *   - `state = manual_review` sobre un ticket abierto → `revision`.
-     *   - ticket abierto con `escalated_at` y sin caso en esos dos estados → `caso_delegado`.
-     *   - `support_codex_operations.status = awaiting_approval` → `aprobacion`.
-     *   - `lead_messages.status = sugerido` de un lead con `requiere_verificacion_mensajes` → `aprobacion`.
-     *   - `admin_tasks` sin hacer creadas por Claude → `tarea`.
-     *
-     * @return array{items: array<int, array<string, mixed>>, total: int}
+     * Solo misiones pendientes de inicio. El total incluye las que exceden el tope.
      */
     private function bandeja()
     {
-        $items = [];
-
-        /* 🔴 `total` es el total REAL (para `resumen.para_lucas`): un count() por fuente, sin el tope de 50
-           que solo aplica a la lista. Cada fuente se arma una vez y se clona para contar. */
-        $total = 0;
-
-        $casos_base = DB::table('support_codex_cases as c')
-            ->join('support_tickets as t', 't.id', '=', 'c.support_ticket_id')
+        $pendientes = MisionesDelLocal::pendientes();
+        $total = (clone $pendientes)->count();
+        $casos = $pendientes
             ->leftJoin('clients as cl', 'cl.id', '=', 't.client_id')
-            ->where(function ($q) {
-                $q->where(function ($q1) {
-                    $q1->where('c.state', 'mission_pending')->whereNull('c.mission_started_at');
-                })->orWhere(function ($q2) {
-                    $q2->where('c.state', 'manual_review')->where('t.status', SupportTicket::STATUS_ABIERTO);
-                });
-            });
-        $total += (clone $casos_base)->count();
-
-        $casos = $casos_base
             ->select(
-                'c.state',
-                'c.review_reason',
                 'c.updated_at',
+                'c.local_mission_request_id',
+                'c.local_mission_claim_token',
                 't.id as ticket_id',
                 't.client_id',
                 'cl.name as client_name',
                 'cl.company_name as client_company'
             )
-            // Solo el principio de la misión: el texto entero puede ser largo y acá se usan 70 letras.
-            ->selectRaw('LEFT(c.mission, 400) AS mission_inicio')
+            ->selectRaw('LEFT(c.mission, 400) AS mission_inicio, SHA2(c.mission, 256) AS mission_sha256')
             ->orderByDesc('c.updated_at')
+            ->orderBy('t.id')
             ->limit(self::TOPE_BANDEJA)
             ->get();
 
+        $items = [];
         foreach ($casos as $caso) {
+            $ticket_id = (int) $caso->ticket_id;
             $cliente = $this->nombre_de($caso->client_company, $caso->client_name, $caso->client_id);
-
-            if ($caso->state === 'mission_pending') {
-                $items[] = $this->item_de_bandeja(
-                    'soporte-mision-' . (int) $caso->ticket_id,
-                    'mision_pendiente',
-                    'Misión · ' . $cliente . ': ' . $this->recortar($caso->mission_inicio, self::LETRAS_DE_MISION),
-                    $caso->client_id,
-                    $caso->updated_at,
-                    $this->ruta_de_ticket($caso->ticket_id)
-                );
-                continue;
-            }
-
-            $motivo = $this->recortar($caso->review_reason, self::LETRAS_DE_TITULO);
-            $items[] = $this->item_de_bandeja(
-                'soporte-revision-' . (int) $caso->ticket_id,
-                'revision',
-                'Revisión · ' . $cliente . ': ' . ($motivo !== '' ? $motivo : 'ticket #' . (int) $caso->ticket_id),
-                $caso->client_id,
-                $caso->updated_at,
-                $this->ruta_de_ticket($caso->ticket_id)
-            );
+            $items[] = [
+                'id' => 'soporte-mision-' . $ticket_id,
+                'tipo' => 'mision_pendiente',
+                'titulo' => 'Misión · ' . $cliente . ': ' . $this->recortar($caso->mission_inicio, self::LETRAS_DE_MISION),
+                'client_id' => $caso->client_id !== null ? (int) $caso->client_id : null,
+                'creado_at' => $this->iso($caso->updated_at),
+                'ruta' => $this->ruta_de_ticket($ticket_id),
+                'ticket_id' => $ticket_id,
+                'mission_sha256' => $caso->mission_sha256,
+                'estado_inicio' => MisionesDelLocal::estado($caso->local_mission_request_id, $caso->local_mission_claim_token !== null),
+            ];
         }
 
-        /* Un ticket delegado que ya tiene caso en mission_pending o manual_review NO se repite como
-           caso_delegado: aparece una sola vez, por su caso. */
-        $delegados_base = DB::table('support_tickets as t')
-            ->leftJoin('clients as cl', 'cl.id', '=', 't.client_id')
-            ->whereNotNull('t.escalated_at')
-            ->where('t.status', SupportTicket::STATUS_ABIERTO)
-            ->whereNotExists(function ($q) {
-                $q->selectRaw('1')
-                    ->from('support_codex_cases as c')
-                    ->whereColumn('c.support_ticket_id', 't.id')
-                    ->whereIn('c.state', ['mission_pending', 'manual_review']);
-            });
-        $total += (clone $delegados_base)->count();
-
-        $delegados = $delegados_base
-            ->select('t.id', 't.client_id', 't.name', 't.escalation_reason', 't.escalated_at', 'cl.name as client_name', 'cl.company_name as client_company')
-            ->orderByDesc('t.escalated_at')
-            ->limit(self::TOPE_BANDEJA)
-            ->get();
-
-        foreach ($delegados as $ticket) {
-            $cliente = $this->nombre_de($ticket->client_company, $ticket->client_name, $ticket->client_id);
-            $motivo  = $this->recortar($ticket->escalation_reason !== null && trim((string) $ticket->escalation_reason) !== ''
-                ? $ticket->escalation_reason
-                : $ticket->name, self::LETRAS_DE_TITULO);
-
-            $items[] = $this->item_de_bandeja(
-                'soporte-caso-' . (int) $ticket->id,
-                'caso_delegado',
-                'Ticket #' . (int) $ticket->id . ' · ' . $cliente . ($motivo !== '' ? ': ' . $motivo : ''),
-                $ticket->client_id,
-                $ticket->escalated_at,
-                $this->ruta_de_ticket($ticket->id)
-            );
-        }
-
-        $operaciones_base = DB::table('support_codex_operations as o')
-            ->join('support_tickets as t', 't.id', '=', 'o.support_ticket_id')
-            ->leftJoin('clients as cl', 'cl.id', '=', 't.client_id')
-            ->where('o.status', 'awaiting_approval');
-        $total += (clone $operaciones_base)->count();
-
-        $operaciones = $operaciones_base
-            ->select('o.id', 'o.created_at', 't.id as ticket_id', 't.client_id', 'cl.name as client_name', 'cl.company_name as client_company')
-            ->orderByDesc('o.created_at')
-            ->limit(self::TOPE_BANDEJA)
-            ->get();
-
-        foreach ($operaciones as $operacion) {
-            $cliente = $this->nombre_de($operacion->client_company, $operacion->client_name, $operacion->client_id);
-
-            $items[] = $this->item_de_bandeja(
-                'soporte-aprobacion-' . (int) $operacion->id,
-                'aprobacion',
-                'Aprobar respuesta · ' . $cliente . ': ticket #' . (int) $operacion->ticket_id,
-                $operacion->client_id,
-                $operacion->created_at,
-                $this->ruta_de_ticket($operacion->ticket_id)
-            );
-        }
-
-        $sugeridos_base = DB::table('lead_messages as lm')
-            ->join('leads as l', 'l.id', '=', 'lm.lead_id')
-            ->where('lm.status', 'sugerido')
-            ->where('l.requiere_verificacion_mensajes', true);
-        $total += (clone $sugeridos_base)->count();
-
-        $sugeridos = $sugeridos_base
-            ->select('lm.id', 'lm.lead_id', 'lm.created_at', 'l.contact_name', 'l.company_name')
-            ->orderByDesc('lm.created_at')
-            ->limit(self::TOPE_BANDEJA)
-            ->get();
-
-        foreach ($sugeridos as $mensaje) {
-            $nombre = $this->texto_o_null($mensaje->contact_name);
-            if ($nombre === null) {
-                $nombre = $this->texto_o_null($mensaje->company_name);
-            }
-
-            $items[] = $this->item_de_bandeja(
-                'lead-mensaje-' . (int) $mensaje->id,
-                'aprobacion',
-                'Mensaje a lead ' . ($nombre !== null ? $this->recortar($nombre, self::LETRAS_DE_TITULO) : '#' . (int) $mensaje->lead_id),
-                null,
-                $mensaje->created_at,
-                '/leads/' . (int) $mensaje->lead_id . '/conversacion'
-            );
-        }
-
-        $tareas_base = DB::table('admin_tasks')
-            ->where('is_done', false)
-            ->where('created_via', 'claude');
-        $total += (clone $tareas_base)->count();
-
-        $tareas = $tareas_base
-            ->select('id', 'title', 'created_at')
-            ->orderByDesc('created_at')
-            ->limit(self::TOPE_BANDEJA)
-            ->get();
-
-        foreach ($tareas as $tarea) {
-            $titulo = $this->recortar($tarea->title, self::LETRAS_DE_TITULO);
-
-            $items[] = $this->item_de_bandeja(
-                'tarea-' . (int) $tarea->id,
-                'tarea',
-                $titulo !== '' ? $titulo : 'Tarea #' . (int) $tarea->id,
-                null,
-                $tarea->created_at,
-                '/tareas'
-            );
-        }
-
-        usort($items, function ($a, $b) {
-            $por_fecha = strcmp((string) $b['_orden'], (string) $a['_orden']);
-
-            return $por_fecha !== 0 ? $por_fecha : strcmp($a['id'], $b['id']);
-        });
-
-        $items = array_slice($items, 0, self::TOPE_BANDEJA);
-
-        foreach ($items as $i => $item) {
-            unset($items[$i]['_orden']);
-        }
-
-        return ['items' => array_values($items), 'total' => $total];
+        return ['items' => $items, 'total' => $total];
     }
 
     /**
@@ -1292,33 +1124,6 @@ class EscenaService
             'pendientes'       => (int) $pendientes,
             'ultimo_evento_at' => $this->iso($ultimo),
             'detalle'          => $detalle,
-        ];
-    }
-
-    /**
-     * Un ítem de la bandeja con la forma del contrato B (más `_orden`, que se quita antes de devolver).
-     *
-     * @param string      $id
-     * @param string      $tipo      caso_delegado | revision | mision_pendiente | aprobacion | tarea
-     * @param string      $titulo
-     * @param mixed       $client_id
-     * @param mixed       $creado    Fecha cruda de la base (hora del admin).
-     * @param string|null $ruta
-     *
-     * @return array<string, mixed>
-     */
-    private function item_de_bandeja($id, $tipo, $titulo, $client_id, $creado, $ruta)
-    {
-        $ts = $this->ts($creado);
-
-        return [
-            'id'        => $id,
-            'tipo'      => $tipo,
-            'titulo'    => $titulo,
-            'client_id' => $client_id === null ? null : (int) $client_id,
-            'creado_at' => $this->iso($ts),
-            'ruta'      => $ruta,
-            '_orden'    => $ts === null ? '' : sprintf('%012d', $ts),
         ];
     }
 

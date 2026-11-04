@@ -368,6 +368,8 @@ Route::middleware('claude.task.key')
         Route::put('support-codex/settings', 'Api\ClaudeSupportCodexController@update_settings');
         Route::post('support-codex/health', 'Api\ClaudeSupportCodexController@health');
         Route::get('support-codex/pending', 'Api\ClaudeSupportCodexController@pending');
+        Route::get('support-codex/local-missions', [\App\Http\Controllers\Api\LocalMisionesController::class, 'pendientes']);
+        Route::post('support-codex/local-missions/{id}/claim', [\App\Http\Controllers\Api\LocalMisionesController::class, 'reclamar'])->whereNumber('id');
         Route::get('support-codex/operations/{operation_id}', 'Api\ClaudeSupportCodexController@operation');
         Route::post('support-codex/operations/{operation_id}/reconcile', 'Api\ClaudeSupportCodexController@reconcile');
         Route::post('support-codex/tickets/{id}/claim', 'Api\ClaudeSupportCodexController@claim');
@@ -1488,6 +1490,7 @@ Route::prefix('admin')->group(function () {
         /* «El local» (misión el-local, 3/11/2026, contrato B): la escena de la vista /local —negocios,
            agentes del mostrador, bandeja «Para Lucas», oficinas y eventos—, con cache de 20 s. */
         Route::get('local/escena', [\App\Http\Controllers\Api\LocalEscenaController::class, 'escena_json']);
+        Route::post('local/misiones/{id}/iniciar', [\App\Http\Controllers\Api\LocalMisionesController::class, 'iniciar'])->whereNumber('id');
 
         /* Agenda personal tipo Structured (misión agenda-admin, 31/10/2026): la vista de abajo de
            las tarjetas del Inicio y la pantalla /agenda. Cada admin ve y opera SOLO sus tareas: una

@@ -46,7 +46,7 @@ class ClaudeSupportCodexController extends Controller
 
     public function pending(Request $request, SupportCodexService $service)
     {
-        return response()->json($service->pending($request->boolean('supports_upgrade_agreement')));
+        return response()->json($service->pending($request->boolean('supports_upgrade_agreement')) + ['local_missions' => true]);
     }
 
     public function claim(Request $request, $id, SupportCodexService $service)

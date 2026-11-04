@@ -14,7 +14,9 @@ use App\Models\SupportCodexUpgradeAgreement;
 use App\Models\SupportCodexOperation;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
+use App\Services\Local\EscenaService;
 use App\Services\Prueba\PruebaContextoSoporteService;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Symfony\Component\HttpKernel\Exception\HttpException;
@@ -1014,6 +1016,8 @@ class SupportCodexService
             if ((string) $case->mission !== $mission) {
                 $case->mission_thread_id = null;
                 $case->mission_started_at = null;
+                $case->local_mission_request_id = null;
+                $case->local_mission_claim_token = null;
             }
             $case->state = 'mission_pending';
             $case->mission = $mission;
@@ -1230,6 +1234,8 @@ class SupportCodexService
             $case->mission = null;
             $case->mission_thread_id = null;
             $case->mission_started_at = null;
+            $case->local_mission_request_id = null;
+            $case->local_mission_claim_token = null;
             $case->save();
             $ticket->escalated_at = null;
             $ticket->escalation_reason = null;
@@ -1273,9 +1279,10 @@ class SupportCodexService
             return ['ticket' => $this->context($ticket, $case)];
         });
         try {
+            Cache::forget(EscenaService::CACHE_KEY);
             SupportTicketUpdated::dispatch($id);
         } catch (\Throwable $exception) {
-            // El registro durable no se revierte si el realtime no está disponible.
+            // El registro durable no se revierte si el caché o el realtime no están disponibles.
         }
         return $result;
     }

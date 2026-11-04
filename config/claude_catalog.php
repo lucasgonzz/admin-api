@@ -125,6 +125,22 @@ return [
             'para_que' => 'Lista hasta 50 tickets con mensajes nuevos o confirmación pendiente vencida, sin reservas ocupadas ni envíos ambiguos.',
             'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => [],
         ],
+        'GET api/claude/support-codex/local-missions' => [
+            'para_que' => 'Lista las solicitudes vigentes de inicio explícito desde El local. Entrega diagnóstico y huella, hilo de origen si existe, y estado para que el monitor pueda conciliar una apertura.',
+            'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => [],
+        ],
+        'POST api/claude/support-codex/local-missions/{id}/claim' => [
+            'para_que' => 'Reclama para la PC el inicio de una misión solicitada desde El local. Devuelve claimed; no abre el chat ni modifica la atención del ticket.',
+            'escribe' => true, 'peligrosidad' => 'baja',
+            'frenos' => [
+                'Requiere un ticket abierto, una misión aún pendiente y el UUID de su solicitud vigente.',
+                'Solo el token que ganó el reclamo puede repetirlo. Si la apertura quedó incierta, el monitor concilia antes de volver a crear.',
+            ],
+            'parametros' => [
+                ['nombre' => 'solicitud_id', 'obligatorio' => true, 'validacion' => 'required|uuid', 'que_es' => 'Identidad de la solicitud vigente.'],
+                ['nombre' => 'claim_token', 'obligatorio' => true, 'validacion' => 'required|uuid', 'que_es' => 'Identidad durable del intento del monitor.'],
+            ],
+        ],
         'GET api/claude/support-codex/tickets/{id}' => [
             'para_que' => 'Contexto del ticket: cliente, últimos 100 mensajes reales, adjuntos, misión preparada, ventana WhatsApp, la implementación del cliente y previous_tickets (resumen de hasta 5 tickets anteriores, de id menor que el actual: id, status, opened_at, closed_at, mensajes; el detalle con GET .../history); en los mensajes del equipo lo que sigue a «contraseña»/«clave» llega como [oculta]; sin claves.',
             'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => [],

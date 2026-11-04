@@ -351,15 +351,12 @@ class EscenaDelLocalTest extends TestCase
     {
         $admin  = $this->crear_admin();
         $client = $this->crear_cliente('Forma del contrato');
-        $this->mensaje_del_cliente($this->crear_ticket($client));
-        DB::table('admin_tasks')->insert([
-            'created_by_admin_id' => $admin->id,
-            'created_via'         => 'claude',
-            'title'               => 'Revisar la forma',
-            'is_done'             => false,
-            'sort_order'          => 0,
-            'created_at'          => AppTime::now()->format('Y-m-d H:i:s'),
-            'updated_at'          => AppTime::now()->format('Y-m-d H:i:s'),
+        $ticket = $this->crear_ticket($client);
+        $this->mensaje_del_cliente($ticket);
+        SupportCodexCase::create([
+            'support_ticket_id' => $ticket->id,
+            'state' => 'mission_pending',
+            'mission' => 'Revisar la forma',
         ]);
 
         $escena = $this->escena($admin);
@@ -404,8 +401,8 @@ class EscenaDelLocalTest extends TestCase
 
         $this->assertNotEmpty($escena['bandeja']);
         foreach ($escena['bandeja'] as $item) {
-            $this->assertSame(['id', 'tipo', 'titulo', 'client_id', 'creado_at', 'ruta'], array_keys($item));
-            $this->assertContains($item['tipo'], ['caso_delegado', 'revision', 'mision_pendiente', 'aprobacion', 'tarea']);
+            $this->assertSame(['id', 'tipo', 'titulo', 'client_id', 'creado_at', 'ruta', 'ticket_id', 'mission_sha256', 'estado_inicio'], array_keys($item));
+            $this->assertSame('mision_pendiente', $item['tipo']);
         }
         $this->assertLessThanOrEqual(50, count($escena['bandeja']));
         $this->assertGreaterThanOrEqual(count($escena['bandeja']), $escena['resumen']['para_lucas']);
@@ -745,8 +742,7 @@ class EscenaDelLocalTest extends TestCase
 
     /**
      * 🔴 La bandeja «Para Lucas»: una misión pendiente cae como `mision_pendiente` (con las primeras 70 letras y
-     * la ruta del ticket) y deja de estar cuando Lucas la inicia; una revisión manual, un ticket delegado sin
-     * caso y una tarea de Claude también están.
+     * la ruta del ticket) y deja de estar cuando Lucas la inicia. Las tareas y revisiones quedan fuera.
      *
      * @return void
      */
@@ -767,6 +763,9 @@ class EscenaDelLocalTest extends TestCase
             'mission_thread_id'  => 'hilo-de-codex',
             'mission_started_at' => AppTime::now()->subMinutes(5),
         ]);
+
+        $cerrado = $this->crear_ticket($client, 'closed');
+        SupportCodexCase::create(['support_ticket_id' => $cerrado->id, 'state' => 'mission_pending', 'mission' => 'El ticket está cerrado.']);
 
         $en_revision = $this->crear_ticket($client);
         SupportCodexCase::create(['support_ticket_id' => $en_revision->id, 'state' => 'manual_review', 'review_reason' => 'Pide un reintegro']);
@@ -794,24 +793,15 @@ class EscenaDelLocalTest extends TestCase
         $this->assertSame('Misión · Ferre Total de prueba: ' . rtrim(mb_substr($mision, 0, 70)) . '…', $item['titulo']);
         $this->assertSame((int) $client->id, $item['client_id']);
         $this->assertSame('/soporte/ticket/' . $con_mision->id, $item['ruta']);
+        $this->assertSame(hash('sha256', $mision), $item['mission_sha256']);
         $this->assertMatchesRegularExpression(self::ISO, $item['creado_at']);
 
         $this->assertNull($this->item_de_bandeja($escena, 'soporte-mision-' . $iniciada->id), 'La misión ya iniciada pasó a las oficinas.');
 
-        $revision = $this->item_de_bandeja($escena, 'soporte-revision-' . $en_revision->id);
-        $this->assertNotNull($revision);
-        $this->assertSame('revision', $revision['tipo']);
-        $this->assertStringContainsString('Pide un reintegro', $revision['titulo']);
-
-        $caso = $this->item_de_bandeja($escena, 'soporte-caso-' . $delegado->id);
-        $this->assertNotNull($caso);
-        $this->assertSame('caso_delegado', $caso['tipo']);
-        $this->assertSame('Ticket #' . $delegado->id . ' · Ferre Total de prueba: Quiere hablar con Lucas', $caso['titulo']);
-
-        $tarea = $this->item_de_bandeja($escena, 'tarea-' . $tarea_id);
-        $this->assertNotNull($tarea);
-        $this->assertSame('tarea', $tarea['tipo']);
-        $this->assertSame('/tareas', $tarea['ruta']);
+        $this->assertNull($this->item_de_bandeja($escena, 'soporte-mision-' . $cerrado->id));
+        $this->assertNull($this->item_de_bandeja($escena, 'soporte-revision-' . $en_revision->id));
+        $this->assertNull($this->item_de_bandeja($escena, 'soporte-caso-' . $delegado->id));
+        $this->assertNull($this->item_de_bandeja($escena, 'tarea-' . $tarea_id));
 
         $this->assertNotNull($this->evento_de($escena, 'esc-' . $delegado->id), 'La delegación de hace 3 minutos es un evento.');
     }
@@ -877,30 +867,66 @@ class EscenaDelLocalTest extends TestCase
         return (int) $mensaje->id;
     }
 
-    /**
-     * Una tarea de Claude sin hacer (fuente `tarea` de la bandeja).
-     *
-     * @param Admin  $admin
-     * @param string $titulo
-     *
-     * @return int
-     */
-    private function tarea_de_claude(Admin $admin, string $titulo): int
+    public function test_el_mostrador_solicita_una_vez_y_solo_quita_la_mision_al_confirmar_el_hilo(): void
     {
-        return (int) DB::table('admin_tasks')->insertGetId([
-            'created_by_admin_id' => $admin->id,
-            'created_via'         => 'claude',
-            'title'               => $titulo,
-            'is_done'             => false,
-            'sort_order'          => 0,
-            'created_at'          => AppTime::now()->format('Y-m-d H:i:s'),
-            'updated_at'          => AppTime::now()->format('Y-m-d H:i:s'),
+        $admin = $this->crear_admin();
+        $ticket = $this->crear_ticket($this->crear_cliente('Misiones de prueba'));
+        $mission = 'Diagnóstico completo de la misión.';
+        SupportCodexCase::create([
+            'support_ticket_id' => $ticket->id,
+            'state' => 'mission_pending',
+            'mission' => $mission,
+            'thread_id' => 'hilo-soporte',
         ]);
+
+        $iniciar = '/api/admin/local/misiones/' . $ticket->id . '/iniciar';
+        $cola = '/api/claude/support-codex/local-missions';
+        $claim = $cola . '/' . $ticket->id . '/claim';
+        $confirmar = '/api/claude/support-codex/tickets/' . $ticket->id . '/mission-started';
+        $headers = ['X-Claude-Task-Key' => self::CLAVE];
+
+        $this->postJson($iniciar)->assertUnauthorized();
+        $this->getJson($cola)->assertUnauthorized();
+        $this->getJson($cola, $headers)->assertJsonMissing(['ticket_id' => (int) $ticket->id]);
+
+        $this->actingAs($admin, 'sanctum')->postJson($iniciar, ['mission_sha256' => str_repeat('0', 64)])->assertStatus(409);
+        $this->postJson($iniciar, ['mission_sha256' => hash('sha256', $mission)])->assertStatus(202)->assertJsonPath('estado_inicio', 'solicitada');
+        $this->postJson($iniciar)->assertStatus(202)->assertJsonPath('estado_inicio', 'solicitada');
+        $items = $this->getJson($cola, $headers)->assertOk()->json('items');
+        $propios = array_values(array_filter($items, function ($item) use ($ticket) {
+            return $item['ticket_id'] === (int) $ticket->id;
+        }));
+        $this->assertCount(1, $propios);
+        $pedido = $propios[0];
+        $this->assertSame($mission, $pedido['mission']);
+        $this->assertSame(hash('sha256', $mission), $pedido['mission_sha256']);
+        $this->assertSame('hilo-soporte', $pedido['thread_id']);
+
+        $token = (string) Str::uuid();
+        $this->postJson($claim, ['solicitud_id' => (string) Str::uuid(), 'claim_token' => $token], $headers)
+            ->assertOk()->assertJsonPath('claimed', false);
+        $this->postJson($claim, ['solicitud_id' => $pedido['solicitud_id'], 'claim_token' => $token], $headers)
+            ->assertOk()->assertJsonPath('claimed', true);
+        $this->postJson($claim, ['solicitud_id' => $pedido['solicitud_id'], 'claim_token' => $token], $headers)
+            ->assertOk()->assertJsonPath('claimed', true);
+        $this->postJson($claim, ['solicitud_id' => $pedido['solicitud_id'], 'claim_token' => (string) Str::uuid()], $headers)
+            ->assertOk()->assertJsonPath('claimed', false);
+
+        $id = 'soporte-mision-' . $ticket->id;
+        $this->assertSame('iniciando', $this->item_de_bandeja($this->escena($admin), $id)['estado_inicio']);
+        $this->postJson($confirmar, ['mission_thread_id' => 'hilo-mision', 'mission_hash' => str_repeat('0', 64)], $headers)
+            ->assertStatus(409);
+        $this->postJson($confirmar, ['mission_thread_id' => 'hilo-mision', 'mission_hash' => $pedido['mission_sha256']], $headers)
+            ->assertOk();
+        $escena_actual = $this->getJson('/api/admin/local/escena')->assertOk()->json();
+        $this->assertNull($this->item_de_bandeja($escena_actual, $id));
+        $this->getJson($cola, $headers)->assertJsonMissing(['ticket_id' => (int) $ticket->id]);
+        $this->postJson($iniciar)->assertStatus(202)->assertJsonPath('hilo_id', 'hilo-mision');
     }
 
     /**
-     * 🔴 `resumen.para_lucas` es el total REAL de la bandeja (un count por fuente), no el largo de la lista: con
-     * 55 cosas nuevas para Lucas el número sube 55 y la lista sigue cortada en 50.
+     * 🔴 `resumen.para_lucas` es el total real de misiones pendientes: con
+     * 55 misiones nuevas el número sube 55 y la lista sigue cortada en 50.
      *
      * @return void
      */
@@ -909,8 +935,13 @@ class EscenaDelLocalTest extends TestCase
         $admin = $this->crear_admin();
         $antes = $this->escena($admin)['resumen']['para_lucas'];
 
+        $cliente = $this->crear_cliente('Misiones de prueba');
         for ($i = 1; $i <= 55; $i++) {
-            $this->tarea_de_claude($admin, 'Tarea ' . $i);
+            SupportCodexCase::create([
+                'support_ticket_id' => $this->crear_ticket($cliente)->id,
+                'state' => 'mission_pending',
+                'mission' => 'Misión ' . $i,
+            ]);
         }
 
         $escena = $this->escena($admin);
