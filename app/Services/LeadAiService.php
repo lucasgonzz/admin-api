@@ -59,6 +59,7 @@ class LeadAiService
      * (max_tokens 400, un mensaje corto) tienen su propio tope y no usan esta constante.
      */
     private const MAX_TOKENS_RESPUESTA = 3000;
+    private const TIMEOUT_HTTP_SEGUNDOS = 90;
 
     /**
      * Cuántas fuentes citadas se le sirven de una en el segundo intento del gate de respaldo.
@@ -416,6 +417,7 @@ TXT;
      * @param int                              $max_tokens      Límite de tokens de la respuesta.
      * @param PendingRequest                   $http            Cliente HTTP configurado.
      * @param string                           $model           Modelo de Claude a usar.
+     * @param RespaldoDeepSeek                 $respaldo_deepseek Cupo del turno, también en la corrección documental.
      * @param string                           $etiqueta_log    Prefijo del log de diagnóstico.
      * @param array<int, string>               $recursos_leidos Queda con lo que se le sirvió en la
      *                                                          llamada que produjo el paquete que
@@ -433,11 +435,12 @@ TXT;
         int $max_tokens,
         PendingRequest $http,
         string $model,
+        RespaldoDeepSeek $respaldo_deepseek,
         string $etiqueta_log,
         array &$recursos_leidos,
         bool &$gate_rechazo = false
     ): array {
-        $text = $this->run_with_tools($system_payload, $user_content, $max_tokens, $http, $model, $lead, $recursos_leidos);
+        $text = $this->run_with_tools($system_payload, $user_content, $max_tokens, $http, $model, $respaldo_deepseek, $lead, $recursos_leidos);
 
         /* Log de diagnóstico: respuesta cruda de Claude. */
         Log::debug($etiqueta_log . ' - respuesta Claude', [
@@ -502,6 +505,7 @@ TXT;
                 $max_tokens,
                 $http,
                 $model,
+                $respaldo_deepseek,
                 $lead,
                 $leidos_reintento
             );
@@ -791,6 +795,7 @@ TXT;
         $user_content = $this->build_user_content($lead, $is_followup, '', $intencion_forzada, $demo_directa);
         $model        = LeadAiProveedor::modelo();
         $http         = $this->build_http_client();
+        $respaldo_deepseek = new RespaldoDeepSeek('agente_de_leads');
 
         /* Primera llamada a Claude para obtener sugerencia base (con soporte de tool use). */
         $system_payload = [
@@ -818,6 +823,7 @@ TXT;
             self::MAX_TOKENS_RESPUESTA,
             $http,
             $model,
+            $respaldo_deepseek,
             'LeadAiService [PRIMERA LLAMADA]',
             $recursos_leidos,
             $gate_rechazo
@@ -1056,7 +1062,8 @@ TXT;
                     $is_followup,
                     $fecha_solicitada !== '' ? $fecha_solicitada : null,
                     true,
-                    $intencion_forzada
+                    $intencion_forzada,
+                    $respaldo_deepseek
                 );
             } catch (\Throwable $e) {
                 Log::error('Error en segunda llamada a Claude (disponibilidad)', [
@@ -1075,7 +1082,7 @@ TXT;
             }
         }
 
-        return $this->create_message_and_update_lead($lead, $parsed, $is_followup);
+        return $this->create_message_and_update_lead($lead, $parsed, $is_followup, null, $respaldo_deepseek);
     }
 
     /**
@@ -1107,8 +1114,15 @@ TXT;
      *
      * @return LeadMessage Mensaje creado con los horarios sugeridos por Claude.
      */
-    protected function generate_suggestion_with_availability(Lead $lead, bool $is_followup, ?string $specific_date = null, bool $came_from_availability_request = false, ?string $intencion_forzada = null): LeadMessage
-    {
+    protected function generate_suggestion_with_availability(
+        Lead $lead,
+        bool $is_followup,
+        ?string $specific_date = null,
+        bool $came_from_availability_request = false,
+        ?string $intencion_forzada = null,
+        ?RespaldoDeepSeek $respaldo_deepseek = null
+    ): LeadMessage {
+        $respaldo_deepseek = $respaldo_deepseek ?? new RespaldoDeepSeek('agente_de_leads');
         /* Dinámica de este lead (grupo 306): decide, y SOLO acá, si la demo usa su franja propia
          * o sigue gobernada por el closer. No leer la setting global en ningún punto de este flujo —
          * la dinámica se resuelve por la columna del lead, igual que en el grupo 293. */
@@ -1481,6 +1495,7 @@ TXT;
             self::MAX_TOKENS_RESPUESTA,
             $http,
             $model,
+            $respaldo_deepseek,
             'LeadAiService [SEGUNDA LLAMADA - con disponibilidad]',
             $recursos_leidos
         );
@@ -1493,7 +1508,9 @@ TXT;
          * en esta misma llamada. No se re-consulta el calendario: se compara contra $availability_data,
          * que es exactamente lo que el modelo tuvo delante. Cualquier otra cosa es una alucinación.
          */
-        $parsed = $this->descartar_agendamiento_fuera_de_slots($lead, $parsed, $availability_data, is_array($ventanas_extendidas) ? $ventanas_extendidas : []);
+        $parsed = $this->descartar_agendamiento_fuera_de_slots(
+            $lead, $parsed, $availability_data, is_array($ventanas_extendidas) ? $ventanas_extendidas : [], $respaldo_deepseek
+        );
 
         /*
          * COHERENCIA DE FECHA BLOQUEANTE (hueco #4, 6/7/2026 — ahora bloqueante desde el prompt
@@ -1688,7 +1705,7 @@ TXT;
             $parsed['horarios_ofrecidos'] = [];
         }
 
-        return $this->create_message_and_update_lead($lead, $parsed, $is_followup, $calendar_snapshot);
+        return $this->create_message_and_update_lead($lead, $parsed, $is_followup, $calendar_snapshot, $respaldo_deepseek);
     }
 
     /**
@@ -1870,8 +1887,14 @@ TXT;
      *
      * @return array<string, mixed> Paquete corregido.
      */
-    protected function descartar_agendamiento_fuera_de_slots(Lead $lead, array $parsed, array $availability_data, array $ventanas_extendidas = []): array
-    {
+    protected function descartar_agendamiento_fuera_de_slots(
+        Lead $lead,
+        array $parsed,
+        array $availability_data,
+        array $ventanas_extendidas = [],
+        ?RespaldoDeepSeek $respaldo_deepseek = null
+    ): array {
+        $respaldo_deepseek = $respaldo_deepseek ?? new RespaldoDeepSeek('agente_de_leads');
         if (empty($parsed['agendar_demo']) || ! is_array($parsed['agendar_demo'])) {
             return $parsed;
         }
@@ -2030,7 +2053,8 @@ TXT;
                     $demo_date,
                     $demo_start,
                     $fecha_en_ventana,
-                    $pidio_ventana
+                    $pidio_ventana,
+                    $respaldo_deepseek
                 );
             } catch (\Throwable $e) {
                 Log::channel('disponibilidad')->warning(
@@ -2107,7 +2131,8 @@ TXT;
                 $fecha_en_ventana,
                 ($hora_disponible && (! $ventana_ofrecida || ! $ventana_hasta_valida)),
                 $demo_id_invalido
-            )
+            ),
+            $respaldo_deepseek
         );
 
         if ($mensaje_correctivo !== '') {
@@ -2158,8 +2183,17 @@ TXT;
      *
      * @return array<string, mixed>|null Paquete corregido, o null si no se reagenda.
      */
-    protected function reagendar_al_proximo_slot(Lead $lead, array $parsed, array $availability_data, int $demo_id, string $demo_date, string $demo_start, bool $fecha_en_ventana, bool $pidio_ventana): ?array
-    {
+    protected function reagendar_al_proximo_slot(
+        Lead $lead,
+        array $parsed,
+        array $availability_data,
+        int $demo_id,
+        string $demo_date,
+        string $demo_start,
+        bool $fecha_en_ventana,
+        bool $pidio_ventana,
+        ?RespaldoDeepSeek $respaldo_deepseek = null
+    ): ?array {
         /* 1. Dinámica nueva y nada más. En la actual el margen es 30 hardcodeado y el protocolo es
          *    otro (ofrece listas, no un momento): reagendar ahí cambiaría un flujo que no pidió
          *    nadie. Mismo gate que el rescate del margen. */
@@ -2283,7 +2317,7 @@ TXT;
 
         /* 🔴 Primero el texto. Si el modelo no lo redacta, no se reagenda y el paquete queda
          * intacto: no hay mutación que revertir. */
-        $texto = $this->call_reagendado_al_proximo_slot_response($lead, $demo_start, $slot_nuevo['hora'], $demo_date);
+        $texto = $this->call_reagendado_al_proximo_slot_response($lead, $demo_start, $slot_nuevo['hora'], $demo_date, $respaldo_deepseek);
         if ($texto === '') {
             return null;
         }
@@ -5976,7 +6010,7 @@ TXT;
             'anthropic-version' => '2023-06-01',
             'anthropic-beta'    => 'prompt-caching-2024-07-31',
             'content-type'      => 'application/json',
-        ])->timeout(90);
+        ])->timeout(self::TIMEOUT_HTTP_SEGUNDOS);
 
         /* Configuración TLS según entorno (cacert para WAMP en Windows). */
         $verify_ssl = LeadAiProveedor::verify_ssl();
@@ -6036,7 +6070,8 @@ TXT;
         Lead $lead,
         array $parsed,
         bool $is_followup,
-        ?array $calendar_snapshot = null
+        ?array $calendar_snapshot = null,
+        ?RespaldoDeepSeek $respaldo_deepseek = null
     ): LeadMessage {
         // Antes de cambiar el estado o encolar: nunca confirmar una liberación sin su acción.
         if (app(AgendaDemoAutomaticaPolicy::class)->cancelacion_sin_accion($lead->fresh() ?: $lead, $parsed)) {
@@ -6097,7 +6132,7 @@ TXT;
             return $this->create_pending_agendamiento_message($lead, $parsed, $is_followup, $calendar_snapshot);
         }
 
-        return $this->apply_parsed_response($lead, $parsed, $is_followup, $calendar_snapshot);
+        return $this->apply_parsed_response($lead, $parsed, $is_followup, $calendar_snapshot, null, false, false, $respaldo_deepseek);
     }
 
     /**
@@ -6878,8 +6913,10 @@ TXT;
         ?array $calendar_snapshot = null,
         ?LeadMessage $existing_message = null,
         bool $for_approval = false,
-        bool $admin_override_estado = false
+        bool $admin_override_estado = false,
+        ?RespaldoDeepSeek $respaldo_deepseek = null
     ): LeadMessage {
+        $respaldo_deepseek = $respaldo_deepseek ?? new RespaldoDeepSeek('agente_de_leads');
         $this->validate_parsed_response($parsed);
 
         // La advertencia no se resuelve apretando Aprobar sin corregir sus datos.
@@ -7536,7 +7573,9 @@ TXT;
                      * se cayó. El lead no tiene por qué enterarse de la concurrencia del pool, y el
                      * prompt para este caso prohíbe explicar la causa — pero el motivo viaja igual,
                      * porque el hueco vacío es justamente lo que hace inventar al modelo. */
-                    $mensaje_correctivo = $this->call_corrective_availability_response($lead, $demo_start, $demo_date, [], 'no pudimos confirmar ese horario en este momento');
+                    $mensaje_correctivo = $this->call_corrective_availability_response(
+                        $lead, $demo_start, $demo_date, [], 'no pudimos confirmar ese horario en este momento', $respaldo_deepseek
+                    );
                     $mensaje            = $mensaje_correctivo !== '' ? $mensaje_correctivo : 'Ese horario se acaba de ocupar. Decime otro día u horario y lo confirmamos.';
                     $estado_raw         = 'solicita_disponibilidad';
                     $agendar_descartado_por_slot_invalido = true;
@@ -7831,7 +7870,8 @@ TXT;
                              * está en la grilla, $slots_demo viene vacío POR ESO y las ramas
                              * descriptivas del clasificador mentirían sobre la disponibilidad. */
                             ! isset($availability['demos'][$demo_id])
-                        )
+                        ),
+                        $respaldo_deepseek
                     );
 
                     if ($mensaje_correctivo !== '') {
@@ -9493,8 +9533,13 @@ TXT;
      *
      * @return string Texto del mensaje al lead, o string vacío si falló.
      */
-    private function call_reagendado_al_proximo_slot_response(Lead $lead, string $slot_que_arranco, string $slot_nuevo, string $demo_date): string
-    {
+    private function call_reagendado_al_proximo_slot_response(
+        Lead $lead,
+        string $slot_que_arranco,
+        string $slot_nuevo,
+        string $demo_date,
+        ?RespaldoDeepSeek $respaldo_deepseek = null
+    ): string {
         try {
             $hora_actual = AppTime::now()->format('H:i');
 
@@ -9527,7 +9572,7 @@ TXT;
             $model  = LeadAiProveedor::modelo();
             $http   = $this->build_http_client();
 
-            $response = $http->post(LeadAiProveedor::url_messages(), LeadAiProveedor::cuerpo([
+            $response = LeadAiProveedor::enviar($http, [
                 'model'      => $model,
                 'max_tokens' => 400,
                 'system'     => [
@@ -9540,13 +9585,13 @@ TXT;
                 'messages'   => [
                     ['role' => 'user', 'content' => $user_content],
                 ],
-            ]));
+            ], self::TIMEOUT_HTTP_SEGUNDOS, $respaldo_deepseek ?? new RespaldoDeepSeek('redaccion_de_reagendado'));
 
             if ($response->failed()) {
                 Log::error('LeadAiService: fallo HTTP en la llamada del reagendado al próximo slot.', [
                     'lead_id' => $lead->id,
                     'status'  => $response->status(),
-                    'body'    => $response->body(),
+                    'proveedor' => LeadAiProveedor::nombre(),
                 ]);
                 return '';
             }
@@ -9608,8 +9653,14 @@ TXT;
      *
      * @return string Mensaje natural al lead, o string vacío si falló (activa fallback).
      */
-    private function call_corrective_availability_response(Lead $lead, string $slot_invalido, string $demo_date, array $slots_disponibles, string $motivo_real = ''): string
-    {
+    private function call_corrective_availability_response(
+        Lead $lead,
+        string $slot_invalido,
+        string $demo_date,
+        array $slots_disponibles,
+        string $motivo_real = '',
+        ?RespaldoDeepSeek $respaldo_deepseek = null
+    ): string {
         try {
             /* Lista legible de alternativas para inyectar en el prompt (ej: "18:00, 19:00, 20:00"). */
             $alternativas_legibles = implode(', ', $slots_disponibles);
@@ -9673,7 +9724,7 @@ TXT;
             $model  = LeadAiProveedor::modelo();
             $http   = $this->build_http_client();
 
-            $response = $http->post(LeadAiProveedor::url_messages(), LeadAiProveedor::cuerpo([
+            $response = LeadAiProveedor::enviar($http, [
                 'model'      => $model,
                 'max_tokens' => 400,
                 'system'     => [
@@ -9686,13 +9737,13 @@ TXT;
                 'messages'   => [
                     ['role' => 'user', 'content' => $user_content],
                 ],
-            ]));
+            ], self::TIMEOUT_HTTP_SEGUNDOS, $respaldo_deepseek ?? new RespaldoDeepSeek('redaccion_de_slot_correctivo'));
 
             if ($response->failed()) {
                 Log::error('LeadAiService: fallo HTTP en tercera llamada correctiva (slot inválido).', [
                     'lead_id' => $lead->id,
                     'status'  => $response->status(),
-                    'body'    => $response->body(),
+                    'proveedor' => LeadAiProveedor::nombre(),
                 ]);
                 return '';
             }
@@ -9950,6 +10001,7 @@ TXT;
         int $max_tokens,
         PendingRequest $http,
         string $model,
+        RespaldoDeepSeek $respaldo_deepseek,
         ?Lead $lead = null,
         array &$leidas = []
     ): string {
@@ -9961,13 +10013,13 @@ TXT;
         while ($iterations < self::MAX_TOOL_ITERATIONS) {
             $iterations++;
 
-            $response = $http->post(LeadAiProveedor::url_messages(), LeadAiProveedor::cuerpo([
+            $response = LeadAiProveedor::enviar($http, [
                 'model'      => $model,
                 'max_tokens' => $max_tokens,
                 'system'     => $system_payload,
                 'tools'      => $tools,
                 'messages'   => $messages,
-            ]));
+            ], self::TIMEOUT_HTTP_SEGUNDOS, $respaldo_deepseek);
 
             if ($response->failed()) {
                 /* El texto del log y de la excepción lleva el proveedor que corre: con DeepSeek un 402
@@ -9975,11 +10027,11 @@ TXT;
                  * problema de Claude. Con Claude el texto sigue siendo el de siempre. */
                 Log::error('LeadAiService run_with_tools: ' . LeadAiProveedor::etiqueta() . ' error', [
                     'status'    => $response->status(),
-                    'body'      => $response->body(),
                     'iteration' => $iterations,
                     'proveedor' => LeadAiProveedor::nombre(),
+                    'modelo'    => $respaldo_deepseek->modelo_efectivo() ?? $model,
                 ]);
-                throw new \RuntimeException('Error ' . LeadAiProveedor::etiqueta() . ' HTTP ' . $response->status() . ': ' . $response->body());
+                throw new \RuntimeException('Error ' . LeadAiProveedor::etiqueta() . ' HTTP ' . $response->status());
             }
 
             $data        = $response->json();

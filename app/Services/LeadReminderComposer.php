@@ -190,9 +190,9 @@ TXT;
             ],
         ];
 
-        $respuesta = $this->build_http_client()->post(
-            LeadAiProveedor::url_messages(),
-            LeadAiProveedor::cuerpo($payload)
+        $respaldo = new RespaldoDeepSeek('recordatorio_de_demo');
+        $respuesta = LeadAiProveedor::enviar(
+            $this->build_http_client(), $payload, self::TIMEOUT_SEGUNDOS, $respaldo
         );
 
         if (! $respuesta->successful()) {
@@ -231,7 +231,7 @@ TXT;
             'texto'     => $texto,
             'motivo'    => null,
             'proveedor' => LeadAiProveedor::nombre(),
-            'modelo'    => LeadAiProveedor::modelo(),
+            'modelo'    => $respaldo->modelo_efectivo() ?? $payload['model'],
         ];
     }
 
