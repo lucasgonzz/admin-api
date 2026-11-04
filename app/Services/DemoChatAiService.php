@@ -91,13 +91,15 @@ class DemoChatAiService
         $verify = (bool) config('services.deepseek.verify_ssl', true);
         $bundle = config('services.deepseek.ca_bundle');
         if ($verify && is_string($bundle) && $bundle !== '') { $verify = $bundle; }
+        $http = Http::withHeaders(['x-api-key' => $clave, 'anthropic-version' => '2023-06-01'])
+            ->withOptions(['verify' => $verify]);
+        $respaldo = new RespaldoDeepSeek('chat_de_demo');
         $corrigio_formato = false;
         for ($vuelta = 0; $vuelta < 4; $vuelta++) {
-            $respuesta = Http::withHeaders(['x-api-key' => $clave, 'anthropic-version' => '2023-06-01'])
-                ->withOptions(['verify' => $verify])->timeout(25)->post($base . '/v1/messages', [
-                    'model' => $modelo, 'max_tokens' => 1400, 'thinking' => ['type' => 'disabled'],
-                    'system' => $system, 'messages' => $mensajes, 'tools' => $tools,
-                ]);
+            $respuesta = $respaldo->enviar($http, $base . '/v1/messages', [
+                'model' => $modelo, 'max_tokens' => 1400, 'thinking' => ['type' => 'disabled'],
+                'system' => $system, 'messages' => $mensajes, 'tools' => $tools,
+            ], 25);
             if (! $respuesta->successful()) {
                 throw new \RuntimeException('DeepSeek no pudo responder la demo (HTTP ' . $respuesta->status() . ').');
             }

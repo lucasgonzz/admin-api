@@ -2,10 +2,13 @@
 
 namespace App\Services;
 
+use Illuminate\Http\Client\PendingRequest;
+use Illuminate\Http\Client\Response;
+
 /**
  * Proveedor de IA del agente de WhatsApp de los leads (`LeadAiService`): Claude o DeepSeek.
  *
- * Misión leads-agente-deepseek (16/10/2026, pedido de Lucas). Es el ÚNICO lugar del admin que sabe
+ * Misión leads-agente-deepseek (16/10/2026, pedido de Lucas). Es el lugar del agente de leads que sabe
  * que hay dos proveedores; `LeadAiService` le pregunta a esta clase la URL, la clave, el modelo y
  * el cuerpo de cada llamada y no se entera de cuál está corriendo.
  *
@@ -171,6 +174,15 @@ class LeadAiProveedor
         $payload['thinking'] = ['type' => self::THINKING];
 
         return $payload;
+    }
+
+    public static function enviar(PendingRequest $http, array $payload, int $timeout, RespaldoDeepSeek $respaldo): Response
+    {
+        if (! self::es_deepseek()) {
+            return $http->post(self::url_messages(), $payload);
+        }
+
+        return $respaldo->enviar($http, self::url_messages(), self::cuerpo($payload), $timeout);
     }
 
     /**

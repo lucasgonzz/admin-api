@@ -213,7 +213,8 @@ class RecordatoriosConConversacionTest extends TestCase
             'Gaston'   => $this->respuesta_ia('Gaston, te recuerdo que hoy tenés tu demo de ComercioCity. Cualquier duda, escribime por acá cuando quieras.'),
             'Hector'   => new ConnectionException('cURL error 28: timeout'),
         ];
-        $this->simular_http($respuestas);
+        $modelos_por_nombre = [];
+        $this->simular_http($respuestas, $modelos_por_nombre);
 
         $leads = [];
         $i = 10;
@@ -226,12 +227,17 @@ class RecordatoriosConConversacionTest extends TestCase
         $this->artisan('leads:send-morning-demo-reminder')->assertExitCode(0);
 
         $this->assertCount(0, $espia->textos, 'Ninguno de los textos de la IA era válido: no tiene que salir ninguno.');
-        /* La IA se consultó para todos. El del timeout no cuenta: Laravel no registra en
-         * Http::recorded() un pedido cuyo simulador tiró una excepción antes de contestar. */
-        $this->assertCount(count($respuestas) - 1, $this->pedidos_a_la_ia());
+        /* Registramos al entrar al simulador para contar también las llamadas con timeout. */
+        foreach (array_keys($respuestas) as $nombre) {
+            $modelos_esperados = in_array($nombre, ['Benito', 'Hector'], true)
+                ? ['deepseek-flash', 'deepseek-v4-pro']
+                : ['deepseek-flash'];
+            $this->assertSame($modelos_esperados, $modelos_por_nombre[$nombre], $nombre);
+        }
 
         $plantillas = $this->plantillas_de($espia, self::PLANTILLA_MANANA);
         $this->assertCount(count($respuestas), $plantillas, 'Cada recordatorio tiene que haber salido igual, por la plantilla.');
+        $this->assertCount(count($respuestas), array_unique(array_column($plantillas, 'to')), 'Cada destinatario recibe una sola plantilla.');
 
         foreach ($leads as $nombre => $lead) {
             $this->assertTrue((bool) $lead->refresh()->recordatorio_manana_enviado, "{$nombre}: tiene que quedar marcado.");
@@ -337,11 +343,12 @@ class RecordatoriosConConversacionTest extends TestCase
         $this->fijar_ahora('2026-10-16 10:45:00');
         $espia = $this->espiar_whatsapp();
 
+        $modelos_por_nombre = [];
         $this->simular_http([
             'Guillermo' => $this->respuesta_ia(self::TEXTO_PRE_DEMO_OK),
             'Benito'    => Http::response(['error' => 'boom'], 500),
             'Cirilo'    => $this->respuesta_ia('Cirilo, la demo arranca a las 15:30, cualquier duda escribime por acá.'),
-        ]);
+        ], $modelos_por_nombre);
 
         $ok = $this->crear_lead('Guillermo González', '5493519990041', '10:10', ['demo_mail_sent_at' => Carbon::now()->subMinutes(40)]);
         $this->mensaje($ok, 'lead', Carbon::now()->subMinutes(120), 'Hola');
@@ -353,7 +360,10 @@ class RecordatoriosConConversacionTest extends TestCase
         $this->artisan('leads:send-demo-reminders')->assertExitCode(0);
 
         $this->assertCount(0, $espia->plantillas, 'Con la ventana abierta no sale plantilla.');
-        $this->assertCount(3, $this->pedidos_a_la_ia());
+        $this->assertSame(['deepseek-flash'], $modelos_por_nombre['Guillermo']);
+        $this->assertSame(['deepseek-flash', 'deepseek-v4-pro'], $modelos_por_nombre['Benito']);
+        $this->assertSame(['deepseek-flash'], $modelos_por_nombre['Cirilo']);
+        $this->assertCount(3, $espia->textos, 'Dos intentos de IA igual producen un solo envío para Benito.');
 
         $por_telefono = [];
         foreach ($espia->textos as $t) {
@@ -914,12 +924,13 @@ class RecordatoriosConConversacionTest extends TestCase
      * contesta que está todo bien.
      *
      * @param array<string, mixed> $respuestas_por_nombre Respuesta o Throwable por primer nombre.
+     * @param array<string, string[]>|null $modelos_por_nombre Si se indica, anota los modelos consultados por lead.
      *
      * @return void
      */
-    private function simular_http(array $respuestas_por_nombre): void
+    private function simular_http(array $respuestas_por_nombre, ?array &$modelos_por_nombre = null): void
     {
-        Http::fake(function ($request) use ($respuestas_por_nombre) {
+        Http::fake(function ($request) use ($respuestas_por_nombre, &$modelos_por_nombre) {
             $url = $request->url();
             if (strpos($url, 'api.deepseek.com') === false && strpos($url, 'api.anthropic.com') === false) {
                 return Http::response(['ok' => true], 200);
@@ -928,6 +939,9 @@ class RecordatoriosConConversacionTest extends TestCase
             $contenido = (string) ($request['messages'][0]['content'] ?? '');
             foreach ($respuestas_por_nombre as $nombre => $respuesta) {
                 if (strpos($contenido, 'Primer nombre del lead: ' . $nombre . "\n") !== false) {
+                    if ($modelos_por_nombre !== null) {
+                        $modelos_por_nombre[$nombre][] = $request['model'];
+                    }
                     if ($respuesta instanceof \Throwable) {
                         throw $respuesta;
                     }

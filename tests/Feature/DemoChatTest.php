@@ -286,6 +286,55 @@ class DemoChatTest extends TestCase
         $this->assertNotEmpty(app(DemoChatService::class)->snapshot($lead, true)['conversacion']['ultimo_error']);
     }
 
+    public function test_deepseek_alterna_despues_de_leer_el_manual_y_publica_una_sola_respuesta(): void
+    {
+        config(['services.deepseek.api_key' => 'clave-falsa', 'services.demo_chat.model' => 'deepseek-flash']);
+        $ruta = 'manual_sistema/compras/escaneo.md';
+        app(ManualRepositoryService::class)->shouldReceive('get_file')->with($ruta)->once()->andReturn('Revisá la compra antes de confirmar.');
+        Http::fake(['api.deepseek.com/*' => Http::sequence()
+            ->push(['content' => [['type' => 'tool_use', 'id' => 'lectura_1', 'name' => 'leer_manual', 'input' => ['ruta' => $ruta]]]])
+            ->push([], 503)
+            ->push(['content' => [['type' => 'text', 'text' => json_encode([
+                'contenido' => 'Revisá la compra antes de confirmar.', 'videos' => [], 'fuentes' => [$ruta],
+            ])]]])]);
+
+        $lead = $this->lead();
+        $this->mensaje($lead);
+        $this->responder($lead);
+
+        $this->getJson('/api/demo-chat', $this->headers($lead))
+            ->assertJsonCount(3, 'mensajes')
+            ->assertJsonPath('mensajes.2.contenido', 'Revisá la compra antes de confirmar.');
+        $intentos = Http::recorded()->map(function ($par) { return $par[0]->data(); })->all();
+        $this->assertSame(['deepseek-flash', 'deepseek-flash', 'deepseek-v4-pro'], array_column($intentos, 'model'));
+        $this->assertSame(array_replace($intentos[1], ['model' => 'deepseek-v4-pro']), $intentos[2]);
+        $this->assertSame('lectura_1', $intentos[2]['messages'][2]['content'][0]['tool_use_id']);
+    }
+
+    public function test_deepseek_conserva_el_respaldo_en_la_siguiente_ronda_de_tools(): void
+    {
+        config(['services.deepseek.api_key' => 'clave-falsa', 'services.demo_chat.model' => 'deepseek-flash']);
+        $ruta = 'manual_sistema/compras/escaneo.md';
+        app(ManualRepositoryService::class)->shouldReceive('get_file')->with($ruta)->once()->andReturn('Revisá antes de confirmar.');
+        Http::fake(['api.deepseek.com/*' => Http::sequence()
+            ->push([], 503)
+            ->push(['content' => [['type' => 'tool_use', 'id' => 'lectura_1', 'name' => 'leer_manual', 'input' => ['ruta' => $ruta]]]])
+            ->push(['content' => [['type' => 'text', 'text' => json_encode([
+                'contenido' => 'Revisá antes de confirmar.', 'videos' => [], 'fuentes' => [$ruta],
+            ])]]])]);
+
+        $lead = $this->lead();
+        $this->mensaje($lead);
+        $this->responder($lead);
+
+        $this->getJson('/api/demo-chat', $this->headers($lead))
+            ->assertJsonCount(3, 'mensajes')
+            ->assertJsonPath('mensajes.2.contenido', 'Revisá antes de confirmar.');
+        $intentos = Http::recorded()->map(function ($par) { return $par[0]->data(); })->all();
+        $this->assertSame(['deepseek-flash', 'deepseek-v4-pro', 'deepseek-v4-pro'], array_column($intentos, 'model'));
+        $this->assertSame('lectura_1', $intentos[2]['messages'][2]['content'][0]['tool_use_id']);
+    }
+
     public function test_deepseek_corrige_una_cita_invalida_sin_publicar_el_intento(): void
     {
         config(['services.deepseek.api_key' => 'clave-falsa']);
