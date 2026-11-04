@@ -257,11 +257,16 @@ return [
             ],
         ],
         'GET api/claude/support-codex/tickets/{id}/upgrade-window' => [
-            'para_que' => 'Calcula la primera ventana en que el negocio del ticket está cerrado de corrido el tiempo pedido (con los recesos del día incluidos), mirando sus horarios, desde ahora o desde not_before, y respetando el tiempo de espera de una propuesta anterior sin respuesta. Responde {window: {starts_at, ends_at, timezone} | null, reason} en hora de Buenos Aires; window=null si no hay (reason sin_ventana_suficiente o el motivo de horarios sin configurar). Va por query string y NO toca nada; la reserva viaja en el header X-Support-Lease-Token.',
+            'para_que' => 'Calcula la primera ventana en que el negocio del ticket está cerrado de corrido el tiempo pedido (con los recesos del día incluidos), mirando sus horarios, desde ahora o desde not_before, y arrancando después de la ventana de un acuerdo anterior ya aceptado de la misma corrección que quedó sin efecto (vencido sin ejecutarse o con la programación bloqueada sin haber tocado producción). Responde {window: {starts_at, ends_at, timezone} | null, reason} en hora de Buenos Aires; window=null si no hay (reason sin_ventana_suficiente o el motivo de horarios sin configurar). Va por query string y NO toca nada; la reserva viaja en el header X-Support-Lease-Token.',
             'escribe' => false, 'peligrosidad' => 'lectura',
             'frenos' => [
                 'Reserva vigente en el header X-Support-Lease-Token y expected_message_id del último mensaje real (423 invalid_lease / mensaje desactualizado).',
                 'Solo si el contacto puede consultar datos del negocio (403 si no). El cliente sale del ticket, nunca de un parámetro.',
+            ],
+            'parametros' => [
+                ['nombre' => 'minimum_minutes', 'obligatorio' => true, 'validacion' => 'required|integer|between:1,1440', 'que_es' => 'Minutos de cierre continuo que se necesitan.'],
+                ['nombre' => 'expected_message_id', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'Último mensaje real del ticket.'],
+                ['nombre' => 'not_before', 'obligatorio' => false, 'validacion' => 'sometimes|date_format:Y-m-d\TH:i:sP', 'que_es' => 'No buscar antes de este instante (con zona horaria). Por defecto, ahora.'],
             ],
         ],
         'POST api/claude/support-codex/tickets/{id}/upgrade-proposal' => [
@@ -294,7 +299,7 @@ return [
                 'Reserva vigente y expected_message_id actual; solo con el dueño (403 upgrade_owner_required).',
                 'La propuesta tiene que ser la última ENVIADA para la corrección vigente (409 proposal_not_current).',
                 'El mensaje tiene que ser del cliente, posterior a la propuesta y confirmarla exacta: citando la propuesta con un «sí / confirmo / dale…» o escribiendo la frase de confirmación (422 upgrade_confirmation_required).',
-                'Se revalida que la ventana siga siendo una ventana cerrada confirmable (409 upgrade_window_changed). Idempotente con el mismo mensaje; con otro, 409 proposal_already_accepted.',
+                'Se revalida la corrección vigente (409 mission_evidence_changed) y que la ventana siga siendo una ventana cerrada confirmable que todavía no empezó (409 upgrade_window_changed). Idempotente con el mismo mensaje; con otro, 409 proposal_already_accepted.',
             ],
             'parametros' => [
                 ['nombre' => 'lease_token', 'obligatorio' => true, 'validacion' => 'required|string|min:32|max:128', 'que_es' => 'Reserva vigente de este ticket.'],
@@ -311,9 +316,9 @@ return [
             'escribe' => true, 'peligrosidad' => 'media',
             'frenos' => [
                 'Un solo release de empresa activo a la vez (409 release_busy) y una sola reserva por acuerdo; repetir con los mismos datos devuelve la ya hecha, con otros es 409 release_claim_conflict.',
-                'Acuerdo aceptado con confirmación y evidencia vigentes (409 release_agreement_changed) y ventana que todavía no empezó (409 release_window_expired).',
+                'El acuerdo tiene que ser de ESTE ticket (404 si no), estar aceptado con la confirmación exacta, ticket con respuesta automática y contacto dueño, y evidencia vigente que incluya al menos un commit de empresa-api o empresa-spa: una corrección que solo toca admin o tienda no reclama release (409 release_agreement_changed). La ventana no puede haber empezado (409 release_window_expired).',
                 'Verifica contra GitHub que el commit del arreglo es ancestro del develop indicado, en cada repo (422 release_proof_invalid; 502 release_proof_unavailable si GitHub no contesta).',
-                'El borrador tiene que ser exactamente el vigente: ni otro ni uno nuevo si ya hay uno (409 release_draft_changed) y el código no puede estar tomado por otra versión (409 release_version_taken).',
+                'El borrador tiene que ser exactamente el vigente: ni otro ni uno nuevo si ya hay uno (409 release_draft_changed) y, al crear un borrador nuevo, el código no puede estar tomado por otra versión (409 release_version_taken).',
             ],
             'parametros' => [
                 ['nombre' => 'agreement_id', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'Acuerdo aceptado de ESTE ticket.'],
@@ -326,7 +331,7 @@ return [
             'para_que' => 'Cierra el release de empresa reclamado: comprueba contra GitHub las pruebas de que se sacó (commits del disparador y del tag, y los artefactos .zip de empresa-api y empresa-spa con id, tamaño y SHA-256), pasa la versión de borrador a PUBLICADA en el admin (published_at ahora; título y descripción opcionales) y libera el reclamo. La versión publicada queda disponible para desplegar a clientes. No despliega a ningún negocio. Responde {release: {version_id, version, status: published, develop}}.',
             'escribe' => true, 'peligrosidad' => 'alta',
             'frenos' => [
-                'Tiene que existir el reclamo de ese acuerdo, con el mismo version_id, version y develop (409 release_claim_conflict), todavía activo y con acuerdo y evidencia vigentes (409 release_agreement_changed).',
+                'Tiene que existir el reclamo de ese acuerdo, con el mismo version_id, version y develop (409 release_claim_conflict), todavía activo (un reclamo ya liberado es 409 release_claim_conflict) y con acuerdo y evidencia vigentes (409 release_agreement_changed).',
                 'GitHub confirma, por cada repo, el release, los commits y los artefactos (422 release_proof_invalid; 502 release_proof_unavailable si no contesta): sin esa comprobación no publica.',
                 'El borrador vigente tiene que ser el reclamado y el código no puede estar tomado (409 release_draft_changed / release_version_taken).',
                 'Idempotente: repetir con la misma evidencia devuelve el mismo resultado; con otra evidencia sobre un release ya publicado, 409 release_proof_conflict.',
@@ -366,7 +371,7 @@ return [
             'escribe' => true, 'peligrosidad' => 'alta',
             'frenos' => [
                 'Apagado por defecto: sin SUPPORT_CODEX_SCHEDULED_UPGRADES_ENABLED responde 503 y no programa nada; el despliegue lo hace luego el proceso del admin, no esta llamada.',
-                'Acuerdo aceptado de ESTE ticket cuya hora todavía no llegó (409) y que pasa la inspección previa: ticket abierto, evidencia y confirmación vigentes, cliente activo en su frente principal, sin otro despliegue en curso, sin otro acuerdo superpuesto, horarios todavía de cierre y margen suficiente (409 con el motivo).',
+                'Acuerdo de ESTE ticket (404 si no), aceptado y cuya hora todavía no llegó (409) y que pasa la inspección previa: ticket abierto, evidencia y confirmación vigentes, cliente activo en su frente principal, sin otro despliegue en curso, sin otro acuerdo superpuesto, horarios todavía de cierre y margen suficiente (409 con el motivo).',
                 'La versión tiene que estar PUBLICADA y vinculada a ESE acuerdo con las identidades exactas de los artefactos de empresa-api y empresa-spa (409), y el cliente tiene que tener una versión menor (409).',
                 'Idempotente por acuerdo: la misma versión devuelve la ya programada; otra versión es 409.',
                 'Antes de cada etapa del despliegue el servicio vuelve a comprobar actividad real del negocio y horario, y se frena si algo cambió; todo upgrade de este circuito queda bloqueado para el despliegue manual del panel.',
@@ -377,7 +382,7 @@ return [
             ],
         ],
         'POST api/claude/support-codex/tickets/{id}/verify-scheduled-upgrade' => [
-            'para_que' => 'Registra el resultado de comprobar que la corrección funciona en el sistema ya actualizado del cliente. Con resultado=verificado la actualización pasa a verified, y el proceso programado le pide después al cliente que confirme; con inconcluso guarda la evidencia y el motivo y la deja sin verificar. Responde {scheduled_upgrade}.',
+            'para_que' => 'Registra el resultado de comprobar que la corrección funciona en el sistema ya actualizado del cliente. Con resultado=verificado la actualización pasa a verified, y el proceso programado deja el caso listo para pedirle al cliente que confirme (el mensaje real lo manda después el monitor de Martín); con inconcluso guarda la evidencia y el motivo (por defecto reproduccion_inconclusa) y la deja sin verificar. Responde {scheduled_upgrade}.',
             'escribe' => true, 'peligrosidad' => 'baja',
             'frenos' => [
                 'La actualización programada tiene que corresponder al ticket, al acuerdo y al upgrade_id indicados (404 si no).',
