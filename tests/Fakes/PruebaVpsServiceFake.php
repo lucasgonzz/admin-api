@@ -19,6 +19,9 @@ class PruebaVpsServiceFake extends PruebaVpsService
     /** Comandos crudos, en orden. */
     public $comandos = [];
 
+    /** Qué pidió cada comando a la costura (`timeout` y `exit_obligatorio`), en el mismo orden que `$comandos`. */
+    public $pedidos = [];
+
     /** Archivos escritos con `escribir_archivo()`: ruta => contenido (decodificado del base64). */
     public $archivos = [];
 
@@ -62,9 +65,10 @@ class PruebaVpsServiceFake extends PruebaVpsService
         }));
     }
 
-    protected function ejecutar(string $comando, array $secretos): string
+    protected function ejecutar(string $comando, array $secretos, ?int $timeout_segundos = null, bool $exit_obligatorio = false): string
     {
-        $this->comandos[] = $comando;
+        $this->comandos[]  = $comando;
+        $this->pedidos[]   = ['timeout' => $timeout_segundos, 'exit_obligatorio' => $exit_obligatorio];
 
         if (preg_match('#bash /root/prueba-gratuita/([a-z-]+\.sh)#', $comando, $m)) {
             $script = $m[1];

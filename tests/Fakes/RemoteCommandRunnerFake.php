@@ -42,6 +42,13 @@ class RemoteCommandRunnerFake extends RemoteCommandRunner
     public $redactados = [];
 
     /**
+     * Timeout que pidió cada comando a ejecutar() (null = el de la sesión), en el mismo orden que $crudos.
+     *
+     * @var array<int, int|null>
+     */
+    public $timeouts = [];
+
+    /**
      * Salida por defecto de cualquier comando que no matchee ninguna regla.
      *
      * @var string
@@ -122,13 +129,20 @@ class RemoteCommandRunnerFake extends RemoteCommandRunner
      * @param  string              $command
      * @param  array<int, string>  $secretos
      * @param  bool                $must_succeed
+     * @param  int|null            $timeout_segundos
+     * @param  bool                $exit_obligatorio
      * @return string
      */
-    public function run(string $command, array $secretos = [], bool $must_succeed = true): string
-    {
+    public function run(
+        string $command,
+        array $secretos = [],
+        bool $must_succeed = true,
+        ?int $timeout_segundos = null,
+        bool $exit_obligatorio = false
+    ): string {
         $this->redactados[] = $this->redactar($command, $secretos);
 
-        return parent::run($command, $secretos, $must_succeed);
+        return parent::run($command, $secretos, $must_succeed, $timeout_segundos, $exit_obligatorio);
     }
 
     /**
@@ -139,7 +153,8 @@ class RemoteCommandRunnerFake extends RemoteCommandRunner
      */
     protected function ejecutar(string $command): array
     {
-        $this->crudos[] = $command;
+        $this->crudos[]   = $command;
+        $this->timeouts[] = $this->timeout_del_comando;
 
         foreach ($this->salidas as $regla) {
             if (strpos($command, (string) $regla['aguja']) !== false) {

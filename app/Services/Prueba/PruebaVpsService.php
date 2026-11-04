@@ -39,6 +39,17 @@ class PruebaVpsService
     const MODO_ARCHIVO = '640';
 
     /**
+     * Tiempo máximo de un script del pool, en segundos (65 min).
+     *
+     * 🔴 phpseclib corta cada `exec()` a los 10 s de tiempo TOTAL si nadie le sube el tope, y devuelve la salida a
+     * medias (medido en producción el 4/11/2026: un script de 25 s volvió a los 10 s). Los scripts tardan de
+     * segundos (`prueba-estado`) a ~60 min (`pool-crear` con SSL de cuatro hosts, `pool-plantilla` con composer), así
+     * que el tope se pone por encima del job más largo —`CrearInstanciaDePoolJob`, 3600—: el que manda es el
+     * `$timeout` del job, y este número solo evita que un comando legítimo se corte antes.
+     */
+    const TIMEOUT_DE_SCRIPT_SEGUNDOS = 3900;
+
+    /**
      * Runner SSH, abierto al primer comando.
      *
      * @var RemoteCommandRunner|null
@@ -243,7 +254,8 @@ class PruebaVpsService
         $inicio = microtime(true);
 
         try {
-            $salida = $this->ejecutar($comando, []);
+            /* 🔴 Timeout alto y exit obligatorio SOLO acá (los scripts largos del pool): ver las constantes. */
+            $salida = $this->ejecutar($comando, [], self::TIMEOUT_DE_SCRIPT_SEGUNDOS, true);
         } catch (\RuntimeException $e) {
             /* El runner ya armó el mensaje (exit y salida recortada). Si la salida traía el JSON de error del
                script, se prefiere ese texto, que está en castellano. */
@@ -288,14 +300,17 @@ class PruebaVpsService
      * 🔴 LA COSTURA: lo único que abre SSH. `Tests\Fakes\PruebaVpsServiceFake` la sobreescribe.
      *
      * @param array<int, string> $secretos Strings que el runner reemplaza por *** en todo lo logueado.
+     * @param int|null           $timeout_segundos  null = el de la sesión (10 s de phpseclib: alcanza para los comandos
+     *                                              cortos de `escribir_archivo()` y `escribir_variables_env()`).
+     * @param bool               $exit_obligatorio  true = un exit status ausente (salida cortada) es falla.
      *
      * @return string Salida cruda.
      *
      * @throws \RuntimeException Si el comando sale con un código distinto de 0.
      */
-    protected function ejecutar(string $comando, array $secretos): string
+    protected function ejecutar(string $comando, array $secretos, ?int $timeout_segundos = null, bool $exit_obligatorio = false): string
     {
-        return $this->runner()->run($comando, $secretos, true);
+        return $this->runner()->run($comando, $secretos, true, $timeout_segundos, $exit_obligatorio);
     }
 
     protected function runner(): RemoteCommandRunner

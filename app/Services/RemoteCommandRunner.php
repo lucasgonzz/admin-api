@@ -79,6 +79,13 @@ class RemoteCommandRunner
     private $step = 'remote';
 
     /**
+     * Tope en segundos que pidió el `run()` en curso (null = el de la sesión). Lo lee la costura ejecutar().
+     *
+     * @var int|null
+     */
+    protected $timeout_del_comando = null;
+
+    /**
      * Sesión SSH abierta, perezosa: no se conecta hasta el primer comando.
      *
      * @var SSH2|null
@@ -133,14 +140,33 @@ class RemoteCommandRunner
      * @param  string                $command       Comando completo, ya escapado por el llamador.
      * @param  array<int, string>    $secretos      Strings a reemplazar por *** en todo lo logueado.
      * @param  bool                  $must_succeed  false = un exit distinto de 0 no rompe la etapa.
+     * @param  int|null              $timeout_segundos  null = el de la sesión, 10 s de phpseclib (como siempre).
+     *                                                  Un número = tope de ESTE comando, y 0 = sin tope. Se aplica
+     *                                                  solo durante el comando y después se restaura (ver ejecutar()).
+     * @param  bool                  $exit_obligatorio  true = que el servidor no devuelva exit status (`false`) es una
+     *                                                  falla. Es lo que pasa cuando phpseclib corta la lectura por
+     *                                                  tiempo y devuelve la salida TRUNCADA: sin esta bandera esa
+     *                                                  salida parcial pasaría por éxito. Default false para no
+     *                                                  cambiar a los demás llamadores (ver el comentario de abajo).
      * @return string  Salida cruda del comando.
-     * @throws \RuntimeException Si el comando falla y $must_succeed.
+     * @throws \RuntimeException Si el comando falla y $must_succeed, o si no hubo exit status y $exit_obligatorio.
      */
-    public function run(string $command, array $secretos = [], bool $must_succeed = true): string
-    {
+    public function run(
+        string $command,
+        array $secretos = [],
+        bool $must_succeed = true,
+        ?int $timeout_segundos = null,
+        bool $exit_obligatorio = false
+    ): string {
         $this->registrar('$ ' . $this->redactar($command, $secretos));
 
-        $resultado = $this->ejecutar_con_reintento_de_canal($command, $secretos);
+        $this->timeout_del_comando = $timeout_segundos;
+
+        try {
+            $resultado = $this->ejecutar_con_reintento_de_canal($command, $secretos);
+        } finally {
+            $this->timeout_del_comando = null;
+        }
         $salida    = (string) $resultado['salida'];
         $exit      = $resultado['exit'];
 
@@ -151,9 +177,25 @@ class RemoteCommandRunner
 
         /*
          * exit === false es "el servidor no devolvió exit status", que es lo que pasa con algunos
-         * comandos por el canal exec de phpseclib. No se trata como falla: exec_ssh_session() hace
-         * lo mismo desde siempre y cambiarlo acá rompería comandos que hoy andan.
+         * comandos por el canal exec de phpseclib. Por defecto no se trata como falla:
+         * exec_ssh_session() hace lo mismo desde siempre y cambiarlo acá rompería comandos que hoy
+         * andan.
+         *
+         * 🔴 Salvo que el llamador lo pida con $exit_obligatorio (los scripts largos de la prueba
+         * gratuita). Medido en producción el 4/11/2026: phpseclib cortó un script de 25 s a los 10 s
+         * y devolvió su salida a medias con exit false; tomarlo por éxito dejaba pasar un
+         * `pool-crear.sh` que nunca terminó. Ahí "no hay exit status" quiere decir "no sé si
+         * terminó", y eso es una falla.
          */
+        if ($must_succeed && $exit_obligatorio && $exit === false) {
+            throw new \RuntimeException(
+                'El comando remoto no devolvió exit status (se cortó la conexión o venció el tiempo máximo'
+                    . ($timeout_segundos === null ? '' : ' de ' . $timeout_segundos . ' s') . '): '
+                    . $this->redactar($command, $secretos) . ' → '
+                    . substr($salida_redactada, -800)
+            );
+        }
+
         if ($must_succeed && $exit !== false && (int) $exit !== 0) {
             /*
              * 🔴 El mensaje va REDACTADO. Esta excepción termina en failure_reason de la
@@ -292,15 +334,40 @@ class RemoteCommandRunner
      * el mismo momento en que se escribe. La redacción, el armado del mensaje de error y la
      * decisión sobre el exit status viven arriba, en run(), a propósito.
      *
+     * 🔴 El timeout. phpseclib trae 10 s de TIEMPO TOTAL por `exec()` (no de inactividad: un script
+     * que imprime cada segundo se corta igual) y devuelve lo que alcanzó a leer, sin avisar. Con
+     * `$timeout_segundos` null no se toca nada —el 10 de siempre, para los comandos cortos que ya
+     * andaban con él—; con un número se aplica SOLO a este comando y se restaura en un `finally`,
+     * porque la sesión es compartida: un `setTimeout(3900)` que quedara puesto le cambiaría el
+     * comportamiento al siguiente `run()` de otro llamador (un `dig`, un `clpctl`).
+     *
+     * El tope de ESTE comando llega por `$timeout_del_comando` (lo deja `run()`) y no como argumento, para no
+     * cambiar la firma de la costura: los dobles que ya la sobreescriben siguen siendo válidos.
+     *
      * @param  string  $command
      * @return array<string, mixed>  ['salida' => string, 'exit' => int|false]
      */
     protected function ejecutar(string $command): array
     {
-        $ssh    = $this->sesion();
-        $salida = (string) $ssh->exec($command);
+        $ssh              = $this->sesion();
+        $timeout_segundos = $this->timeout_del_comando;
 
-        return ['salida' => $salida, 'exit' => $ssh->getExitStatus()];
+        if ($timeout_segundos === null) {
+            $salida = (string) $ssh->exec($command);
+
+            return ['salida' => $salida, 'exit' => $ssh->getExitStatus()];
+        }
+
+        $anterior = $ssh->getTimeout();
+        $ssh->setTimeout($timeout_segundos);
+
+        try {
+            $salida = (string) $ssh->exec($command);
+
+            return ['salida' => $salida, 'exit' => $ssh->getExitStatus()];
+        } finally {
+            $ssh->setTimeout($anterior);
+        }
     }
 
     /**

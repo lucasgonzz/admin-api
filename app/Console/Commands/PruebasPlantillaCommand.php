@@ -7,23 +7,27 @@ use App\Services\Prueba\PruebaVpsService;
 use Illuminate\Console\Command;
 
 /**
- * `pruebas:plantilla [--version=] [--tienda=]`: arma en el VPS la plantilla pre-extraída de una versión
+ * `pruebas:plantilla [--empresa=] [--tienda=]`: arma en el VPS la plantilla pre-extraída de una versión
  * publicada de empresa y de tienda (`/root/plantillas/<producto>-v<v>/`, con `vendor/` instalado), de
  * la que `pool-crear.sh` copia cada instancia en segundos (decisión D3 del plan de
  * `prueba-alta-instancia`, 3/11/2026). Sin opciones, la última publicada de cada una.
+ *
+ * 🔴 La versión de empresa es `--empresa` y no `--version`: `--version` es una opción GLOBAL de artisan
+ * («An option named "version" already exists») y el comando ni siquiera cargaba, ni con `--help`
+ * (medido en producción el 4/11/2026).
  *
  * Se corre a mano después de cada release de empresa o de tienda, antes de que
  * `pruebas:mantener-pool` arme instancias nuevas.
  */
 class PruebasPlantillaCommand extends Command
 {
-    protected $signature = 'pruebas:plantilla {--version= : Versión de empresa (default: la última publicada)} {--tienda= : Versión de tienda (default: la última publicada)}';
+    protected $signature = 'pruebas:plantilla {--empresa= : Versión de empresa (default: la última publicada)} {--tienda= : Versión de tienda (default: la última publicada)}';
 
     protected $description = 'Arma en el VPS la plantilla pre-extraída de una versión publicada de empresa y de tienda para el pool de pruebas.';
 
     public function handle(PruebaPoolService $pool, PruebaVpsService $vps): int
     {
-        $version = trim((string) $this->option('version'));
+        $version = trim((string) $this->option('empresa'));
         $tienda  = trim((string) $this->option('tienda'));
 
         if ($version === '') {

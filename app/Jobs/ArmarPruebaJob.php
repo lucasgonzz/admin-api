@@ -57,6 +57,9 @@ class ArmarPruebaJob implements ShouldQueue
     public function __construct(int $trial_instance_id)
     {
         $this->trial_instance_id = $trial_instance_id;
+
+        /* Misma conexión y cola que el job del pool (ver CrearInstanciaDePoolJob::CONEXION_DE_COLA). */
+        $this->onConnection(CrearInstanciaDePoolJob::CONEXION_DE_COLA)->onQueue(CrearInstanciaDePoolJob::COLA);
     }
 
     public function handle(): void

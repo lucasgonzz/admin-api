@@ -47,12 +47,32 @@ class CrearInstanciaDePoolJob implements ShouldQueue
 
     public $timeout = 3600;
 
+    /**
+     * Conexión y cola propias de los jobs de la prueba (4/11/2026).
+     *
+     * 🔴 Por qué no `default`. Estos jobs duran de 25 a 60 minutos y el admin tiene UN worker en `default`
+     * (`api_admin_queue`, numprocs 1): mientras armaban una instancia dejaban sin atender todo lo demás
+     * (el WhatsApp de Martín, avisos de soporte, demo setups). Por eso salen por la conexión `database_prueba`
+     * —misma tabla `jobs`, cola `prueba`, `retry_after` de 4200 s— y los atiende su propio programa de
+     * supervisor, `api_admin_queue_prueba` (`queue:work database_prueba --queue=prueba`).
+     *
+     * Y no `database`, porque su `retry_after` es 2400 (`config/queue.php`, fijado por los deployments) y este job
+     * dura hasta 3600: pasados los 40 minutos la cola lo daría por perdido aunque siga vivo. El worker de `default`
+     * NO mira esta cola; si el programa de supervisor no está, el pool no se llena (y nada más se afecta).
+     */
+    const CONEXION_DE_COLA = 'database_prueba';
+
+    const COLA = 'prueba';
+
     /** @var int */
     public $trial_instance_id;
 
     public function __construct(int $trial_instance_id)
     {
         $this->trial_instance_id = $trial_instance_id;
+
+        /* En el constructor y no en cada ::dispatch(): hay cuatro sitios que lo despachan y así ninguno se olvida. */
+        $this->onConnection(self::CONEXION_DE_COLA)->onQueue(self::COLA);
     }
 
     public function handle(): void
