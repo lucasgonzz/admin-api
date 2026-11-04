@@ -1597,6 +1597,7 @@ Route::prefix('admin')->group(function () {
         Route::put('demo-media', [\App\Http\Controllers\Api\DemoMediaController::class, 'update_json']);
 
         // Implementaciones: listado, detalle y avance manual de etapa.
+        Route::get('implementation-timeline', [\App\Http\Controllers\Api\ImplementationTimelineController::class, 'index']);
         Route::get('implementation', [\App\Http\Controllers\Api\ImplementationController::class, 'index']);
         // Conteo de implementaciones listas para avanzar (badge del Nav); debe ir antes del wildcard {implementation}.
         Route::get('implementation/ready-to-advance-count', [\App\Http\Controllers\Api\ImplementationController::class, 'ready_to_advance_count']);
