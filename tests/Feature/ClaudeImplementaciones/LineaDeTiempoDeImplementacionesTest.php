@@ -31,7 +31,12 @@ class LineaDeTiempoDeImplementacionesTest extends BaseDeImplementaciones
             'created_at' => now()->subDays(3),
             'form_submitted_at' => now()->subDays(2),
         ]);
-        $sistema->stages()->where('stage_number', 1)->update(['status' => 'completed', 'completed_at' => now()->subDays(2)]);
+        $inicio = now()->subDays(3)->startOfMinute();
+        $sistema->stages()->where('stage_number', 1)->update([
+            'status' => 'completed',
+            'started_at' => $inicio,
+            'completed_at' => now()->subDays(2),
+        ]);
         ImplementationStageConfig::updateOrCreate(['stage_number' => 6], ['name' => 'Capacitación']);
 
         $tienda = EcommerceImplementation::create(['client_id' => $cliente->id]);
@@ -69,12 +74,15 @@ class LineaDeTiempoDeImplementacionesTest extends BaseDeImplementaciones
         $this->assertSame(['sistema', 'tienda', 'agentes'], $ramas->keys()->all());
         $this->assertCount(7, $ramas['sistema']['stages']);
         $this->assertSame('completed', $ramas['sistema']['stages'][0]['status']);
+        $this->assertSame($inicio->copy()->utc()->toIso8601String(), $ramas['sistema']['stages'][0]['started_at']);
         $this->assertSame('Formulario de implementación', $ramas['sistema']['stages'][0]['completed_source']);
         $this->assertStringStartsWith('Catálogo', $ramas['sistema']['stages'][5]['name']);
         $this->assertSame('Conversación de implementación', $ramas['tienda']['stages'][0]['sent_source']);
         $this->assertSame('Conversación de implementación', $ramas['tienda']['stages'][0]['completed_source']);
+        $this->assertNull($ramas['tienda']['stages'][0]['started_at']);
         $this->assertNull($ramas['tienda']['stages'][0]['sent_ticket_id']);
         $this->assertSame($agentes->id, $ramas['agentes']['id']);
+        $this->assertSame($agentes->stages()->first()->started_at->utc()->toIso8601String(), $ramas['agentes']['stages'][0]['started_at']);
         $this->assertSame('skipped', $ramas['agentes']['stages'][1]['status']);
         $this->assertNull($ramas['agentes']['stages'][1]['completed_at']);
         $respuesta->assertDontSee('dato-reservado')->assertDontSee('Contenido privado del hilo');
