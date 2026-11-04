@@ -42,14 +42,26 @@ class IaImagenesController extends Controller
         }
 
         /* 🔴 La clave SIEMPRE, aunque el middleware esté en el modo sin clave (ADMIN_INBOUND_REQUIRE_API_KEY=false,
-           que resuelve el cliente por el client_uuid del body): la cola de imágenes gasta la cuenta personal de
-           ChatGPT de Lucas y no puede quedar abierta a quien conozca un uuid. Un cliente sin inbound_api_key
+           que resuelve el cliente por el client_uuid del body): la cola de imágenes genera consumo y
+           no puede quedar abierta a quien conozca un uuid. Un cliente sin inbound_api_key
            cargada tampoco entra: se le carga con la exigencia de admin-sync (escribe ADMIN_API_OUTBOUND_KEY). */
         $esperada = trim((string) $client->inbound_api_key);
         $recibida = trim((string) $request->header('X-Admin-Api-Key'));
 
         if ($esperada === '' || $recibida === '' || ! hash_equals($esperada, $recibida)) {
             return $this->error(401, 'clave_invalida', 'Falta la clave del sistema o no es la que tiene el admin.');
+        }
+
+        if ($request->boolean('consultar_capacidades')) {
+            if (! hash_equals((string) $client->uuid, (string) $request->input('client_uuid'))) {
+                return $this->error(403, 'cliente_no_coincide', 'El client_uuid no corresponde a la clave del sistema.');
+            }
+
+            if (! $imagenes->openai_disponible()) {
+                return $this->error(503, 'imagenes_no_disponibles', 'La generación de imágenes todavía no está disponible.');
+            }
+
+            return response()->json(['proveedor' => 'openai', 'acepta_referencia' => true]);
         }
 
         $invalido = $this->validar($request, [
@@ -59,6 +71,8 @@ class IaImagenesController extends Controller
             'tamano'        => 'required|string|in:' . implode(',', IaImagenPedido::TAMANOS),
             'estilo'        => 'nullable|string|max:200',
             'ai_message_id' => 'required|integer|min:1',
+            'requiere_openai' => 'sometimes|boolean',
+            'referencia_base64' => 'nullable|string|max:' . IaImagenesService::MAX_REFERENCIA_BASE64,
         ]);
 
         if ($invalido !== null) {
@@ -77,6 +91,8 @@ class IaImagenesController extends Controller
             'tamano'        => (string) $request->input('tamano'),
             'estilo'        => $request->input('estilo'),
             'ai_message_id' => (int) $request->input('ai_message_id'),
+            'requiere_openai' => $request->boolean('requiere_openai'),
+            'referencia_base64' => $request->input('referencia_base64'),
         ]);
 
         return response()->json($resultado['cuerpo'], $resultado['http']);

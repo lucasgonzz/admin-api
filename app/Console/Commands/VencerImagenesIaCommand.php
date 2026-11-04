@@ -37,6 +37,7 @@ class VencerImagenesIaCommand extends Command
     public function handle(IaImagenesService $imagenes): int
     {
         $vencidos    = $imagenes->vencer_colgados();
+        $imagenes->reencolar_generaciones_perdidas(15);
         $reencolados = $imagenes->reencolar_entregas_perdidas(15);
         $borradas    = $imagenes->borrar_imagenes_entregadas(7);
 

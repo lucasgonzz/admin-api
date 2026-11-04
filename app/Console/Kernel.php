@@ -399,6 +399,13 @@ class Kernel extends ConsoleKernel
         ))
             ->everyMinute()
             ->runInBackground();
+
+        // OpenAI puede tardar más de un minuto por imagen. Una tanda no debe demorar las otras colas.
+        $schedule->exec(self::artisan_sin_el_lock_del_cron(
+            'queue:work database --queue=' . \App\Jobs\GenerarImagenOpenAiJob::COLA . ' --max-time=60 --stop-when-empty'
+        ))
+            ->everyMinute()
+            ->runInBackground();
     }
 
     /**

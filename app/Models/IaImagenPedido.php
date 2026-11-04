@@ -31,6 +31,8 @@ use Illuminate\Database\Eloquent\Model;
  */
 class IaImagenPedido extends Model
 {
+    const PROVEEDOR_OPENAI = 'openai';
+
     const ESTADO_PENDIENTE       = 'pendiente';
     const ESTADO_RESERVADO       = 'reservado';
     const ESTADO_LISTA           = 'lista';
@@ -45,6 +47,8 @@ class IaImagenPedido extends Model
 
     protected $guarded = [];
 
+    protected $hidden = ['referencia_base64'];
+
     protected $casts = [
         'client_id'        => 'integer',
         'ai_message_id'    => 'integer',
@@ -53,6 +57,9 @@ class IaImagenPedido extends Model
         'lease_expires_at' => 'datetime',
         'entregado_en'     => 'datetime',
         'entrega_proxima_en' => 'datetime',
+        'costo_reservado_microusd' => 'integer',
+        'costo_cobrado_microusd' => 'integer',
+        'uso_openai' => 'array',
     ];
 
     /**

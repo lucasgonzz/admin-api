@@ -46,6 +46,8 @@ return [
     ],
 
     'imagenes' => [
+        'openai_enabled'        => env('IA_IMAGENES_OPENAI_ENABLED', false),
+        'openai_api_key'        => env('OPENAI_IMAGE_API_KEY'),
         // Lease de la reserva de la PC (molde support-codex: 15 minutos).
         'lease_minutos'          => 15,
         // Reservas por pedido antes de darlo por fallido (contrato C3: vuelve a pendiente si intentos < 2).

@@ -3,8 +3,11 @@
 namespace Tests\Feature\IaApp;
 
 use App\Jobs\EntregarImagenIaJob;
+use App\Jobs\GenerarImagenOpenAiJob;
+use App\Models\AiImagePlan;
 use App\Models\Client;
 use App\Models\IaImagenPedido;
+use App\Services\IaApp\IaImagenesService;
 use Illuminate\Http\Client\Request;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Http;
@@ -113,6 +116,164 @@ class ColaDeImagenesIaTest extends BaseDeLaAppIa
     }
 
     /* -------------------------------------------------------------------- C2.1 */
+
+    public function test_openai_reserva_el_tope_mensual_y_cobra_una_vez_aunque_se_repita_el_job(): void
+    {
+        $client = $this->cliente_con_plan_openai('openai-cupo', '0.10');
+        $cuerpo = $this->alta($client, ['requiere_openai' => true]);
+        $archivo = UploadedFile::fake()->image('generada.png', 64, 64);
+        $png = file_get_contents($archivo->getRealPath());
+        $this->fakear(['api.openai.com/*' => Http::response([
+            'data' => [['b64_json' => base64_encode($png)]],
+            'usage' => ['input_tokens' => 12, 'output_tokens' => 100],
+        ])]);
+
+        $this->postJson('/api/inbound/ia-imagenes', $cuerpo, $this->clave($client))
+            ->assertStatus(201)->assertJsonPath('proveedor', 'openai');
+        $this->postJson('/api/inbound/ia-imagenes', $cuerpo, $this->clave($client))
+            ->assertOk()->assertJsonPath('proveedor', 'openai');
+        $this->postJson('/api/inbound/ia-imagenes', $this->alta($client), $this->clave($client))
+            ->assertStatus(429)->assertJsonPath('code', 'tope_mensual_imagenes');
+
+        $pedido = IaImagenPedido::where('uuid', $cuerpo['uuid'])->firstOrFail();
+        $this->assertSame(65000, $pedido->costo_reservado_microusd);
+        $this->reservar($pedido->id)->assertStatus(409);
+        $this->getJson('/api/claude/ia-imagenes/pendientes', $this->headers_claude())
+            ->assertExactJson(['pedidos' => []]);
+
+        $job = new GenerarImagenOpenAiJob($pedido->id);
+        $job->handle(app(IaImagenesService::class));
+        $job->handle(app(IaImagenesService::class));
+        Http::assertSentCount(1);
+        Http::assertSent(function (Request $request) {
+            return $request->url() === 'https://api.openai.com/v1/images/generations'
+                && $request['quality'] === 'medium' && $request['model'] === 'gpt-image-2';
+        });
+
+        $pedido->refresh();
+        $this->assertSame(65000, $pedido->costo_cobrado_microusd);
+        $this->assertNull($pedido->costo_reservado_microusd);
+        $this->assertSame(100, $pedido->uso_openai['output_tokens']);
+        Storage::disk('local')->assertExists($pedido->imagen_path);
+        Queue::assertPushed(EntregarImagenIaJob::class, 1);
+    }
+
+    public function test_openai_edita_con_referencia_y_libera_el_saldo_de_un_rechazo_definitivo(): void
+    {
+        $client = $this->cliente_con_plan_openai('openai-edicion', '0.30', 'high');
+        $archivo = UploadedFile::fake()->image('referencia.png', 64, 64);
+        $referencia = base64_encode(file_get_contents($archivo->getRealPath()));
+        $cuerpo = $this->alta($client, ['referencia_base64' => $referencia, 'requiere_openai' => true]);
+        $this->fakear(['api.openai.com/*' => Http::response([], 400)]);
+
+        $this->postJson('/api/inbound/ia-imagenes', $cuerpo, $this->clave($client))
+            ->assertStatus(201)->assertJsonPath('referencia_recibida', true);
+        $pedido = IaImagenPedido::where('uuid', $cuerpo['uuid'])->firstOrFail();
+        $this->assertSame(230000, $pedido->costo_reservado_microusd);
+        $this->assertSame('high', $pedido->calidad);
+        (new GenerarImagenOpenAiJob($pedido->id))->handle(app(IaImagenesService::class));
+        Http::assertSent(function (Request $request) {
+            return $request->url() === 'https://api.openai.com/v1/images/edits'
+                && strpos($request->body(), 'name="image[]"') !== false;
+        });
+
+        $pedido->refresh();
+        $this->assertSame('fallida', $pedido->estado);
+        $this->assertNull($pedido->costo_reservado_microusd);
+        $this->assertNull($pedido->referencia_base64);
+        $this->postJson('/api/inbound/ia-imagenes', $cuerpo, $this->clave($client))
+            ->assertOk()->assertJsonPath('referencia_recibida', true);
+        $this->postJson('/api/inbound/ia-imagenes', $this->alta($client), $this->clave($client))->assertStatus(201);
+    }
+
+    public function test_openai_conserva_la_reserva_de_un_resultado_incierto_y_no_repite_el_proveedor(): void
+    {
+        $client = $this->cliente_con_plan_openai('openai-incierto', '0.10');
+        $cuerpo = $this->alta($client);
+        $this->fakear(['api.openai.com/*' => Http::response([], 503)]);
+
+        $this->postJson('/api/inbound/ia-imagenes', $cuerpo, $this->clave($client))->assertStatus(201);
+        $pedido = IaImagenPedido::where('uuid', $cuerpo['uuid'])->firstOrFail();
+        $job = new GenerarImagenOpenAiJob($pedido->id);
+        $job->handle(app(IaImagenesService::class));
+        $job->handle(app(IaImagenesService::class));
+
+        Http::assertSentCount(1);
+        $pedido->refresh();
+        $this->assertSame('fallida', $pedido->estado);
+        $this->assertSame(65000, $pedido->costo_reservado_microusd);
+        $this->assertNull($pedido->costo_cobrado_microusd);
+        $this->postJson('/api/inbound/ia-imagenes', $this->alta($client), $this->clave($client))
+            ->assertStatus(429)->assertJsonPath('code', 'tope_mensual_imagenes');
+    }
+
+    public function test_la_sonda_no_crea_pedidos_y_openai_solo_admite_clientes_con_plan(): void
+    {
+        $client = $this->crear_cliente('openai-sin-plan');
+        $consulta = ['client_uuid' => $client->uuid, 'consultar_capacidades' => true];
+        $cuerpo = $this->alta($client, ['requiere_openai' => true]);
+
+        $this->postJson('/api/inbound/ia-imagenes', $consulta, $this->clave($client))
+            ->assertStatus(503)->assertJsonPath('code', 'imagenes_no_disponibles');
+        $this->postJson('/api/inbound/ia-imagenes', $cuerpo, $this->clave($client))
+            ->assertStatus(503)->assertJsonPath('code', 'imagenes_no_disponibles');
+        config(['ia_app.imagenes.openai_enabled' => true, 'ia_app.imagenes.openai_api_key' => 'simulada']);
+        $this->postJson('/api/inbound/ia-imagenes', $consulta, $this->clave($client))
+            ->assertOk()->assertExactJson(['proveedor' => 'openai', 'acepta_referencia' => true]);
+        $this->postJson('/api/inbound/ia-imagenes', $cuerpo, $this->clave($client))
+            ->assertStatus(422)->assertJsonPath('code', 'sin_plan_imagenes');
+        $this->assertDatabaseMissing('ia_imagen_pedidos', ['client_id' => $client->id]);
+    }
+
+    public function test_el_presupuesto_de_imagenes_se_reinicia_al_empezar_el_mes_en_argentina(): void
+    {
+        $client = $this->cliente_con_plan_openai('openai-mes', '0.10');
+        $headers = $this->clave($client);
+        $this->travelTo(\Carbon\Carbon::parse('2026-11-01 02:59:00', 'UTC'));
+        $primero = $this->alta($client);
+        $this->postJson('/api/inbound/ia-imagenes', $primero, $headers)->assertStatus(201);
+        $this->postJson('/api/inbound/ia-imagenes', $this->alta($client), $headers)->assertStatus(429);
+        $this->assertDatabaseHas('ia_imagen_pedidos', ['uuid' => $primero['uuid'], 'periodo_consumo' => '2026-10']);
+
+        $this->travelTo(\Carbon\Carbon::parse('2026-11-01 03:00:00', 'UTC'));
+        $segundo = $this->alta($client);
+        $this->postJson('/api/inbound/ia-imagenes', $segundo, $headers)->assertStatus(201);
+        $this->assertDatabaseHas('ia_imagen_pedidos', ['uuid' => $segundo['uuid'], 'periodo_consumo' => '2026-11']);
+        $this->travelBack();
+    }
+
+    public function test_el_barrido_recupera_un_pedido_pendiente_y_no_repite_un_reclamo_vencido(): void
+    {
+        $client = $this->cliente_con_plan_openai('openai-barrido', '0.10');
+        $cuerpo = $this->alta($client);
+        $this->postJson('/api/inbound/ia-imagenes', $cuerpo, $this->clave($client))->assertStatus(201);
+        $pedido = IaImagenPedido::where('uuid', $cuerpo['uuid'])->firstOrFail();
+        $pedido->update(['updated_at' => now()->subMinutes(20)]);
+        $servicio = app(IaImagenesService::class);
+        Queue::fake();
+
+        $this->assertSame(1, $servicio->reencolar_generaciones_perdidas());
+        $this->assertSame(0, $servicio->reencolar_generaciones_perdidas());
+        Queue::assertPushedOn(GenerarImagenOpenAiJob::COLA, GenerarImagenOpenAiJob::class);
+
+        $servicio->tomar_para_openai($pedido->id)->update(['lease_expires_at' => now()->subMinute()]);
+        $this->assertSame(1, $servicio->vencer_colgados());
+        $this->assertNull($servicio->tomar_para_openai($pedido->id));
+        $this->assertSame(65000, $pedido->refresh()->costo_reservado_microusd);
+    }
+
+    private function cliente_con_plan_openai(string $slug, string $tope, string $calidad = 'medium'): Client
+    {
+        Queue::fake();
+        config(['ia_app.imagenes.openai_enabled' => true, 'ia_app.imagenes.openai_api_key' => 'simulada']);
+        $cliente = $this->crear_cliente($slug);
+        $plan = AiImagePlan::create(['nombre' => $slug, 'precio_ars' => 10000, 'tope_usd_mensual' => $tope, 'activo' => true]);
+        $cliente->ai_image_plan_id = $plan->id;
+        $cliente->ai_image_quality = $calidad;
+        $cliente->save();
+
+        return $cliente;
+    }
 
     public function test_el_alta_es_201_y_el_mismo_uuid_otra_vez_es_200(): void
     {

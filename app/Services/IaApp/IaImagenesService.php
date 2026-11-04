@@ -3,6 +3,8 @@
 namespace App\Services\IaApp;
 
 use App\Jobs\EntregarImagenIaJob;
+use App\Jobs\GenerarImagenOpenAiJob;
+use App\Models\AdminSetting;
 use App\Models\Client;
 use App\Models\IaImagenPedido;
 use Illuminate\Database\QueryException;
@@ -29,6 +31,10 @@ use Illuminate\Support\Str;
  */
 class IaImagenesService
 {
+    const MAX_REFERENCIA_BYTES = 2 * 1024 * 1024;
+
+    const MAX_REFERENCIA_BASE64 = 2796204;
+
     /** Extensión de archivo según el MIME detectado de la imagen. */
     const EXTENSIONES = [
         'image/png'  => 'png',
@@ -54,6 +60,10 @@ class IaImagenesService
 
         if ($existente !== null) {
             return $this->repetido($client, $existente);
+        }
+
+        if (config('ia_app.imagenes.openai_enabled') || ! empty($datos['requiere_openai']) || ! empty($datos['referencia_base64'])) {
+            return $this->alta_openai($client, $datos);
         }
 
         $tope = (int) config('ia_app.imagenes.tope_diario_por_cliente', 60);
@@ -86,6 +96,160 @@ class IaImagenesService
         return ['http' => 201, 'cuerpo' => ['ok' => true, 'estado' => IaImagenPedido::ESTADO_PENDIENTE]];
     }
 
+    public function openai_disponible(): bool
+    {
+        return (bool) config('ia_app.imagenes.openai_enabled')
+            && trim((string) config('ia_app.imagenes.openai_api_key')) !== '';
+    }
+
+    private function alta_openai(Client $client, array $datos): array
+    {
+        if (! $this->openai_disponible()) {
+            return $this->error(503, 'imagenes_no_disponibles', 'La generación de imágenes todavía no está disponible.');
+        }
+
+        $referencia = $datos['referencia_base64'] ?? null;
+        if ($referencia !== null) {
+            $binario = base64_decode($referencia, true);
+            $medidas = $binario !== false && strlen($binario) <= self::MAX_REFERENCIA_BYTES
+                ? @getimagesizefromstring($binario) : false;
+            if ($medidas === false || ! isset(self::EXTENSIONES[$medidas['mime']])
+                || $medidas[0] > 4096 || $medidas[1] > 4096) {
+                return $this->error(422, 'referencia_invalida', 'La referencia debe ser PNG, JPG o WEBP de hasta 2 MB y 4096 px por lado.');
+            }
+        }
+
+        try {
+            return DB::transaction(function () use ($client, $datos, $referencia) {
+                // El cliente serializa todos los pedidos del negocio antes de leer su saldo.
+                $cliente = Client::whereKey($client->id)->lockForUpdate()->firstOrFail();
+                $existente = IaImagenPedido::where('uuid', $datos['uuid'])->first();
+                if ($existente !== null) {
+                    return $this->repetido($cliente, $existente);
+                }
+
+                $plan = DB::table('ai_image_plans')->where('id', $cliente->ai_image_plan_id)
+                    ->where('activo', true)->sharedLock()->first();
+                if ($plan === null) {
+                    return $this->error(422, 'sin_plan_imagenes', 'Tu negocio todavía no tiene un plan de generación de imágenes activo.');
+                }
+
+                $calidad = $cliente->ai_image_quality === 'high' ? 'high' : 'medium';
+                $costo = (int) round(1000000 * (float) AdminSetting::get(
+                    'ai_image_cost_' . $calidad . '_usd', $calidad === 'high' ? '0.230000' : '0.065000'
+                ));
+                if ($costo <= 0) {
+                    return $this->error(503, 'imagenes_no_disponibles', 'La generación de imágenes todavía no está disponible.');
+                }
+
+                $periodo = now('America/Argentina/Buenos_Aires')->format('Y-m');
+                $ocupado = IaImagenPedido::where('client_id', $cliente->id)->where('periodo_consumo', $periodo)
+                    ->selectRaw('COALESCE(SUM(COALESCE(costo_cobrado_microusd, costo_reservado_microusd)), 0) AS ocupado')
+                    ->value('ocupado');
+                $tope_microusd = (int) round(1000000 * (float) $plan->tope_usd_mensual);
+                if ((int) $ocupado + $costo > $tope_microusd) {
+                    return $this->error(429, 'tope_mensual_imagenes', 'Tu plan de imágenes llegó a su límite mensual para esta calidad.');
+                }
+
+                $tope_diario = (int) config('ia_app.imagenes.tope_diario_por_cliente', 60);
+                if ($tope_diario > 0 && IaImagenPedido::where('client_id', $cliente->id)
+                    ->where('created_at', '>=', now()->startOfDay())->count() >= $tope_diario) {
+                    return $this->error(429, 'tope_diario', 'Este sistema ya pidió ' . $tope_diario . ' imágenes hoy.');
+                }
+
+                $pedido = IaImagenPedido::create([
+                    'client_id' => (int) $cliente->id,
+                    'uuid' => $datos['uuid'],
+                    'ai_message_id' => $datos['ai_message_id'] ?? null,
+                    'prompt' => $datos['prompt'],
+                    'tamano' => $datos['tamano'],
+                    'estilo' => $datos['estilo'] ?? null,
+                    'estado' => IaImagenPedido::ESTADO_PENDIENTE,
+                    'proveedor' => IaImagenPedido::PROVEEDOR_OPENAI,
+                    'calidad' => $calidad,
+                    'periodo_consumo' => $periodo,
+                    'costo_reservado_microusd' => $costo,
+                    'referencia_base64' => $referencia,
+                    'con_referencia' => $referencia !== null,
+                ]);
+
+                $this->despachar_generacion($pedido);
+
+                return ['http' => 201, 'cuerpo' => $this->respuesta_de_alta($pedido)];
+            });
+        } catch (QueryException $e) {
+            if ((string) $e->getCode() === '23000') {
+                $existente = IaImagenPedido::where('uuid', $datos['uuid'])->first();
+                if ($existente !== null) {
+                    return $this->repetido($client, $existente);
+                }
+            }
+
+            // El detalle SQL de un alta puede incluir la foto codificada en los parámetros.
+            Log::error('IaImagenesService: falló el alta del pedido OpenAI.', [
+                'client_id' => (int) $client->id, 'uuid' => $datos['uuid'], 'sqlstate' => (string) $e->getCode(),
+            ]);
+
+            return $this->error(503, 'imagenes_no_disponibles', 'No se pudo reservar el presupuesto para generar la imagen.');
+        }
+    }
+
+    private function respuesta_de_alta(IaImagenPedido $pedido): array
+    {
+        $respuesta = ['ok' => true, 'estado' => (string) $pedido->estado];
+        if ($pedido->proveedor === IaImagenPedido::PROVEEDOR_OPENAI) {
+            $respuesta['proveedor'] = $pedido->proveedor;
+            $respuesta['referencia_recibida'] = (bool) $pedido->con_referencia;
+        }
+
+        return $respuesta;
+    }
+
+    /** El reclamo es irreversible: si se perdió la respuesta, repetir la llamada puede facturar dos veces. */
+    public function tomar_para_openai(int $id): ?IaImagenPedido
+    {
+        $tomado = IaImagenPedido::whereKey($id)->where('proveedor', IaImagenPedido::PROVEEDOR_OPENAI)
+            ->where('estado', IaImagenPedido::ESTADO_PENDIENTE)->update([
+                'estado' => IaImagenPedido::ESTADO_RESERVADO,
+                'lease_expires_at' => now()->addMinutes(15),
+                'intentos' => 1,
+            ]);
+
+        return $tomado === 1 ? IaImagenPedido::find($id) : null;
+    }
+
+    /** Guarda resultado y consumo juntos. Un error posterior de entrega solo reintenta la entrega. */
+    public function finalizar_openai(int $id, ?string $binario, ?array $uso, ?string $error, bool $incierto = false): void
+    {
+        DB::transaction(function () use ($id, $binario, $uso, $error, $incierto) {
+            $pedido = IaImagenPedido::whereKey($id)->where('proveedor', IaImagenPedido::PROVEEDOR_OPENAI)
+                ->where('estado', IaImagenPedido::ESTADO_RESERVADO)->lockForUpdate()->first();
+            if ($pedido === null) {
+                return;
+            }
+
+            $pedido->uso_openai = $uso;
+            $pedido->referencia_base64 = null;
+            if ($binario === null) {
+                if (! $incierto) {
+                    $pedido->costo_reservado_microusd = null;
+                }
+                $this->marcar_fallida($pedido, $error);
+                return;
+            }
+
+            $mime = (string) (@getimagesizefromstring($binario)['mime'] ?? '');
+            if (! isset(self::EXTENSIONES[$mime]) || strlen($binario) > 15 * 1024 * 1024) {
+                $this->marcar_fallida($pedido, 'OpenAI devolvió una imagen inválida.');
+                return;
+            }
+
+            $pedido->costo_cobrado_microusd = $pedido->costo_reservado_microusd;
+            $pedido->costo_reservado_microusd = null;
+            $this->guardar_resultado($pedido, $mime, $binario);
+        });
+    }
+
     /**
      * El mismo uuid otra vez: 200 con el estado actual, si es del mismo cliente.
      *
@@ -100,7 +264,7 @@ class IaImagenesService
             return $this->error(409, 'uuid_en_uso', 'Ese uuid ya lo usó otro sistema.');
         }
 
-        return ['http' => 200, 'cuerpo' => ['ok' => true, 'estado' => (string) $pedido->estado]];
+        return ['http' => 200, 'cuerpo' => $this->respuesta_de_alta($pedido)];
     }
 
     /* ==============================================================================================
@@ -121,6 +285,7 @@ class IaImagenesService
         $max = (int) config('ia_app.imagenes.max_intentos', 2);
 
         $pedidos = IaImagenPedido::with('client')
+            ->whereNull('proveedor')
             ->where(function ($q) use ($max) {
                 $q->where('estado', IaImagenPedido::ESTADO_PENDIENTE)
                     ->orWhere(function ($r) use ($max) {
@@ -153,6 +318,10 @@ class IaImagenesService
 
             if ($pedido === null) {
                 return $this->error(404, 'pedido_inexistente', 'No existe ese pedido de imagen.');
+            }
+
+            if ($pedido->proveedor !== null) {
+                return $this->error(409, 'proveedor_no_disponible', 'Este pedido usa la generación por API.');
             }
 
             $worker   = (string) $datos['worker_id'];
@@ -233,23 +402,29 @@ class IaImagenesService
                 return $this->error(422, 'imagen_invalida', 'La imagen tiene que ser PNG, JPG o WEBP.');
             }
 
-            $disco = (string) config('ia_app.imagenes.disco', 'local');
-            $ruta  = 'ia_imagenes/' . (int) $pedido->client_id . '/' . $pedido->uuid . '.' . $ext;
-
-            Storage::disk($disco)->put($ruta, file_get_contents($imagen->getRealPath()));
-
-            $pedido->imagen_path      = $ruta;
-            $pedido->imagen_mime      = $mime;
-            $pedido->estado           = IaImagenPedido::ESTADO_LISTA;
-            $pedido->resultado        = IaImagenPedido::ESTADO_LISTA;
-            $pedido->error            = null;
-            $pedido->lease_expires_at = null;
-            $pedido->save();
-
-            $this->despachar_entrega($pedido);
+            $this->guardar_resultado($pedido, $mime, file_get_contents($imagen->getRealPath()));
 
             return ['http' => 200, 'cuerpo' => ['estado' => IaImagenPedido::ESTADO_LISTA]];
         });
+    }
+
+    private function guardar_resultado(IaImagenPedido $pedido, string $mime, string $binario): void
+    {
+        $disco = (string) config('ia_app.imagenes.disco', 'local');
+        $ruta = 'ia_imagenes/' . (int) $pedido->client_id . '/' . $pedido->uuid . '.' . self::EXTENSIONES[$mime];
+        if (! Storage::disk($disco)->put($ruta, $binario)) {
+            throw new \RuntimeException('No se pudo guardar la imagen generada.');
+        }
+
+        $pedido->imagen_path = $ruta;
+        $pedido->imagen_mime = $mime;
+        $pedido->estado = IaImagenPedido::ESTADO_LISTA;
+        $pedido->resultado = IaImagenPedido::ESTADO_LISTA;
+        $pedido->error = null;
+        $pedido->lease_expires_at = null;
+        $pedido->save();
+
+        $this->despachar_entrega($pedido);
     }
 
     /**
@@ -315,7 +490,9 @@ class IaImagenesService
         $ids = IaImagenPedido::where(function ($q) use ($max) {
             $q->where('estado', IaImagenPedido::ESTADO_RESERVADO)
                 ->where('lease_expires_at', '<=', now())
-                ->where('intentos', '>=', $max);
+                ->where(function ($r) use ($max) {
+                    $r->where('intentos', '>=', $max)->orWhere('proveedor', IaImagenPedido::PROVEEDOR_OPENAI);
+                });
         })->orWhere(function ($q) use ($limite) {
             $q->whereIn('estado', [IaImagenPedido::ESTADO_PENDIENTE, IaImagenPedido::ESTADO_RESERVADO])
                 ->where('created_at', '<=', $limite)
@@ -336,6 +513,13 @@ class IaImagenesService
                 }
 
                 $por_intentos = $pedido->estado === IaImagenPedido::ESTADO_RESERVADO && (int) $pedido->intentos >= $max;
+                if ($pedido->proveedor === IaImagenPedido::PROVEEDOR_OPENAI) {
+                    // Un pedido pendiente nunca llegó al proveedor. Un reclamo vencido puede haber sido facturado.
+                    if ($pedido->estado === IaImagenPedido::ESTADO_PENDIENTE) {
+                        $pedido->costo_reservado_microusd = null;
+                    }
+                    $pedido->referencia_base64 = null;
+                }
 
                 $this->marcar_fallida(
                     $pedido,
@@ -349,6 +533,36 @@ class IaImagenesService
         }
 
         return $vencidos;
+    }
+
+    public function reencolar_generaciones_perdidas(int $minutos = 15): int
+    {
+        $limite = now()->subMinutes($minutos);
+        $pedidos = IaImagenPedido::where('proveedor', IaImagenPedido::PROVEEDOR_OPENAI)
+            ->where('estado', IaImagenPedido::ESTADO_PENDIENTE)->where('updated_at', '<=', $limite)
+            ->orderBy('id')->limit(200)->get(['id']);
+
+        foreach ($pedidos as $pedido) {
+            $reenviar = IaImagenPedido::whereKey($pedido->id)->where('estado', IaImagenPedido::ESTADO_PENDIENTE)
+                ->where('updated_at', '<=', $limite)->update(['updated_at' => now()]);
+            if ($reenviar === 1) {
+                $this->despachar_generacion($pedido);
+            }
+        }
+
+        return $pedidos->count();
+    }
+
+    private function despachar_generacion(IaImagenPedido $pedido): void
+    {
+        try {
+            app(\Illuminate\Contracts\Bus\Dispatcher::class)->dispatch(
+                (new GenerarImagenOpenAiJob((int) $pedido->id))->onConnection('database')->onQueue(GenerarImagenOpenAiJob::COLA)
+            );
+        } catch (\Throwable $e) {
+            // El barrido recupera los pedidos pendientes si la cola no pudo guardarlos.
+            Log::warning('IaImagenesService: no se pudo encolar la generación.', ['pedido_id' => (int) $pedido->id]);
+        }
     }
 
     /**

@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\AdminTaskController;
 use App\Http\Controllers\AdminTaskNotificationController;
+use App\Http\Controllers\AiImagePlanController;
 use App\Http\Controllers\AiPlanController;
 use App\Http\Controllers\TaskTemplateController;
 use App\Http\Controllers\Api\AdminController;
@@ -1101,6 +1102,12 @@ Route::prefix('admin')->group(function () {
            El ABM del catálogo de planes (CRUD). La asignación de un paquete a un cliente y el push a
            su instancia van más abajo, con las rutas por-cliente. */
         Route::get('ai-plan', [AiPlanController::class, 'index_json']);
+        Route::get('ai-image-plan', [AiImagePlanController::class, 'index_json']);
+        Route::post('ai-image-plan', [AiImagePlanController::class, 'store_json']);
+        Route::put('ai-image-plan/costos', [AiImagePlanController::class, 'update_costos_json']);
+        Route::put('ai-image-plan/{plan}', [AiImagePlanController::class, 'update_json'])->whereNumber('plan');
+        Route::get('client/{client}/ai-image-plan', [AiImagePlanController::class, 'client_json'])->whereNumber('client');
+        Route::put('client/{client}/ai-image-plan', [AiImagePlanController::class, 'assign_json'])->whereNumber('client');
         Route::post('ai-plan', [AiPlanController::class, 'store_json']);
         Route::put('ai-plan/{id}', [AiPlanController::class, 'update_json']);
         Route::delete('ai-plan/{id}', [AiPlanController::class, 'destroy_json']);

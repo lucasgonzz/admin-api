@@ -94,6 +94,7 @@ class Client extends Model
         // datetime del push por el mismo motivo que ai_tokens_synced_at (la ficha muestra "Enviado
         // el …"). ai_plan_sync_status/_message son texto y no necesitan cast.
         'ai_plan_id'                => 'integer',
+        'ai_image_plan_id'          => 'integer',
         'ai_plan_synced_at'         => 'datetime',
         /* Contrato del cliente (misión modulo-cobranzas, 18/9/2026): los mismos casts que tiene
          * `Lead` para las mismas columnas, porque `LeadContractPdfService` lee los atributos por
