@@ -53,8 +53,10 @@ class CrearInstanciaDePoolJob implements ShouldQueue
      * 🔴 Por qué no `default`. Estos jobs duran de 25 a 60 minutos y el admin tiene UN worker en `default`
      * (`api_admin_queue`, numprocs 1): mientras armaban una instancia dejaban sin atender todo lo demás
      * (el WhatsApp de Martín, avisos de soporte, demo setups). Por eso salen por la conexión `database_prueba`
-     * —misma tabla `jobs`, cola `prueba`, `retry_after` de 4200 s— y los atiende su propio programa de
-     * supervisor, `api_admin_queue_prueba` (`queue:work database_prueba --queue=prueba`).
+     * —misma tabla `jobs`, `retry_after` de 4200 s— y los atienden sus propios programas de supervisor. Dos colas,
+     * un worker cada una: `prueba-pool` (este job, el pool que se arma de a poco) y `prueba` (`ArmarPruebaJob`, el
+     * alta de un prospecto real, que no puede esperar detrás de un pool de 60 min). Programas
+     * `api_admin_queue_prueba_pool` y `api_admin_queue_prueba`.
      *
      * Y no `database`, porque su `retry_after` es 2400 (`config/queue.php`, fijado por los deployments) y este job
      * dura hasta 3600: pasados los 40 minutos la cola lo daría por perdido aunque siga vivo. El worker de `default`
@@ -62,7 +64,8 @@ class CrearInstanciaDePoolJob implements ShouldQueue
      */
     const CONEXION_DE_COLA = 'database_prueba';
 
-    const COLA = 'prueba';
+    /** Cola del pool pre-armado: jobs de hasta 60 min que no pueden hacer esperar el alta de un prospecto. */
+    const COLA = 'prueba-pool';
 
     /** @var int */
     public $trial_instance_id;

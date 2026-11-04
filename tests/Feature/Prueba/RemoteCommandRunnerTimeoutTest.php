@@ -17,10 +17,14 @@ use Tests\TestCase;
 class RemoteCommandRunnerTimeoutTest extends TestCase
 {
     /** Un SSH2 que no conecta: registra setTimeout() y devuelve lo preparado. */
-    private function ssh_falso(string $salida, $exit, int $timeout_inicial = 10): SSH2
+    private function ssh_falso(string $salida, $exit, int $timeout_inicial = 10, bool $corto_por_tiempo = false): SSH2
     {
-        return new class($salida, $exit, $timeout_inicial) extends SSH2 {
+        return new class($salida, $exit, $timeout_inicial, $corto_por_tiempo) extends SSH2 {
             public $timeout_actual;
+
+            public $keepalives_puestos = [];
+
+            private $corto_por_tiempo;
 
             public $timeouts_puestos = [];
 
@@ -30,8 +34,9 @@ class RemoteCommandRunnerTimeoutTest extends TestCase
 
             private $exit_preparado;
 
-            public function __construct($salida, $exit, $timeout_inicial)
+            public function __construct($salida, $exit, $timeout_inicial, $corto_por_tiempo)
             {
+                $this->corto_por_tiempo = $corto_por_tiempo;
                 $this->salida_preparada = $salida;
                 $this->exit_preparado   = $exit;
                 $this->timeout_actual   = $timeout_inicial;
@@ -64,6 +69,16 @@ class RemoteCommandRunnerTimeoutTest extends TestCase
             {
                 return $this->exit_preparado;
             }
+
+            public function isTimeout()
+            {
+                return $this->corto_por_tiempo;
+            }
+
+            public function setKeepAlive($interval)
+            {
+                $this->keepalives_puestos[] = $interval;
+            }
         };
     }
 
@@ -71,6 +86,8 @@ class RemoteCommandRunnerTimeoutTest extends TestCase
     {
         return new class(new ClientSshCredential(), $ssh) extends RemoteCommandRunner {
             private $ssh_falso;
+
+            public $sesiones_descartadas = 0;
 
             public function __construct(ClientSshCredential $credential, SSH2 $ssh)
             {
@@ -81,6 +98,11 @@ class RemoteCommandRunnerTimeoutTest extends TestCase
             protected function sesion(): SSH2
             {
                 return $this->ssh_falso;
+            }
+
+            protected function reconectar(): void
+            {
+                $this->sesiones_descartadas++;
             }
         };
     }
@@ -151,6 +173,43 @@ class RemoteCommandRunnerTimeoutTest extends TestCase
 
         $this->assertSame(10, $ssh->timeout_actual);
         $this->assertSame([600, 10], $ssh->timeouts_puestos);
+    }
+
+    public function test_un_corte_por_tiempo_es_falla_aunque_getexitstatus_devuelva_el_cero_del_comando_anterior(): void
+    {
+        /* phpseclib no resetea el exit status: tras un comando anterior que dio 0, un exec cortado por tiempo lo devuelve. */
+        $ssh    = $this->ssh_falso('salida parcial', 0, 10, true);
+        $runner = $this->runner_con($ssh);
+
+        try {
+            $runner->run('bash pool-crear.sh', [], true, 3900, true);
+            $this->fail('Una salida cortada por tiempo no puede pasar por éxito.');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('no devolvió exit status', $e->getMessage());
+        }
+
+        $this->assertSame(1, $runner->sesiones_descartadas, 'El canal quedó abierto con el comando corriendo: la sesión se tira.');
+    }
+
+    public function test_el_latido_vale_solo_durante_el_comando_con_tope_propio(): void
+    {
+        $ssh    = $this->ssh_falso('ok', 0);
+        $runner = $this->runner_con($ssh);
+
+        $runner->run('corto');
+        $this->assertSame([], $ssh->keepalives_puestos, 'Sin tope propio no se toca el latido.');
+
+        $runner->run('largo', [], true, 3900);
+        $this->assertSame([RemoteCommandRunner::KEEPALIVE_SEGUNDOS, 0], $ssh->keepalives_puestos);
+    }
+
+    public function test_un_timeout_menor_a_un_segundo_se_rechaza(): void
+    {
+        $runner = $this->runner_con($this->ssh_falso('ok', 0));
+
+        $this->expectException(\InvalidArgumentException::class);
+
+        $runner->run('x', [], true, 0);
     }
 
     public function test_exit_ausente_con_exit_obligatorio_es_una_falla_y_no_filtra_secretos(): void

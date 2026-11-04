@@ -57,6 +57,13 @@ class RemoteCommandRunner
     const LARGO_MINIMO_DE_SECRETO = 6;
 
     /**
+     * Cada cuántos segundos se manda un latido (SSH_MSG_IGNORE) mientras corre un comando con tope propio.
+     *
+     * @var int
+     */
+    const KEEPALIVE_SEGUNDOS = 30;
+
+    /**
      * Credencial contra la que se ejecuta todo.
      *
      * @var ClientSshCredential
@@ -141,8 +148,10 @@ class RemoteCommandRunner
      * @param  array<int, string>    $secretos      Strings a reemplazar por *** en todo lo logueado.
      * @param  bool                  $must_succeed  false = un exit distinto de 0 no rompe la etapa.
      * @param  int|null              $timeout_segundos  null = el de la sesión, 10 s de phpseclib (como siempre).
-     *                                                  Un número = tope de ESTE comando, y 0 = sin tope. Se aplica
-     *                                                  solo durante el comando y después se restaura (ver ejecutar()).
+     *                                                  Un número positivo = tope de ESTE comando, en segundos. Se
+     *                                                  aplica solo durante el comando y después se restaura (ver
+     *                                                  ejecutar()). Cero o negativo no se acepta: en phpseclib 0 no
+     *                                                  es "sin tope" sino el timeout por defecto del socket.
      * @param  bool                  $exit_obligatorio  true = que el servidor no devuelva exit status (`false`) es una
      *                                                  falla. Es lo que pasa cuando phpseclib corta la lectura por
      *                                                  tiempo y devuelve la salida TRUNCADA: sin esta bandera esa
@@ -158,6 +167,10 @@ class RemoteCommandRunner
         ?int $timeout_segundos = null,
         bool $exit_obligatorio = false
     ): string {
+        if ($timeout_segundos !== null && $timeout_segundos < 1) {
+            throw new \InvalidArgumentException('El timeout de un comando remoto tiene que ser de al menos 1 segundo.');
+        }
+
         $this->registrar('$ ' . $this->redactar($command, $secretos));
 
         $this->timeout_del_comando = $timeout_segundos;
@@ -361,12 +374,30 @@ class RemoteCommandRunner
         $anterior = $ssh->getTimeout();
         $ssh->setTimeout($timeout_segundos);
 
+        /* Un comando de minutos u horas que no imprime nada deja el TCP callado: un NAT o un firewall lo puede
+           cortar. phpseclib manda un SSH_MSG_IGNORE cada tanto si se lo pide. Se apaga al terminar (la sesión es
+           compartida). */
+        $ssh->setKeepAlive(self::KEEPALIVE_SEGUNDOS);
+
         try {
             $salida = (string) $ssh->exec($command);
+
+            /*
+             * 🔴 Si venció el tiempo, exec() devuelve la salida parcial y getExitStatus() devuelve el exit del
+             * comando ANTERIOR de la sesión (phpseclib no lo resetea): un 0 viejo haría pasar la salida cortada
+             * por un éxito. Por eso un corte por tiempo es SIEMPRE "sin exit status", y la sesión se descarta
+             * porque el canal quedó abierto con el comando todavía corriendo.
+             */
+            if ($ssh->isTimeout()) {
+                $this->reconectar();
+
+                return ['salida' => $salida, 'exit' => false];
+            }
 
             return ['salida' => $salida, 'exit' => $ssh->getExitStatus()];
         } finally {
             $ssh->setTimeout($anterior);
+            $ssh->setKeepAlive(0);
         }
     }
 

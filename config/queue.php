@@ -94,7 +94,8 @@ return [
         /* La cola de la prueba gratuita (4/11/2026): la MISMA tabla `jobs`, pero otra conexión para poder tener
          * su propio `retry_after`. `CrearInstanciaDePoolJob` dura hasta 3600 s y `database.retry_after` es 2400
          * (lo fija `RobustezDelDeploymentDesatendidoTest` para los deployments, y no se toca). 4200 = 3600 + 10 min.
-         * La atiende `queue:work database_prueba --queue=prueba` (supervisor `api_admin_queue_prueba`); el worker
+         * Las atienden `queue:work database_prueba --queue=prueba` y `--queue=prueba-pool` (supervisor
+         * `api_admin_queue_prueba` y `api_admin_queue_prueba_pool`); el worker
          * de `database` solo mira `default`. Ver `CrearInstanciaDePoolJob::CONEXION_DE_COLA`. */
         'database_prueba' => [
             'driver' => 'database',

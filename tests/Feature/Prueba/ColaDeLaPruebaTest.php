@@ -16,10 +16,12 @@ class ColaDeLaPruebaTest extends BaseDePruebaGratuita
 {
     public function test_los_dos_jobs_nacen_en_la_conexion_y_la_cola_de_la_prueba(): void
     {
-        foreach ([new CrearInstanciaDePoolJob(1), new ArmarPruebaJob(1)] as $job) {
-            $this->assertSame('database_prueba', $job->connection, get_class($job));
-            $this->assertSame('prueba', $job->queue, get_class($job));
-        }
+        $this->assertSame('database_prueba', (new CrearInstanciaDePoolJob(1))->connection);
+        $this->assertSame('prueba-pool', (new CrearInstanciaDePoolJob(1))->queue);
+
+        /* El alta de un prospecto real NO comparte cola con el pool (jobs de hasta 60 min). */
+        $this->assertSame('database_prueba', (new ArmarPruebaJob(1))->connection);
+        $this->assertSame('prueba', (new ArmarPruebaJob(1))->queue);
     }
 
     public function test_el_despacho_real_deja_el_job_en_esa_cola_sin_que_el_llamador_lo_pida(): void
@@ -28,7 +30,7 @@ class ColaDeLaPruebaTest extends BaseDePruebaGratuita
         CrearInstanciaDePoolJob::dispatch($instancia->id);
         ArmarPruebaJob::dispatch($instancia->id);
 
-        Queue::assertPushedOn('prueba', CrearInstanciaDePoolJob::class);
+        Queue::assertPushedOn('prueba-pool', CrearInstanciaDePoolJob::class);
         Queue::assertPushedOn('prueba', ArmarPruebaJob::class);
         Queue::assertPushed(CrearInstanciaDePoolJob::class, function ($job) {
             return $job->connection === 'database_prueba';
@@ -43,6 +45,7 @@ class ColaDeLaPruebaTest extends BaseDePruebaGratuita
         $this->assertSame('database', $conexion['driver']);
         $this->assertSame(config('queue.connections.database.table'), $conexion['table'], 'Misma tabla `jobs`.');
         $this->assertSame('prueba', $conexion['queue']);
+        $this->assertSame(ArmarPruebaJob::COLA, $conexion['queue'], 'La cola por defecto de la conexión es la del alta.');
 
         foreach ([CrearInstanciaDePoolJob::class, ArmarPruebaJob::class] as $clase) {
             $timeout = (new \ReflectionClass($clase))->getDefaultProperties()['timeout'];
@@ -60,7 +63,7 @@ class ColaDeLaPruebaTest extends BaseDePruebaGratuita
     {
         $this->artisan('pruebas:mantener-pool')->assertExitCode(0);
 
-        Queue::assertPushedOn('prueba', CrearInstanciaDePoolJob::class);
+        Queue::assertPushedOn('prueba-pool', CrearInstanciaDePoolJob::class);
         $this->assertGreaterThan(0, TrialInstance::count());
     }
 }

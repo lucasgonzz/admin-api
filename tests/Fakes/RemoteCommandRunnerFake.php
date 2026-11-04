@@ -49,6 +49,13 @@ class RemoteCommandRunnerFake extends RemoteCommandRunner
     public $timeouts = [];
 
     /**
+     * Si cada comando se pidió con exit obligatorio, en el mismo orden que $crudos.
+     *
+     * @var array<int, bool>
+     */
+    public $exits_obligatorios = [];
+
+    /**
      * Salida por defecto de cualquier comando que no matchee ninguna regla.
      *
      * @var string
@@ -141,6 +148,7 @@ class RemoteCommandRunnerFake extends RemoteCommandRunner
         bool $exit_obligatorio = false
     ): string {
         $this->redactados[] = $this->redactar($command, $secretos);
+        $this->exits_obligatorios[] = $exit_obligatorio;
 
         return parent::run($command, $secretos, $must_succeed, $timeout_segundos, $exit_obligatorio);
     }

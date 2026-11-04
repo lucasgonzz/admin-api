@@ -51,6 +51,9 @@ class ArmarPruebaJob implements ShouldQueue
 
     public $timeout = 1500;
 
+    /** Cola del alta de un prospecto (el pool va por `prueba-pool`). */
+    const COLA = 'prueba';
+
     /** @var int */
     public $trial_instance_id;
 
@@ -58,8 +61,9 @@ class ArmarPruebaJob implements ShouldQueue
     {
         $this->trial_instance_id = $trial_instance_id;
 
-        /* Misma conexión y cola que el job del pool (ver CrearInstanciaDePoolJob::CONEXION_DE_COLA). */
-        $this->onConnection(CrearInstanciaDePoolJob::CONEXION_DE_COLA)->onQueue(CrearInstanciaDePoolJob::COLA);
+        /* Misma conexión que el job del pool, pero cola propia: un prospecto real no espera detrás de un pool de 60 min
+           (ver CrearInstanciaDePoolJob::CONEXION_DE_COLA). */
+        $this->onConnection(CrearInstanciaDePoolJob::CONEXION_DE_COLA)->onQueue(self::COLA);
     }
 
     public function handle(): void

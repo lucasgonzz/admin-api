@@ -39,15 +39,29 @@ class PruebaVpsService
     const MODO_ARCHIVO = '640';
 
     /**
-     * Tiempo máximo de un script del pool, en segundos (65 min).
+     * Tiempo máximo de un script del pool que puede tardar mucho, en segundos (65 min).
      *
      * 🔴 phpseclib corta cada `exec()` a los 10 s de tiempo TOTAL si nadie le sube el tope, y devuelve la salida a
-     * medias (medido en producción el 4/11/2026: un script de 25 s volvió a los 10 s). Los scripts tardan de
-     * segundos (`prueba-estado`) a ~60 min (`pool-crear` con SSL de cuatro hosts, `pool-plantilla` con composer), así
-     * que el tope se pone por encima del job más largo —`CrearInstanciaDePoolJob`, 3600—: el que manda es el
-     * `$timeout` del job, y este número solo evita que un comando legítimo se corte antes.
+     * medias (medido en producción el 4/11/2026: un script de 25 s volvió a los 10 s). Los scripts largos
+     * (`pool-crear` con SSL de cuatro hosts, `pool-plantilla` con composer, `prueba-ssl`) llegan a ~60 min, así que
+     * el tope se pone por encima del job más largo —`CrearInstanciaDePoolJob`, 3600—: el que manda es el `$timeout`
+     * del job, y este número solo evita que un comando legítimo se corte antes.
      */
     const TIMEOUT_DE_SCRIPT_SEGUNDOS = 3900;
+
+    /**
+     * Topes propios de los scripts cortos, en segundos. Sin esto, un VPS colgado dejaría tomado una hora a quien
+     * los llama desde un request o un comando del scheduler (`prueba-dormir`, `prueba-despertar`, `prueba-estado`).
+     * Un script que no figura acá usa `TIMEOUT_DE_SCRIPT_SEGUNDOS`.
+     *
+     * @var array<string, int>
+     */
+    const TIMEOUT_DE_SCRIPT_CORTO = [
+        'prueba-estado.sh'    => 120,
+        'prueba-dormir.sh'    => 300,
+        'prueba-despertar.sh' => 300,
+        'prueba-borrar.sh'    => 900,
+    ];
 
     /**
      * Runner SSH, abierto al primer comando.
@@ -235,6 +249,12 @@ class PruebaVpsService
      | Internas
      |============================================================================================ */
 
+    /** Tope en segundos con el que se corre un script (ver las constantes). */
+    public static function timeout_del_script(string $script): int
+    {
+        return isset(self::TIMEOUT_DE_SCRIPT_CORTO[$script]) ? self::TIMEOUT_DE_SCRIPT_CORTO[$script] : self::TIMEOUT_DE_SCRIPT_SEGUNDOS;
+    }
+
     /**
      * Corre un script de `/root/prueba-gratuita/` y devuelve el JSON de su última línea.
      *
@@ -255,7 +275,7 @@ class PruebaVpsService
 
         try {
             /* 🔴 Timeout alto y exit obligatorio SOLO acá (los scripts largos del pool): ver las constantes. */
-            $salida = $this->ejecutar($comando, [], self::TIMEOUT_DE_SCRIPT_SEGUNDOS, true);
+            $salida = $this->ejecutar($comando, [], self::timeout_del_script($script), true);
         } catch (\RuntimeException $e) {
             /* El runner ya armó el mensaje (exit y salida recortada). Si la salida traía el JSON de error del
                script, se prefiere ese texto, que está en castellano. */

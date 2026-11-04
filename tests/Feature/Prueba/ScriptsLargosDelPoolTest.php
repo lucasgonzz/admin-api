@@ -36,7 +36,6 @@ class ScriptsLargosDelPoolTest extends BaseDePruebaGratuita
             'pool-configurar' => ['pool-configurar.sh', function (PruebaVpsService $v) { return $v->pool_configurar('prueba-01'); }],
             'prueba-ssl'      => ['prueba-ssl.sh', function (PruebaVpsService $v) { return $v->prueba_ssl('prueba-01', 'ferre-demo'); }],
             'prueba-asignar'  => ['prueba-asignar.sh', function (PruebaVpsService $v) { return $v->prueba_asignar('prueba-01', 'ferre-demo', 900100); }],
-            'prueba-borrar'   => ['prueba-borrar.sh', function (PruebaVpsService $v) { return $v->prueba_borrar('prueba-01', 'ferre-demo'); }],
         ];
     }
 
@@ -51,8 +50,34 @@ class ScriptsLargosDelPoolTest extends BaseDePruebaGratuita
 
         $this->assertTrue($json['ok']);
         $this->assertCount(1, $this->runner->crudos_con($script));
-        $this->assertSame([PruebaVpsService::TIMEOUT_DE_SCRIPT_SEGUNDOS], $this->runner->timeouts);
-        $this->assertGreaterThan(3600, PruebaVpsService::TIMEOUT_DE_SCRIPT_SEGUNDOS, 'Por encima del job del pool (3600).');
+        $this->assertSame([PruebaVpsService::timeout_del_script($script)], $this->runner->timeouts);
+        $this->assertSame([true], $this->runner->exits_obligatorios, 'Un script cortado no puede pasar por éxito.');
+        $this->assertGreaterThan(3600, PruebaVpsService::timeout_del_script($script), 'Los largos van por encima del job del pool (3600).');
+    }
+
+    /**
+     * @dataProvider scripts_cortos
+     */
+    public function test_los_scripts_cortos_tienen_un_tope_propio_y_tambien_exit_obligatorio(string $script, \Closure $llamar, int $tope): void
+    {
+        $this->runner->responder($script, json_encode(['ok' => true]) . "\n", 0);
+
+        $llamar(app(PruebaVpsService::class));
+
+        $this->assertSame([$tope], $this->runner->timeouts);
+        $this->assertSame([true], $this->runner->exits_obligatorios);
+        $this->assertLessThan(PruebaVpsService::TIMEOUT_DE_SCRIPT_SEGUNDOS, $tope, 'Un VPS colgado no tiene que tomar una hora a quien llama.');
+    }
+
+    /** @return array<string, array> */
+    public function scripts_cortos(): array
+    {
+        return [
+            'prueba-estado'    => ['prueba-estado.sh', function (PruebaVpsService $v) { return $v->prueba_estado('prueba-01'); }, 120],
+            'prueba-dormir'    => ['prueba-dormir.sh', function (PruebaVpsService $v) { return $v->prueba_dormir('prueba-01'); }, 300],
+            'prueba-despertar' => ['prueba-despertar.sh', function (PruebaVpsService $v) { return $v->prueba_despertar('prueba-01'); }, 300],
+            'prueba-borrar'    => ['prueba-borrar.sh', function (PruebaVpsService $v) { return $v->prueba_borrar('prueba-01', 'ferre-demo'); }, 900],
+        ];
     }
 
     public function test_un_script_cortado_sin_exit_status_es_error_y_no_un_exito_parcial(): void
@@ -76,5 +101,6 @@ class ScriptsLargosDelPoolTest extends BaseDePruebaGratuita
         app(PruebaVpsService::class)->escribir_archivo('/home/x/archivo.txt', 'contenido', 'usuariox');
 
         $this->assertSame([null], $this->runner->timeouts, 'Escribir un archivo sigue con el tiempo de la sesión.');
+        $this->assertSame([false], $this->runner->exits_obligatorios);
     }
 }
