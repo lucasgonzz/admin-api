@@ -112,7 +112,7 @@ class PruebaImportacionService
             }
 
             $pdf = $this->adjunto_del_cliente($ticket, (int) $input['pdf_attachment_id']);
-            if ($pdf === null || ($pdf->mime !== 'application/pdf' && $this->extension_del_adjunto($pdf) !== 'pdf')) {
+            if ($pdf === null || ($pdf->mime !== 'application/pdf' && self::extension_del_adjunto($pdf) !== 'pdf')) {
                 return ['estado' => 'sin_fuente', 'mensaje' => 'El PDF original tiene que ser un adjunto del cliente en este ticket.'];
             }
 
@@ -354,7 +354,7 @@ class PruebaImportacionService
                 return ['estado' => 'sin_fuente', 'mensaje' => 'Ese adjunto no es de este ticket.'];
             }
 
-            $extension = $this->extension_del_adjunto($attachment);
+            $extension = self::extension_del_adjunto($attachment);
             if (! isset(self::EXCEL[$extension])) {
                 return ['estado' => 'archivo_invalido', 'mensaje' => 'El adjunto no es un Excel (.xlsx o .xls).'];
             }
@@ -423,7 +423,7 @@ class PruebaImportacionService
      *
      * @return string
      */
-    protected function extension_del_adjunto(SupportMessageAttachment $attachment): string
+    public static function extension_del_adjunto(SupportMessageAttachment $attachment): string
     {
         $mime = strtolower(trim((string) $attachment->mime));
         foreach (self::EXCEL as $extension => $esperado) {

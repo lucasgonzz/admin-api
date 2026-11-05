@@ -3,6 +3,7 @@
 namespace Tests\Feature\PruebaGratuita;
 
 use App\Models\AdminSetting;
+use App\Models\SupportCodexCase;
 use App\Models\SupportMessage;
 use App\Models\SupportMessageAttachment;
 use App\Models\SupportTicket;
@@ -176,6 +177,75 @@ class ImportacionDesdeElTicketTest extends BaseDeLaPrueba
         foreach ($pedidos as [$pedido]) {
             $this->assertSame(hash('sha256', 'pdf:' . $pdf->id), $this->campo($pedido, 'importacion_clave'));
         }
+    }
+
+    /** @test @dataProvider conversaciones_durante_la_carga */
+    public function martin_deja_una_cortesia_aislada_al_aviso_de_la_importacion(
+        string $texto, bool $recibio_excel, bool $otro_entrante, bool $cita, bool $monitor_nuevo, bool $en_proceso, bool $silencio,
+        bool $mime_generico = false
+    ): void {
+        $this->fakear_http([
+            '*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response(['en_proceso' => $en_proceso], 200),
+        ]);
+        AdminSetting::set(SupportCodexSettings::KEY_ENABLED, '1');
+        AdminSetting::set(SupportCodexSettings::KEY_ACTIVATED_AT, now()->subHour()->toDateTimeString());
+        AdminSetting::set(SupportCodexSettings::KEY_ACTIVATED_AFTER_ID, 0);
+        if ($mime_generico) {
+            $this->adjunto->update(['mime' => 'application/octet-stream']);
+        }
+        $hilo = ['support_ticket_id' => $this->ticket->id, 'kind' => 'text'];
+        $anterior = $recibio_excel ? $this->adjunto->support_message_id : SupportMessage::create($hilo + [
+            'sender_type' => 'user', 'body' => 'Cómo entro al sistema?',
+        ])->id;
+        $recibo = SupportMessage::create($hilo + ['sender_type' => 'admin', 'body' => $recibio_excel
+            ? 'Recibí el Excel y ya está en preparación.' : 'Querés que te mande un enlace de ingreso?']);
+        $case = SupportCodexCase::create([
+            'support_ticket_id' => $this->ticket->id, 'state' => 'ready', 'last_reply_id' => $recibo->id,
+            'handled_message_id' => $anterior,
+        ]);
+        if ($otro_entrante) {
+            SupportMessage::create($hilo + ['sender_type' => 'user', 'body' => 'La columna de precio es costo.']);
+        }
+        $mensaje = SupportMessage::create($hilo + [
+            'sender_type' => 'user', 'body' => $texto, 'reply_to_message_id' => $cita ? $recibo->id : null,
+        ]);
+        SupportMessage::create($hilo + [
+            'sender_type' => 'admin', 'body' => 'En el Excel, el precio es de venta o es el costo?', 'is_trial_import_notice' => true,
+        ]);
+        $url = '/api/claude/support-codex/tickets/' . $this->ticket->id . '/claim';
+        $datos = ['worker_id' => 'martin', 'expected_message_id' => $mensaje->id];
+        if ($monitor_nuevo) {
+            $datos['supports_trial_import_quiet'] = true;
+        }
+
+        $resultado = $this->postJson($url, $datos, $this->headers_de_claude())->assertOk();
+
+        $case->refresh();
+        $this->assertSame('open', $this->ticket->fresh()->status);
+        $this->assertSame(2, SupportMessage::where('support_ticket_id', $this->ticket->id)->where('sender_type', 'admin')->count());
+        if ($silencio) {
+            $resultado->assertExactJson(['trial_import_quiet' => true]);
+            $this->assertSame((int) $mensaje->id, (int) $case->handled_message_id);
+            $this->assertNull($case->lease_expires_at);
+            $this->postJson($url, $datos, $this->headers_de_claude())->assertStatus(409);
+        } else {
+            $resultado->assertJsonStructure(['lease_token'])->assertJsonPath('ticket.expected_message_id', (int) $mensaje->id);
+            $this->assertSame((int) $anterior, (int) $case->handled_message_id);
+        }
+    }
+
+    public function conversaciones_durante_la_carga(): array
+    {
+        return [
+            'cortesía aislada' => ['Dale gracias', true, false, false, true, true, true],
+            'Excel con MIME genérico' => ['Dale gracias', true, false, false, true, true, true, true],
+            'respuesta y cortesía en dos mensajes' => ['Gracias', true, true, false, true, true, false],
+            'otro tema' => ['Gracias, cómo cargo una venta?', true, false, false, true, true, false],
+            'contestación a otra consulta' => ['Dale gracias', false, false, false, true, true, false],
+            'mensaje citado' => ['Gracias', true, false, true, true, true, false],
+            'monitor anterior' => ['Gracias', true, false, false, false, true, false],
+            'sin carga pendiente' => ['Gracias', true, false, false, true, false, false],
+        ];
     }
 
     /** @test */

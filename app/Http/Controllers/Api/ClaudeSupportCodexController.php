@@ -61,6 +61,7 @@ class ClaudeSupportCodexController extends Controller
             'dispatch_recovery' => 'sometimes|boolean',
             'execution_id' => 'required_if:dispatch_recovery,true|uuid',
             'supports_upgrade_agreement' => 'sometimes|boolean',
+            'supports_trial_import_quiet' => 'sometimes|boolean',
         ]);
         return response()->json($service->claim((int) $id, $data));
     }

@@ -13,6 +13,7 @@ use App\Models\SupportCodexMissionFixEvidence;
 use App\Models\SupportCodexUpgradeAgreement;
 use App\Models\SupportCodexOperation;
 use App\Models\SupportMessage;
+use App\Models\SupportMessageAttachment;
 use App\Models\SupportTicket;
 use App\Services\Local\EscenaService;
 use App\Services\Prueba\PruebaContextoSoporteService;
@@ -116,13 +117,16 @@ class SupportCodexService
                 $case->state = trim((string) $case->mission) !== '' ? 'mission_pending' : 'ready';
                 $case->review_reason = null;
             }
-            if ($this->pending_reason($ticket, $case, ! empty($input['supports_upgrade_agreement'])) === null) {
+            $reason = $this->pending_reason($ticket, $case, ! empty($input['supports_upgrade_agreement']));
+            if ($reason === null) {
                 $this->fail(409, 'not_pending', 'El ticket ya fue atendido o necesita revisión humana.');
             }
             $last = $this->last_real_message($id);
             if ($last === null || (int) $last->id !== (int) $input['expected_message_id']) {
                 $this->fail(409, 'stale_message', 'La conversación cambió; volvé a leerla.');
             }
+            $cortesia_de_prueba = ! $renewing && ! $recover_dispatch && $reason === 'inbound'
+                && ! empty($input['supports_trial_import_quiet']) && $this->es_cortesia_aislada($case, $last);
             $token = $renewing ? $token : Str::random(64);
             if ($case->state === 'manual_review') {
                 // Una revisión pedida por el propio agente admite información nueva. Tomar el
@@ -151,12 +155,46 @@ class SupportCodexService
             $case->save();
             // Invalida borradores ya encolados del proveedor anterior.
             app(SupportAiSuggestionDraftService::class)->clear_ticket_pending_state($ticket);
+            $context = $this->context($ticket, $case);
+            if ($cortesia_de_prueba && $context['importaciones_prueba_en_proceso'] === true) {
+                // El aviso de Empresa lleva la aclaración. Consumir sólo este agradecimiento evita
+                // que un turno conversacional vuelva a preguntar o cierre la importación.
+                $case->handled_message_id = (int) $last->id;
+                $case->lease_hash = null;
+                $case->lease_expires_at = null;
+                $case->save();
+                return ['trial_import_quiet' => true];
+            }
             return [
                 'lease_token' => $token,
                 'lease_expires_at' => $case->lease_expires_at->toIso8601String(),
-                'ticket' => $this->context($ticket, $case),
+                'ticket' => $context,
             ];
         });
+    }
+
+    private function es_cortesia_aislada(SupportCodexCase $case, SupportMessage $last): bool
+    {
+        if ($case->state !== 'ready' || $case->last_reply_id === null || $case->handled_message_id === null || $last->kind !== 'text'
+            || $last->reply_to_message_id !== null) {
+            return false;
+        }
+        $body = Str::ascii(mb_strtolower((string) $last->body));
+        if (! preg_match('/^(?:(?:ah|ok|oka|dale|listo|perfecto|buenisimo|genial|barbaro)[,.!\s]+)*(?:(?:muchas|muchisimas|mil)\s+)?gracias[,.!\s]*$/D', $body)
+            || $last->attachments()->exists()) {
+            return false;
+        }
+
+        // El agradecimiento tiene que seguir al recibo del Excel. Si hubo otro entrante,
+        // como «Es costo» y enseguida «Gracias», Martín tiene que leer los dos.
+        $adjuntos = SupportMessageAttachment::where('support_message_id', $case->handled_message_id)
+            ->whereHas('message', function ($mensaje) use ($last) {
+                $mensaje->where('support_ticket_id', $last->support_ticket_id)->where('sender_type', 'user');
+            })->get(['mime', 'path']);
+        return $adjuntos->contains(function (SupportMessageAttachment $adjunto) {
+            return isset(PruebaImportacionService::EXCEL[PruebaImportacionService::extension_del_adjunto($adjunto)]);
+        }) && ! SupportMessage::where('support_ticket_id', $last->support_ticket_id)->where('sender_type', 'user')
+            ->where('id', '>', $case->handled_message_id)->where('id', '<', $last->id)->exists();
     }
 
     public function context(SupportTicket $ticket, SupportCodexCase $case = null): array
