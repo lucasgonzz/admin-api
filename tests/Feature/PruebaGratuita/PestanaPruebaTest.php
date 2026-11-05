@@ -4,6 +4,7 @@ namespace Tests\Feature\PruebaGratuita;
 
 use App\Models\PruebaWhatsappEnvio;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Http\Client\Request;
 use Laravel\Sanctum\Sanctum;
 
 /**
@@ -110,5 +111,74 @@ class PestanaPruebaTest extends BaseDeLaPrueba
         $client = $this->cliente_en_prueba();
 
         $this->getJson('/api/admin/client/' . $client->id . '/prueba/seguimiento')->assertStatus(401);
+        $this->putJson('/api/admin/client/' . $client->id . '/prueba/cupo-imagenes', ['tope' => 30])->assertStatus(401);
+    }
+
+    /** @test */
+    public function la_edicion_del_cupo_desde_lead_y_cliente_conserva_el_consumo_del_erp(): void
+    {
+        Sanctum::actingAs($this->admin());
+        $client = $this->cliente_en_prueba();
+        $lead = $this->lead_en_prueba($client);
+        $imagenes = ['tope' => 30, 'usadas' => 12, 'restantes' => 18];
+        $this->fakear_http([
+            '*/admin-sync/prueba/estado' => function () use (&$imagenes) {
+                return Http::response(array_merge($this->estado_de_la_instancia([]), ['imagenes' => $imagenes]), 200);
+            },
+            '*/admin-sync/prueba/cupo-imagenes' => function (Request $request) use (&$imagenes) {
+                $this->assertSame('POST', $request->method());
+                $this->assertTrue($request->hasHeader('X-Admin-Api-Key', 'clave-del-cliente'));
+                $imagenes['tope'] = $request->data()['tope'];
+                $imagenes['restantes'] = max(0, $imagenes['tope'] - $imagenes['usadas']);
+
+                return Http::response(['imagenes' => $imagenes], 200);
+            },
+        ]);
+
+        $ruta_cliente = '/api/admin/client/' . $client->id . '/prueba';
+        $ruta_lead = '/api/admin/lead/' . $lead->id . '/prueba';
+        $this->getJson($ruta_lead . '/seguimiento')->assertOk()->assertJsonPath('imagenes', $imagenes);
+
+        $this->putJson($ruta_lead . '/cupo-imagenes', ['tope' => 50])
+            ->assertOk()->assertJsonPath('imagenes', ['tope' => 50, 'usadas' => 12, 'restantes' => 38]);
+        $this->putJson($ruta_cliente . '/cupo-imagenes', ['tope' => 0])
+            ->assertOk()->assertJsonPath('imagenes', ['tope' => 0, 'usadas' => 12, 'restantes' => 0]);
+        $this->getJson($ruta_cliente . '/seguimiento')->assertOk()->assertJsonPath('imagenes', $imagenes);
+        $this->assertSame(7, (int) $client->fresh()->trial_days);
+    }
+
+    /** @test */
+    public function una_version_vieja_conserva_el_seguimiento_y_no_confirma_la_edicion(): void
+    {
+        Sanctum::actingAs($this->admin());
+        $client = $this->cliente_en_prueba();
+        $this->fakear_http([
+            '*/admin-sync/prueba/estado' => Http::response($this->estado_de_la_instancia(['ingreso']), 200),
+            '*/admin-sync/prueba/cupo-imagenes' => Http::response([], 404),
+        ]);
+
+        $ruta = '/api/admin/client/' . $client->id . '/prueba';
+        $this->getJson($ruta . '/seguimiento')->assertOk()
+            ->assertJsonPath('hitos_fuente', 'instancia')
+            ->assertJsonPath('imagenes', null)
+            ->assertJsonPath('cupo_imagenes_estado', 'version_vieja');
+        $this->putJson($ruta . '/cupo-imagenes', ['tope' => 50])
+            ->assertStatus(409)->assertJsonPath('estado', 'version_vieja');
+    }
+
+    /** @test */
+    public function el_admin_valida_el_cupo_y_la_prueba_antes_de_llamar_al_erp(): void
+    {
+        Sanctum::actingAs($this->admin());
+        $client = $this->cliente_en_prueba();
+        $ruta = '/api/admin/client/' . $client->id . '/prueba/cupo-imagenes';
+
+        foreach ([-1, 10001, 1.5, true, null] as $invalido) {
+            $this->putJson($ruta, ['tope' => $invalido])->assertStatus(422)->assertJsonValidationErrors('tope');
+        }
+
+        $client->update(['estado' => 'activo']);
+        $this->putJson($ruta, ['tope' => 30])->assertStatus(422);
+        Http::assertNothingSent();
     }
 }

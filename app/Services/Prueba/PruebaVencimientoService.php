@@ -57,6 +57,32 @@ class PruebaVencimientoService
     }
 
     /**
+     * Empresa conserva el consumo y devuelve el saldo actualizado al cambiar el cupo total.
+     */
+    public function enviar_cupo_imagenes(Client $client, int $tope): array
+    {
+        return $this->llamar($client, 'POST', 'prueba/cupo-imagenes', ['tope' => $tope]);
+    }
+
+    public static function leer_cupo_imagenes(array $cuerpo): ?array
+    {
+        $imagenes = $cuerpo['imagenes'] ?? null;
+        if (! is_array($imagenes)) {
+            return null;
+        }
+
+        $cupo = [];
+        foreach (['tope', 'usadas', 'restantes'] as $campo) {
+            if (! isset($imagenes[$campo]) || ! is_int($imagenes[$campo]) || $imagenes[$campo] < 0) {
+                return null;
+            }
+            $cupo[$campo] = $imagenes[$campo];
+        }
+
+        return $cupo;
+    }
+
+    /**
      * @return array<string, mixed>
      */
     private function llamar(Client $client, string $metodo, string $ruta, array $cuerpo): array

@@ -1067,8 +1067,10 @@ Route::prefix('admin')->group(function () {
            hitos (C3, en vivo contra la instancia, con los eventos de C2 de respaldo), próximo paso, los WhatsApps de
            la prueba y el botón «Avisar a Tomás» (POST, sin tope). */
         Route::get('client/{clientId}/prueba/seguimiento', [\App\Http\Controllers\PruebaController::class, 'client_json']);
+        Route::put('client/{clientId}/prueba/cupo-imagenes', [\App\Http\Controllers\PruebaController::class, 'cupo_imagenes_client_json']);
         Route::post('client/{clientId}/prueba/avisar-a-tomas', [\App\Http\Controllers\PruebaController::class, 'avisar_a_tomas_client_json']);
         Route::get('lead/{id}/prueba/seguimiento', [\App\Http\Controllers\PruebaController::class, 'lead_json'])->whereNumber('id');
+        Route::put('lead/{id}/prueba/cupo-imagenes', [\App\Http\Controllers\PruebaController::class, 'cupo_imagenes_lead_json'])->whereNumber('id');
         Route::post('lead/{id}/prueba/avisar-a-tomas', [\App\Http\Controllers\PruebaController::class, 'avisar_a_tomas_lead_json'])->whereNumber('id');
         /* Boton Gestionar extensiones (mision extensiones-desde-el-admin, 15/10/2026): pide al empresa-api del cliente un acceso de un solo uso al configurador. */
         Route::post('client/{clientId}/extensiones/acceso', [\App\Http\Controllers\ClientExtensionesAccesoController::class, 'acceso_json']);

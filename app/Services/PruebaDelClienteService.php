@@ -10,6 +10,7 @@ use App\Models\PruebaWhatsappEnvio;
 use Carbon\Carbon;
 use Illuminate\Support\Collection;
 use App\Services\Prueba\PruebaCicloService;
+use App\Services\Prueba\PruebaVencimientoService;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -255,11 +256,11 @@ class PruebaDelClienteService
      *
      * @param Client $client
      *
-     * @return array{disponible: bool, motivo: string|null, vence_at: string|null, vencida: bool|null, semilla_presente: bool|null, hitos: array<string, string|null>}
+     * @return array{disponible: bool, motivo: string|null, vence_at: string|null, vencida: bool|null, semilla_presente: bool|null, hitos: array<string, string|null>, imagenes: array|null}
      */
     public function estado_remoto(Client $client): array
     {
-        $vacio = ['disponible' => false, 'motivo' => null, 'vence_at' => null, 'vencida' => null, 'semilla_presente' => null, 'hitos' => []];
+        $vacio = ['disponible' => false, 'motivo' => null, 'vence_at' => null, 'vencida' => null, 'semilla_presente' => null, 'hitos' => [], 'imagenes' => null];
 
         try {
             $resultado = $this->puente->reenviar($client, 'GET', self::RUTA_ESTADO_REMOTO, null);
@@ -305,6 +306,7 @@ class PruebaDelClienteService
             'vencida'          => isset($cuerpo['vencida']) ? (bool) $cuerpo['vencida'] : null,
             'semilla_presente' => isset($cuerpo['semilla_presente']) ? (bool) $cuerpo['semilla_presente'] : null,
             'hitos'            => $hitos,
+            'imagenes'         => PruebaVencimientoService::leer_cupo_imagenes($cuerpo),
         ];
     }
 
@@ -356,7 +358,7 @@ class PruebaDelClienteService
      * @param Lead|null $lead
      * @param bool      $consultar_instancia false = solo locales (para no pegarle al cliente, p. ej. en un listado).
      *
-     * @return array{fuente: string, hitos: array<string, string|null>, semilla_presente: bool|null, vence_at: string|null, vencida: bool|null}
+     * @return array{fuente: string, hitos: array<string, string|null>, semilla_presente: bool|null, vence_at: string|null, vencida: bool|null, imagenes: array|null, cupo_imagenes_estado: string|null}
      */
     public function hitos(Client $client, ?Lead $lead, bool $consultar_instancia = true): array
     {
@@ -376,6 +378,8 @@ class PruebaDelClienteService
                 'semilla_presente' => $remoto['semilla_presente'],
                 'vence_at'         => $remoto['vence_at'],
                 'vencida'          => $remoto['vencida'],
+                'imagenes'         => $remoto['imagenes'],
+                'cupo_imagenes_estado' => $remoto['imagenes'] === null ? 'version_vieja' : 'ok',
             ];
         }
 
@@ -385,6 +389,8 @@ class PruebaDelClienteService
             'semilla_presente' => null,
             'vence_at'         => null,
             'vencida'          => null,
+            'imagenes'         => null,
+            'cupo_imagenes_estado' => $remoto['motivo'] ?? null,
         ];
     }
 
@@ -484,6 +490,8 @@ class PruebaDelClienteService
             'hitos_fuente'        => $hitos['fuente'],
             'hitos'               => $hitos['hitos'],
             'hitos_lista'         => $lista,
+            'imagenes'            => $hitos['imagenes'],
+            'cupo_imagenes_estado' => $hitos['cupo_imagenes_estado'],
             'proximo_hito'        => $proximo,
             'proximo_hito_label'  => self::label_del_hito($proximo),
             'bienvenida_enviada'  => $bienvenida !== null,

@@ -4,8 +4,11 @@ namespace App\Http\Controllers;
 
 use App\Models\Client;
 use App\Models\Lead;
+use App\Services\Prueba\PruebaCicloService;
+use App\Services\Prueba\PruebaVencimientoService;
 use App\Services\PruebaDelClienteService;
 use App\Services\PruebaWhatsappService;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 /**
@@ -25,6 +28,8 @@ use Illuminate\Http\Request;
  */
 class PruebaController extends Controller
 {
+    private const MAX_CUPO_IMAGENES = 10000;
+
     /**
      * El estado de la prueba de un cliente.
      *
@@ -51,6 +56,50 @@ class PruebaController extends Controller
         $lead = Lead::findOrFail($id);
 
         return response()->json($this->payload(null, $lead));
+    }
+
+    public function cupo_imagenes_client_json(Request $request, $clientId): JsonResponse
+    {
+        return $this->cambiar_cupo_imagenes($request, $this->find_client_by_route_id($clientId));
+    }
+
+    public function cupo_imagenes_lead_json(Request $request, $id): JsonResponse
+    {
+        $lead = Lead::findOrFail($id);
+        $client = app(PruebaDelClienteService::class)->cliente_del_lead($lead);
+
+        return $this->cambiar_cupo_imagenes($request, $client);
+    }
+
+    private function cambiar_cupo_imagenes(Request $request, ?Client $client): JsonResponse
+    {
+        if (! PruebaCicloService::esta_en_prueba($client)) {
+            return response()->json(['message' => 'Este negocio no está en prueba gratuita.'], 422);
+        }
+
+        $tope = $request->input('tope');
+        if (! is_int($tope) || $tope < 0 || $tope > self::MAX_CUPO_IMAGENES) {
+            $mensaje = 'Ingresá un número entero entre 0 y ' . self::MAX_CUPO_IMAGENES . '.';
+
+            return response()->json(['message' => $mensaje, 'errors' => ['tope' => [$mensaje]]], 422);
+        }
+
+        $respuesta = app(PruebaVencimientoService::class)->enviar_cupo_imagenes($client, $tope);
+        $estado = $respuesta['estado'];
+        $imagenes = PruebaVencimientoService::leer_cupo_imagenes($respuesta);
+
+        if ($estado === PruebaVencimientoService::ESTADO_SIN_RUTA || ($estado === PruebaVencimientoService::ESTADO_OK && $imagenes === null)) {
+            return response()->json([
+                'estado'  => 'version_vieja',
+                'message' => 'La versión del sistema del negocio todavía no permite editar el cupo de imágenes.',
+            ], 409);
+        }
+
+        if ($estado !== PruebaVencimientoService::ESTADO_OK || $imagenes['tope'] !== $tope) {
+            return response()->json(['message' => 'El sistema del negocio no confirmó el cambio de cupo. Actualizá la prueba e intentá de nuevo.'], 502);
+        }
+
+        return response()->json(['imagenes' => $imagenes]);
     }
 
     /**
