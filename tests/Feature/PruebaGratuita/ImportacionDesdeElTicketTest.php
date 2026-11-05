@@ -2,9 +2,11 @@
 
 namespace Tests\Feature\PruebaGratuita;
 
+use App\Models\AdminSetting;
 use App\Models\SupportMessage;
 use App\Models\SupportMessageAttachment;
 use App\Models\SupportTicket;
+use App\Services\SupportCodexSettings;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 
@@ -113,6 +115,7 @@ class ImportacionDesdeElTicketTest extends BaseDeLaPrueba
         $this->assertSame('aceptado', $respuesta->json('estado'));
         $this->assertSame('uuid-de-la-corrida', $respuesta->json('analysis_uuid'));
         $this->assertSame(202, $respuesta->json('http'));
+        $this->assertFalse($respuesta->json('automatizar_prueba'));
         $this->assertStringNotContainsString('clave-del-cliente', (string) $respuesta->getContent());
 
         Http::assertSent(function ($request) {
@@ -126,6 +129,135 @@ class ImportacionDesdeElTicketTest extends BaseDeLaPrueba
                 && $this->campo($request, 'avisar_por_whatsapp') === '1'
                 && $this->campo($request, 'origen') === 'martin';
         });
+    }
+
+    /** @test */
+    public function pide_el_flujo_automatico_y_le_devuelve_al_monitor_si_la_instancia_lo_acepto(): void
+    {
+        $this->fakear_http(['*/admin-sync/ai-excel-import/analyze' => Http::response([
+            'analysis_uuid' => 'uuid-de-la-corrida', 'automatizar_prueba' => true,
+        ], 202)]);
+
+        $this->importar(['attachment_id' => $this->adjunto->id])->assertOk()->assertJson([
+            'estado' => 'aceptado', 'automatizar_prueba' => true,
+        ]);
+
+        Http::assertSent(function ($request) {
+            return $this->campo($request, 'automatizar_prueba') === '1'
+                && $this->campo($request, 'support_ticket_id') === (string) $this->ticket->id
+                && $this->campo($request, 'importacion_clave') === hash('sha256', 'contenido-del-excel');
+        });
+    }
+
+    /** @test */
+    public function la_clave_del_pdf_identifica_el_adjunto_original_aunque_cambie_la_planilla_derivada(): void
+    {
+        $this->fakear_http(['*/admin-sync/ai-excel-import/analyze' => Http::response([
+            'analysis_uuid' => 'uuid-de-la-corrida', 'automatizar_prueba' => true,
+        ], 202)]);
+        $pdf = $this->adjuntar($this->ticket, 'soporte/lista.pdf', 'application/pdf');
+
+        foreach (['version-1', 'version-2'] as $contenido) {
+            $this->importar([
+                'origen' => 'pdf',
+                'pdf_attachment_id' => $pdf->id,
+                'file' => ['filename' => 'catalogo.xlsx', 'content_base64' => base64_encode($contenido)],
+            ])->assertOk();
+        }
+
+        $this->importar([
+            'origen' => 'pdf',
+            'pdf_attachment_id' => $this->adjunto->id,
+            'file' => ['filename' => 'catalogo.xlsx', 'content_base64' => base64_encode('contenido')],
+        ])->assertStatus(422);
+
+        $pedidos = Http::recorded();
+        $this->assertCount(2, $pedidos);
+        foreach ($pedidos as [$pedido]) {
+            $this->assertSame(hash('sha256', 'pdf:' . $pdf->id), $this->campo($pedido, 'importacion_clave'));
+        }
+    }
+
+    /** @test */
+    public function martin_recibe_las_preguntas_y_resuelve_solo_con_la_reserva_y_mensaje_actuales(): void
+    {
+        $uuid = '9b2c4f1e-7a3d-4c55-9e0b-2f6d8a1c3e70';
+        $preguntas = ['analysis_uuid' => $uuid, 'filename' => 'lista.xlsx', 'revision' => 2, 'tipo' => 'columnas', 'preguntas' => [
+            ['clave' => 'columna-1', 'texto' => '¿La columna Importe es costo o precio?', 'opciones' => [['valor' => 'costo', 'etiqueta' => 'Costo']]],
+        ]];
+        $this->fakear_http([
+            '*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response(['pendientes' => [$preguntas]], 200),
+            '*/admin-sync/ai-excel-import/prueba-resolver/' . $uuid => Http::response(['estado' => 'encolada'], 202),
+        ]);
+        AdminSetting::set(SupportCodexSettings::KEY_ENABLED, '1');
+        AdminSetting::set(SupportCodexSettings::KEY_ACTIVATED_AT, now()->subHour()->toDateTimeString());
+        AdminSetting::set(SupportCodexSettings::KEY_ACTIVATED_AFTER_ID, 0);
+
+        $base = '/api/claude/support-codex/tickets/' . $this->ticket->id;
+        $mensaje = (int) $this->adjunto->support_message_id;
+        $aviso = SupportMessage::create([
+            'support_ticket_id' => $this->ticket->id, 'sender_type' => 'admin', 'kind' => 'text',
+            'body' => 'Ya leí otro archivo que mandaste.', 'is_trial_import_notice' => true,
+        ]);
+        $reserva = $this->postJson($base . '/claim', ['worker_id' => 'martin', 'expected_message_id' => $mensaje], $this->headers_de_claude())
+            ->assertOk()->assertJsonPath('ticket.capabilities.prueba_import_resolver', true)
+            ->assertJsonPath('ticket.expected_message_id', $mensaje)
+            ->assertJsonPath('ticket.importaciones_prueba_pendientes', [$preguntas]);
+        $this->assertSame((int) $aviso->id, $reserva->json('ticket.messages.1.id'));
+
+        $respuestas = ['columna-1' => 'costo'];
+        $datos = ['analysis_uuid' => $uuid, 'revision' => 2, 'respuestas' => $respuestas,
+            'lease_token' => $reserva->json('lease_token'), 'expected_message_id' => $mensaje];
+        $this->postJson($base . '/import-prueba-resolver', ['lease_token' => str_repeat('x', 64)] + $datos, $this->headers_de_claude())->assertStatus(423);
+        $this->postJson($base . '/import-prueba-resolver', ['expected_message_id' => $mensaje + 1] + $datos, $this->headers_de_claude())->assertStatus(409);
+        $this->postJson($base . '/import-prueba-resolver', $datos, $this->headers_de_claude())->assertStatus(202)->assertJsonPath('estado', 'encolada');
+
+        $consultas = Http::recorded(function ($request) {
+            return strpos($request->url(), '/ai-excel-import/prueba-pendientes') !== false;
+        });
+        $this->assertCount(1, $consultas);
+        parse_str(parse_url($consultas->first()[0]->url(), PHP_URL_QUERY), $query);
+        $this->assertSame((string) $this->ticket->id, $query['support_ticket_id']);
+        $this->assertSame((string) $this->client->user_id, $query['user_id']);
+
+        $resoluciones = Http::recorded(function ($request) {
+            return strpos($request->url(), '/ai-excel-import/prueba-resolver') !== false;
+        });
+        $this->assertCount(1, $resoluciones);
+        $pedido = $resoluciones->first()[0];
+        $this->assertSame(['clave-del-cliente'], $pedido->header('X-Admin-Api-Key'));
+        $this->assertSame([
+            'revision' => 2, 'respuestas' => $respuestas,
+            'user_id' => (int) $this->client->user_id, 'support_ticket_id' => (int) $this->ticket->id,
+        ], $pedido->data());
+    }
+
+    /** @test */
+    public function martin_mantiene_abierto_el_ticket_mientras_queda_un_archivo_procesando(): void
+    {
+        $this->fakear_http([
+            '*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response(['pendientes' => [], 'en_proceso' => true], 200),
+        ]);
+        AdminSetting::set(SupportCodexSettings::KEY_ENABLED, '1');
+        AdminSetting::set(SupportCodexSettings::KEY_ACTIVATED_AT, now()->subHour()->toDateTimeString());
+        AdminSetting::set(SupportCodexSettings::KEY_ACTIVATED_AFTER_ID, 0);
+
+        $agradecimiento = SupportMessage::create([
+            'support_ticket_id' => $this->ticket->id, 'sender_type' => 'user', 'kind' => 'text', 'body' => 'Gracias',
+        ]);
+        $base = '/api/claude/support-codex/tickets/' . $this->ticket->id;
+        $mensaje = (int) $agradecimiento->id;
+        $reserva = $this->postJson($base . '/claim', ['worker_id' => 'martin', 'expected_message_id' => $mensaje], $this->headers_de_claude())
+            ->assertOk()->assertJsonPath('ticket.importaciones_prueba_en_proceso', true)
+            ->assertJsonPath('ticket.importaciones_prueba_pendientes', []);
+
+        $this->postJson($base . '/reply', [
+            'lease_token' => $reserva->json('lease_token'), 'expected_message_id' => $mensaje,
+            'operation_id' => 'cerrar-gracias', 'action' => 'cerrar', 'body' => 'De nada.',
+        ], $this->headers_de_claude())->assertStatus(409)
+            ->assertJsonPath('message', 'trial_import_pending: Hay una importación en curso en este ticket. Dejá abierta la conversación.');
+        $this->assertSame('open', $this->ticket->fresh()->status);
+        $this->assertDatabaseMissing('support_codex_operations', ['operation_id' => 'cerrar-gracias']);
     }
 
     /** @test */

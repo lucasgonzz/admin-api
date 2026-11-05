@@ -9,6 +9,7 @@ use App\Services\Prueba\PruebaDemoSetupService;
 use App\Services\Prueba\PruebaDnsService;
 use App\Services\Prueba\PruebaEnvService;
 use App\Services\Prueba\PruebaVpsService;
+use App\Services\PruebaWhatsappService;
 use Carbon\Carbon;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -139,7 +140,7 @@ class ArmarPruebaJob implements ShouldQueue
                 break;
 
             case 'lista':
-                $this->terminar($instancia, $lead);
+                $this->terminar($instancia, $lead, $client);
                 break;
         }
     }
@@ -180,7 +181,7 @@ class ArmarPruebaJob implements ShouldQueue
         throw new \RuntimeException('El demo setup falló: ' . $resultado['mensaje']);
     }
 
-    private function terminar(TrialInstance $instancia, Lead $lead): void
+    private function terminar(TrialInstance $instancia, Lead $lead, Client $client): void
     {
         $instancia->estado           = TrialInstance::ESTADO_ASIGNADA;
         $instancia->etapa            = 'lista';
@@ -192,10 +193,19 @@ class ArmarPruebaJob implements ShouldQueue
 
         $lead_fresco = $lead->fresh();
         if ($lead_fresco !== null && (string) $lead_fresco->demo_setup_status === 'ejecutandose') {
-            Lead::query()->whereKey($lead->id)->update(['demo_setup_status' => 'exitoso', 'demo_setup_last_error' => null]);
+            $lead_fresco->update(['demo_setup_status' => 'exitoso', 'demo_setup_last_error' => null]);
         }
 
         Log::info('ArmarPruebaJob: prueba lista.', ['instancia' => $instancia->nombre, 'slug' => $instancia->alias_slug, 'lead_id' => $lead->id]);
+
+        if ($lead_fresco !== null && (string) $lead_fresco->demo_setup_status === 'exitoso') {
+            try {
+                app(PruebaWhatsappService::class)->enviar_bienvenida($lead_fresco, $client);
+            } catch (\Throwable $e) {
+                // La instancia está lista. El barrido habitual retoma la bienvenida si falló el envío.
+                Log::warning('ArmarPruebaJob: no se pudo iniciar la bienvenida por WhatsApp.', ['lead_id' => $lead->id]);
+            }
+        }
     }
 
     private function marcar(TrialInstance $instancia, string $etapa): void

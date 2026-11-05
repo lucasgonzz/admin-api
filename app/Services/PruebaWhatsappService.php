@@ -11,14 +11,15 @@ use App\Models\SupportMessage;
 use App\Models\SupportTicket;
 use Carbon\Carbon;
 use Database\Seeders\PipelineLeadSeeder;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
 /**
  * Los WhatsApps de la prueba gratuita que manda el admin (misión cruzada prueba-martin-importacion,
  * 3/11/2026, programa «Prueba gratuita de 7 días»):
  *
- *  1. **La bienvenida de Martín** (`cc_prueba_bienvenida`) la primera vez que la instancia reporta
- *     `prueba.ingreso` por C2. Una sola vez por cliente.
+ *  1. **La bienvenida de Martín** (`cc_prueba_bienvenida`) cuando la instancia queda lista, con
+ *     el primer ingreso y el barrido diario como respaldo. Una sola vez por cliente.
  *  2. **Los empujones por hito faltante** (`cc_prueba_paso_<hito>`): un job diario manda, como mucho,
  *     UNO por día y por negocio; se frena si el negocio escribió en las últimas 24 h (la ventana del
  *     número principal está abierta: ya está hablando con Martín), nunca después de vencida, y solo con
@@ -166,17 +167,26 @@ class PruebaWhatsappService
      */
     public function enviar_bienvenida_a(Client $client, ?Lead $lead): array
     {
-        $ya = PruebaWhatsappEnvio::query()
-            ->where('client_id', (int) $client->id)
-            ->where('plantilla', PruebaPlantillasService::BIENVENIDA)
-            ->where('estado', PruebaWhatsappEnvio::ESTADO_ENVIADO)
-            ->exists();
-
-        if ($ya) {
-            return ['estado' => 'ya_enviada', 'detalle' => null];
+        $reserva = Cache::lock('prueba-bienvenida-' . $client->id, 120);
+        if (! $reserva->get()) {
+            return ['estado' => 'en_curso', 'detalle' => null];
         }
 
-        return $this->enviar_plantilla_por_ticket($client, $lead, PruebaPlantillasService::BIENVENIDA, null, true);
+        try {
+            $ya = PruebaWhatsappEnvio::query()
+                ->where('client_id', (int) $client->id)
+                ->where('plantilla', PruebaPlantillasService::BIENVENIDA)
+                ->where('estado', PruebaWhatsappEnvio::ESTADO_ENVIADO)
+                ->exists();
+
+            if ($ya) {
+                return ['estado' => 'ya_enviada', 'detalle' => null];
+            }
+
+            return $this->enviar_plantilla_por_ticket($client, $lead, PruebaPlantillasService::BIENVENIDA, null, true);
+        } finally {
+            $reserva->release();
+        }
     }
 
     /* ------------------------------------------------------------------------------------------
@@ -427,15 +437,26 @@ class PruebaWhatsappService
      *
      * @param Client $client
      * @param string $texto
+     * @param int|null $ticket_id Conversación del archivo cuando la instancia informó el origen.
      *
      * @return array{enviado: bool, motivo: string|null, whatsapp_message_id: string|null, support_ticket_id: int|null}
      */
-    public function mandar_texto_por_ticket(Client $client, string $texto): array
+    public function mandar_texto_por_ticket(Client $client, string $texto, ?int $ticket_id = null): array
     {
-        $telefono = trim((string) $client->telefono_personal());
+        $ticket = null;
+        if ($ticket_id !== null) {
+            $ticket = SupportTicket::whereKey($ticket_id)->where('client_id', $client->id)
+                ->whereNull('client_employee_id')->where('source', 'whatsapp')->where('status', SupportTicket::STATUS_ABIERTO)->first();
+
+            if ($ticket === null) {
+                return ['enviado' => false, 'motivo' => 'ticket_no_disponible', 'whatsapp_message_id' => null, 'support_ticket_id' => null];
+            }
+        }
+
+        $telefono = trim((string) ($ticket === null ? $client->telefono_personal() : $ticket->whatsapp_phone));
         $contacto = $telefono === '' ? null : $this->directorio->resolve_for_client($client, $telefono);
 
-        if ($contacto === null) {
+        if ($contacto === null || ($ticket !== null && $contacto['client_employee_id'] !== null)) {
             return ['enviado' => false, 'motivo' => 'sin_contacto', 'whatsapp_message_id' => null, 'support_ticket_id' => null];
         }
 
@@ -448,8 +469,9 @@ class PruebaWhatsappService
             return ['enviado' => false, 'motivo' => 'sin_remitente', 'whatsapp_message_id' => null, 'support_ticket_id' => null];
         }
 
-        $resuelto = $this->opener->resolve_or_create_ticket($client, (string) $contacto['phone'], $admin, 'Prueba gratuita');
-        $ticket   = $resuelto['ticket'];
+        if ($ticket === null) {
+            $ticket = $this->opener->resolve_or_create_ticket($client, (string) $contacto['phone'], $admin, 'Prueba gratuita')['ticket'];
+        }
 
         $mensaje = SupportMessage::create([
             'support_ticket_id' => $ticket->id,
@@ -458,7 +480,7 @@ class PruebaWhatsappService
             'kind'              => 'text',
             'body'              => $texto,
             'delivered_at'      => now(),
-        ]);
+        ] + ($ticket_id === null ? [] : ['is_trial_import_notice' => true]));
 
         $wamid = $this->sender->send_text((string) $contacto['phone'], $texto, 'Prueba gratuita - aviso de importación - cliente #' . $client->id, true);
 

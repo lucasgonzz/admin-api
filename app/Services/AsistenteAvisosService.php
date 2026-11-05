@@ -467,7 +467,8 @@ class AsistenteAvisosService
             return $this->resolver_reclamo_previo($client, $aviso, $clave, $previo);
         }
 
-        $link    = $this->link_del_aviso($aviso, $spa_url);
+        $ticket_id = $aviso['support_ticket_id'] ?? null;
+        $link    = $ticket_id === null ? $this->link_del_aviso($aviso, $spa_url) : '';
         $mensaje = (string) $aviso['texto'] . ($link !== '' ? "\n\n" . $link : '');
 
         if (! Cache::add($clave, ['estado' => self::RECLAMO_RECLAMADO], now()->addMinutes(self::MINUTOS_DEL_RECLAMO_EN_CURSO))) {
@@ -475,7 +476,7 @@ class AsistenteAvisosService
         }
 
         try {
-            $salida = app(PruebaWhatsappService::class)->mandar_texto_por_ticket($client, $mensaje);
+            $salida = app(PruebaWhatsappService::class)->mandar_texto_por_ticket($client, $mensaje, $ticket_id);
         } catch (\Throwable $exception) {
             $this->registrar_fallo($client, (string) $aviso['id'], $clave, $exception->getMessage());
 
@@ -483,7 +484,7 @@ class AsistenteAvisosService
         }
 
         if ($salida['enviado'] !== true) {
-            if ($salida['motivo'] === 'ventana_cerrada' || $salida['motivo'] === 'sin_contacto') {
+            if (in_array($salida['motivo'], ['ventana_cerrada', 'sin_contacto', 'ticket_no_disponible'], true)) {
                 /* No salió nada y no es un rechazo de Meta: se suelta el reclamo sin contar un intento. */
                 Cache::forget($clave);
 
@@ -827,6 +828,9 @@ class AsistenteAvisosService
                 'texto'              => $texto,
                 'ruta'               => isset($fila['ruta']) ? trim((string) $fila['ruta']) : '',
                 'url'                => isset($fila['url']) ? trim((string) $fila['url']) : '',
+                'support_ticket_id'  => isset($fila['support_ticket_id']) && (int) $fila['support_ticket_id'] > 0
+                    ? (int) $fila['support_ticket_id']
+                    : null,
             ];
         }
 

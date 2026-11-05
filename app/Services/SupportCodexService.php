@@ -167,7 +167,11 @@ class SupportCodexService
         SupportMessage::apply_mensaje_real_conditions($messages, 'support_messages');
         $messages = $messages->with('attachments')->orderByDesc('id')->limit(100)->get()->reverse()->values();
         $last = $messages->last();
+        if ($last !== null && $last->is_trial_import_notice) {
+            $last = $this->last_real_message($ticket->id);
+        }
         $fix_evidence = SupportCodexMissionFixEvidence::current_for($ticket, $case);
+        $importaciones = app(PruebaImportacionService::class)->estado_en_ticket($ticket);
         return [
             'id' => (int) $ticket->id,
             'status' => $ticket->status,
@@ -196,7 +200,7 @@ class SupportCodexService
             'reason' => $this->pending_reason($ticket, $case, true),
             // El helper debe verificar esta capacidad ANTES de pedir el modo nuevo: un admin
             // anterior ignoraría el campo y ejecutaría el resume que consume la consulta.
-            'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => true],
+            'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => true, 'prueba_import_resolver' => true],
             'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
             'window' => app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone),
@@ -207,6 +211,8 @@ class SupportCodexService
              * claves (día actual, próximo paso, hitos en vivo por C3, bienvenida) por
              * `PruebaContextoSoporteService::extender()`, registrada en `SupportPruebaContextService::registrar()`. */
             'prueba' => app(PruebaContextoSoporteService::class)->bloque_para_el_cliente($ticket->client),
+            'importaciones_prueba_pendientes' => $importaciones['pendientes'],
+            'importaciones_prueba_en_proceso' => $importaciones['en_proceso'],
             /* La implementación del sistema y de la tienda (abierta, o cerrada hace ≤ 30 días), para que
              * Martín siga la conversación de la implementación donde la dejó Lucas. null = no tiene. */
             'implementation' => app(SupportImplementationContextService::class)->bloque_para_el_ticket($ticket),
@@ -219,6 +225,7 @@ class SupportCodexService
                     'sender_type' => $message->sender_type,
                     'body' => $this->cuerpo_para_el_monitor($message),
                     'kind' => $message->kind,
+                    'is_trial_import_notice' => (bool) $message->is_trial_import_notice,
                     'reply_to_message_id' => $message->reply_to_message_id === null ? null : (int) $message->reply_to_message_id,
                     'created_at' => $message->created_at ? $message->created_at->toIso8601String() : null,
                     'attachments' => $message->attachments->map(function ($attachment) use ($ticket) {
@@ -855,7 +862,17 @@ class SupportCodexService
             $this->fail(409, 'mission_pending', 'La misión sigue pendiente; no se anuncia resuelta.');
         }
         if ($input['action'] === 'cerrar') {
+            $this->assert_importacion_cerrable($ticket);
             $this->assert_confirmation($ticket, $case, $input);
+        }
+    }
+
+    private function assert_importacion_cerrable(SupportTicket $ticket): void
+    {
+        $en_proceso = app(PruebaImportacionService::class)->estado_en_ticket($ticket)['en_proceso'];
+        if ($en_proceso !== false) {
+            $mensaje = $en_proceso ? 'Hay una importación en curso en este ticket.' : 'Todavía no se pudo confirmar si la importación terminó.';
+            $this->fail(409, 'trial_import_pending', $mensaje . ' Dejá abierta la conversación.');
         }
     }
 
@@ -1204,6 +1221,9 @@ class SupportCodexService
         if (in_array($input['action'], ['solicitar_confirmacion', 'cerrar'], true) && $case->state === 'mission_pending') {
             $this->fail(409, 'mission_pending', 'No se puede anunciar resuelta una misión que todavía no se ejecutó.');
         }
+        if ($input['action'] === 'cerrar') {
+            $this->assert_importacion_cerrable($ticket);
+        }
         return $case;
     }
 
@@ -1496,7 +1516,9 @@ class SupportCodexService
     {
         $query = SupportMessage::where('support_ticket_id', $id);
         SupportMessage::apply_mensaje_real_conditions($query, 'support_messages');
-        return $query->orderByDesc('id')->first();
+        // Una notificación de otra corrida puede llegar después de la respuesta del dueño.
+        // Queda visible en el hilo, pero no puede desplazar ese entrante ni invalidar su reserva.
+        return $query->where('is_trial_import_notice', false)->orderByDesc('id')->first();
     }
 
     private function assert_managed(SupportTicket $ticket): void

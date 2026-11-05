@@ -416,6 +416,8 @@ Route::middleware('claude.task.key')
            ticket abierto y el cliente en prueba (404 `no_es_prueba`). */
         Route::post('support-codex/tickets/{id}/import-excel', 'Api\ClaudeSupportCodexController@import_excel')
             ->whereNumber('id');
+        Route::post('support-codex/tickets/{id}/import-prueba-resolver', 'Api\ClaudeSupportCodexController@import_prueba_resolver')
+            ->whereNumber('id');
         Route::post('support-codex/tickets/{id}/import-images', 'Api\ClaudeSupportCodexController@import_images')
             ->whereNumber('id');
         Route::get('admins', 'Api\ClaudeTaskIngestController@admins_json');

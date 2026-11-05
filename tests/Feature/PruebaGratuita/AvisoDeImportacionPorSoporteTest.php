@@ -144,6 +144,39 @@ class AvisoDeImportacionPorSoporteTest extends BaseDeLaPrueba
     }
 
     /** @test */
+    public function la_consulta_automatica_sale_solo_en_el_ticket_del_archivo_y_sin_link_al_asistente(): void
+    {
+        $espia = $this->espiar_sender();
+        $this->crear_config_whatsapp();
+        $this->admin();
+        $client = $this->cliente_en_prueba();
+        $ticket = $this->ticket_del_cliente($client);
+        $otro_ticket = $this->ticket_del_cliente($client);
+        $otro_cliente = $this->cliente_en_prueba(5, 7, '+5493418887777');
+        $ajeno = $this->ticket_del_cliente($otro_cliente);
+
+        $pregunta = '¿La columna Importe es costo o precio?';
+        $aviso = array_replace($this->pendientes()['avisos'][0], ['texto' => $pregunta]);
+        $this->fakear_http([
+            '*/asistente/avisos-pendientes*' => Http::response(['avisos' => [
+                ['support_ticket_id' => $ticket->id] + $aviso,
+                ['support_ticket_id' => $ajeno->id, 'id' => 'importacion_lista:00000000-0000-4000-8000-000000000001'] + $aviso,
+            ]], 200),
+            '*/asistente/avisos/avisado' => Http::response(['ok' => true], 200),
+        ]);
+
+        $resultado = app(AsistenteAvisosService::class)->enviar_a_cliente_en_prueba($client);
+
+        $this->assertSame(1, $resultado['enviados']);
+        $this->assertStringContainsString('ticket_no_disponible', $resultado['detalle']);
+        $this->assertCount(1, $espia->textos);
+        $this->assertSame($pregunta, $espia->textos[0]['body']);
+        $this->assertDatabaseHas('support_messages', ['support_ticket_id' => $ticket->id, 'body' => $pregunta]);
+        $this->assertDatabaseMissing('support_messages', ['support_ticket_id' => $otro_ticket->id, 'body' => $pregunta]);
+        $this->assertDatabaseMissing('support_messages', ['support_ticket_id' => $ajeno->id, 'body' => $pregunta]);
+    }
+
+    /** @test */
     public function los_otros_tipos_de_aviso_quedan_sin_canal_para_un_negocio_sin_asistente(): void
     {
         $espia = $this->espiar_sender();

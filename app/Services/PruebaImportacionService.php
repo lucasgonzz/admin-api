@@ -20,7 +20,8 @@ use Illuminate\Support\Facades\Storage;
  * de SU disco (el archivo ya está acá, no viaja a la PC de Lucas) y lo reenvía a
  * `POST admin-sync/ai-excel-import/analyze` del cliente con la clave del cliente, pidiendo el análisis en
  * segundo plano (`segundo_plano=1`) y el aviso por WhatsApp (`avisar_por_whatsapp=1`). Del otro lado
- * queda una corrida del dueño: entra al sistema y tiene la importación lista para confirmar.
+ * queda una corrida del dueño. Para artículos de la prueba vigente, la instancia puede continuar
+ * automáticamente y reservar el ticket para las preguntas que aparezcan.
  *
  * 🔴 SOLO PARA CLIENTES EN PRUEBA (`PruebaDelClienteService`), y solo desde un ticket ABIERTO de ese
  * cliente. El adjunto tiene que ser de ese ticket; el archivo que arma la tarea del PDF viaja en base64
@@ -38,6 +39,8 @@ class PruebaImportacionService
 
     const RUTA_ANALYZE  = 'api/admin-sync/ai-excel-import/analyze';
     const RUTA_IMAGENES = 'api/admin-sync/ai-excel-import/imagenes';
+    const RUTA_PENDIENTES = 'api/admin-sync/ai-excel-import/prueba-pendientes';
+    const RUTA_RESOLVER = 'api/admin-sync/ai-excel-import/prueba-resolver/';
 
     /** Peso máximo del Excel que se reenvía (bytes). */
     const MAX_BYTES_EXCEL = 10 * 1024 * 1024;
@@ -81,7 +84,7 @@ class PruebaImportacionService
      * Reenvía un Excel del ticket (o uno en base64) a la instancia del cliente en prueba.
      *
      * @param SupportTicket        $ticket
-     * @param array<string, mixed> $input `attachment_id` | `file:{filename, content_base64}`, `model`, `provider_id`, `origen`.
+     * @param array<string, mixed> $input `attachment_id` | `file:{filename, content_base64}`, `pdf_attachment_id` opcional, `model`, `provider_id`, `origen`.
      *
      * @return array<string, mixed> `estado`: aceptado | analizado_sin_corrida | rechazado | no_es_prueba |
      *                              ticket_cerrado | sin_fuente | archivo_invalido | sin_api_key | sin_url | no_responde.
@@ -102,6 +105,20 @@ class PruebaImportacionService
 
         $modelo = isset($input['model']) && in_array((string) $input['model'], self::MODELOS, true) ? (string) $input['model'] : 'article';
         $origen = isset($input['origen']) && trim((string) $input['origen']) !== '' ? mb_substr(trim((string) $input['origen']), 0, 40) : 'martin';
+        $clave = hash('sha256', $archivo['bytes']);
+        if (isset($input['pdf_attachment_id'])) {
+            if (isset($input['attachment_id'])) {
+                return ['estado' => 'archivo_invalido', 'mensaje' => 'El PDF original se indica junto con el Excel derivado.'];
+            }
+
+            $pdf = $this->adjunto_del_cliente($ticket, (int) $input['pdf_attachment_id']);
+            if ($pdf === null || ($pdf->mime !== 'application/pdf' && $this->extension_del_adjunto($pdf) !== 'pdf')) {
+                return ['estado' => 'sin_fuente', 'mensaje' => 'El PDF original tiene que ser un adjunto del cliente en este ticket.'];
+            }
+
+            // El XLSX derivado puede cambiar sus metadatos al regenerarse para el mismo PDF.
+            $clave = hash('sha256', 'pdf:' . $pdf->id);
+        }
 
         $campos = [
             'user_id'             => (int) $client->user_id,
@@ -112,6 +129,11 @@ class PruebaImportacionService
         ];
         if (isset($input['provider_id']) && is_numeric($input['provider_id']) && (int) $input['provider_id'] > 0) {
             $campos['provider_id'] = (int) $input['provider_id'];
+        }
+        if ($modelo === 'article' && $this->automatizacion_disponible($ticket)) {
+            $campos['automatizar_prueba'] = '1';
+            $campos['support_ticket_id'] = (int) $ticket->id;
+            $campos['importacion_clave'] = $clave;
         }
 
         $respuesta = $this->reenviar($client, self::RUTA_ANALYZE, $campos, [
@@ -139,6 +161,7 @@ class PruebaImportacionService
                 'http'          => $status,
                 'cuerpo'        => $cuerpo,
                 'filename'      => $archivo['filename'],
+                'automatizar_prueba' => ($cuerpo['automatizar_prueba'] ?? false) === true,
             ];
         }
 
@@ -160,6 +183,51 @@ class PruebaImportacionService
             'cuerpo'        => $cuerpo,
             'filename'      => $archivo['filename'],
         ];
+    }
+
+    /** Corridas de esta conversación. Una instancia anterior conserva el contexto de siempre. */
+    public function estado_en_ticket(SupportTicket $ticket): array
+    {
+        $sin_corrida = ['pendientes' => [], 'en_proceso' => false];
+        if (! $this->automatizacion_disponible($ticket)) {
+            return $sin_corrida;
+        }
+
+        $respuesta = $this->reenviar($ticket->client, self::RUTA_PENDIENTES, $this->contexto_del_ticket($ticket), [], 4, 'GET');
+        $status = $respuesta['status'] ?? null;
+        if ($status === 404) {
+            return $sin_corrida;
+        }
+        if ($status !== 200) {
+            return ['pendientes' => [], 'en_proceso' => null];
+        }
+
+        $pendientes = $respuesta['cuerpo']['pendientes'] ?? [];
+        $pendientes = is_array($pendientes) ? $pendientes : [];
+
+        return ['pendientes' => $pendientes, 'en_proceso' => $pendientes !== [] || ($respuesta['cuerpo']['en_proceso'] ?? false) === true];
+    }
+
+    public function resolver(SupportTicket $ticket, array $datos): array
+    {
+        if (! $this->automatizacion_disponible($ticket)) {
+            return ['status' => 409, 'cuerpo' => ['message' => 'El ticket no pertenece al dueño de una prueba vigente.']];
+        }
+
+        $respuesta = $this->reenviar($ticket->client, self::RUTA_RESOLVER . $datos['analysis_uuid'], [
+            'revision' => (int) $datos['revision'],
+            'respuestas' => $datos['respuestas'],
+        ] + $this->contexto_del_ticket($ticket), [], 12);
+
+        if (! isset($respuesta['status'])) {
+            return ['status' => 502, 'cuerpo' => $respuesta];
+        }
+
+        if (! in_array($respuesta['status'], [200, 202, 404, 409, 422], true)) {
+            return ['status' => 502, 'cuerpo' => ['message' => 'La instancia no pudo resolver la importación.']];
+        }
+
+        return $respuesta;
     }
 
     /**
@@ -251,6 +319,24 @@ class PruebaImportacionService
         return null;
     }
 
+    private function automatizacion_disponible(SupportTicket $ticket): bool
+    {
+        return $ticket->source === 'whatsapp' && $ticket->client_employee_id === null
+            && $this->puerta($ticket) === null && ! $this->pruebas->datos($ticket->client)['vencida'];
+    }
+
+    private function contexto_del_ticket(SupportTicket $ticket): array
+    {
+        return ['user_id' => (int) $ticket->client->user_id, 'support_ticket_id' => (int) $ticket->id];
+    }
+
+    private function adjunto_del_cliente(SupportTicket $ticket, int $id): ?SupportMessageAttachment
+    {
+        return SupportMessageAttachment::where('id', $id)->whereHas('message', function ($query) use ($ticket) {
+            $query->where('support_ticket_id', (int) $ticket->id)->where('sender_type', 'user');
+        })->first();
+    }
+
     /**
      * El Excel a reenviar: del adjunto del ticket o del `file` en base64.
      *
@@ -262,11 +348,7 @@ class PruebaImportacionService
     protected function archivo_excel(SupportTicket $ticket, array $input): array
     {
         if (isset($input['attachment_id']) && is_numeric($input['attachment_id'])) {
-            $attachment = SupportMessageAttachment::where('id', (int) $input['attachment_id'])
-                ->whereHas('message', function ($query) use ($ticket) {
-                    $query->where('support_ticket_id', (int) $ticket->id);
-                })
-                ->first();
+            $attachment = $this->adjunto_del_cliente($ticket, (int) $input['attachment_id']);
 
             if ($attachment === null) {
                 return ['estado' => 'sin_fuente', 'mensaje' => 'Ese adjunto no es de este ticket.'];
@@ -362,10 +444,11 @@ class PruebaImportacionService
      * @param array<string, mixed>              $campos
      * @param array<int, array<string, string>> $archivos `[{nombre, bytes, filename}]`.
      * @param int                               $timeout
+     * @param string                            $metodo
      *
      * @return array<string, mixed>
      */
-    protected function reenviar(Client $client, string $ruta, array $campos, array $archivos, int $timeout): array
+    protected function reenviar(Client $client, string $ruta, array $campos, array $archivos, int $timeout, string $metodo = 'POST'): array
     {
         $clave = trim((string) $client->api_key);
         if ($clave === '') {
@@ -386,7 +469,7 @@ class PruebaImportacionService
                 $pedido = $pedido->attach($archivo['nombre'], $archivo['bytes'], $archivo['filename']);
             }
 
-            $respuesta = $pedido->post($url, $campos);
+            $respuesta = $metodo === 'GET' ? $pedido->get($url, $campos) : $pedido->post($url, $campos);
         } catch (ConnectionException $e) {
             Log::channel('daily')->warning('PruebaImportacion: el sistema del cliente no respondió.', [
                 'client_id' => (int) $client->id,

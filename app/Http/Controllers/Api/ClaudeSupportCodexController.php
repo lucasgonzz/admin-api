@@ -5,9 +5,11 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\SupportCodexCase;
 use App\Models\SupportCodexOperation;
+use App\Models\SupportMessage;
 use App\Models\SupportMessageAttachment;
 use App\Models\SupportTicket;
 use App\Services\ClientScheduleResolver;
+use App\Services\PruebaImportacionService;
 use App\Services\SistemaQueryService;
 use App\Services\SupportCodexDiagnosticService;
 use App\Services\SupportCodexService;
@@ -295,18 +297,19 @@ class ClaudeSupportCodexController extends Controller
      * `PruebaImportacionService`.
      *
      * Body: `attachment_id` (adjunto de ESTE ticket) o `file {filename, content_base64}`; opcionales `model`
-     * (article|client|provider), `provider_id`, `origen`.
+     * (article|client|provider), `provider_id`, `origen` y `pdf_attachment_id` (adjunto original cuando `file` deriva de un PDF).
      *
      * @return \Illuminate\Http\JsonResponse 200 aceptado/analizado_sin_corrida/rechazado · 404 no_es_prueba ·
      *                                       409 ticket_cerrado/sin_api_key/sin_url · 422 · 502 no_responde
      */
-    public function import_excel(Request $request, $id, \App\Services\PruebaImportacionService $service)
+    public function import_excel(Request $request, $id, PruebaImportacionService $service)
     {
         $data = $request->validate([
             'attachment_id' => 'sometimes|nullable|integer|min:1',
             'file' => 'sometimes|required|array',
             'file.filename' => 'required_with:file|string|max:160',
             'file.content_base64' => 'required_with:file|string|max:14000000',
+            'pdf_attachment_id' => 'sometimes|integer|min:1',
             'model' => 'sometimes|nullable|in:article,client,provider',
             'provider_id' => 'sometimes|nullable|integer|min:1',
             'origen' => 'sometimes|nullable|string|max:40',
@@ -316,13 +319,36 @@ class ClaudeSupportCodexController extends Controller
         return response()->json($resultado, $this->http_de_la_importacion($resultado['estado']));
     }
 
+    public function import_prueba_resolver(Request $request, $id, SupportCodexService $soporte, PruebaImportacionService $importacion)
+    {
+        $datos = $request->validate([
+            'analysis_uuid' => 'required|uuid',
+            'revision' => 'required|integer|min:1',
+            'respuestas' => 'required|array|min:1|max:500',
+            'respuestas.*' => 'required|string|max:255',
+            'lease_token' => 'required|string|min:32|max:128',
+            'expected_message_id' => 'required|integer|min:1',
+        ]);
+
+        $resultado = DB::transaction(function () use ($id, $datos, $soporte, $importacion) {
+            $ticket = SupportTicket::lockForUpdate()->findOrFail($id);
+            $soporte->assert_current($ticket, $datos + ['action' => 'responder']);
+            abort_unless(SupportMessage::whereKey($datos['expected_message_id'])->where('support_ticket_id', $ticket->id)
+                ->where('sender_type', 'user')->exists(), 409, 'Hace falta una respuesta del negocio en este ticket.');
+
+            return $importacion->resolver($ticket, $datos);
+        });
+
+        return response()->json($resultado['cuerpo'], $resultado['status']);
+    }
+
     /**
      * Reenvía fotos (base64, hasta 25 por pedido) a `admin-sync/ai-excel-import/imagenes` de la instancia del
      * cliente en prueba: el nombre de cada archivo es el código del artículo.
      *
      * @return \Illuminate\Http\JsonResponse
      */
-    public function import_images(Request $request, $id, \App\Services\PruebaImportacionService $service)
+    public function import_images(Request $request, $id, PruebaImportacionService $service)
     {
         $data = $request->validate([
             'imagenes' => 'required|array|min:1|max:25',

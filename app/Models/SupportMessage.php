@@ -87,6 +87,7 @@ class SupportMessage extends Model
         'read_at'                 => 'datetime',
         'synced_to_client_at'     => 'datetime',
         'is_ai_suggestion_draft'  => 'boolean',
+        'is_trial_import_notice'  => 'boolean',
         'ai_auto_send_at'         => 'datetime',
         /* Sello de que el texto lo escribió el agente; sobrevive a la aprobación humana. */
         'ai_generated_at'         => 'datetime',

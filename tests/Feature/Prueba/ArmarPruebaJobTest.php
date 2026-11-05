@@ -6,6 +6,7 @@ use App\Jobs\ArmarPruebaJob;
 use App\Models\Client;
 use App\Models\Lead;
 use App\Models\TrialInstance;
+use App\Services\PruebaWhatsappService;
 use Illuminate\Support\Facades\Http;
 
 /**
@@ -85,6 +86,23 @@ class ArmarPruebaJobTest extends BaseDePruebaGratuita
         /* Y la landing ya ve `lista` con la URL de ingreso. */
         $this->getJson('/api/landing/prueba/' . $instancia->fresh()->seguimiento_uuid . '/estado')
             ->assertJson(['estado' => 'lista', 'url_ingreso' => 'https://prueba-test.comerciocity.com/demo/ingreso?t=' . $lead->demo_ingreso_token]);
+    }
+
+    public function test_al_quedar_lista_la_prueba_pide_la_bienvenida_sin_esperar_el_primer_ingreso(): void
+    {
+        $instancia = $this->crear_instancia_libre('prueba-01', 900100);
+        $this->postear_alta(['telefono' => '341' . random_int(1000000, 9999999)])->assertCreated();
+        $instancia->refresh();
+        $this->zona_antes_y_despues(['prueba-test', 'api-prueba-test', 'tienda-prueba-test', 'api-tienda-prueba-test']);
+        $this->mock(PruebaWhatsappService::class)->shouldReceive('enviar_bienvenida')->once()
+            ->withArgs(function (Lead $lead, Client $client) use ($instancia) {
+                return $lead->id === $instancia->lead_id && $client->id === $instancia->client_id
+                    && $lead->demo_setup_status === 'exitoso' && $instancia->fresh()->estado === TrialInstance::ESTADO_ASIGNADA;
+            })->andThrow(new \RuntimeException('Simular que no pudo salir la bienvenida'));
+
+        (new ArmarPruebaJob($instancia->id))->handle();
+
+        $this->assertSame(TrialInstance::ESTADO_ASIGNADA, $instancia->fresh()->estado);
     }
 
     public function test_si_el_demo_setup_falla_la_instancia_queda_fallida_en_esa_etapa_y_el_reintento_arranca_de_ahi(): void
