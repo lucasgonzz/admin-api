@@ -149,12 +149,15 @@ class PruebaVpsService
         return $this->ejecutar_script('prueba-despertar.sh', [PruebaNombres::assert_nombre($nombre)]);
     }
 
-    /** `prueba-borrar.sh <prueba-NN> <slug>`: respaldo y baja de los 4 sitios, la base y el supervisor. */
+    /**
+     * `prueba-borrar.sh <prueba-NN> <slug>`: respaldo y baja de los 4 sitios, la base y el supervisor.
+     * Una instancia que nunca se asignó no tiene alias: se pasa su propio nombre, y solo ese, como slug.
+     */
     public function prueba_borrar(string $nombre, string $slug): array
     {
         return $this->ejecutar_script('prueba-borrar.sh', [
             PruebaNombres::assert_nombre($nombre),
-            PruebaNombres::assert_slug($slug),
+            $slug === $nombre ? $nombre : PruebaNombres::assert_slug($slug),
         ]);
     }
 

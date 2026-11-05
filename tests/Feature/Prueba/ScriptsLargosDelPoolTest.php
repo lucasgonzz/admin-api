@@ -80,6 +80,28 @@ class ScriptsLargosDelPoolTest extends BaseDePruebaGratuita
         ];
     }
 
+    /**
+     * Una instancia del pool que nunca se asignó no tiene alias: `PruebaCicloService::borrar()` le pasa el nombre
+     * como slug y el script lo acepta. La validación del servicio real rechazaba ese caso y la instancia quedaba
+     * `fallida`, frenando el armado del pool (renovación a 4.3.30, 5/11/2026).
+     */
+    public function test_una_instancia_sin_asignar_se_borra_con_su_nombre_como_slug(): void
+    {
+        $this->runner->responder('prueba-borrar.sh', json_encode(['ok' => true, 'respaldo' => '/root/respaldos-pruebas/prueba-02']) . "
+", 0);
+
+        $resultado = app(PruebaVpsService::class)->prueba_borrar('prueba-02', 'prueba-02');
+
+        $this->assertSame('/root/respaldos-pruebas/prueba-02', $resultado['respaldo']);
+    }
+
+    public function test_el_nombre_de_otra_instancia_no_vale_como_slug_para_borrar(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+
+        app(PruebaVpsService::class)->prueba_borrar('prueba-02', 'prueba-03');
+    }
+
     public function test_un_script_cortado_sin_exit_status_es_error_y_no_un_exito_parcial(): void
     {
         /* Lo que pasó en producción: phpseclib cortó a los 10 s y devolvió la salida a medias, exit false. */
