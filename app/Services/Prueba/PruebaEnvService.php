@@ -52,6 +52,11 @@ class PruebaEnvService
         $vars  = $this->plantilla('empresa');
         $hosts = $instancia->hosts_del_pool();
 
+        $clave_deepseek = trim((string) config('services.prueba.deepseek_api_key'));
+        if ($clave_deepseek !== '') {
+            $vars['DEEPSEEK_API_KEY'] = $clave_deepseek;
+        }
+
         $vars['APP_KEY']                 = $app_key;
         $vars['APP_URL']                 = 'https://' . $hosts['erp_api'];
         $vars['SANCTUM_STATEFUL_DOMAINS'] = $hosts['erp_spa'];

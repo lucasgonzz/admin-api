@@ -149,7 +149,7 @@ class CrearInstanciaDePoolJob implements ShouldQueue
         $app_key     = PruebaEnvService::generar_app_key();
         $vars_erp    = $env->variables_erp($instancia, $db, $app_key);
         $vars_tienda = $env->variables_tienda($instancia, $db, $vars_erp);
-        $secretos    = [(string) $db['pass'], $app_key, (string) $vars_erp['ADMIN_API_INBOUND_KEY']];
+        $secretos    = [(string) $db['pass'], $app_key, (string) $vars_erp['ADMIN_API_INBOUND_KEY'], (string) ($vars_erp['DEEPSEEK_API_KEY'] ?? '')];
 
         $vps->escribir_archivo($instancia->ruta_erp() . '/.env', $env->contenido_env($vars_erp), 'api-' . $instancia->erp_vps_path, $secretos);
         $vps->escribir_archivo($instancia->ruta_tienda() . '/.env', $env->contenido_env($vars_tienda), 'api-' . $instancia->ecommerce_vps_path, $secretos);

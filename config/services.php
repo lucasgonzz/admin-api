@@ -419,6 +419,8 @@ return [
     // Prueba gratuita de 7 días (misión prueba-alta-instancia, 3/11/2026): el pool de instancias
     // `prueba-NN` del VPS y el alta desde la landing. Lo consumen App\Services\Prueba\*.
     'prueba' => [
+        'deepseek_api_key' => env('PRUEBA_DEEPSEEK_API_KEY'),
+
         // 🔴 Interruptor PROPIO de escritura del DNS de las pruebas (decisión D9), independiente de
         // HOSTINGER_DNS_WRITE_ENABLED: apagado por default. Prenderlo habilita escribir y borrar los A
         // records de `<slug>`, `api-<slug>`, `tienda-<slug>`, `api-tienda-<slug>` y los del pool en la

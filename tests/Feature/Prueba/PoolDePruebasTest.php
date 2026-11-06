@@ -43,6 +43,7 @@ class PoolDePruebasTest extends BaseDePruebaGratuita
 
     public function test_el_job_arma_la_instancia_escribe_los_cuatro_archivos_y_la_deja_libre(): void
     {
+        config(['services.prueba.deepseek_api_key' => 'clave-deepseek-solo-de-prueba']);
         $instancia = app(PruebaPoolService::class)->crear_fila('4.3.99', '1.9.99');
         $this->zona_antes_y_despues(['prueba-01', 'api-prueba-01', 'tienda-prueba-01', 'api-tienda-prueba-01']);
         $this->vps->responder('pool-crear.sh', ['ok' => true, 'nombre' => 'prueba-01', 'db' => ['name' => 'prueba_01', 'user' => 'prueba_01', 'pass' => 'Clave-Generada-En-El-Vps-01'], 'hosts' => []]);
@@ -80,12 +81,14 @@ class PoolDePruebasTest extends BaseDePruebaGratuita
         $this->assertStringContainsString("CACHE_PREFIX=prueba-01_\n", $env_erp);
         $this->assertStringContainsString("REDIS_PREFIX=prueba-01_\n", $env_erp);
         $this->assertStringContainsString("FOR_USER=prueba\n", $env_erp);
+        $this->assertStringContainsString("DEEPSEEK_API_KEY=clave-deepseek-solo-de-prueba\n", $env_erp);
         $this->assertStringContainsString("ADMIN_SYNC_REQUIRE_API_KEY=true\n", $env_erp);
         $this->assertStringContainsString("MAIL_FROM_NAME='ComercioCity Sistemas'\n", $env_erp, 'Un valor con espacios va entre comillas simples (phpdotenv).');
         /* La APP_KEY lleva `+` y `=`, así que va entre comillas simples (lo que phpdotenv acepta literal). */
         $this->assertMatchesRegularExpression('/^APP_KEY=\'base64:[A-Za-z0-9+\/=]+\'$/m', $env_erp);
 
         $env_tienda = $this->vps->archivos['/home/api-tienda-prueba-01/tienda-api/.env'];
+        $this->assertStringNotContainsString('clave-deepseek-solo-de-prueba', $env_tienda);
         $this->assertStringContainsString("APP_URL=https://api-tienda-prueba-01.comerciocity.com\n", $env_tienda);
         $this->assertStringContainsString("SANCTUM_STATEFUL_DOMAINS=tienda-prueba-01.comerciocity.com\n", $env_tienda);
         $this->assertStringContainsString("SESSION_DOMAIN=.comerciocity.com\n", $env_tienda, 'El padre común de tienda-x y api-tienda-x, como lo calcula el pipeline de tiendas.');
@@ -105,6 +108,7 @@ class PoolDePruebasTest extends BaseDePruebaGratuita
 
         /* La contraseña de la base viajó en el base64 de los archivos y NO en claro en ningún comando. */
         $this->assertStringNotContainsString('Clave-Generada-En-El-Vps-01', implode("\n", $this->vps->comandos));
+        $this->assertStringNotContainsString('clave-deepseek-solo-de-prueba', implode("\n", $this->vps->comandos));
     }
 
     public function test_si_pool_crear_falla_la_instancia_queda_fallida_y_no_cuenta_como_libre(): void
