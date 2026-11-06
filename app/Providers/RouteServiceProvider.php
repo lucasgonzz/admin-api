@@ -89,6 +89,11 @@ class RouteServiceProvider extends ServiceProvider
             $limite = max(1, (int) config('services.demo_chat.rate_limit_per_minute', 240));
             return Limit::perMinute($limite)->by('demo-chat:' . ($token !== '' ? hash('sha256', $token) : $request->ip()));
         });
+        RateLimiter::for('prueba-chat', function (Request $request) {
+            $clave = (string) $request->header('X-Admin-Api-Key');
+            $limite = max(1, (int) config('services.demo_chat.rate_limit_per_minute', 240));
+            return Limit::perMinute($limite)->by('prueba-chat:' . ($clave !== '' ? hash('sha256', $clave) : $request->ip()));
+        });
 
         RateLimiter::for('shared-catalog-inbound', function (Request $request) {
             $client = $request->attributes->get('sync_client');

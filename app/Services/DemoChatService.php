@@ -3,10 +3,12 @@
 namespace App\Services;
 
 use App\Jobs\GenerateDemoChatReplyJob;
+use App\Models\Client;
 use App\Models\DemoChatConversacion;
 use App\Models\DemoChatMensaje;
 use App\Models\DemoChatProgreso;
 use App\Models\Lead;
+use App\Services\Prueba\PruebaChatAcceso;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -15,44 +17,52 @@ class DemoChatService
 {
     const ESPERA_SEGUNDOS = 10;
 
-    public function conversacion(Lead $lead): DemoChatConversacion
+    public function conversacion(Lead $lead, ?int $prueba_cliente_id = null): DemoChatConversacion
     {
-        DB::table('demo_chat_conversaciones')->insertOrIgnore([
-            'lead_id' => $lead->id, 'created_at' => now(), 'updated_at' => now(),
-        ]);
-        return DemoChatConversacion::where('lead_id', $lead->id)->firstOrFail();
+        $identidad = DemoChatConversacion::identidad($lead, $prueba_cliente_id);
+        DB::table('demo_chat_conversaciones')->insertOrIgnore($identidad + ['created_at' => now(), 'updated_at' => now()]);
+
+        return DemoChatConversacion::delLead($lead, $prueba_cliente_id)->firstOrFail();
     }
 
-    public function iniciar(Lead $lead): void
+    public function iniciar(Lead $lead, ?int $prueba_cliente_id = null): void
     {
-        $id = $this->conversacion($lead)->id;
+        $id = $this->conversacion($lead, $prueba_cliente_id)->id;
         DB::transaction(function () use ($id, $lead) {
             $chat = DemoChatConversacion::lockForUpdate()->findOrFail($id);
             if ($chat->iniciado_at !== null) {
                 return;
             }
-            $video = app(DemoChatCatalogoService::class)->siguiente($lead, []);
-            $this->crear($chat, 'asistente',
-                '¡Hola! Soy tu asistente de la demo. Te voy pasando videos cortos para recorrerla. '
-                . 'Si querés ver algo puntual, preguntame acá.' . ($video ? ' Empecemos por «' . $video['titulo'] . '».' : ''),
-                $video ? [$video['clave']] : [], 'guia');
+            if ($chat->es_de_prueba()) {
+                $this->crear($chat, 'asistente',
+                    '¡Hola! Soy tu asistente durante la prueba gratuita de ComercioCity. Si querés aprender a usar una función o tenés una duda, preguntame acá.',
+                    [], 'bienvenida');
+            } else {
+                $video = app(DemoChatCatalogoService::class)->siguiente($lead, []);
+                $this->crear($chat, 'asistente',
+                    '¡Hola! Soy tu asistente de la demo. Te voy pasando videos cortos para recorrerla. '
+                    . 'Si querés ver algo puntual, preguntame acá.' . ($video ? ' Empecemos por «' . $video['titulo'] . '».' : ''),
+                    $video ? [$video['clave']] : [], 'guia');
+            }
             $chat->iniciado_at = now();
             $chat->revision++;
             $chat->save();
         });
     }
 
-    public function recibir(Lead $lead, string $contenido, string $uuid, ?array $guia = null): void
+    public function recibir(Lead $lead, string $contenido, string $uuid, ?array $guia = null,
+        ?int $prueba_cliente_id = null): void
     {
-        $this->iniciar($lead);
-        $job = DB::transaction(function () use ($lead, $contenido, $uuid, $guia) {
-            $chat = DemoChatConversacion::where('lead_id', $lead->id)->lockForUpdate()->firstOrFail();
+        $this->iniciar($lead, $prueba_cliente_id);
+        $job = DB::transaction(function () use ($lead, $contenido, $uuid, $guia, $prueba_cliente_id) {
+            $chat = DemoChatConversacion::delLead($lead, $prueba_cliente_id)->lockForUpdate()->firstOrFail();
             if ($chat->mensajes()->where('cliente_uuid', $uuid)->exists()) {
                 return null;
             }
             // Cota por hilo, además del throttle del puente: no permite crecimiento ilimitado.
             if ($chat->mensajes()->where('rol', 'lead')->count() >= 300) {
-                throw ValidationException::withMessages(['contenido' => 'Llegaste al límite de mensajes de esta demo.']);
+                $experiencia = $chat->es_de_prueba() ? 'prueba' : 'demo';
+                throw ValidationException::withMessages(['contenido' => 'Llegaste al límite de mensajes de esta ' . $experiencia . '.']);
             }
             $this->crear($chat, 'lead', $contenido, [], 'lead', 'publicado', $uuid, null, $guia);
             return $this->programar($chat);
@@ -66,7 +76,7 @@ class DemoChatService
     {
         $this->iniciar($lead);
         $job = DB::transaction(function () use ($lead) {
-            $chat = DemoChatConversacion::where('lead_id', $lead->id)->lockForUpdate()->firstOrFail();
+            $chat = DemoChatConversacion::delLead($lead)->lockForUpdate()->firstOrFail();
             return $this->programar($chat);
         });
         $this->despachar($job[0], $job[1], $job[2]);
@@ -81,7 +91,7 @@ class DemoChatService
         }
         $this->iniciar($lead);
         DB::transaction(function () use ($lead, $clave, $uuid, $catalogo) {
-            $chat = DemoChatConversacion::where('lead_id', $lead->id)->lockForUpdate()->firstOrFail();
+            $chat = DemoChatConversacion::delLead($lead)->lockForUpdate()->firstOrFail();
             // El UUID pertenece al hilo, nunca al navegador ni a un lead elegido en el body.
             if ($chat->mensajes()->where('cliente_uuid', $uuid)->exists()) {
                 return;
@@ -135,7 +145,15 @@ class DemoChatService
         }
         try {
             $chat = DemoChatConversacion::findOrFail($id);
-            $lead = Lead::findOrFail($chat->lead_id);
+            $lead = Lead::findOrFail($chat->lead_id ?? $chat->prueba_lead_id);
+            if ($chat->es_de_prueba()) {
+                $client = Client::find($chat->prueba_cliente_id);
+                if ($client === null || ! PruebaChatAcceso::vigente($lead, $client)) {
+                    DemoChatConversacion::whereKey($id)->where('generacion', $generacion)->where('estado', 'pensando')
+                        ->update(['estado' => 'inactivo', 'responder_desde' => null, 'revision' => DB::raw('revision + 1')]);
+                    return;
+                }
+            }
             $salida = app(DemoChatAiService::class)->responder($lead, $chat);
             DB::transaction(function () use ($id, $generacion, $salida) {
                 $chat = DemoChatConversacion::lockForUpdate()->findOrFail($id);
@@ -292,17 +310,18 @@ class DemoChatService
         });
     }
 
-    public function snapshot(Lead $lead, bool $admin = false): array
+    public function snapshot(Lead $lead, bool $admin = false, ?int $prueba_cliente_id = null): array
     {
-        $chat = DemoChatConversacion::where('lead_id', $lead->id)->first();
+        $chat = DemoChatConversacion::delLead($lead, $prueba_cliente_id)->first();
         $salida = ['disponible' => true, 'version' => 1, 'conversacion' => [
             'auto_responder' => $chat ? $chat->auto_responder : true, 'estado' => $chat ? $chat->estado : 'inactivo',
             'responder_desde' => $chat && $chat->responder_desde ? $chat->responder_desde->toIso8601String() : null,
             'revision' => $chat ? $chat->revision : 0,
             'espera_segundos' => $chat ? $chat->espera_segundos : self::ESPERA_SEGUNDOS,
         ], 'mensajes' => [], 'catalogo' => []];
-        $videos = app(DemoChatCatalogoService::class)->videos($lead);
-        $progresos = $chat ? $chat->progresos()->get()->keyBy('clave') : collect();
+        $es_demo = $prueba_cliente_id === null;
+        $videos = $es_demo ? app(DemoChatCatalogoService::class)->videos($lead) : [];
+        $progresos = $es_demo && $chat ? $chat->progresos()->get()->keyBy('clave') : collect();
         foreach ($videos as $clave => $video) {
             $videos[$clave] = $this->video_con_progreso($video, $progresos->get($clave));
         }
@@ -317,7 +336,7 @@ class DemoChatService
             }
             $fila = ['id' => $mensaje->id, 'rol' => $mensaje->rol, 'contenido' => $mensaje->contenido,
                 'creado_at' => $mensaje->created_at->toIso8601String(), 'videos' => $adjuntos];
-            if ($mensaje->rol === 'asistente' && $mensaje->estado === 'publicado' && $mensaje->guia !== null) {
+            if ($es_demo && $mensaje->rol === 'asistente' && $mensaje->estado === 'publicado' && $mensaje->guia !== null) {
                 $fila['guia'] = $mensaje->guia;
             }
             if ($admin) { $fila['estado'] = $mensaje->estado; $fila['origen'] = $mensaje->origen; }

@@ -251,6 +251,14 @@ Route::withoutMiddleware('throttle:api')->middleware(['demo.eventos.key', 'throt
     Route::post('videos/seleccionar', [\App\Http\Controllers\DemoChatController::class, 'seleccionar']);
 });
 
+Route::withoutMiddleware('throttle:api')
+    ->middleware(['admin.inbound.strict', \App\Http\Middleware\PruebaChatKey::class, 'throttle:prueba-chat'])
+    ->prefix('prueba-chat')->group(function () {
+        Route::get('/', [\App\Http\Controllers\PruebaChatController::class, 'index']);
+        Route::post('iniciar', [\App\Http\Controllers\PruebaChatController::class, 'iniciar']);
+        Route::post('mensajes', [\App\Http\Controllers\PruebaChatController::class, 'mensaje']);
+    });
+
 /*
 | Callback desde empresa-api cliente (inbound)
 */
