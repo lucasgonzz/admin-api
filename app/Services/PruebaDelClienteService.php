@@ -463,12 +463,12 @@ class PruebaDelClienteService
             ->get();
 
         $bienvenida = $envios->first(function ($envio) {
-            return $envio->plantilla === PruebaPlantillasService::BIENVENIDA && $envio->estado === PruebaWhatsappEnvio::ESTADO_ENVIADO;
+            return in_array($envio->plantilla, PruebaPlantillasService::BIENVENIDAS, true) && $envio->estado === PruebaWhatsappEnvio::ESTADO_ENVIADO;
         });
 
         /* La bienvenida que todavía no salió porque Meta no aprobó la plantilla: va a salir sola; Martín no se presenta. */
         $bienvenida_en_cola = $bienvenida === null && $envios->first(function ($envio) {
-            return $envio->plantilla === PruebaPlantillasService::BIENVENIDA && $envio->estado === PruebaWhatsappEnvio::ESTADO_EN_COLA;
+            return in_array($envio->plantilla, PruebaPlantillasService::BIENVENIDAS, true) && $envio->estado === PruebaWhatsappEnvio::ESTADO_EN_COLA;
         }) !== null;
 
         $ultimo_empujon = $envios->first(function ($envio) {

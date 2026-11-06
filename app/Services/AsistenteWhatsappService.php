@@ -2,12 +2,15 @@
 
 namespace App\Services;
 
+use App\Helpers\WhatsappNormalizer;
 use App\Jobs\EnviarMensajeAlAsistenteJob;
 use App\Models\Client;
+use App\Models\ClientEmployee;
 use App\Models\ClientAssistantMessage;
 use App\Models\Demo;
 use App\Models\Lead;
 use App\Models\WhatsappConfig;
+use App\Services\Prueba\PruebaCicloService;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -34,6 +37,83 @@ use Illuminate\Support\Facades\Log;
  */
 class AsistenteWhatsappService
 {
+    public function dueno_por_telefono_exacto(string $phone, bool $para_habilitar_prueba = false): ?Client
+    {
+        if (trim($phone) === '') {
+            return null;
+        }
+
+        $client_employees = ClientEmployee::query()
+            ->whereNotNull('phone')
+            ->where('phone', '!=', '')
+            ->get();
+
+        foreach ($client_employees as $client_employee) {
+            if (WhatsappNormalizer::equals_estricto((string) $client_employee->phone, $phone)) {
+                return null;
+            }
+        }
+
+        $active_clients = Client::where('is_active', true)
+            ->where(function ($query) {
+                $query->where(function ($con_phone) {
+                    $con_phone->whereNotNull('phone')->where('phone', '!=', '');
+                })->orWhere(function ($con_personal) {
+                    $con_personal->whereNotNull('asistente_phone')->where('asistente_phone', '!=', '');
+                });
+            })
+            ->get();
+
+        $coincidentes = $active_clients->filter(function (Client $client) use ($phone) {
+            return WhatsappNormalizer::equals_estricto((string) $client->telefono_personal(), $phone);
+        });
+        if ($coincidentes->count() > 1) {
+            if ($para_habilitar_prueba) {
+                return null;
+            }
+
+            // Una ficha de prueba con un teléfono duplicado no desplaza a un cliente activo.
+            return $coincidentes->first(function (Client $client) {
+                return ! in_array((string) $client->estado, PruebaCicloService::ESTADOS_EN_PRUEBA, true);
+            });
+        }
+        $directo = $coincidentes->first();
+        if ($directo !== null && ! in_array((string) $directo->estado, PruebaCicloService::ESTADOS_EN_PRUEBA, true)) {
+            return $directo;
+        }
+
+        /* Repliegue por lead promovido, igual que en el camino institucional: el `clients.phone`
+           puede estar vacío porque el teléfono quedó cargado en el lead del que nació el cliente. */
+        $promoted_leads = Lead::whereNotNull('promoted_client_id')
+            ->whereNotNull('phone')
+            ->get();
+
+        foreach ($promoted_leads as $lead) {
+            if (! WhatsappNormalizer::equals_estricto((string) $lead->phone, $phone)) {
+                continue;
+            }
+
+            $client = Client::where('is_active', true)->find($lead->promoted_client_id);
+            /* Un cliente con teléfono personal propio se reconoce solo por ese número: su lead promovido
+               (el teléfono con el que se registró, que suele ser el del negocio) no lo identifica. */
+            if ($client && ! $client->tiene_telefono_personal_propio()) {
+                if ($directo === null) {
+                    return $client;
+                }
+                if ((int) $client->id !== (int) $directo->id) {
+                    if ($para_habilitar_prueba) {
+                        return null;
+                    }
+                    if (! in_array((string) $client->estado, PruebaCicloService::ESTADOS_EN_PRUEBA, true)) {
+                        return $client;
+                    }
+                }
+            }
+        }
+
+        return $directo;
+    }
+
     /**
      * Texto que recibe el dueño cuando su sistema todavía no tiene el endpoint del asistente.
      *

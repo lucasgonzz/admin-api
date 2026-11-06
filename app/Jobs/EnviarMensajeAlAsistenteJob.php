@@ -12,6 +12,7 @@ use App\Services\AsistenteFotoSalienteService;
 use App\Services\AsistenteImagenesService;
 use App\Services\AsistenteWhatsappService;
 use App\Services\ClientEmpresaApiUrlResolver;
+use App\Services\Prueba\PruebaAsistenteService;
 use App\Services\WhatsappSendService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -341,7 +342,7 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
          * cedido el cierre a esta (su temporizador vio una más nueva y salió en silencio) quedaban
          * `esperando` para siempre con la URL guardada: ningún otro temporizador iba a volver por
          * ellas. */
-        if (! (bool) $client->asistente_whatsapp_activo) {
+        if (! PruebaAsistenteService::puede_atender($client, (string) $fila->telefono)) {
             $estaba_esperando = (string) $fila->estado === ClientAssistantMessage::ESTADO_ESPERANDO;
 
             $fila->estado = ClientAssistantMessage::ESTADO_ERROR;

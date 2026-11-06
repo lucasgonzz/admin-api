@@ -167,17 +167,43 @@ class PruebaWhatsappService
      */
     public function enviar_bienvenida_a(Client $client, ?Lead $lead): array
     {
+        if ($this->pruebas->datos($client)['vencida']) {
+            return ['estado' => 'vencida', 'detalle' => 'La prueba venció.'];
+        }
+
         $reserva = Cache::lock('prueba-bienvenida-' . $client->id, 120);
         if (! $reserva->get()) {
             return ['estado' => 'en_curso', 'detalle' => null];
         }
 
         try {
-            $ya = PruebaWhatsappEnvio::query()
+            $enviadas = PruebaWhatsappEnvio::query()
                 ->where('client_id', (int) $client->id)
-                ->where('plantilla', PruebaPlantillasService::BIENVENIDA)
+                ->whereIn('plantilla', array_merge(PruebaPlantillasService::BIENVENIDAS, [PruebaPlantillasService::ASISTENTE_LISTO]))
                 ->where('estado', PruebaWhatsappEnvio::ESTADO_ENVIADO)
-                ->exists();
+                ->pluck('plantilla');
+
+            $ya = $enviadas->isNotEmpty();
+            $plantilla = $ya ? PruebaPlantillasService::ASISTENTE_LISTO : PruebaPlantillasService::BIENVENIDA_CON_ASISTENTE;
+            $instancia = $lead !== null ? Prueba\PruebaAsistenteService::instancia_vigente($client) : null;
+            if ($instancia !== null) {
+                $falta_correo = $instancia->correo_bienvenida_at === null && filter_var((string) $client->email, FILTER_VALIDATE_EMAIL);
+                $falta_whatsapp = ! $enviadas->contains(PruebaPlantillasService::BIENVENIDA_CON_ASISTENTE)
+                    && ! $enviadas->contains(PruebaPlantillasService::ASISTENTE_LISTO)
+                    && $this->plantillas->estado_para_enviar($plantilla)['motivo'] === null;
+
+                if ($falta_correo || $falta_whatsapp) {
+                    $asistente = app(Prueba\PruebaAsistenteService::class)->habilitar($client, $lead, $instancia);
+                    if ($asistente !== null) {
+                        if ($falta_correo) {
+                            app(Prueba\PruebaCorreoService::class)->enviar($client, $instancia, $asistente);
+                        }
+                        if ($falta_whatsapp) {
+                            return $this->enviar_plantilla_por_ticket($client, $lead, $plantilla, null, true, $asistente['numero']);
+                        }
+                    }
+                }
+            }
 
             if ($ya) {
                 return ['estado' => 'ya_enviada', 'detalle' => null];
@@ -186,6 +212,33 @@ class PruebaWhatsappService
             return $this->enviar_plantilla_por_ticket($client, $lead, PruebaPlantillasService::BIENVENIDA, null, true);
         } finally {
             $reserva->release();
+        }
+    }
+
+    /** Retoma el alta por los dos canales sin disparar los recordatorios diarios. */
+    public function retomar_bienvenidas(?int $cliente_id = null): void
+    {
+        foreach ($this->pruebas->clientes_en_prueba() as $client) {
+            if ($cliente_id !== null && (int) $client->id !== $cliente_id) {
+                continue;
+            }
+
+            try {
+                $instancia = Prueba\PruebaAsistenteService::instancia_vigente($client);
+                if ($instancia === null || $instancia->lead_id === null) {
+                    continue;
+                }
+
+                $lead = Lead::find($instancia->lead_id);
+                if ($lead !== null && $lead->demo_setup_status === 'exitoso') {
+                    $this->enviar_bienvenida_a($client, $lead);
+                }
+            } catch (\Throwable $e) {
+                Log::warning('No se pudo retomar la bienvenida de la prueba.', [
+                    'client_id' => (int) $client->id,
+                    'tipo' => get_class($e),
+                ]);
+            }
         }
     }
 
@@ -328,10 +381,11 @@ class PruebaWhatsappService
      * @param string      $plantilla  Nombre de la plantilla de Meta.
      * @param string|null $hito       El hito que empuja (null para la bienvenida).
      * @param bool        $encolar    true = si la plantilla no está aprobada, queda `en_cola` para reintentar.
+     * @param string|null $numero_asistente Número oficial para las plantillas que lo informan.
      *
      * @return array{estado: string, detalle: string|null, whatsapp_message_id?: string|null, support_ticket_id?: int|null}
      */
-    public function enviar_plantilla_por_ticket(Client $client, ?Lead $lead, string $plantilla, ?string $hito, bool $encolar): array
+    public function enviar_plantilla_por_ticket(Client $client, ?Lead $lead, string $plantilla, ?string $hito, bool $encolar, ?string $numero_asistente = null): array
     {
         $estado = $this->plantillas->estado_para_enviar($plantilla);
 
@@ -379,10 +433,15 @@ class PruebaWhatsappService
         $fila   = $estado['fila'];
         $idioma = trim((string) $fila->language_code) !== '' ? (string) $fila->language_code : PruebaPlantillasService::IDIOMA;
 
+        $variables = [$this->opener->sanitize_template_variable($primer_nombre)];
+        if ($numero_asistente !== null) {
+            $variables[] = $this->opener->sanitize_template_variable($numero_asistente);
+        }
+
         $wamid = $this->sender->send_template(
             (string) $contacto['phone'],
             $plantilla,
-            [$this->opener->sanitize_template_variable($primer_nombre)],
+            $variables,
             $idioma,
             'Prueba gratuita - ' . $plantilla . ' - cliente #' . $client->id
         );
@@ -392,7 +451,7 @@ class PruebaWhatsappService
             'sender_type'            => 'admin',
             'sender_admin_id'        => (int) $admin->id,
             'kind'                   => 'text',
-            'body'                   => $this->plantillas->cuerpo_renderizado($plantilla, $primer_nombre),
+            'body'                   => $this->plantillas->cuerpo_renderizado($plantilla, $primer_nombre, $numero_asistente),
             'delivered_at'           => now(),
             'whatsapp_message_id'    => $wamid,
             'remote_delivery_status' => $wamid === null ? 'not_received' : null,
@@ -413,10 +472,10 @@ class PruebaWhatsappService
 
         $this->registrar($client, $lead, $plantilla, $hito, PruebaWhatsappEnvio::ESTADO_ENVIADO, (int) $ticket->id, (int) $mensaje->id, $wamid, null);
 
-        /* Un envío en cola de la misma plantilla ya no hace falta. */
+        /* Si salió la bienvenida completa, también se descarta la bienvenida anterior en cola. */
         PruebaWhatsappEnvio::query()
             ->where('client_id', (int) $client->id)
-            ->where('plantilla', $plantilla)
+            ->whereIn('plantilla', in_array($plantilla, PruebaPlantillasService::BIENVENIDAS, true) ? PruebaPlantillasService::BIENVENIDAS : [$plantilla])
             ->where('estado', PruebaWhatsappEnvio::ESTADO_EN_COLA)
             ->delete();
 

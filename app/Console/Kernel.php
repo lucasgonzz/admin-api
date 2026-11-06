@@ -217,6 +217,11 @@ class Kernel extends ConsoleKernel
             ->dailyAt('10:00')
             ->withoutOverlapping(30);
 
+        $schedule->command('prueba:empujar --solo-bienvenidas')
+            ->everyFiveMinutes()
+            ->withoutOverlapping(10)
+            ->runInBackground();
+
         // Sincroniza desde GitHub identidad, system prompt y protocolo de WhatsApp a la BD.
         // Red de seguridad por si Lucas olvida apretar el botón manual del admin.
         $schedule->command('agent-prompts:sync')->everyTenMinutes();

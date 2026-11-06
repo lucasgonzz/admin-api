@@ -24,7 +24,7 @@ class PruebaEmpujarCommand extends Command
     /**
      * @var string
      */
-    protected $signature = 'prueba:empujar {--cliente= : Id del cliente en prueba (solo ese)}';
+    protected $signature = 'prueba:empujar {--cliente= : Id del cliente en prueba (solo ese)} {--solo-bienvenidas : Retoma las bienvenidas pendientes sin enviar recordatorios}';
 
     /**
      * @var string
@@ -40,6 +40,12 @@ class PruebaEmpujarCommand extends Command
     public function handle(PruebaWhatsappService $whatsapp, PruebaDelClienteService $pruebas)
     {
         $solo = $this->option('cliente');
+
+        if ($this->option('solo-bienvenidas')) {
+            $whatsapp->retomar_bienvenidas($solo !== null && $solo !== '' ? (int) $solo : null);
+
+            return 0;
+        }
 
         if ($solo !== null && $solo !== '') {
             $client = Client::find((int) $solo);

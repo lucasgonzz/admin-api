@@ -21,13 +21,19 @@ use Illuminate\Support\Facades\Log;
  * pasan a `APPROVED` se pueden mandar ({@see FollowupTemplate::estado_para_enviar()}). Mientras tanto
  * los envíos quedan `en_cola` (PruebaWhatsappService).
  *
- * UTILITY, `es_AR`, posicional, una sola variable `{{1}}` (el primer nombre): es lo único que
- * `WhatsappSendService::send_template()` sabe mandar.
+ * UTILITY, `es_AR`, variables posicionales. La primera es el nombre y las que presentan al asistente
+ * agregan su número como segunda variable.
  */
 class PruebaPlantillasService
 {
     /** La bienvenida de Martín al primer ingreso. */
     const BIENVENIDA = 'cc_prueba_bienvenida';
+
+    const BIENVENIDA_CON_ASISTENTE = 'cc_prueba_bienvenida_asistente';
+
+    const ASISTENTE_LISTO = 'cc_prueba_asistente_listo';
+
+    const BIENVENIDAS = [self::BIENVENIDA, self::BIENVENIDA_CON_ASISTENTE];
 
     /** Prefijo de los empujones: `cc_prueba_paso_<hito>` (los hitos son los de PruebaDelClienteService::HITOS). */
     const PASO_PREFIJO = 'cc_prueba_paso_';
@@ -49,6 +55,14 @@ class PruebaPlantillasService
         self::BIENVENIDA => [
             'body' => 'Hola {{1}}, soy Martín, del equipo de ComercioCity. Ya tenés tu sistema armado con datos de ejemplo para que lo pruebes tranquilo. Si querés, te cargamos tu información sin costo: mandame por acá el Excel de tus artículos o el catálogo de tu proveedor en PDF y lo dejamos listo en tu sistema. Cualquier duda, escribime por acá.',
             'uso'  => 'Prueba gratuita: bienvenida de Martín cuando el sistema del negocio queda listo (una sola vez).',
+        ],
+        self::BIENVENIDA_CON_ASISTENTE => [
+            'body' => 'Hola {{1}}, soy Martín, del equipo de ComercioCity. Tu prueba de siete días ya está lista con datos de ejemplo. Si querés que carguemos tu catálogo sin costo, mandame por acá tu Excel o el PDF del proveedor. Tu asistente personal te atiende por WhatsApp en el {{2}}. ' . \App\Services\Prueba\PruebaAsistenteService::USO,
+            'uso'  => 'Prueba gratuita: bienvenida de Martín con el WhatsApp del asistente personal.',
+        ],
+        self::ASISTENTE_LISTO => [
+            'body' => 'Hola {{1}}, soy Martín, de ComercioCity. Ya podés usar tu asistente personal de la prueba por WhatsApp en el {{2}}. ' . \App\Services\Prueba\PruebaAsistenteService::USO,
+            'uso'  => 'Prueba gratuita: informa el WhatsApp del asistente personal después de la bienvenida.',
         ],
         'cc_prueba_paso_ingreso' => [
             'body' => 'Hola {{1}}, te escribo de ComercioCity. Tu sistema de prueba ya está listo y todavía no entraste. Entrá cuando puedas con el acceso que te mandamos: en unos minutos ves cómo trabaja. Si no lo encontrás, escribime por acá y lo vemos.',
@@ -128,7 +142,7 @@ class PruebaPlantillasService
      *
      * @return string
      */
-    public function cuerpo_renderizado(string $nombre_de_plantilla, string $primer_nombre): string
+    public function cuerpo_renderizado(string $nombre_de_plantilla, string $primer_nombre, ?string $numero_asistente = null): string
     {
         $fila = FollowupTemplate::query()->where('template_name', $nombre_de_plantilla)->first();
 
@@ -136,7 +150,7 @@ class PruebaPlantillasService
             ? (string) $fila->body_template
             : (isset(self::PLANTILLAS[$nombre_de_plantilla]) ? self::PLANTILLAS[$nombre_de_plantilla]['body'] : '');
 
-        return str_replace('{{1}}', $primer_nombre, $cuerpo);
+        return strtr($cuerpo, ['{{1}}' => $primer_nombre, '{{2}}' => $numero_asistente ?? '']);
     }
 
     /**
@@ -240,10 +254,15 @@ class PruebaPlantillasService
      */
     protected function componentes(string $cuerpo): array
     {
+        $ejemplos = [self::EJEMPLO_NOMBRE];
+        if (strpos($cuerpo, '{{2}}') !== false) {
+            $ejemplos[] = '+54 9 11 1234-5678';
+        }
+
         return [[
             'type'    => 'BODY',
             'text'    => $cuerpo,
-            'example' => ['body_text' => [[self::EJEMPLO_NOMBRE]]],
+            'example' => ['body_text' => [$ejemplos]],
         ]];
     }
 }

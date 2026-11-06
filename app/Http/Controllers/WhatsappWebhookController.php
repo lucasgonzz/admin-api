@@ -23,6 +23,7 @@ use App\Models\WhatsappConfig;
 use App\Services\AsistenteDemoLeadService;
 use App\Services\BuscadorDeLeadPorTelefono;
 use App\Services\AsistenteWhatsappService;
+use App\Services\Prueba\PruebaAsistenteService;
 use App\Services\AsistenteWhatsappSettings;
 use App\Services\EcommerceImplementationBroadcastService;
 use App\Services\EcommerceImplementationConversationService;
@@ -1466,7 +1467,7 @@ class WhatsappWebhookController extends Controller
         $desde  = $this->telefono_del_remitente($parsed);
         $client = $this->find_dueno_por_telefono_exacto($desde);
 
-        if ($client !== null && (bool) $client->asistente_whatsapp_activo) {
+        if ($client !== null && PruebaAsistenteService::puede_atender($client)) {
             app(AsistenteWhatsappService::class)->recibir($parsed, $client);
             Log::channel('daily')->info('WhatsApp webhook: mensaje enrutado al asistente del cliente.', [
                 'from'      => $parsed['from'],
@@ -1701,57 +1702,7 @@ class WhatsappWebhookController extends Controller
      */
     private function find_dueno_por_telefono_exacto(string $phone): ?Client
     {
-        if (trim($phone) === '') {
-            return null;
-        }
-
-        $client_employees = ClientEmployee::query()
-            ->whereNotNull('phone')
-            ->where('phone', '!=', '')
-            ->get();
-
-        foreach ($client_employees as $client_employee) {
-            if (WhatsappNormalizer::equals_estricto((string) $client_employee->phone, $phone)) {
-                return null;
-            }
-        }
-
-        $active_clients = Client::where('is_active', true)
-            ->where(function ($query) {
-                $query->where(function ($con_phone) {
-                    $con_phone->whereNotNull('phone')->where('phone', '!=', '');
-                })->orWhere(function ($con_personal) {
-                    $con_personal->whereNotNull('asistente_phone')->where('asistente_phone', '!=', '');
-                });
-            })
-            ->get();
-
-        foreach ($active_clients as $client) {
-            if (WhatsappNormalizer::equals_estricto((string) $client->telefono_personal(), $phone)) {
-                return $client;
-            }
-        }
-
-        /* Repliegue por lead promovido, igual que en el camino institucional: el `clients.phone`
-           puede estar vacío porque el teléfono quedó cargado en el lead del que nació el cliente. */
-        $promoted_leads = Lead::whereNotNull('promoted_client_id')
-            ->whereNotNull('phone')
-            ->get();
-
-        foreach ($promoted_leads as $lead) {
-            if (! WhatsappNormalizer::equals_estricto((string) $lead->phone, $phone)) {
-                continue;
-            }
-
-            $client = Client::where('is_active', true)->find($lead->promoted_client_id);
-            /* Un cliente con teléfono personal propio se reconoce solo por ese número: su lead promovido
-               (el teléfono con el que se registró, que suele ser el del negocio) no lo identifica. */
-            if ($client && ! $client->tiene_telefono_personal_propio()) {
-                return $client;
-            }
-        }
-
-        return null;
+        return app(AsistenteWhatsappService::class)->dueno_por_telefono_exacto($phone);
     }
 
     /**
