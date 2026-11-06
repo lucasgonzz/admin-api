@@ -19,9 +19,13 @@ class DemoChatAiService
         // Sólo el pedido actual: los temas ya respondidos no deben contaminar sus adjuntos.
         // La tarjeta elegida por el lead no es una respuesta a su pregunta pendiente.
         // Se omite sólo para delimitar la consulta; el historial enviado conserva la tarjeta.
-        $consulta = $historial->reject(function ($m) { return $m->rol === 'asistente' && $m->origen === 'seleccion'; })
+        $turno = $historial->reject(function ($m) { return $m->rol === 'asistente' && $m->origen === 'seleccion'; })
             ->reverse()->takeWhile(function ($m) { return $m->rol === 'lead'; })
-            ->take(4)->reverse()->pluck('contenido')->implode(' ');
+            ->take(4)->reverse();
+        $consulta = $turno->pluck('contenido')->implode(' ');
+        $ultimo = $turno->last();
+        $contexto_guia = $ultimo ? DemoChatGuia::contexto($ultimo->guia) : null;
+        $solicitud_guia = $contexto_guia !== null ? $ultimo->cliente_uuid : null;
         $catalogo = app(DemoChatCatalogoService::class);
         $candidatos = $catalogo->buscar($lead, $consulta);
         $terminados = [];
@@ -76,6 +80,18 @@ class DemoChatAiService
             . "\nVideos disponibles para esta pregunta: " . json_encode(array_values($permitidos), JSON_UNESCAPED_UNICODE)
             . "\nClaves de fuentes admitidas ahora, sin agregar títulos ni descripciones: " . json_encode(array_keys($fuentes), JSON_UNESCAPED_UNICODE)
             . "\nÍndice del manual (leer antes de afirmar pasos): " . mb_substr($indice, 0, 22000);
+        if ($solicitud_guia !== null) {
+            $system .= "\nEl último mensaje se envió desde Vender. Si pregunta cómo buscar un artículo, ofrecé una guía visual "
+                . 'y agregá al mismo JSON «guia»: {"accion":"iniciar","pasos":[{"id":"…","texto":"…"}]}. '
+                . 'Por nombre, la secuencia es abrir_buscador (tocar el campo de búsqueda), escribir_nombre (escribir el criterio), '
+                . 'buscar_nombre (presionar Enter), elegir_resultado (elegir un artículo de los resultados). '
+                . 'Podés devolver un tramo contiguo de esa secuencia según el paso actual. Por código, usá sólo codigo_barras '
+                . '(escanear o escribir el código y confirmar la búsqueda). Si pide cerrar, devolvé «guia»: {"accion":"cerrar","pasos":[]}. '
+                . 'En los demás casos omití «guia». Escribí una instrucción breve de hasta 160 caracteres por paso, en texto plano. '
+                . 'Nunca agregues selectores, enlaces, HTML, rutas ni acciones fuera de esta búsqueda. El lead hace cada gesto. '
+                . 'La secuencia anterior forma parte de la fuente «demo». Paso informado en el último mensaje: '
+                . json_encode($contexto_guia['paso'], JSON_UNESCAPED_UNICODE);
+        }
         $turnos = [];
         foreach ($historial as $mensaje) {
             $turnos[] = ['rol' => $mensaje->rol, 'contenido' => $mensaje->contenido, 'videos' => $mensaje->videos];
@@ -128,7 +144,7 @@ class DemoChatAiService
                 continue;
             }
             try {
-                return $this->validar_salida($texto, $permitidos, $fuentes);
+                return $this->validar_salida($texto, $permitidos, $fuentes, $solicitud_guia);
             } catch (\RuntimeException $e) {
                 // Una corrección de formato, con las mismas fuentes: nunca publicamos el intento inválido.
                 if ($corrigio_formato || $vuelta === 3) { throw $e; }
@@ -144,7 +160,7 @@ class DemoChatAiService
         throw new \RuntimeException('La respuesta de demo agotó las consultas al conocimiento.');
     }
 
-    private function validar_salida(string $texto, array $permitidos, array $fuentes): array
+    private function validar_salida(string $texto, array $permitidos, array $fuentes, ?string $solicitud_guia): array
     {
         $texto = preg_replace('/^```(?:json)?\s*|\s*```$/', '', trim($texto));
         $salida = json_decode($texto, true);
@@ -167,6 +183,15 @@ class DemoChatAiService
         if (empty($leidas) || preg_match('~https?://|www\.~i', $salida['contenido'])) {
             throw new \RuntimeException('La respuesta de demo no tiene respaldo verificable.');
         }
-        return ['contenido' => mb_substr(trim($salida['contenido']), 0, 2000), 'videos' => array_slice(array_values(array_unique($videos)), 0, 2)];
+        $respuesta = ['contenido' => mb_substr(trim($salida['contenido']), 0, 2000),
+            'videos' => array_slice(array_values(array_unique($videos)), 0, 2)];
+        if ($solicitud_guia !== null) {
+            $guia = DemoChatGuia::plan($salida['guia'] ?? null, $solicitud_guia);
+            if ($guia !== null) {
+                $respuesta['guia'] = $guia;
+            }
+        }
+
+        return $respuesta;
     }
 }

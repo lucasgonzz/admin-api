@@ -277,6 +277,115 @@ class DemoChatTest extends TestCase
         $this->assertStringNotContainsString('clave-falsa', json_encode(app(DemoChatService::class)->snapshot($lead, true)));
     }
 
+    /** @dataProvider recorridos_registrados */
+    public function test_el_plan_se_asocia_al_ultimo_mensaje_y_solo_publica_pasos_registrados(string $consulta, string $paso_actual, array $pasos): void
+    {
+        $lead = $this->lead();
+        $this->mensaje($lead, '¿Cómo busco un artículo?');
+        $uuid = (string) Str::uuid();
+        $this->postJson('/api/demo-chat/mensajes', [
+            'contenido' => $consulta, 'cliente_uuid' => $uuid,
+            'guia' => ['version' => 1, 'pantalla' => 'vender', 'paso' => $paso_actual, 'selector' => '#privado'],
+        ], $this->headers($lead))->assertStatus(202);
+
+        config(['services.deepseek.api_key' => 'clave-falsa']);
+        Http::fake(['api.deepseek.com/*' => Http::response(['content' => [['type' => 'text', 'text' => json_encode([
+            'contenido' => 'Te muestro cómo seguir.', 'videos' => [], 'fuentes' => ['demo'],
+            'guia' => ['accion' => 'iniciar', 'solicitud_uuid' => 'inventado', 'pasos' => $pasos],
+        ])]]])]);
+        $this->responder($lead);
+
+        Http::assertSent(function ($r) use ($paso_actual) {
+            return strpos($r['system'], 'Paso informado en el último mensaje: ' . json_encode($paso_actual)) !== false;
+        });
+        $contexto = DemoChatMensaje::where('cliente_uuid', $uuid)->firstOrFail()->guia;
+        $this->assertEquals(['version' => 1, 'pantalla' => 'vender', 'paso' => $paso_actual], $contexto);
+        $this->assertSame(1, $contexto['version']);
+        $mensajes = $this->getJson('/api/demo-chat', $this->headers($lead))->assertOk()->assertJsonCount(4, 'mensajes')->json('mensajes');
+        $this->assertArrayNotHasKey('guia', $mensajes[2]);
+        $guia = $mensajes[3]['guia'];
+        $this->assertEquals(['version' => 1, 'solicitud_uuid' => $uuid, 'accion' => 'iniciar', 'pasos' => $pasos], $guia);
+        $this->assertSame(1, $guia['version']);
+        $this->assertSame(array_column($pasos, 'id'), array_column($guia['pasos'], 'id'));
+    }
+
+    public function recorridos_registrados(): array
+    {
+        return [
+            'reanudación por nombre' => ['Ya abrí el buscador.', 'escribir_nombre', [
+                ['id' => 'escribir_nombre', 'texto' => 'Escribí el nombre.'],
+                ['id' => 'buscar_nombre', 'texto' => 'Apretá Enter.'],
+            ]],
+            'cambio a código' => ['Lo tengo por código de barras.', 'escribir_nombre', [
+                ['id' => 'codigo_barras', 'texto' => 'Escaneá o escribí el código de barras.'],
+            ]],
+        ];
+    }
+
+    /** @dataProvider guias_no_permitidas */
+    public function test_una_guia_no_permitida_conserva_el_chat_de_texto(?array $contexto, array $pasos): void
+    {
+        $lead = $this->lead();
+        config(['services.deepseek.api_key' => 'clave-falsa']);
+        Http::fake(['api.deepseek.com/*' => Http::response(['content' => [['type' => 'text', 'text' => json_encode([
+            'contenido' => 'Podés buscar por el nombre del artículo.', 'videos' => [], 'fuentes' => ['demo'],
+            'guia' => ['accion' => 'iniciar', 'pasos' => $pasos],
+        ])]]])]);
+        $datos = ['contenido' => '¿Cómo busco un artículo?', 'cliente_uuid' => (string) Str::uuid()];
+        if ($contexto !== null) { $datos['guia'] = $contexto; }
+        $this->postJson('/api/demo-chat/mensajes', $datos, $this->headers($lead))->assertStatus(202);
+        $this->responder($lead);
+
+        $respuesta = $this->getJson('/api/demo-chat', $this->headers($lead))->assertOk()
+            ->assertJsonPath('mensajes.2.contenido', 'Podés buscar por el nombre del artículo.')->json('mensajes.2');
+        $this->assertArrayNotHasKey('guia', $respuesta);
+    }
+
+    public function guias_no_permitidas(): array
+    {
+        $valido = ['version' => 1, 'pantalla' => 'vender'];
+        $codigo = [['id' => 'codigo_barras', 'texto' => 'Ingresá el código.']];
+        return [
+            'punta anterior' => [null, $codigo],
+            'otra pantalla' => [['version' => 1, 'pantalla' => 'compras'], $codigo],
+            'paso de entrada no registrado' => [$valido + ['paso' => '#otro'], $codigo],
+            'selector inventado' => [$valido, [['id' => '#cobrar', 'texto' => 'Tocá acá.']]],
+            'orden no contiguo' => [$valido, [['id' => 'abrir_buscador', 'texto' => 'Abrí.'], ['id' => 'buscar_nombre', 'texto' => 'Buscá.']]],
+        ];
+    }
+
+    public function test_el_operador_aprueba_una_guia_de_cierre_y_editar_el_texto_retira_la_siguiente(): void
+    {
+        $lead = $this->lead(); $this->admin();
+        $ruta = '/api/admin/lead/' . $lead->id . '/demo-chat';
+        $this->putJson($ruta . '/configuracion', ['auto_responder' => false])->assertOk();
+        config(['services.deepseek.api_key' => 'clave-falsa']);
+        Http::fake(['api.deepseek.com/*' => Http::response(['content' => [['type' => 'text', 'text' => json_encode([
+            'contenido' => 'Dale, cerramos la guía.', 'videos' => [], 'fuentes' => ['demo'],
+            'guia' => ['accion' => 'cerrar', 'pasos' => []],
+        ])]]])]);
+
+        $uuid = (string) Str::uuid();
+        $datos = ['contenido' => 'Cerrá la guía.', 'cliente_uuid' => $uuid, 'guia' => ['version' => 1, 'pantalla' => 'vender']];
+        $this->postJson('/api/demo-chat/mensajes', $datos, $this->headers($lead))->assertStatus(202);
+        $this->responder($lead);
+        $this->getJson('/api/demo-chat', $this->headers($lead))->assertJsonCount(2, 'mensajes');
+        $id = $this->getJson($ruta)->assertOk()->json('mensajes.2.id');
+        $this->postJson($ruta . '/mensajes/' . $id . '/enviar')->assertOk();
+        $this->getJson('/api/demo-chat', $this->headers($lead))->assertJsonPath('mensajes.2.guia.accion', 'cerrar')
+            ->assertJsonPath('mensajes.2.guia.solicitud_uuid', $uuid);
+
+        $datos['cliente_uuid'] = (string) Str::uuid();
+        $this->postJson('/api/demo-chat/mensajes', $datos, $this->headers($lead))->assertStatus(202);
+        $this->responder($lead);
+        $id = $this->getJson($ruta)->assertOk()->json('mensajes.4.id');
+        $this->putJson($ruta . '/mensajes/' . $id, ['contenido' => '¿Querés que sigamos?'])->assertOk();
+        $this->postJson($ruta . '/mensajes/' . $id . '/enviar')->assertOk();
+        $respuesta = $this->getJson('/api/demo-chat', $this->headers($lead))
+            ->assertJsonPath('mensajes.4.contenido', '¿Querés que sigamos?')->json('mensajes.4');
+        $this->assertArrayNotHasKey('guia', $respuesta);
+    }
+
     public function test_sin_deepseek_falla_visible_al_operador_sin_usar_otro_proveedor(): void
     {
         config(['services.deepseek.api_key' => '']);

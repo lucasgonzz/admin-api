@@ -8,6 +8,6 @@ class DemoChatMensaje extends Model
 {
     protected $table = 'demo_chat_mensajes';
     protected $guarded = [];
-    protected $casts = ['videos' => 'array', 'revisiones' => 'array'];
-    protected $hidden = ['revisiones', 'admin_id'];
+    protected $casts = ['videos' => 'array', 'revisiones' => 'array', 'guia' => 'array'];
+    protected $hidden = ['revisiones', 'admin_id', 'guia'];
 }

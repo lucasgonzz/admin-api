@@ -42,10 +42,10 @@ class DemoChatService
         });
     }
 
-    public function recibir(Lead $lead, string $contenido, string $uuid): void
+    public function recibir(Lead $lead, string $contenido, string $uuid, ?array $guia = null): void
     {
         $this->iniciar($lead);
-        $job = DB::transaction(function () use ($lead, $contenido, $uuid) {
+        $job = DB::transaction(function () use ($lead, $contenido, $uuid, $guia) {
             $chat = DemoChatConversacion::where('lead_id', $lead->id)->lockForUpdate()->firstOrFail();
             if ($chat->mensajes()->where('cliente_uuid', $uuid)->exists()) {
                 return null;
@@ -54,7 +54,7 @@ class DemoChatService
             if ($chat->mensajes()->where('rol', 'lead')->count() >= 300) {
                 throw ValidationException::withMessages(['contenido' => 'Llegaste al límite de mensajes de esta demo.']);
             }
-            $this->crear($chat, 'lead', $contenido, [], 'lead', 'publicado', $uuid);
+            $this->crear($chat, 'lead', $contenido, [], 'lead', 'publicado', $uuid, null, $guia);
             return $this->programar($chat);
         });
         if ($job !== null) {
@@ -143,7 +143,8 @@ class DemoChatService
                 if ($chat->generacion !== $generacion || $chat->estado !== 'pensando') {
                     return;
                 }
-                $this->crear($chat, 'asistente', $salida['contenido'], $salida['videos'], 'ia', $chat->auto_responder ? 'publicado' : 'borrador');
+                $this->crear($chat, 'asistente', $salida['contenido'], $salida['videos'], 'ia',
+                    $chat->auto_responder ? 'publicado' : 'borrador', null, null, $salida['guia'] ?? null);
                 $chat->estado = $chat->auto_responder ? 'inactivo' : 'listo';
                 $chat->responder_desde = null;
                 $chat->revision++;
@@ -204,12 +205,20 @@ class DemoChatService
                 $this->crear($chat, 'asistente', trim($datos['contenido']), $claves, 'admin', 'publicado', null, $admin_id);
             } else {
                 $revisiones = (array) $mensaje->revisiones;
-                $revisiones[] = ['contenido' => $mensaje->contenido, 'videos' => $mensaje->videos, 'estado' => $mensaje->estado,
+                $revision = ['contenido' => $mensaje->contenido, 'videos' => $mensaje->videos, 'estado' => $mensaje->estado,
                     'accion' => $accion, 'admin_id' => $admin_id, 'fecha' => now()->toIso8601String()];
+                if ($mensaje->guia !== null) {
+                    $revision['guia'] = $mensaje->guia;
+                }
+                $revisiones[] = $revision;
                 $mensaje->revisiones = $revisiones;
                 $mensaje->admin_id = $admin_id;
                 if ($accion === 'editar') {
-                    $mensaje->contenido = trim($datos['contenido']);
+                    $contenido = trim($datos['contenido']);
+                    if ($mensaje->rol === 'asistente' && $mensaje->guia !== null && $mensaje->contenido !== $contenido) {
+                        $mensaje->guia = null;
+                    }
+                    $mensaje->contenido = $contenido;
                     if (isset($datos['videos'])) {
                         $mensaje->videos = $this->validar_videos($lead, $datos['videos']);
                     }
@@ -308,6 +317,9 @@ class DemoChatService
             }
             $fila = ['id' => $mensaje->id, 'rol' => $mensaje->rol, 'contenido' => $mensaje->contenido,
                 'creado_at' => $mensaje->created_at->toIso8601String(), 'videos' => $adjuntos];
+            if ($mensaje->rol === 'asistente' && $mensaje->estado === 'publicado' && $mensaje->guia !== null) {
+                $fila['guia'] = $mensaje->guia;
+            }
             if ($admin) { $fila['estado'] = $mensaje->estado; $fila['origen'] = $mensaje->origen; }
             $salida['mensajes'][] = $fila;
         }
@@ -327,10 +339,15 @@ class DemoChatService
     }
 
     private function crear(DemoChatConversacion $chat, string $rol, string $contenido, array $videos, string $origen,
-        string $estado = 'publicado', ?string $uuid = null, ?int $admin_id = null): DemoChatMensaje
+        string $estado = 'publicado', ?string $uuid = null, ?int $admin_id = null, ?array $guia = null): DemoChatMensaje
     {
-        return $chat->mensajes()->create(['rol' => $rol, 'contenido' => $contenido, 'videos' => array_values($videos),
-            'origen' => $origen, 'estado' => $estado, 'cliente_uuid' => $uuid, 'admin_id' => $admin_id]);
+        $campos = ['rol' => $rol, 'contenido' => $contenido, 'videos' => array_values($videos),
+            'origen' => $origen, 'estado' => $estado, 'cliente_uuid' => $uuid, 'admin_id' => $admin_id];
+        if ($guia !== null) {
+            $campos['guia'] = $guia;
+        }
+
+        return $chat->mensajes()->create($campos);
     }
 
     private function ofrecidos(DemoChatConversacion $chat): array

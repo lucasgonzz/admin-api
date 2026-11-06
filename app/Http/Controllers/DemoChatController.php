@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Lead;
+use App\Services\DemoChatGuia;
 use App\Services\DemoChatService;
 use Illuminate\Http\Request;
 
@@ -32,7 +33,7 @@ class DemoChatController extends Controller
     {
         $datos = $request->validate(['contenido' => 'required|string|max:4000', 'cliente_uuid' => 'required|uuid']);
         $lead = $this->lead($request);
-        $service->recibir($lead, trim($datos['contenido']), $datos['cliente_uuid']);
+        $service->recibir($lead, trim($datos['contenido']), $datos['cliente_uuid'], DemoChatGuia::contexto($request->input('guia')));
         return response()->json($service->snapshot($lead), 202);
     }
 
