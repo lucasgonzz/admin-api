@@ -4,6 +4,7 @@ namespace App\Services\Prueba;
 
 use App\Models\Lead;
 use App\Models\LeadDemoHito;
+use App\Services\MetaConversionesService;
 use Carbon\Carbon;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
@@ -126,6 +127,18 @@ class PruebaHitosService
 
             return 1;
         });
+
+        if ($tipo === 'prueba.ingreso') {
+            try {
+                // Incluso en un replay: recupera un registro fallido sin duplicar ni mover la fecha.
+                app(MetaConversionesService::class)->registrar_inicio_prueba($lead);
+            } catch (\Throwable $e) {
+                Log::error('PruebaHitosService: no se pudo registrar StartTrial; lo recuperará la conciliación.', [
+                    'lead_id' => $lead->id,
+                    'error' => app(MetaConversionesService::class)->sin_token($e->getMessage()),
+                ]);
+            }
+        }
 
         if ($tipo === 'prueba.vencida') {
             $this->dormir_por_vencimiento($lead);

@@ -6,8 +6,10 @@ use App\Helpers\AppTime;
 use App\Jobs\EnviarEventoMetaJob;
 use App\Models\Client;
 use App\Models\Lead;
+use App\Models\LeadDemoHito;
 use App\Models\LeadEventoMeta;
 use App\Models\LicenciaCuota;
+use App\Models\TrialInstance;
 use Carbon\Carbon;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
@@ -86,6 +88,11 @@ class MetaConversionesService
 {
     /** Host de la Graph API de Meta. */
     const URL_GRAPH = 'https://graph.facebook.com';
+
+    const MOTIVO_SIN_INGRESO = 'StartTrial sin ingreso real: espera evidencia autenticada.';
+
+    /** Retención máxima del contexto de captación para el ingreso posterior. */
+    const DIAS_CONTEXTO_INGRESO = 7;
 
     /** `action_source` de la CAPI for Business Messaging. */
     const ACTION_SOURCE = 'business_messaging';
@@ -303,13 +310,104 @@ class MetaConversionesService
         if ($promovido) {
             $eventos[] = $nombres[2];
         }
-        /* `StartTrial` solo por la web (es donde está el píxel que lo dispara del lado del navegador y lo deduplica
-           por `event_id`): el negocio empezó su prueba gratuita. */
-        if ($en_prueba && $canal === LeadEventoMeta::CANAL_WEB) {
+        /* La prueba empieza al ingresar, no al crear ni aprovisionar la instancia. */
+        if ($canal === LeadEventoMeta::CANAL_WEB && $this->primer_ingreso_de_prueba($lead) !== null) {
             $eventos[] = LeadEventoMeta::EVENTO_WEB_START_TRIAL;
         }
 
         return $eventos;
+    }
+
+    /** Evidencia persistida del primer ingreso autenticado; nunca inferida del estado comercial. */
+    private function primer_ingreso_de_prueba(Lead $lead): ?Carbon
+    {
+        $hito = LeadDemoHito::query()
+            ->where('lead_id', (int) $lead->id)
+            ->where('tipo', 'prueba')
+            ->where('clip_id', 'ingreso')
+            ->where('evento_esperado', 'prueba.ingreso')
+            ->where('estado', LeadDemoHito::ESTADO_COMPLETO)
+            ->whereNotNull('accion_hecha_at')
+            ->first();
+
+        return $hito !== null ? Carbon::instance($hito->accion_hecha_at) : null;
+    }
+
+    /** Registra solamente el inicio real: recibir un hito no fabrica etapas ni compras. */
+    public function registrar_inicio_prueba(Lead $lead, bool $despachar = true): ?LeadEventoMeta
+    {
+        if (self::canal_del_lead($lead) !== LeadEventoMeta::CANAL_WEB) {
+            return null;
+        }
+        $momento = $this->primer_ingreso_de_prueba($lead);
+        if ($momento === null) {
+            return null;
+        }
+        $config = self::config_completa(LeadEventoMeta::CANAL_WEB);
+        $existente = LeadEventoMeta::query()->where('lead_id', (int) $lead->id)
+            ->where('canal', LeadEventoMeta::CANAL_WEB)->where('evento', LeadEventoMeta::EVENTO_WEB_START_TRIAL)->first();
+        if ($existente !== null) {
+            $recuperada = DB::transaction(function () use ($existente, $config, $momento, $lead) {
+                // Bloquear la fila evita competir con el reclamo del worker o con otro replay.
+                $fila = LeadEventoMeta::query()->whereKey($existente->id)->lockForUpdate()->first();
+                $sin_ingreso = $fila->estado === LeadEventoMeta::ESTADO_OMITIDO
+                    && $fila->ultimo_error === self::MOTIVO_SIN_INGRESO;
+                $fecha_legacy = in_array($fila->estado, [LeadEventoMeta::ESTADO_PENDIENTE,
+                    LeadEventoMeta::ESTADO_SIN_CONFIGURAR, LeadEventoMeta::ESTADO_ERROR], true)
+                    && ! $fila->event_time->equalTo($momento);
+                if (! $sin_ingreso && ! $fecha_legacy) {
+                    return false;
+                }
+                $fila->estado = $config ? LeadEventoMeta::ESTADO_PENDIENTE : LeadEventoMeta::ESTADO_SIN_CONFIGURAR;
+                $fila->event_time = $momento;
+                $fila->contexto_web = self::contexto_web_limpio($fila->contexto_web) ?: $this->contexto_del_alta($lead);
+                if ($sin_ingreso) {
+                    // Nunca hubo envío real; otros errores conservan su presupuesto de intentos.
+                    $fila->intentos = 0;
+                    $fila->ultimo_error = null;
+                }
+                $fila->save();
+                $this->consumir_contexto_del_alta($lead);
+
+                return true;
+            });
+            if (! $recuperada) {
+                return null;
+            }
+            $existente->refresh();
+            if ($config && $despachar) {
+                $this->despachar($existente);
+            }
+
+            return $existente;
+        }
+        $fila = $this->crear_fila(
+            $lead, LeadEventoMeta::CANAL_WEB, LeadEventoMeta::EVENTO_WEB_START_TRIAL,
+            $config ? LeadEventoMeta::ESTADO_PENDIENTE : LeadEventoMeta::ESTADO_SIN_CONFIGURAR,
+            $momento, null
+        );
+        if ($fila !== null && $config && $despachar) {
+            $this->despachar($fila);
+        }
+
+        return $fila;
+    }
+
+    /** Contexto de captación de ESTA prueba, no del webhook ni de una demo anterior. */
+    private function contexto_del_alta(Lead $lead): ?array
+    {
+        $instancia = TrialInstance::query()->where('lead_id', (int) $lead->id)
+            ->where('asignada_at', '>=', AppTime::now()->subDays(self::DIAS_CONTEXTO_INGRESO))
+            ->orderByDesc('id')->first();
+
+        return $instancia !== null ? self::contexto_web_limpio($instancia->contexto_meta) : null;
+    }
+
+    /** Se consume únicamente después de persistir el snapshot de StartTrial. */
+    private function consumir_contexto_del_alta(Lead $lead): void
+    {
+        TrialInstance::query()->where('lead_id', (int) $lead->id)->whereNotNull('contexto_meta')
+            ->update(['contexto_meta' => null]);
     }
 
     /**
@@ -661,6 +759,15 @@ class MetaConversionesService
      */
     private function crear_fila(Lead $lead, string $canal, string $evento, string $estado, Carbon $momento, ?string $motivo, ?array $contexto_web = null): ?LeadEventoMeta
     {
+        // Todas las rutas (observer, conciliación y hito) conservan la evidencia y su fecha.
+        if ($evento === LeadEventoMeta::EVENTO_WEB_START_TRIAL) {
+            $momento = $this->primer_ingreso_de_prueba($lead);
+            if ($canal !== LeadEventoMeta::CANAL_WEB || $momento === null) {
+                return null;
+            }
+            $contexto_web = $this->contexto_del_alta($lead);
+        }
+
         $atributos = [
             'lead_id'      => (int) $lead->id,
             'canal'        => $canal,
@@ -680,7 +787,14 @@ class MetaConversionesService
         }
 
         try {
-            return LeadEventoMeta::create($atributos);
+            return DB::transaction(function () use ($atributos, $evento, $lead) {
+                $fila = LeadEventoMeta::create($atributos);
+                if ($evento === LeadEventoMeta::EVENTO_WEB_START_TRIAL) {
+                    $this->consumir_contexto_del_alta($lead);
+                }
+
+                return $fila;
+            });
         } catch (QueryException $exception) {
             if (self::es_error_de_duplicado($exception)) {
                 /* El único (lead_id, canal, evento): otro proceso lo registró entre la lectura y
@@ -753,6 +867,25 @@ class MetaConversionesService
             return LeadEventoMeta::ESTADO_ERROR;
         }
 
+        if ($evento->evento === LeadEventoMeta::EVENTO_WEB_START_TRIAL) {
+            $ingreso = $this->primer_ingreso_de_prueba($lead);
+            if ($ingreso === null) {
+                $this->marcar_omitido($evento, self::MOTIVO_SIN_INGRESO);
+
+                return LeadEventoMeta::ESTADO_OMITIDO;
+            }
+            if ($ingreso->gt(AppTime::now())
+                || $ingreso->lt(AppTime::now()->subDays(LeadEventoMeta::DIAS_DE_VIGENCIA))) {
+                $this->marcar_omitido($evento, 'StartTrial sin ingreso real vigente: no se envía a Meta.');
+
+                return LeadEventoMeta::ESTADO_OMITIDO;
+            }
+            // También corrige filas pendientes del contrato anterior, sin reenviar las ya enviadas.
+            $evento->event_time = $ingreso;
+            $evento->contexto_web = self::contexto_web_limpio($evento->contexto_web) ?: $this->contexto_del_alta($lead);
+            $evento->save();
+        }
+
         /* 🔴 Un lead no se reporta en dos canales: una fila de un canal que ya no es el del lead (o
            de un lead que se quedó sin canal) no sale. Queda `omitido`, que no reclama nadie más.
            El `Purchase` mira el canal de la compra: un promovido sin atribución sale por la web. */
@@ -811,8 +944,7 @@ class MetaConversionesService
                 'enviado_at'   => AppTime::now(),
                 'ultimo_error' => null,
                 'respuesta'    => json_encode($resumen),
-                /* La IP y el user agent del visitante se guardan solo mientras hacen falta para mandar el
-                   evento: enviado, no se vuelven a usar. */
+                /* Enviado: la IP y el user agent ya no hacen falta en esta fila. */
                 'contexto_web' => null,
             ]);
 
@@ -991,7 +1123,7 @@ class MetaConversionesService
      *
      * @return array<string, string>|null
      */
-    private static function contexto_web_limpio(?array $contexto): ?array
+    public static function contexto_web_limpio(?array $contexto): ?array
     {
         if ($contexto === null) {
             return null;
@@ -1150,6 +1282,11 @@ class MetaConversionesService
             'sin_configurar_reenviados' => 0,
         ];
 
+        // El contexto de captación no queda indefinidamente si el negocio nunca entra.
+        TrialInstance::query()->whereNotNull('contexto_meta')
+            ->where('asignada_at', '<', AppTime::now()->subDays(self::DIAS_CONTEXTO_INGRESO))
+            ->update(['contexto_meta' => null]);
+
         $ahora           = AppTime::now();
         $desde           = $ahora->copy()->subDays(LeadEventoMeta::DIAS_DE_VIGENCIA);
         $quieto_antes_de = $ahora->copy()->subMinutes(LeadEventoMeta::MINUTOS_ANTES_DE_REENCOLAR);
@@ -1174,6 +1311,26 @@ class MetaConversionesService
                         Log::channel('daily')->error('Conversiones Meta: el conciliador no pudo registrar los eventos de un lead.', [
                             'lead_id' => (int) $lead->id,
                             'error'   => $this->sin_token($exception->getMessage()),
+                        ]);
+                    }
+                }
+            });
+
+        // El hito no actualiza el lead: recuperar también ingresos recientes de leads antiguos.
+        Lead::query()->whereIn('id', LeadDemoHito::query()->select('lead_id')
+            ->where('tipo', 'prueba')->where('clip_id', 'ingreso')
+            ->where('evento_esperado', 'prueba.ingreso')->where('estado', LeadDemoHito::ESTADO_COMPLETO)
+            ->where('accion_hecha_at', '>=', $desde))
+            ->chunkById(200, function ($leads) use (&$resumen) {
+                foreach ($leads as $lead) {
+                    try {
+                        if ($this->registrar_inicio_prueba($lead) !== null) {
+                            $resumen['registrados']++;
+                        }
+                    } catch (\Throwable $exception) {
+                        Log::channel('daily')->error('Conversiones Meta: no se pudo recuperar el ingreso de prueba.', [
+                            'lead_id' => (int) $lead->id,
+                            'error' => $this->sin_token($exception->getMessage()),
                         ]);
                     }
                 }

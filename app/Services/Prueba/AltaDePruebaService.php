@@ -89,8 +89,8 @@ class AltaDePruebaService
         LeadPipelineStatus::ensure_exists(LeadPipelineStatus::PRUEBA_ACTIVA, 'Prueba activa');
 
         try {
-            $resultado = DB::transaction(function () use ($lead, $telefono, $datos) {
-                return $this->escribir_alta($lead, $telefono, $datos);
+            $resultado = DB::transaction(function () use ($lead, $telefono, $datos, $contexto_web) {
+                return $this->escribir_alta($lead, $telefono, $datos, $contexto_web);
             });
         } catch (SinCapacidadDePruebaException $e) {
             /* La excepción deshizo la transacción: no queda lead, cliente ni instancia a medias. */
@@ -107,8 +107,9 @@ class AltaDePruebaService
         /** @var TrialInstance $instancia */
         $instancia = $resultado['instancia'];
 
-        $meta_eventos = $this->registrar_conversiones($lead_listo, $contexto_web);
+        // El worker puede tomar el Lead inmediatamente: el fbclid debe estar persistido antes.
         $this->dejar_evento_en_el_hilo($lead_listo, $datos, $instancia);
+        $meta_eventos = $this->registrar_conversiones($lead_listo, $contexto_web);
 
         /* A la cola (`database` en producción), NO `afterResponse()`: eso correría los ~3 minutos del armado adentro
            del proceso del request, después de contestar. La transacción ya commiteó. */
@@ -180,7 +181,7 @@ class AltaDePruebaService
      *
      * @throws SinCapacidadDePruebaException
      */
-    private function escribir_alta(?Lead $lead, string $telefono, array $datos): array
+    private function escribir_alta(?Lead $lead, string $telefono, array $datos, ?array $contexto_web): array
     {
         if (! PruebaPoolService::hay_capacidad() || ! TrialInstance::where('estado', TrialInstance::ESTADO_LIBRE)->exists()) {
             throw new SinCapacidadDePruebaException(self::MENSAJE_SIN_CAPACIDAD);
@@ -265,6 +266,7 @@ class AltaDePruebaService
 
         $instancia->client_id        = $client->id;
         $instancia->password_cifrada = Crypt::encryptString((string) $datos['password']);
+        $instancia->contexto_meta    = MetaConversionesService::contexto_web_limpio($contexto_web);
         $instancia->etapa            = 'encolada';
         $instancia->progreso         = 5;
         $instancia->save();
@@ -460,8 +462,8 @@ class AltaDePruebaService
     }
 
     /**
-     * `Lead` + `StartTrial` por el canal web, con el contexto del navegador. Devuelve `[{nombre, event_id}]`
-     * para que la landing dispare el píxel con los mismos ids.
+     * `Lead` por el canal web, con el contexto del navegador. StartTrial espera el primer ingreso.
+     * Devuelve `[{nombre, event_id}]` para que la landing dispare el píxel con los mismos ids.
      *
      * @return array<int, array<string, string>>
      */
@@ -471,8 +473,10 @@ class AltaDePruebaService
 
         try {
             $filas = app(MetaConversionesService::class)->registrar_alcanzados($lead, null, true, $contexto_web);
+            // No reemitir un Lead histórico: la deduplicación del navegador tiene una ventana limitada.
             foreach ($filas as $fila) {
-                if ($fila instanceof LeadEventoMeta) {
+                if ($fila instanceof LeadEventoMeta && $fila->canal === LeadEventoMeta::CANAL_WEB
+                    && $fila->evento === LeadEventoMeta::EVENTO_WEB_LEAD) {
                     $salida[] = ['nombre' => (string) $fila->evento, 'event_id' => (string) $fila->event_id];
                 }
             }

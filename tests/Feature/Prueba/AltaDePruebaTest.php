@@ -32,8 +32,8 @@ class AltaDePruebaTest extends BaseDePruebaGratuita
         $uuid = $respuesta->json('uuid');
         $this->assertNotEmpty($uuid);
 
-        /* El píxel de la landing dispara con los MISMOS ids que la CAPI del admin: Lead y StartTrial. */
-        $this->assertSame(['Lead', 'StartTrial'], array_column($respuesta->json('meta_eventos'), 'nombre'));
+        /* El píxel de la landing dispara con los MISMOS ids que la CAPI del admin: solo Lead. StartTrial requiere el primer ingreso real. */
+        $this->assertSame(['Lead'], array_column($respuesta->json('meta_eventos'), 'nombre'));
 
         $lead = $this->lead_del_alta($uuid);
         $this->assertNotNull($lead);
@@ -91,8 +91,8 @@ class AltaDePruebaTest extends BaseDePruebaGratuita
 
         /* Las conversiones, por el canal web y con el contexto del navegador. */
         $filas = LeadEventoMeta::where('lead_id', $lead->id)->orderBy('id')->get();
-        $this->assertSame(['Lead', 'StartTrial'], $filas->pluck('evento')->all());
-        $this->assertSame(['web', 'web'], $filas->pluck('canal')->all());
+        $this->assertSame(['Lead'], $filas->pluck('evento')->all());
+        $this->assertSame(['web'], $filas->pluck('canal')->all());
         $this->assertSame('https://comerciocity.com/prueba', $filas[0]->contexto_web['event_source_url']);
         $this->assertSame(array_column($respuesta->json('meta_eventos'), 'event_id'), $filas->pluck('event_id')->all());
 

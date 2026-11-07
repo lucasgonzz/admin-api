@@ -55,10 +55,11 @@ class TrialInstance extends Model
         'lista_at'    => 'datetime',
         'borrada_at'  => 'datetime',
         'dns_labels'  => 'array',
+        'contexto_meta' => 'array',
     ];
 
-    /** La contraseña cifrada del dueño no sale nunca serializada. */
-    protected $hidden = ['password_cifrada'];
+    /** Ni la contraseña ni el contexto privado del navegador salen serializados. */
+    protected $hidden = ['password_cifrada', 'contexto_meta'];
 
     /**
      * Los labels de A records que esta instancia escribió (del nombre del pool y del slug). Es lo único que
