@@ -599,6 +599,64 @@ class ControlYVerificacionDeSoporteCodexTest extends TestCase
         $this->assertSame(['En Ventas abrí el detalle de la cuota.', 'De nada! Un abrazo!'], $this->transport->sent);
     }
 
+    public function test_cierre_confirmado_en_una_respuesta_espera_aprobacion_y_cierra_al_enviar(): void
+    {
+        $ticket = $this->ticket();
+        $guidance = 'En Ventas abrí el detalle de la cuota.';
+        $this->reply($ticket, $this->claim($ticket), ['body' => $guidance])->assertOk();
+        $message = $this->inbound($ticket);
+        $message->update(['body' => 'Salió todo de diez, gracias!']);
+        $this->verification($ticket);
+        $claim = $this->claim($ticket);
+        $result = $this->reply($ticket, $claim, ['body' => 'De nada Gonzalo!'])->assertOk()
+            ->assertJsonPath('operation.action', 'cerrar')->assertJsonPath('operation.status', 'awaiting_approval')->json();
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->assertSame([$guidance], $this->transport->sent);
+        $draft_id = $result['operation']['message_id'];
+        $this->actingAs($this->admin, 'sanctum')->postJson('/api/admin/support-message/' . $draft_id . '/approve-ai-draft')
+            ->assertOk()->assertJsonPath('delivered', true);
+        $this->assertSame('closed', $ticket->fresh()->status);
+        $this->reply($ticket, $claim, ['body' => 'De nada Gonzalo!'])->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->assertSame([$guidance, 'De nada Gonzalo!'], $this->transport->sent);
+    }
+
+    public function test_cierre_confirmado_inferido_se_desarma_si_la_edicion_retoma_el_dialogo(): void
+    {
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), ['body' => 'En Ventas abrí el detalle de la cuota.'])->assertOk();
+        $this->inbound($ticket)->update(['body' => 'Salió todo de diez, gracias!']);
+        $this->verification($ticket);
+        $claim = $this->claim($ticket);
+        $payload = ['body' => 'De nada Gonzalo!'];
+        $draft_id = $this->reply($ticket, $claim, $payload)->assertOk()
+            ->assertJsonPath('operation.action', 'cerrar')->json('operation.message_id');
+        $body = 'De nada Gonzalo! Necesitás que te guíe para el otro comprobante?';
+        $this->actingAs($this->admin, 'sanctum')->postJson('/api/admin/support-message/' . $draft_id . '/approve-ai-draft', ['body' => $body])
+            ->assertOk()->assertJsonPath('operation.action', 'responder');
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->reply($ticket, $claim, $payload)->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->assertSame(['En Ventas abrí el detalle de la cuota.', $body], $this->transport->sent);
+    }
+
+    public function test_editar_acuse_de_una_mejora_antes_de_aprobar_desarma_cierre_al_iniciar(): void
+    {
+        $ticket = $this->ticket();
+        $this->verification($ticket);
+        $mission = 'Agregar una opción para elegir el medio de pago cada vez.';
+        $draft_id = $this->reply($ticket, $this->claim($ticket), [
+            'action' => 'escalar', 'mission' => $mission,
+            'body' => 'Dejé registrada la mejora.', 'close_on_mission_start' => true,
+        ])->assertOk()->assertJsonPath('operation.status', 'awaiting_approval')->json('operation.message_id');
+        $this->actingAs($this->admin, 'sanctum')->postJson('/api/admin/support-message/' . $draft_id . '/approve-ai-draft', [
+            'body' => 'Seguimos revisando el problema. Me pasás una captura?',
+        ])->assertOk()->assertJsonPath('operation.action', 'escalar');
+        $this->postJson($this->base . '/tickets/' . $ticket->id . '/mission-started', [
+            'mission_thread_id' => 'mejora-cobro', 'mission_hash' => hash('sha256', $mission),
+        ], $this->headers)->assertOk()
+            ->assertJsonPath('ticket.mission_lifecycle.status', 'started')->assertJsonPath('ticket.status', 'open');
+        $this->assertCount(1, $this->transport->sent);
+    }
+
     public function test_cierre_por_gracias_obsoleto_no_se_envia_al_llegar_nueva_consulta(): void
     {
         $ticket = $this->ticket();

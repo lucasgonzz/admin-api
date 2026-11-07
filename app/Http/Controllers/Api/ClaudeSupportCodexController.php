@@ -196,6 +196,7 @@ class ClaudeSupportCodexController extends Controller
             'attachment.filename' => 'required_with:attachment|string|max:160',
             'attachment.content_base64' => 'required_with:attachment|string|max:' . \App\Services\SupportCodexOutboundAttachment::MAX_ENCODED_LENGTH,
             'mission' => 'sometimes|nullable|string|max:30000',
+            'close_on_mission_start' => 'sometimes|boolean|prohibited_unless:action,escalar',
             'review_reason' => 'required_if:action,pedir_revision|nullable|string|max:500',
             'thread_id' => 'sometimes|string|max:150',
             'confirmation_message_id' => 'sometimes|nullable|integer|min:1',

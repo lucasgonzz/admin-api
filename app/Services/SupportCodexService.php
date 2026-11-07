@@ -10,6 +10,7 @@ use App\Models\Implementation;
 use App\Models\ImplementationStage;
 use App\Models\SupportCodexCase;
 use App\Models\SupportCodexMissionFixEvidence;
+use App\Models\SupportCodexScheduledUpgrade;
 use App\Models\SupportCodexUpgradeAgreement;
 use App\Models\SupportCodexOperation;
 use App\Models\SupportMessage;
@@ -238,7 +239,7 @@ class SupportCodexService
             'reason' => $this->pending_reason($ticket, $case, true),
             // El helper debe verificar esta capacidad ANTES de pedir el modo nuevo: un admin
             // anterior ignoraría el campo y ejecutaría el resume que consume la consulta.
-            'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => true, 'prueba_import_resolver' => true],
+            'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => true, 'prueba_import_resolver' => true],
             'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
             'window' => app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone),
@@ -620,6 +621,9 @@ class SupportCodexService
         if ($input['action'] === 'pedir_revision') {
             $hash_payload[] = $input['review_reason'] ?? null;
         }
+        if ($input['action'] === 'escalar' && isset($input['close_on_mission_start'])) {
+            $hash_payload[] = (bool) $input['close_on_mission_start'];
+        }
         if ($attachment !== null) {
             $hash_payload[] = [$attachment['filename'], hash('sha256', $attachment['bytes'])];
         }
@@ -667,6 +671,12 @@ class SupportCodexService
                     $this->request_attention($ticket);
                     return null;
                 }
+                $this->assert_mission_allows_action($case, $input['action']);
+            } elseif ($attachment === null && $proposal === null && $this->can_close_on_reply($ticket, $case, $input)) {
+                // La operación guarda la acción efectiva. El replay conserva el hash del pedido original.
+                $input['action'] = 'cerrar';
+                $input['confirmation_message_id'] = (int) $input['expected_message_id'];
+                $input['_inferred_closure'] = true;
             }
             if ($input['action'] === 'escalar' && empty(trim((string) ($input['mission'] ?? '')))) {
                 $this->fail(422, 'mission_required', 'El escalado requiere el texto de la misión preparada.');
@@ -710,6 +720,11 @@ class SupportCodexService
         }
         if (! $operation->wasRecentlyCreated || $operation->status === 'awaiting_approval') {
             return $this->operation_result($operation);
+        }
+        if ($operation->action !== $input['action']) {
+            $input['action'] = $operation->action;
+            $input['confirmation_message_id'] = (int) $operation->expected_message_id;
+            $input['_inferred_closure'] = true;
         }
 
         return DB::transaction(function () use ($id, $input, $operation, $attachment, $proposal) {
@@ -896,13 +911,48 @@ class SupportCodexService
 
     private function assert_approval_action(SupportTicket $ticket, SupportCodexCase $case, array $input): void
     {
-        if (in_array($input['action'], ['cerrar', 'solicitar_confirmacion'], true) && trim((string) $case->mission) !== '') {
-            $this->fail(409, 'mission_pending', 'La misión sigue pendiente; no se anuncia resuelta.');
-        }
+        $this->assert_mission_allows_action($case, $input['action']);
         if ($input['action'] === 'cerrar') {
+            $this->assert_upgrade_allows_closure($ticket, $case);
             $this->assert_importacion_cerrable($ticket);
-            $this->assert_confirmation($ticket, $case, $input);
+            $this->assert_confirmation($ticket, $case, $input, empty($input['_inferred_closure']));
         }
+    }
+
+    private function assert_mission_allows_action(SupportCodexCase $case, string $action): void
+    {
+        if ($this->mission_blocks_action($case, $action)) {
+            $this->fail(409, 'mission_pending', 'No se puede anunciar resuelta una misión que todavía no se ejecutó.');
+        }
+    }
+
+    private function mission_blocks_action(SupportCodexCase $case, string $action): bool
+    {
+        $mission = $case->mission_lifecycle();
+        return ($mission !== null || $case->state === 'mission_pending')
+            && ($action === 'solicitar_confirmacion' || ($action === 'cerrar' && ($mission['status'] ?? null) !== 'started'));
+    }
+
+    private function assert_upgrade_allows_closure(SupportTicket $ticket, SupportCodexCase $case): void
+    {
+        if ($this->upgrade_blocks_closure($ticket, $case)) {
+            $this->fail(409, 'upgrade_in_progress', 'Hay una actualización acordada o en curso; el ticket debe seguir abierto hasta que termine.');
+        }
+    }
+
+    private function upgrade_blocks_closure(SupportTicket $ticket, SupportCodexCase $case): bool
+    {
+        $evidence = SupportCodexMissionFixEvidence::current_for($ticket, $case);
+        if ($evidence === null) {
+            return false;
+        }
+        $agreements = SupportCodexUpgradeAgreement::where('mission_fix_evidence_id', $evidence->id)->whereNotNull('accepted_at');
+        return (clone $agreements)->where('ends_at_utc', '>', now()->utc()->toDateTimeString())->exists()
+            || SupportCodexScheduledUpgrade::whereIn('agreement_id', (clone $agreements)->select('id'))
+                ->whereIn('status', array_merge(SupportCodexScheduledUpgrade::EXECUTING, [
+                    SupportCodexScheduledUpgrade::SCHEDULED, SupportCodexScheduledUpgrade::VERIFICATION_PENDING,
+                ]))->exists()
+            || DB::table('support_codex_release_claims')->whereIn('agreement_id', $agreements->select('id'))->whereNotNull('active_key')->exists();
     }
 
     private function assert_importacion_cerrable(SupportTicket $ticket): void
@@ -935,11 +985,19 @@ class SupportCodexService
             $message = SupportMessage::whereKey($message_id)->where('is_ai_suggestion_draft', true)->firstOrFail();
             $input = $operation->approval_payload;
             $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->lockForUpdate()->firstOrFail();
-            $this->assert_approval_action($ticket, $case, $input);
             $final = $body === null ? trim($message->body) : trim($body);
             if ($final === '') {
                 $this->fail(422, 'invalid_body', 'El mensaje no puede quedar vacío.');
             }
+            if (! empty($input['_inferred_closure']) && ! $this->is_closing_farewell($final)) {
+                $input['action'] = 'responder';
+                $operation->action = 'responder';
+                unset($input['confirmation_message_id'], $input['_inferred_closure']);
+            }
+            if ($input['action'] === 'escalar' && ! empty($input['close_on_mission_start']) && $final !== trim($message->body)) {
+                $input['close_on_mission_start'] = false;
+            }
+            $this->assert_approval_action($ticket, $case, $input);
             if (isset($input['upgrade_proposal'])) {
                 if ($final !== $input['body']) {
                     $this->fail(422, 'proposal_text_changed', 'El texto de una propuesta de actualización debe conservar su horario exacto.');
@@ -1072,6 +1130,7 @@ class SupportCodexService
         } elseif ($input['action'] === 'cerrar') {
             $ticket->support_attention_enabled = false;
             $case->state = 'closed';
+            $case->close_on_mission_start = false;
             $case->review_reason = null;
             $case->review_requested_message_id = null;
             $case->confirmation_due_at = null;
@@ -1094,6 +1153,10 @@ class SupportCodexService
                 $case->mission_started_at = null;
                 $case->local_mission_request_id = null;
                 $case->local_mission_claim_token = null;
+                $case->close_on_mission_start = false;
+            }
+            if (isset($input['close_on_mission_start'])) {
+                $case->close_on_mission_start = (bool) $input['close_on_mission_start'];
             }
             $case->state = 'mission_pending';
             $case->mission = $mission;
@@ -1256,10 +1319,11 @@ class SupportCodexService
             || ($check_unfinished && $this->has_unfinished_operation($ticket->id))) {
             $this->fail(409, 'manual_review', 'La atención está pausada y requiere revisión.');
         }
-        if (in_array($input['action'], ['solicitar_confirmacion', 'cerrar'], true) && $case->state === 'mission_pending') {
-            $this->fail(409, 'mission_pending', 'No se puede anunciar resuelta una misión que todavía no se ejecutó.');
+        if ($case->state === 'mission_pending' || ! $check_unfinished) {
+            $this->assert_mission_allows_action($case, $input['action']);
         }
         if ($input['action'] === 'cerrar') {
+            $this->assert_upgrade_allows_closure($ticket, $case);
             $this->assert_importacion_cerrable($ticket);
         }
         return $case;
@@ -1313,6 +1377,7 @@ class SupportCodexService
             $case->mission = null;
             $case->mission_thread_id = null;
             $case->mission_started_at = null;
+            $case->close_on_mission_start = false;
             $case->local_mission_request_id = null;
             $case->local_mission_claim_token = null;
             $case->save();
@@ -1323,17 +1388,22 @@ class SupportCodexService
         });
     }
 
-    /** Registra la tarea creada por Lucas; no inicia, atiende ni resuelve el ticket. */
+    /** Registra la tarea creada por Lucas y, si corresponde, cierra el traspaso de una mejora. */
     public function mission_started(int $id, array $input): array
     {
         $result = DB::transaction(function () use ($id, $input) {
             $ticket = SupportTicket::where('id', $id)->lockForUpdate()->findOrFail($id);
+            $case = SupportCodexCase::where('support_ticket_id', $id)->lockForUpdate()->first();
             // Registrar una tarea ya creada no es retomar la atención: debe poder asentarse
             // aunque Lucas haya apagado al agente o pausado el proveedor mientras tanto.
             if ($ticket->status !== 'open') {
+                if ($case !== null && $case->state === 'closed' && $case->close_on_mission_start
+                    && $case->mission_started_at !== null && $case->mission_thread_id === $input['mission_thread_id']
+                    && hash_equals(hash('sha256', (string) $case->mission), $input['mission_hash'])) {
+                    return ['ticket' => $this->context($ticket, $case)];
+                }
                 $this->fail(409, 'disabled_or_ineligible', 'El ticket cerrado no admite registrar una misión pendiente.');
             }
-            $case = SupportCodexCase::where('support_ticket_id', $id)->lockForUpdate()->first();
             if ($case === null || trim((string) $case->mission) === '') {
                 $this->fail(409, 'mission_missing', 'El ticket no tiene una misión pendiente para vincular.');
             }
@@ -1349,6 +1419,12 @@ class SupportCodexService
             if ($case->mission_started_at === null) {
                 $case->mission_thread_id = $input['mission_thread_id'];
                 $case->mission_started_at = now();
+                if ($case->close_on_mission_start && $this->can_close_on_mission_start($ticket, $case)) {
+                    $this->apply_action($ticket, $case, ['action' => 'cerrar']);
+                    $case->close_on_mission_start = true; // Permite reconocer la repetición del mismo inicio.
+                    $case->save();
+                    return ['ticket' => $this->context($ticket, $case)];
+                }
                 $case->save();
             }
             // Es una actualización de seguimiento: no cambia manual_review ni consume la reserva.
@@ -1364,6 +1440,21 @@ class SupportCodexService
             // El registro durable no se revierte si el caché o el realtime no están disponibles.
         }
         return $result;
+    }
+
+    private function can_close_on_mission_start(SupportTicket $ticket, SupportCodexCase $case): bool
+    {
+        if ($case->state !== 'mission_pending' || $case->is_agent_requested_review()
+            || ($case->lease_expires_at !== null && $case->lease_expires_at->isFuture())
+            || $case->last_reply_id === null || $this->has_unfinished_operation($ticket->id)) {
+            return false;
+        }
+        $last = $this->last_real_message($ticket->id);
+        return $last !== null && $last->sender_type === 'admin' && (int) $last->id === (int) $case->last_reply_id
+            && SupportCodexOperation::where('support_ticket_id', $ticket->id)->where('message_id', $last->id)
+                ->where('action', 'escalar')->where('status', 'sent')->exists()
+            && ! $this->upgrade_blocks_closure($ticket, $case)
+            && app(PruebaImportacionService::class)->estado_en_ticket($ticket)['en_proceso'] === false;
     }
 
     public function register_mission_fix_evidence(int $id, array $input): array
@@ -1577,9 +1668,9 @@ class SupportCodexService
         $case->thread_id = $thread;
     }
 
-    private function assert_confirmation(SupportTicket $ticket, SupportCodexCase $case, array $input): void
+    private function assert_confirmation(SupportTicket $ticket, SupportCodexCase $case, array $input, bool $allow_thanks_only = true): void
     {
-        if (! $this->confirms_resolution($ticket, $case, $this->confirmation_message($ticket, $input))) {
+        if (! $this->confirms_resolution($ticket, $case, $this->confirmation_message($ticket, $input), $allow_thanks_only)) {
             $this->fail(422, 'confirmation_required', 'El mensaje no confirma de forma suficiente que el caso quedó resuelto.');
         }
     }
@@ -1594,11 +1685,38 @@ class SupportCodexService
         return $message;
     }
 
-    private function confirms_resolution(SupportTicket $ticket, SupportCodexCase $case, SupportMessage $message): bool
+    private function can_close_on_reply(SupportTicket $ticket, SupportCodexCase $case, array $input): bool
+    {
+        if ($input['action'] !== 'responder' || isset($input['mission']) || isset($input['review_reason'])
+            || isset($input['confirmation_message_id']) || ! $this->is_closing_farewell($input['body'])
+            || $case->is_agent_requested_review() || $case->last_reply_id === null
+            || $this->mission_blocks_action($case, 'cerrar')) {
+            return false;
+        }
+
+        $message = $this->last_real_message($ticket->id);
+        if ($message === null || $message->sender_type !== 'user'
+            || ($message->reply_to_message_id !== null && (int) $message->reply_to_message_id !== (int) $case->last_reply_id)) {
+            return false;
+        }
+        $previous = $this->previous_conversation_message($ticket, $message);
+        return $previous !== null && (int) $previous->id === (int) $case->last_reply_id
+            && $this->confirms_resolution($ticket, $case, $message, false)
+            && ! $this->upgrade_blocks_closure($ticket, $case)
+            && app(PruebaImportacionService::class)->estado_en_ticket($ticket)['en_proceso'] === false;
+    }
+
+    private function is_closing_farewell(string $body): bool
+    {
+        return (bool) preg_match('/^de nada(?: [a-z]+)?[.! ]*$/D', Str::ascii(mb_strtolower(trim($body))));
+    }
+
+    private function confirms_resolution(SupportTicket $ticket, SupportCodexCase $case, SupportMessage $message, bool $allow_thanks_only = true): bool
     {
         $body = Str::ascii(mb_strtolower(trim((string) $message->body)));
         $negative = strpos($body, '?') !== false
             || preg_match('/\b(no|nunca|tampoco|todavia|aun|sigue|pero|falta|error|problema|dificultad|manana|luego|despues|probare|probar|voy|cuando|veremos|ojala|deberia|podria|creo|supongo|parece|quizas|parcialmente|parcial|incompleto|incompleta|algunos|algunas)\b/', $body)
+            || preg_match('/\b(?:excepto|salvo|necesito|necesitamos|quiero|queremos|podes|podrias|mandame|pasame|enviame|pruebo|hare|haremos)\b|\b(?:otra|nueva) (?:consulta|duda|pregunta)\b|\b(?:te|les) aviso\b/', $body)
             || preg_match('/\b(a medias|una parte|solo pude|solamente pude)\b/', $body)
             || preg_match('/\bsi (funciona|anda|queda|(?:ya )?lo (arreglamos|arregle|solucionamos|solucione))\b/', $body);
         // «Todo normal» confirma el resultado si contesta una pregunta sobre la solución,
@@ -1621,6 +1739,7 @@ class SupportCodexService
         // actual/pasado, o una respuesta breve al pedido de verificar ese resultado.
         $resolved = preg_match('/\b(ya )?(esta|quedo) (resuelt[oa]|solucionad[oa]|bien|funcionando)\b/', $body)
             || preg_match('/\b(ya|ahora) (funciona|anda|funciono)\b/', $body)
+            || ($question !== null && $question->id < $message->id && preg_match('/\bsalio todo (?:bien|perfecto|de (?:10|diez))\b/', $body))
             || preg_match('/^(?:(?:ya|ahora)[,.!\s]+)?(?:anduvo|funciono)(?:[,.!\s]+(?:bien|perfecto|correctamente))?(?:[,.!\s]+(?:muchas\s+)?gracias)?[.!\s]*$/', $body)
             || preg_match('/^(si[,.! ]+)?(ya )?lo (arreglamos|arregle|solucionamos|solucione)([,.! ]+(muchas )?gracias)?[!. ]*$/', $body)
             || preg_match('/^(si[,.! ]+)?(ya )?(resuelt[oa]|solucionad[oa])[,.! ]*(muchas )?gracias[!. ]*$/', $body);
@@ -1673,8 +1792,9 @@ class SupportCodexService
         $implicit_completed = ($task_question || $answer_to_resolution)
             && preg_match('/^(?:(?:listo|perfecto|si)[,.! ]+)?(?:ya )?pude(?: hacerlo)?(?:[,.! ]+(?:muchas )?gracias)?[!. ]*$/', $body);
         $own_error = $question !== null && $question->id < $message->id
-            && $this->acknowledges_own_error_after_guidance($body, $question_body);
-        $natural_thanks = $this->natural_thanks_can_close($ticket, $case, $message, $body);
+            && ($this->acknowledges_own_error_after_guidance($body, $question_body)
+                || $this->completed_after_identifying_error($ticket, $message, $question, $body, $question_body));
+        $natural_thanks = $allow_thanks_only && $this->natural_thanks_can_close($ticket, $case, $message, $body);
         return ($own_error || ! $negative)
             && ($resolved || $short_answer || $task_completed || $implicit_completed || $own_error || $natural_thanks);
     }
@@ -1698,9 +1818,7 @@ class SupportCodexService
         if (! $thanks || preg_match('/\b(?:consulta|duda|pregunta|necesito|quiero|podes|podrias|como|donde|cual|cuales|cuantos|mandame|pasame|enviame|revisame|fijate|tengo|ademas|tambien|otra|otro|proba[a-z]*|prueb[a-z]*|verific[a-z]*|hare|haremos|hago|haremos|esper[a-z]*|pendiente|viernes|lunes|martes|miercoles|jueves|sabado|domingo)\b|\b(?:te|les) aviso\b/', $words)) {
             return false;
         }
-        $previous = SupportMessage::where('support_ticket_id', $ticket->id)->where('id', '<', $message->id);
-        SupportMessage::apply_mensaje_real_conditions($previous, 'support_messages');
-        $last = $previous->orderByDesc('id')->first();
+        $last = $this->previous_conversation_message($ticket, $message);
         if ($last === null) {
             return true; // Solo llegó una despedida; no hay consulta anterior que dejar abierta.
         }
@@ -1732,13 +1850,46 @@ class SupportCodexService
         $admission = '(?:(?:(?:fue|era|es|habia sido)\s+)?(?:un\s+)?error\s+(?:nuestro|mio|de nuestra parte)|nos equivocamos|me equivoque)';
         $complete_admission = preg_match('/^(?:(?:si|claro|perfecto|ah|ok|listo)[,.!\s]+)*' . $admission
             . '(?:[,.!\s]+' . $admission . ')*(?:[,.!\s]+(?:muchas\s+)?gracias)?[.!\s]*$/', $body);
-        if (! $complete_admission) {
+        return $complete_admission && $this->guidance_explains_cause($guidance);
+    }
+
+    private function completed_after_identifying_error(SupportTicket $ticket, SupportMessage $message, SupportMessage $guidance, string $body, string $guidance_body): bool
+    {
+        // FR Total #68: «Listo» y «Me di cuenta el error» confirman juntos la orientación del QR.
+        if (! preg_match('/^(listo[,.!\s]+)?(?:ya\s+)?me di cuenta (?:el|del) error(?:[,.!\s]+gracias)?[.!\s]*$/D', $body, $parts)
+            || ! $this->guidance_explains_cause($guidance_body)) {
             return false;
         }
+
+        $previous = $this->previous_conversation_message($ticket, $message);
+        $quoted = $message->reply_to_message_id === null ? null : (int) $message->reply_to_message_id;
+        if (! empty($parts[1])) {
+            return $previous !== null && $previous->is($guidance)
+                && ($quoted === null || $quoted === (int) $guidance->id);
+        }
+        if ($previous === null || $previous->sender_type !== 'user'
+            || ($previous->reply_to_message_id !== null && (int) $previous->reply_to_message_id !== (int) $guidance->id)
+            || ! preg_match('/^listo[.! ]*$/D', mb_strtolower(trim((string) $previous->body)))) {
+            return false;
+        }
+        $before_listo = $this->previous_conversation_message($ticket, $previous);
+        return $before_listo !== null && $before_listo->is($guidance)
+            && ($quoted === null || in_array($quoted, [(int) $guidance->id, (int) $previous->id], true));
+    }
+
+    private function previous_conversation_message(SupportTicket $ticket, SupportMessage $message): ?SupportMessage
+    {
+        $query = SupportMessage::where('support_ticket_id', $ticket->id)->where('id', '<', $message->id);
+        SupportMessage::apply_mensaje_real_conditions($query, 'support_messages');
+        return $query->orderByDesc('id')->first();
+    }
+
+    private function guidance_explains_cause(string $guidance): bool
+    {
         // Alcanza una causa concreta; reconocerla no exige haber editado ya la venta. Un
         // saludo o «lo verá Lucas» no son una explicación que pueda confirmar el cliente.
         return ! preg_match('/\b(?:no sabemos|no pude verificar|no pude comprobar|podria ser|puede que|quizas)\b/', $guidance)
-            && preg_match('/\b(?:campo|opcion|dato|observaciones|filtro|fecha|caja|sucursal|cliente|remito|venta|cuota|permiso|configuracion)\b[^.!?\n]{0,160}\b(?:esta|estan|quedo|quedaron|figura|aparece|es|son) (?:intern[oa]s?|ocult[oa]s?|vaci[oa]s?|guardad[oa]s?|cargad[oa]s?|seleccionad[oa]s?|marcad[oa]s?|tildad[oa]s?|activad[oa]s?|desactivad[oa]s?|apagad[oa]s?|encendid[oa]s?|incorrect[oa]s?|en)\b/', $guidance);
+            && preg_match('/\b(?:campo|opcion|dato|observaciones|filtro|fecha|caja|sucursal|cliente|remito|venta|cuota|permiso|configuracion|qr|cartel)\b[^.!?\n]{0,160}\b(?:esta|estan|quedo|quedaron|figura|aparece|es|son) (?:intern[oa]s?|ocult[oa]s?|vaci[oa]s?|guardad[oa]s?|cargad[oa]s?|seleccionad[oa]s?|marcad[oa]s?|tildad[oa]s?|activad[oa]s?|desactivad[oa]s?|apagad[oa]s?|encendid[oa]s?|incorrect[oa]s?|vinculad[oa]s?|en)\b/', $guidance);
     }
 
     private function fail(int $status, string $code, string $message): void

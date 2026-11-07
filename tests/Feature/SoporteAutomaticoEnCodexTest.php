@@ -524,6 +524,20 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         return [$ticket, SupportCodexUpgradeAgreement::where('support_ticket_id', $ticket->id)->firstOrFail(), $lease['lease_token']];
     }
 
+    public function test_cierre_confirmado_preserva_ticket_con_actualizacion_acordada(): void
+    {
+        [$ticket, $agreement, $lease_token] = $this->aceptar_propuesta_para_release();
+        $message = $this->inbound($ticket, 'Ya funciona, gracias.');
+        $claim = $this->postJson($this->base . '/tickets/' . $ticket->id . '/claim', [
+            'worker_id' => 'pc-lucas', 'expected_message_id' => $message->id, 'lease_token' => $lease_token,
+        ], $this->headers)->assertOk()->json();
+        $this->reply($ticket, $claim, ['action' => 'cerrar', 'confirmation_message_id' => $message->id])
+            ->assertStatus(409)->assertJsonPath('message', 'upgrade_in_progress: Hay una actualización acordada o en curso; el ticket debe seguir abierto hasta que termine.');
+        $this->reply($ticket, $claim, ['body' => 'De nada!'])->assertOk()
+            ->assertJsonPath('operation.action', 'responder')->assertJsonPath('ticket.status', 'open');
+        $this->assertNotNull($agreement->fresh()->accepted_at);
+    }
+
     private function release_claim_payload(SupportCodexUpgradeAgreement $agreement, Version $version): array
     {
         return ['agreement_id' => $agreement->id, 'draft_version_id' => $version->id, 'draft_version' => $version->version,
@@ -817,6 +831,63 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         ]);
         $this->reply($ticket, $claim)->assertOk()->assertJsonPath('operation.status', 'sent');
         $this->assertCount(0, $this->deliveries->bodies);
+    }
+
+    public function test_funcionalidad_registrada_cierra_al_iniciar_mision_sin_duplicar_la_respuesta(): void
+    {
+        $ticket = $this->ticket();
+        $this->inbound($ticket, 'Quiero agregar una opción para elegir el medio de pago cada vez.');
+        $claim = $this->claim($ticket);
+        $this->assertTrue($claim['ticket']['capabilities']['feature_handoff_closure']);
+        $mission = 'Agregar una opción para elegir el medio de pago en cada venta.';
+        $payload = [
+            'action' => 'escalar',
+            'mission' => $mission,
+            'body' => 'Dejé registrada la mejora para que Lucas pueda iniciarla.',
+            'close_on_mission_start' => true,
+        ];
+        $this->reply($ticket, $claim, $payload)->assertOk()
+            ->assertJsonPath('operation.status', 'sent')
+            ->assertJsonPath('ticket.status', 'open')
+            ->assertJsonPath('ticket.mission_lifecycle.status', 'pending');
+        $this->reply($ticket, $claim, array_merge($payload, ['close_on_mission_start' => false]))
+            ->assertStatus(409);
+        $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->firstOrFail();
+        $this->register_mission($ticket, $case, ['mission_hash' => str_repeat('0', 64)])->assertStatus(409);
+        $this->assertSame('open', $ticket->fresh()->status);
+        $first = $this->register_mission($ticket, $case)->assertOk()
+            ->assertJsonPath('ticket.status', 'closed')
+            ->assertJsonPath('ticket.state', 'closed')
+            ->assertJsonPath('ticket.mission_lifecycle.status', 'started')
+            ->assertJsonPath('ticket.mission_lifecycle.thread_id', 'tarea-mision-18');
+        Carbon::setTestNow(now()->addMinutes(2));
+        $this->register_mission($ticket, $case)->assertOk()
+            ->assertJsonPath('ticket.closed_at', $first->json('ticket.closed_at'));
+        $this->register_mission($ticket, $case, ['mission_thread_id' => 'otra-tarea'])->assertStatus(409);
+        $this->assertSame($mission, $case->fresh()->mission);
+        $this->assertCount(1, $this->deliveries->bodies);
+    }
+
+    public function test_iniciar_mejora_preserva_entrante_nuevo_y_replay_no_cierra(): void
+    {
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), [
+            'action' => 'escalar',
+            'mission' => 'Agregar una opción para elegir el medio de pago en cada venta.',
+            'body' => 'Dejé registrada la mejora para que Lucas pueda iniciarla.',
+            'close_on_mission_start' => true,
+        ])->assertOk();
+        $this->inbound($ticket, 'Me quedó otra duda, ¿cómo abro una caja nueva?');
+        $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->firstOrFail();
+        $this->register_mission($ticket, $case)->assertOk()
+            ->assertJsonPath('ticket.status', 'open')
+            ->assertJsonPath('ticket.mission_lifecycle.status', 'started');
+        $this->reply($ticket, $this->claim($ticket), [
+            'body' => 'Podés abrir una caja desde Tesorería.',
+        ])->assertOk();
+        $this->register_mission($ticket, $case)->assertOk()
+            ->assertJsonPath('ticket.status', 'open');
+        $this->assertCount(2, $this->deliveries->bodies);
     }
 
     public function test_registrar_mision_iniciada_es_idempotente_y_no_atiende_ni_resuelve(): void
@@ -1357,6 +1428,116 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         $this->assertSame('open', $ticket->fresh()->status);
     }
 
+    /** @dataProvider cierre_confirmado_de_masquito */
+    public function test_cierre_confirmado_masquito_tras_la_despedida_sin_duplicar(string $action, bool $delivered): void
+    {
+        $ticket = $this->ticket();
+        $guidance = 'Sí. En Devoluciones, dejá apagado Regresar al stock y prendé Generar movimiento en la cuenta corriente.';
+        $this->reply($ticket, $this->claim($ticket), ['body' => $guidance])->assertOk();
+        $message = $this->inbound($ticket, 'Perfecto Martín salio todo de 10 gracias seguí durmiendo nomás');
+        $claim = $this->claim($ticket);
+        $payload = ['action' => $action, 'body' => 'De nada Gonzalo!'];
+        if ($action === 'cerrar') {
+            $payload['confirmation_message_id'] = $message->id;
+        }
+        $this->deliveries->success = $delivered;
+        $response = $this->reply($ticket, $claim, $payload)->assertOk()
+            ->assertJsonPath('operation.action', 'cerrar')
+            ->assertJsonPath('operation.status', $delivered ? 'sent' : 'unknown')
+            ->assertJsonPath('ticket.status', $delivered ? 'closed' : 'open');
+        $this->reply($ticket, $claim, $payload)->assertOk()
+            ->assertJsonPath('operation.id', $response->json('operation.id'))
+            ->assertJsonPath('operation.status', $response->json('operation.status'));
+        $this->assertSame([$guidance, 'De nada Gonzalo!'], $this->deliveries->bodies);
+        $this->assertSame(['open', 'open'], $this->deliveries->ticket_states_during_delivery);
+        $this->assertSame($delivered ? 'closed' : 'manual_review', SupportCodexCase::where('support_ticket_id', $ticket->id)->value('state'));
+    }
+
+    public function cierre_confirmado_de_masquito(): array
+    {
+        return [
+            'instrucción expresa' => ['cerrar', true],
+            'despedida como respuesta' => ['responder', true],
+            'despedida de entrega incierta' => ['responder', false],
+        ];
+    }
+
+    /** @dataProvider respuestas_sin_cierre_confirmado */
+    public function test_cierre_confirmado_no_promueve_cortesia_con_trabajo_pendiente(string $inbound, string $body): void
+    {
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), ['body' => 'En Ventas abrí el comprobante.'])->assertOk();
+        $this->inbound($ticket, $inbound);
+        $this->reply($ticket, $this->claim($ticket), ['body' => $body])->assertOk()
+            ->assertJsonPath('operation.action', 'responder')->assertJsonPath('ticket.status', 'open');
+        $this->assertCount(2, $this->deliveries->bodies);
+    }
+
+    public function respuestas_sin_cierre_confirmado(): array
+    {
+        return [
+            'agradecimiento solo' => ['Gracias', 'De nada Gonzalo!'],
+            'prueba futura' => ['Gracias, lo pruebo mañana', 'De nada Gonzalo!'],
+            'dificultad vigente' => ['Salió todo de 10, pero sigue sin imprimir', 'De nada Gonzalo!'],
+            'excepción excepto' => ['Salió todo de 10 excepto el QR', 'De nada Gonzalo!'],
+            'excepción salvo' => ['Salió todo de 10 salvo al imprimir', 'De nada Gonzalo!'],
+            'consulta adicional' => ['Salió todo de 10. Necesito que me ayudes con el QR', 'De nada Gonzalo!'],
+            'respuesta con pregunta' => ['Salió todo de 10, gracias', 'De nada Gonzalo! Querés que revisemos la otra caja?'],
+        ];
+    }
+
+    public function test_cierre_confirmado_fr_total_conserva_mision_iniciada_y_su_vinculo(): void
+    {
+        $ticket = $this->ticket();
+        $mission = 'Permitir elegir el medio de pago al iniciar una venta.';
+        $this->reply($ticket, $this->claim($ticket), ['action' => 'escalar', 'mission' => $mission])->assertOk();
+        $this->inbound($ticket, 'Sigo con problemas con los QR. El único que me funciona es el del mostrador dos.');
+        $guidance = 'En Mostrador 4, el cartel está vinculado a MOSTRADOR 4 EFECTIVO, pero Vender manda el cobro a MOSTRADOR 4 QR MERCADO PAGO. '
+            . 'Por eso termina mostrando el QR general. Creá el QR para la caja de Mercado Pago. '
+            . 'El cambio del medio de pago sigue en curso por separado.';
+        $this->reply($ticket, $this->claim($ticket), ['body' => $guidance])->assertOk();
+        $this->inbound($ticket, 'Listo');
+        $message = $this->inbound($ticket, 'Me di cuenta el error');
+        $claim = $this->claim($ticket);
+        $payload = ['action' => 'cerrar', 'confirmation_message_id' => $message->id, 'body' => 'De nada Pablo!'];
+        $this->reply($ticket, $claim, $payload)->assertStatus(409);
+        $this->assertSame('open', $ticket->fresh()->status);
+        $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->firstOrFail();
+        $this->register_mission($ticket, $case)->assertOk()->assertJsonPath('ticket.mission_lifecycle.status', 'started');
+        $this->reply($ticket, $claim, $payload)->assertOk()
+            ->assertJsonPath('operation.status', 'sent')->assertJsonPath('ticket.status', 'closed')
+            ->assertJsonPath('ticket.mission_lifecycle.thread_id', 'tarea-mision-18');
+        $this->assertSame($mission, $case->fresh()->mission);
+        $this->assertSame('De nada Pablo!', end($this->deliveries->bodies));
+    }
+
+    public function test_cierre_confirmado_fr_total_no_toma_listo_separado_por_otra_consulta(): void
+    {
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), ['body' => 'El cartel está vinculado a la caja de efectivo.'])->assertOk();
+        $this->inbound($ticket, 'Listo');
+        $this->inbound($ticket, 'Ahora necesito que me ayudes con stock');
+        $message = $this->inbound($ticket, 'Me di cuenta el error');
+        $this->reply($ticket, $this->claim($ticket), ['action' => 'cerrar', 'confirmation_message_id' => $message->id])
+            ->assertStatus(422)->assertJsonPath('message', 'confirmation_required: El mensaje no confirma de forma suficiente que el caso quedó resuelto.');
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->assertCount(1, $this->deliveries->bodies);
+    }
+
+    public function test_cierre_confirmado_fr_total_no_toma_una_confirmacion_citada_a_otro_tema(): void
+    {
+        $ticket = $this->ticket();
+        $other = $this->inbound($ticket, 'Cómo se configura el medio de pago?');
+        $this->reply($ticket, $this->claim($ticket), ['body' => 'El cartel está vinculado a la caja de efectivo.'])->assertOk();
+        $this->inbound($ticket, 'Listo');
+        $message = $this->inbound($ticket, 'Me di cuenta el error');
+        $message->update(['reply_to_message_id' => $other->id]);
+        $this->reply($ticket, $this->claim($ticket), ['action' => 'cerrar', 'confirmation_message_id' => $message->id])
+            ->assertStatus(422);
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->assertCount(1, $this->deliveries->bodies);
+    }
+
     /** @dataProvider confirmaciones_contextuales */
     public function test_confirmacion_breve_reconoce_la_pregunta_y_cierra_despues_del_envio(string $question, string $answer): void
     {
@@ -1467,7 +1648,7 @@ class SoporteAutomaticoEnCodexTest extends TestCase
 
     public function test_resultado_explicito_actual_o_pasado_no_depende_de_formula_masculina(): void
     {
-        foreach (['Ya quedó resuelta, gracias.', 'Sí, lo arreglamos.', 'Ya lo solucioné.'] as $answer) {
+        foreach (['Ya quedó resuelta, gracias.', 'Ya quedó resuelta la consulta, gracias.', 'Sí, lo arreglamos.', 'Ya lo solucioné.'] as $answer) {
             $ticket = $this->ticket();
             $message = $this->inbound($ticket, $answer);
             $claim = $this->claim($ticket);
