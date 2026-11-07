@@ -13,9 +13,13 @@ use Illuminate\Support\Facades\Mail;
 class SupportCodexHealthService
 {
     const KEY = 'support_codex_monitor_health';
+    const CLOSED_KEY_PREFIX = self::KEY . '.closed.';
     const RECIPIENT = 'lucasgonzalez5500@gmail.com';
     const TIMEOUT_SECONDS = 300;
     const REMINDER_SECONDS = 21600;
+    const RECOVERY_SECONDS = 900;
+    const HEALTHY_SECONDS = 180;
+    const RECOVERY_REASONS = ['monitor_stale', 'poll_error', 'app_error', 'queue_stale', 'drain_timeout', 'restart_failed', 'recovery_timeout', 'monitor_recovered'];
     const TIMEZONE = 'America/Argentina/Buenos_Aires';
     const RESUME_HOUR = 7;
     const ERROR_CODES = ['starting', 'poll_stale', 'poll_error', 'queue_stale', 'app_error', 'dispatch_unknown', 'monitor_error'];
@@ -24,6 +28,10 @@ class SupportCodexHealthService
     {
         return $this->locked(function (array $state) use ($data) {
             $now = now()->getTimestamp();
+            if (($data['source'] ?? 'monitor') === 'supervisor') {
+                return $this->supervisor($state, $data, $now);
+            }
+            $state['monitor_sequence'] = (int) ($state['monitor_sequence'] ?? 0) + 1;
             $state['armed_at'] = $state['armed_at'] ?? $now;
             $state['last_seen_at'] = $now;
             $state['status'] = $data['status'] ?? 'ok';
@@ -35,8 +43,66 @@ class SupportCodexHealthService
             } else {
                 $state['first_error_at'] = $state['first_error_at'] ?? $now;
             }
-            return $state;
+            return $this->close_recovered_incident($state, $now);
         });
+    }
+
+    private function healthy(array $state, int $now): bool
+    {
+        return ($state['status'] ?? '') === 'ok' && isset($state['last_success_at'])
+            && $now - (int) $state['last_success_at'] < self::HEALTHY_SECONDS;
+    }
+
+    private function close_recovered_incident(array $state, int $now): array
+    {
+        $incident = $state['supervisor_incident'] ?? null;
+        if ($incident && $this->healthy($state, $now)
+            && (int) ($state['monitor_sequence'] ?? 0) > (int) $incident['monitor_sequence']) {
+            // La secuencia distingue también dos pedidos recibidos dentro del mismo segundo.
+            // Una fila por UUID: la fila de salud no crece hasta desbordar su columna TEXT.
+            // Se escribe bajo el mismo lock y transacción que el cierre del incidente.
+            DB::table('admin_settings')->insertOrIgnore(['key' => self::CLOSED_KEY_PREFIX . $incident['id'],
+                'value' => '1', 'created_at' => now(), 'updated_at' => now()]);
+            $state['supervisor_incident'] = null;
+            $state['pending_supervisor_recovery'] = ! empty($state['alert_sent_at']);
+            $state['alert_sent_at'] = null;
+            $state['incident_started_at'] = null;
+        }
+        return $state;
+    }
+
+    private function supervisor(array $state, array $data, int $now): array
+    {
+        $state = $this->close_recovered_incident($state, $now);
+        $id = strtolower($data['incident_id']);
+        // No expirar ni truncar: un UUID retirado nunca puede volver a abrir una avería.
+        if (DB::table('admin_settings')->where('key', self::CLOSED_KEY_PREFIX . $id)->exists()) {
+            return $state;
+        }
+        $incident = $state['supervisor_incident'] ?? null;
+        if ($incident && $incident['id'] !== $id) {
+            abort(409, 'Ya existe una recuperación en curso.');
+        }
+        if (! $incident) {
+            if ($data['recovery_state'] !== 'attempting') {
+                abort(409, 'La recuperación debe comenzar con attempting.');
+            }
+            $incident = ['id' => $id, 'started_at' => $now,
+                'monitor_sequence' => (int) ($state['monitor_sequence'] ?? 0), 'attempt' => 0];
+            $state['pending_supervisor_recovery'] = false;
+        }
+        if ((int) $data['attempt'] < (int) $incident['attempt']) {
+            return $state;
+        }
+        // Un fallo terminal no vuelve a esperar por un reintento de transporte tardío.
+        if (($incident['state'] ?? '') !== 'failed') {
+            $incident['state'] = $data['recovery_state'];
+            $incident['reason_code'] = $data['reason_code'];
+            $incident['attempt'] = (int) $data['attempt'];
+        }
+        $state['supervisor_incident'] = $incident;
+        $state['last_supervisor_seen_at'] = $now;
+        return $state;
     }
 
     public function test_mail(): void
@@ -60,7 +126,7 @@ class SupportCodexHealthService
             return ['result' => 'disabled'];
         }
         return $this->locked(function (array $state) {
-            if (empty($state['armed_at'])) {
+            if (empty($state['armed_at']) && empty($state['supervisor_incident'])) {
                 return $state;
             }
             $local = now(self::TIMEZONE);
@@ -70,15 +136,25 @@ class SupportCodexHealthService
             }
             $now = $local->getTimestamp();
             $resumeAt = $resume->getTimestamp();
-            $silent = $now - max($resumeAt, (int) $state['last_seen_at']) >= self::TIMEOUT_SECONDS;
+            $silent = $now - max($resumeAt, (int) ($state['last_seen_at'] ?? 0)) >= self::TIMEOUT_SECONDS;
             $failing = ! empty($state['first_error_at'])
                 && $now - max($resumeAt, (int) $state['first_error_at']) >= self::TIMEOUT_SECONDS;
             $unhealthy = $silent || $failing;
+            $reason = $silent ? 'sin_pulso' : ($state['error_code'] ?? 'monitor_error');
+            $incident = $state['supervisor_incident'] ?? null;
+            if ($incident) {
+                $failed = $incident['state'] === 'failed';
+                $expired = $now - max($resumeAt, (int) $incident['started_at']) >= self::RECOVERY_SECONDS;
+                // Al reanudar a las 07:00 hay un presupuesto nuevo; los reportes no lo renuevan.
+                $unhealthy = ($failed || $expired) && $now - $resumeAt >= self::TIMEOUT_SECONDS;
+                $reason = $failed ? 'recovery_failed' : 'recovery_unverified';
+            }
             $kind = null;
             if ($unhealthy && (empty($state['alert_sent_at']) || $now - (int) $state['alert_sent_at'] >= self::REMINDER_SECONDS)) {
                 $kind = empty($state['alert_sent_at']) ? 'failure' : 'reminder';
-            } elseif (! $unhealthy && ($state['status'] ?? '') === 'ok' && ! empty($state['alert_sent_at'])
-                && (int) $state['last_seen_at'] >= $resumeAt) {
+            } elseif (! $incident && ! $unhealthy && ($state['status'] ?? '') === 'ok'
+                && (! empty($state['alert_sent_at']) || (! empty($state['pending_supervisor_recovery']) && $this->healthy($state, $now)))
+                && (int) ($state['last_seen_at'] ?? 0) >= $resumeAt) {
                 $kind = 'recovery';
             }
             // Una falla del SMTP se reintenta al minuto siguiente, sin consumir el aviso.
@@ -87,10 +163,12 @@ class SupportCodexHealthService
                     $this->send_mail(new SupportCodexHealthMail($kind, [
                         'last_seen_at' => $this->date($state['last_seen_at'] ?? null),
                         'last_success_at' => $this->date($state['last_success_at'] ?? null),
-                        'reason' => $silent ? 'sin_pulso' : ($state['error_code'] ?? 'monitor_error'),
+                        'reason' => $reason,
+                        'recovery_reason' => $incident['reason_code'] ?? null,
                     ]));
                     $state['mail_error_at'] = null;
                     if ($kind === 'recovery') {
+                        $state['pending_supervisor_recovery'] = false;
                         $state['alert_sent_at'] = null;
                         $state['incident_started_at'] = null;
                     } else {

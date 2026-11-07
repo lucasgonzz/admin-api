@@ -5,7 +5,15 @@ Este es un correo de prueba de la vigilancia del monitor. No informa una caída 
 @elseif ($kind === 'recovery')
 El monitor volvió a informar una consulta y un circuito local saludables. Esto no certifica por sí solo que todos los tickets hayan sido respondidos.
 @else
+@if (($health['reason'] ?? '') === 'recovery_failed')
+El supervisor intentó recuperar el monitor y no pudo confirmar que volviera a funcionar. Los tickets pueden estar quedando sin respuesta.
+Motivo de la recuperación: {{ $health['recovery_reason'] ?? 'sin registro' }}.
+@elseif (($health['reason'] ?? '') === 'recovery_unverified')
+Venció el plazo de recuperación sin una confirmación saludable del monitor. No se pudo verificar el resultado del supervisor; la PC o su conexión pueden no estar disponibles. Este aviso no afirma que la reparación haya fallado.
+@else
 El monitor de soporte lleva al menos cinco minutos sin poder confirmar que consulta y atiende normalmente. Los tickets pueden estar quedando sin respuesta.
+No se recibió una recuperación supervisada confirmada para esta caída.
+@endif
 
 Motivo técnico: {{ $health['reason'] }}.
 @if ($kind === 'reminder')

@@ -37,13 +37,19 @@ class ClaudeSupportCodexController extends Controller
     public function health(Request $request, \App\Services\SupportCodexHealthService $service)
     {
         $data = $request->validate([
+            'source' => 'sometimes|in:monitor,supervisor',
+            'incident_id' => 'required_if:source,supervisor|uuid',
+            'recovery_state' => 'required_if:source,supervisor|in:attempting,failed,recovered',
+            'reason_code' => 'required_if:source,supervisor|in:' . implode(',', \App\Services\SupportCodexHealthService::RECOVERY_REASONS),
+            'attempt' => 'required_if:source,supervisor|integer|min:0|max:100',
             'status' => 'sometimes|in:ok,error',
             'error_code' => 'nullable|in:' . implode(',', \App\Services\SupportCodexHealthService::ERROR_CODES),
             'monitor_version' => ['nullable', 'string', 'max:40', 'regex:/^[A-Za-z0-9_.-]+$/'],
         ]);
         $state = $service->heartbeat($data);
         return response()->json(['accepted' => true, 'server_time' => now()->toIso8601String(),
-            'last_success_at' => $state['last_success_at'] ?? null]);
+            'last_success_at' => $state['last_success_at'] ?? null,
+            'capabilities' => ['supervisor_recovery_v1' => true]]);
     }
 
     public function pending(Request $request, SupportCodexService $service)
