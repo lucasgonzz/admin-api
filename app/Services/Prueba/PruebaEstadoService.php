@@ -64,7 +64,7 @@ class PruebaEstadoService
             'etapa'            => self::texto_de_etapa((string) $instancia->etapa),
             'progreso'         => max(0, min(100, (int) $instancia->progreso)),
             'url_ingreso'      => null,
-            'video_url'        => PruebaSettings::video_url(),
+            'video_url'        => PruebaSettings::video_espera_url(),
             'whatsapp_soporte' => PruebaSettings::whatsapp_soporte(),
             'mensaje'          => null,
         ];

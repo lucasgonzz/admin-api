@@ -22,8 +22,14 @@ class PruebaSettings
     /** Días después del vencimiento sin contratar tras los que `pruebas:borrar` borra la instancia. */
     const KEY_DIAS_GRACIA_BORRADO = 'prueba_dias_gracia_borrado';
 
-    /** URL del video de bienvenida (viaja en C1 y en C6). */
+    /** URL anterior, conservada como respaldo para las instalaciones ya configuradas. */
     const KEY_VIDEO_URL = 'prueba_video_url';
+
+    /** Historia durante el armado, en la landing (C6). */
+    const KEY_VIDEO_ESPERA_URL = 'prueba_video_espera_url';
+
+    /** Bienvenida corta al primer ingreso del negocio (C1). */
+    const KEY_VIDEO_BIENVENIDA_URL = 'prueba_video_bienvenida_url';
 
     /** WhatsApp de soporte que ve el negocio en la pantalla de vencimiento (viaja en C1 y en C6). */
     const KEY_WHATSAPP_SOPORTE = 'prueba_whatsapp_soporte';
@@ -60,6 +66,24 @@ class PruebaSettings
     public static function video_url(): string
     {
         return trim((string) AdminSetting::get(self::KEY_VIDEO_URL, ''));
+    }
+
+    public static function video_espera_url(): string
+    {
+        return self::video_del_momento(self::KEY_VIDEO_ESPERA_URL);
+    }
+
+    public static function video_bienvenida_url(): string
+    {
+        return self::video_del_momento(self::KEY_VIDEO_BIENVENIDA_URL);
+    }
+
+    private static function video_del_momento(string $key): string
+    {
+        $url = trim((string) AdminSetting::get($key, ''));
+
+        // Separar un destino no debe dejar sin video al otro ni exigir migrar la configuración anterior.
+        return $url !== '' ? $url : self::video_url();
     }
 
     public static function whatsapp_soporte(): string

@@ -171,7 +171,7 @@ class PruebaDemoSetupService
             'prueba'   => [
                 'dias'             => (int) ($client->trial_days ?: PruebaSettings::dias_default()),
                 'vence_at'         => $vence_at->toIso8601String(),
-                'video_url'        => PruebaSettings::video_url(),
+                'video_url'        => PruebaSettings::video_bienvenida_url(),
                 'whatsapp_soporte' => PruebaSettings::whatsapp_soporte(),
             ],
         ];
