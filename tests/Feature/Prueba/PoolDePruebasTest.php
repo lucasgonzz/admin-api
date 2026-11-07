@@ -192,5 +192,25 @@ class PoolDePruebasTest extends BaseDePruebaGratuita
         $this->crear_instancia_libre('prueba-03', 900300);
 
         $this->assertSame('prueba-02', app(PruebaPoolService::class)->proximo_nombre_libre());
+        $borrada->refresh();
+        $this->assertMatchesRegularExpression('/^prueba-02~[0-9a-f]{6}$/', $borrada->nombre);
+        $historia = $borrada->getAttributes();
+
+        /* El reciclado antes tiraba abajo el listado completo al construir un host del nombre historico. */
+        $respuesta = $this->actingAs($this->admin, 'sanctum')->getJson('/api/admin/prueba/instancias')
+            ->assertStatus(200)->assertJsonCount(3, 'instancias')->assertJsonPath('resumen.libres', 2);
+        $fila_historica = collect($respuesta->json('instancias'))->firstWhere('id', $borrada->id);
+        $this->assertSame($borrada->nombre, $fila_historica['nombre']);
+        $this->assertNull($fila_historica['url']);
+
+        /* El host reciclado le pertenece solo a la nueva instancia, nunca al registro borrado. */
+        $nueva = $this->crear_instancia_libre('prueba-02', 900400);
+        $respuesta = $this->getJson('/api/admin/prueba/instancias')
+            ->assertStatus(200)->assertJsonCount(4, 'instancias')->assertJsonPath('resumen.libres', 3);
+        $filas = collect($respuesta->json('instancias'))->keyBy('id');
+        $this->assertSame('https://prueba-02.comerciocity.com', $filas[$nueva->id]['url']);
+        $this->assertNull($filas[$borrada->id]['url']);
+        $this->assertSame(TrialInstance::ESTADO_BORRADA, $filas[$borrada->id]['estado']);
+        $this->assertSame($historia, $borrada->fresh()->getAttributes());
     }
 }

@@ -212,7 +212,10 @@ class PruebaInstanciaController extends Controller
             'estado'        => $instancia->estado,
             'dormida'       => $instancia->esta_dormida(),
             'alias_slug'    => $instancia->alias_slug,
-            'url'           => $instancia->alias_slug ? 'https://' . PruebaNombres::hosts_del_slug((string) $instancia->alias_slug)['erp_spa'] : 'https://' . $instancia->hosts_del_pool()['erp_spa'],
+            /* La borrada conserva historia: su nombre puede haberse reciclado para otro negocio. */
+            'url'           => $instancia->estado === TrialInstance::ESTADO_BORRADA ? null : (
+                $instancia->alias_slug ? 'https://' . PruebaNombres::hosts_del_slug((string) $instancia->alias_slug)['erp_spa'] : 'https://' . $instancia->hosts_del_pool()['erp_spa']
+            ),
             'version'       => $instancia->version,
             'ecommerce_version' => $instancia->ecommerce_version,
             'user_id'       => $instancia->user_id,
