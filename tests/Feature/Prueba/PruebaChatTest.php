@@ -88,6 +88,65 @@ class PruebaChatTest extends TestCase
         $this->postJson('/api/prueba-chat/videos/seleccionar', [], $headers)->assertNotFound();
     }
 
+    public function test_manual_exige_ambas_credenciales_de_la_prueba_vigente(): void
+    {
+        [$lead, $client, $instancia] = $this->prueba();
+        [, $otro] = $this->prueba();
+        $manual = $this->mock(ManualRepositoryService::class);
+        $manual->shouldNotReceive('file_list_cacheada');
+        $manual->shouldNotReceive('get_file');
+
+        $url = '/api/prueba-chat/manual';
+        $this->getJson($url, ['X-Demo-Eventos-Key' => $lead->demo_eventos_token])->assertUnauthorized();
+        $this->getJson($url, ['X-Admin-Api-Key' => $client->inbound_api_key])->assertUnauthorized();
+        $this->getJson($url, $this->headers($lead, $otro))->assertUnauthorized();
+        $this->getJson($url.'?capacidad=1', $this->headers($lead, $client))->assertOk()
+            ->assertExactJson(['disponible' => true]);
+
+        $instancia->update(['dormida_at' => now()]);
+        $this->getJson($url.'?ruta=manual_sistema/README.md', $this->headers($lead, $client))->assertUnauthorized();
+    }
+
+    public function test_manual_devuelve_indice_y_contenido_sin_abrir_una_conversacion(): void
+    {
+        [$lead, $client] = $this->prueba();
+        $ruta = 'manual_sistema/compras/escaneo.md';
+        $contenido = str_repeat('á', 18001);
+        $this->mock(ManualRepositoryService::class, function ($mock) use ($ruta, $contenido) {
+            $mock->shouldReceive('file_list_cacheada')->once()->andReturn('- '.$ruta);
+            $mock->shouldReceive('get_file')->once()->with($ruta)->andReturn($contenido);
+        });
+        $headers = $this->headers($lead, $client);
+        $url = '/api/prueba-chat/manual';
+
+        $this->getJson($url, $headers)->assertOk()->assertExactJson(['disponible' => true, 'indice' => '- '.$ruta]);
+        $this->getJson($url.'?'.http_build_query(['ruta' => $ruta]), $headers)->assertOk()
+            ->assertExactJson(['disponible' => true, 'contenido' => mb_substr($contenido, 0, 18000)]);
+        $this->assertDatabaseMissing('demo_chat_conversaciones', ['prueba_cliente_id' => $client->id]);
+    }
+
+    public function test_manual_rechaza_rutas_invalidas_y_no_expone_errores_del_repositorio(): void
+    {
+        [$lead, $client] = $this->prueba();
+        $ruta = 'manual_sistema/compras/faltante.md';
+        $this->mock(ManualRepositoryService::class, function ($mock) use ($ruta) {
+            $mock->shouldReceive('file_list_cacheada')->once()->andReturn(ManualRepositoryService::FALLBACK_LISTA_NO_DISPONIBLE);
+            $mock->shouldReceive('get_file')->once()->with($ruta)->andThrow(new \RuntimeException('Detalle privado de GitHub'));
+        });
+        $headers = $this->headers($lead, $client);
+        $url = '/api/prueba-chat/manual';
+
+        foreach (['contexto/contexto_master.md', 'manual_sistema/../contexto/contexto_master.md',
+            'manual_sistema/%2e%2e/contexto/contexto_master.md', 'manual_sistema/README.txt', ['README.md']] as $invalida) {
+            $this->getJson($url.'?'.http_build_query(['ruta' => $invalida]), $headers)
+                ->assertStatus(422)->assertJsonValidationErrors('ruta');
+        }
+
+        $this->getJson($url, $headers)->assertOk()->assertExactJson(['disponible' => false]);
+        $this->getJson($url.'?'.http_build_query(['ruta' => $ruta]), $headers)
+            ->assertOk()->assertExactJson(['disponible' => false]);
+    }
+
     public function test_responde_con_el_manual_y_no_activa_guias_aunque_el_payload_las_pida(): void
     {
         Queue::fake();

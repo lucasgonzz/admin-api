@@ -255,6 +255,7 @@ Route::withoutMiddleware('throttle:api')
     ->middleware(['admin.inbound.strict', \App\Http\Middleware\PruebaChatKey::class, 'throttle:prueba-chat'])
     ->prefix('prueba-chat')->group(function () {
         Route::get('/', [\App\Http\Controllers\PruebaChatController::class, 'index']);
+        Route::get('manual', [\App\Http\Controllers\PruebaChatController::class, 'manual']);
         Route::post('iniciar', [\App\Http\Controllers\PruebaChatController::class, 'iniciar']);
         Route::post('mensajes', [\App\Http\Controllers\PruebaChatController::class, 'mensaje']);
     });
