@@ -26,15 +26,15 @@ No hay editor de estos videos en la pantalla `/pruebas` ni un endpoint genérico
 
 C6 lee la URL de espera en cada consulta: el cambio de ese ajuste alcanza a los seguimientos existentes.
 
-C1 copia la bienvenida a `prueba_configs.video_url` en Empresa durante el alta. Cambiar el ajuste de Admin no actualiza esa copia. Las pruebas ya asignadas requieren una actualización puntual si se quiere que usen la nueva bienvenida.
+C1 copia la bienvenida a `prueba_config.video_url` en Empresa durante el alta. Cambiar el ajuste de Admin no actualiza esa copia. Las pruebas ya asignadas requieren una actualización puntual si se quiere que usen la nueva bienvenida.
 
 **No volver a disparar `demo-setup`, reintentar el alta ni llamar `PruebaHelper::activar_desde_payload()` para actualizar un video.** El setup puede reconstruir la base; el helper también reinicia `modal_visto_at`, `importacion_origen` y `semilla_borrada_at`, además de modificar vencimiento. Ninguno es una migración segura de URL.
 
 Procedimiento de actualización puntual, a ejecutar sólo con autorización de la operación y respaldo verificado:
 
-1. Enumerar las instancias de prueba asignadas de Admin y sus clientes, sin incluir clientes contratados ni demos por turno. Resolver el dueño real en cada instancia y verificar que exista exactamente una fila `prueba_configs` para él.
+1. Enumerar las instancias de prueba asignadas de Admin y sus clientes, sin incluir clientes contratados ni demos por turno. Resolver el dueño real en cada instancia y verificar que exista exactamente una fila `prueba_config` para él.
 2. Leer y guardar la fila completa previa y el vencimiento del dueño en un respaldo privado. No registrar claves ni tokens. Clasificar la URL actual: vacía, respaldo anterior reconocido o personalizada. Una personalizada no se reemplaza automáticamente.
-3. En transacción, actualizar únicamente `prueba_configs.video_url` con un filtro por `id`, `owner_id` y **valor anterior exacto**. Exigir una fila afectada; si el valor cambió desde la lectura, abortar esa instancia. No usar `updateOrCreate`, no insertar una configuración inexistente, no tocar los demás campos ni extender el período.
+3. En transacción, actualizar únicamente `prueba_config.video_url` con un filtro por `id`, `owner_id` y **valor anterior exacto**. Exigir una fila afectada; si el valor cambió desde la lectura, abortar esa instancia. No usar `updateOrCreate`, no insertar una configuración inexistente, no tocar los demás campos ni extender el período.
 4. Releer la fila y comparar todas las columnas salvo `video_url` contra el respaldo. Confirmar que siguen iguales `modal_visto_at`, origen de importación, semilla, días y vencimiento. Un modal ya visto no debe reaparecer.
 5. Reversión equivalente: restaurar sólo `video_url` si todavía coincide con la nueva URL. Nunca pisar un cambio posterior.
 
