@@ -64,7 +64,10 @@ class PruebaEstadoService
             'etapa'            => self::texto_de_etapa((string) $instancia->etapa),
             'progreso'         => max(0, min(100, (int) $instancia->progreso)),
             'url_ingreso'      => null,
-            'video_url'        => PruebaSettings::video_espera_url(),
+            // Un proceso persistente puede haber cargado PruebaSettings antes del cambio de codigo.
+            'video_url'        => method_exists(PruebaSettings::class, 'video_espera_url')
+                ? PruebaSettings::video_espera_url()
+                : PruebaSettings::video_url(),
             'whatsapp_soporte' => PruebaSettings::whatsapp_soporte(),
             'mensaje'          => null,
         ];

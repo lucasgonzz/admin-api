@@ -171,7 +171,10 @@ class PruebaDemoSetupService
             'prueba'   => [
                 'dias'             => (int) ($client->trial_days ?: PruebaSettings::dias_default()),
                 'vence_at'         => $vence_at->toIso8601String(),
-                'video_url'        => PruebaSettings::video_bienvenida_url(),
+                // Un proceso persistente puede haber cargado PruebaSettings antes del cambio de codigo.
+                'video_url'        => method_exists(PruebaSettings::class, 'video_bienvenida_url')
+                    ? PruebaSettings::video_bienvenida_url()
+                    : PruebaSettings::video_url(),
                 'whatsapp_soporte' => PruebaSettings::whatsapp_soporte(),
             ],
         ];
