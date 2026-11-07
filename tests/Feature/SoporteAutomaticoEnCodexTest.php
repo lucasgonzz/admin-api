@@ -855,14 +855,17 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->firstOrFail();
         $this->register_mission($ticket, $case, ['mission_hash' => str_repeat('0', 64)])->assertStatus(409);
         $this->assertSame('open', $ticket->fresh()->status);
-        $first = $this->register_mission($ticket, $case)->assertOk()
+        $this->register_mission($ticket, $case)->assertOk()
             ->assertJsonPath('ticket.status', 'closed')
             ->assertJsonPath('ticket.state', 'closed')
             ->assertJsonPath('ticket.mission_lifecycle.status', 'started')
             ->assertJsonPath('ticket.mission_lifecycle.thread_id', 'tarea-mision-18');
+        $closed_at = $ticket->fresh()->closed_at;
+        $this->assertNotNull($closed_at);
         Carbon::setTestNow(now()->addMinutes(2));
         $this->register_mission($ticket, $case)->assertOk()
-            ->assertJsonPath('ticket.closed_at', $first->json('ticket.closed_at'));
+            ->assertJsonPath('ticket.status', 'closed');
+        $this->assertSame($closed_at->toIso8601String(), $ticket->fresh()->closed_at->toIso8601String());
         $this->register_mission($ticket, $case, ['mission_thread_id' => 'otra-tarea'])->assertStatus(409);
         $this->assertSame($mission, $case->fresh()->mission);
         $this->assertCount(1, $this->deliveries->bodies);
