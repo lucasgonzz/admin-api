@@ -295,8 +295,8 @@ class ClaudeSupportCodexController extends Controller
     }
 
     /**
-     * Reenvía el Excel del ticket (o uno en base64) a la instancia del cliente en prueba (C4). Ver
-     * `PruebaImportacionService`.
+     * Reenvía el Excel a la instancia del cliente. El modo de soporte para un activo requiere
+     * adjunto del ticket y una reserva vigente. Se conserva el modo anterior de la prueba.
      *
      * Body: `attachment_id` (adjunto de ESTE ticket) o `file {filename, content_base64}`; opcionales `model`
      * (article|client|provider), `provider_id`, `origen` y `pdf_attachment_id` (adjunto original cuando `file` deriva de un PDF).
@@ -304,7 +304,7 @@ class ClaudeSupportCodexController extends Controller
      * @return \Illuminate\Http\JsonResponse 200 aceptado/analizado_sin_corrida/rechazado · 404 no_es_prueba ·
      *                                       409 ticket_cerrado/sin_api_key/sin_url · 422 · 502 no_responde
      */
-    public function import_excel(Request $request, $id, PruebaImportacionService $service)
+    public function import_excel(Request $request, $id, PruebaImportacionService $service, SupportCodexService $soporte)
     {
         $data = $request->validate([
             'attachment_id' => 'sometimes|nullable|integer|min:1',
@@ -315,9 +315,31 @@ class ClaudeSupportCodexController extends Controller
             'model' => 'sometimes|nullable|in:article,client,provider',
             'provider_id' => 'sometimes|nullable|integer|min:1',
             'origen' => 'sometimes|nullable|string|max:40',
+            'automatizar_soporte' => 'sometimes|boolean',
+            'lease_token' => 'required_if:automatizar_soporte,true|nullable|string|min:32|max:128',
+            'expected_message_id' => 'required_if:automatizar_soporte,true|nullable|integer|min:1',
         ]);
-        $ticket = SupportTicket::findOrFail($id);
-        $resultado = $service->importar_excel($ticket, $data);
+        if ($request->boolean('automatizar_soporte')) {
+            $resultado = DB::transaction(function () use ($id, $data, $service, $soporte) {
+                $ticket = SupportTicket::lockForUpdate()->findOrFail($id);
+                $puerta = $service->puerta_activo($ticket);
+                if ($puerta !== null) {
+                    return $puerta;
+                }
+
+                abort_unless(isset($data['lease_token'], $data['expected_message_id']), 422, 'Hace falta la reserva del turno.');
+                $soporte->assert_current($ticket, $data + ['action' => 'responder']);
+                $mensaje = SupportMessage::find($data['expected_message_id']);
+                if (!$service->es_entrante_del_dueno($ticket, $mensaje)) {
+                    return ['estado' => 'archivo_sin_remitente_verificado',
+                        'mensaje' => 'Reenviá el Excel desde el WhatsApp registrado del dueño para poder usarlo.'];
+                }
+
+                return $service->importar_excel($ticket, $data, true);
+            });
+        } else {
+            $resultado = $service->importar_excel(SupportTicket::findOrFail($id), $data);
+        }
         return response()->json($resultado, $this->http_de_la_importacion($resultado['estado']));
     }
 
@@ -335,10 +357,11 @@ class ClaudeSupportCodexController extends Controller
         $resultado = DB::transaction(function () use ($id, $datos, $soporte, $importacion) {
             $ticket = SupportTicket::lockForUpdate()->findOrFail($id);
             $soporte->assert_current($ticket, $datos + ['action' => 'responder']);
-            abort_unless(SupportMessage::whereKey($datos['expected_message_id'])->where('support_ticket_id', $ticket->id)
-                ->where('sender_type', 'user')->exists(), 409, 'Hace falta una respuesta del negocio en este ticket.');
+            $mensaje = SupportMessage::whereKey($datos['expected_message_id'])->where('support_ticket_id', $ticket->id)
+                ->where('sender_type', 'user')->first();
+            abort_unless($mensaje !== null, 409, 'Hace falta una respuesta del negocio en este ticket.');
 
-            return $importacion->resolver($ticket, $datos);
+            return $importacion->resolver($ticket, $datos, $mensaje);
         });
 
         return response()->json($resultado['cuerpo'], $resultado['status']);
@@ -380,11 +403,13 @@ class ClaudeSupportCodexController extends Controller
             'rechazado' => 200,
             'version_vieja' => 200,
             'no_es_prueba' => 404,
+            'contacto_no_habilitado' => 403,
             'ticket_cerrado' => 409,
             'sin_api_key' => 409,
             'sin_url' => 409,
             'sin_fuente' => 422,
             'archivo_invalido' => 422,
+            'archivo_sin_remitente_verificado' => 422,
             'no_responde' => 502,
         ];
         return isset($tabla[$estado]) ? $tabla[$estado] : 200;

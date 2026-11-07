@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Events\SupportMessageReceived;
+use App\Helpers\WhatsappNormalizer;
 use App\Models\Admin;
 use App\Models\Client;
 use App\Models\Lead;
@@ -515,7 +516,9 @@ class PruebaWhatsappService
         $telefono = trim((string) ($ticket === null ? $client->telefono_personal() : $ticket->whatsapp_phone));
         $contacto = $telefono === '' ? null : $this->directorio->resolve_for_client($client, $telefono);
 
-        if ($contacto === null || ($ticket !== null && $contacto['client_employee_id'] !== null)) {
+        if ($contacto === null || ($ticket !== null && $contacto['client_employee_id'] !== null)
+            || ($ticket !== null && $ticket->importacion_soporte_iniciada_at !== null
+                && !WhatsappNormalizer::equals_estricto((string) $contacto['raw_phone'], $telefono))) {
             return ['enviado' => false, 'motivo' => 'sin_contacto', 'whatsapp_message_id' => null, 'support_ticket_id' => null];
         }
 
@@ -541,7 +544,7 @@ class PruebaWhatsappService
             'delivered_at'      => now(),
         ] + ($ticket_id === null ? [] : ['is_trial_import_notice' => true]));
 
-        $wamid = $this->sender->send_text((string) $contacto['phone'], $texto, 'Prueba gratuita - aviso de importación - cliente #' . $client->id, true);
+        $wamid = $this->sender->send_text((string) $contacto['phone'], $texto, 'Soporte - aviso de importación - cliente #' . $client->id, true);
 
         $mensaje->whatsapp_message_id    = $wamid;
         $mensaje->remote_delivery_status = $wamid === null ? 'not_received' : null;

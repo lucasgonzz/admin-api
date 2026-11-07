@@ -157,7 +157,8 @@ class SupportCodexService
             // Invalida borradores ya encolados del proveedor anterior.
             app(SupportAiSuggestionDraftService::class)->clear_ticket_pending_state($ticket);
             $context = $this->context($ticket, $case);
-            if ($cortesia_de_prueba && $context['importaciones_prueba_en_proceso'] === true) {
+            if ($cortesia_de_prueba && ($context['importaciones_prueba_en_proceso'] === true
+                || $context['importaciones_soporte_en_proceso'] === true)) {
                 // El aviso de Empresa lleva la aclaración. Consumir sólo este agradecimiento evita
                 // que un turno conversacional vuelva a preguntar o cierre la importación.
                 $case->handled_message_id = (int) $last->id;
@@ -210,7 +211,9 @@ class SupportCodexService
             $last = $this->last_real_message($ticket->id);
         }
         $fix_evidence = SupportCodexMissionFixEvidence::current_for($ticket, $case);
-        $importaciones = app(PruebaImportacionService::class)->estado_en_ticket($ticket);
+        $importador = app(PruebaImportacionService::class);
+        $importaciones = $importador->estado_en_ticket($ticket);
+        $soporte_activo = $importador->puerta_activo($ticket) === null;
         return [
             'id' => (int) $ticket->id,
             'status' => $ticket->status,
@@ -239,7 +242,8 @@ class SupportCodexService
             'reason' => $this->pending_reason($ticket, $case, true),
             // El helper debe verificar esta capacidad ANTES de pedir el modo nuevo: un admin
             // anterior ignoraría el campo y ejecutaría el resume que consume la consulta.
-            'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => true, 'prueba_import_resolver' => true],
+            'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => true, 'prueba_import_resolver' => true,
+                'soporte_import' => $soporte_activo, 'soporte_import_resolver' => $soporte_activo],
             'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
             'window' => app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone),
@@ -250,8 +254,10 @@ class SupportCodexService
              * claves (día actual, próximo paso, hitos en vivo por C3, bienvenida) por
              * `PruebaContextoSoporteService::extender()`, registrada en `SupportPruebaContextService::registrar()`. */
             'prueba' => app(PruebaContextoSoporteService::class)->bloque_para_el_cliente($ticket->client),
-            'importaciones_prueba_pendientes' => $importaciones['pendientes'],
-            'importaciones_prueba_en_proceso' => $importaciones['en_proceso'],
+            'importaciones_prueba_pendientes' => $soporte_activo ? [] : $importaciones['pendientes'],
+            'importaciones_prueba_en_proceso' => $soporte_activo ? false : $importaciones['en_proceso'],
+            'importaciones_soporte_pendientes' => $soporte_activo ? $importaciones['pendientes'] : [],
+            'importaciones_soporte_en_proceso' => $soporte_activo ? $importaciones['en_proceso'] : false,
             /* La implementación del sistema y de la tienda (abierta, o cerrada hace ≤ 30 días), para que
              * Martín siga la conversación de la implementación donde la dejó Lucas. null = no tiene. */
             'implementation' => app(SupportImplementationContextService::class)->bloque_para_el_ticket($ticket),

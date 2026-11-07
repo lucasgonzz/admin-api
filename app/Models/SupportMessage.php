@@ -76,6 +76,8 @@ class SupportMessage extends Model
      */
     protected $guarded = [];
 
+    protected $hidden = ['whatsapp_remitente_crudo'];
+
     /**
      * Casts de tiempos de estado del mensaje.
      * Campo WhatsApp mass-assignable vía guarded=[]: whatsapp_message_id.

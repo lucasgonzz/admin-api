@@ -4,6 +4,7 @@ namespace Tests\Feature\PruebaGratuita;
 
 use App\Models\SupportMessage;
 use App\Services\AsistenteAvisosService;
+use App\Services\Prueba\PruebaCicloService;
 use Illuminate\Support\Facades\Http;
 
 /**
@@ -112,6 +113,47 @@ class AvisoDeImportacionPorSoporteTest extends BaseDeLaPrueba
         $otra = app(AsistenteAvisosService::class)->enviar_a_cliente_en_prueba($client);
         $this->assertCount(1, $espia->textos);
         $this->assertStringContainsString('ya_avisado', $otra['detalle']);
+    }
+
+    /** @test */
+    public function un_activo_sin_asistente_recibe_solo_sus_avisos_de_importacion_por_el_ticket(): void
+    {
+        $espia = $this->espiar_sender();
+        $this->crear_config_whatsapp();
+        $this->admin();
+        $client = $this->cliente_en_prueba();
+        $client->update(['estado' => PruebaCicloService::CLIENTE_ACTIVO]);
+        $ticket = $this->ticket_del_cliente($client);
+        $ticket->update(['importacion_soporte_iniciada_at' => now()]);
+        $cerrado = $this->ticket_del_cliente($client);
+        $cerrado->update(['status' => 'closed', 'importacion_soporte_iniciada_at' => now()]);
+        $aviso = $this->pendientes()['avisos'][0];
+        $aviso['support_ticket_id'] = (int) $ticket->id;
+        $aviso['texto'] = 'Para importar respondé CONFIRMAR ABCDEF12.';
+        $escaneo = $this->pendientes('escaneo_factura')['avisos'][0];
+        $sin_ticket = $this->pendientes()['avisos'][0];
+        $de_otro_ticket = $aviso;
+        $de_otro_ticket['support_ticket_id'] = (int) $cerrado->id;
+        $this->fakear_http([
+            '*/asistente/avisos-pendientes*' => Http::response(['avisos' => [$aviso, $escaneo, $sin_ticket, $de_otro_ticket]], 200),
+            '*/asistente/avisos/avisado' => Http::response(['ok' => true], 200),
+        ]);
+
+        app(AsistenteAvisosService::class)->enviar_a_todos();
+
+        $this->assertCount(1, $espia->textos);
+        $this->assertSame((string) $ticket->whatsapp_phone, $espia->textos[0]['to']);
+        $this->assertSame($aviso['texto'], $espia->textos[0]['body']);
+        $this->assertTrue(SupportMessage::where('support_ticket_id', $ticket->id)
+            ->where('is_trial_import_notice', true)->where('whatsapp_message_id', 'wamid.saliente.1')->exists());
+        $consultas = $this->pedidos_a('/asistente/avisos-pendientes', 'GET');
+        $this->assertCount(1, $consultas);
+        $this->assertStringContainsString('solo_importaciones_de_soporte=1', $consultas[0]->url());
+        parse_str((string) parse_url($consultas[0]->url(), PHP_URL_QUERY), $query);
+        $this->assertSame([(string) $ticket->id], $query['support_ticket_ids']);
+        $marcas = $this->pedidos_a('/asistente/avisos/avisado', 'POST');
+        $this->assertCount(1, $marcas);
+        $this->assertSame('1', $marcas[0]['solo_importaciones_de_soporte']);
     }
 
     /** @test */

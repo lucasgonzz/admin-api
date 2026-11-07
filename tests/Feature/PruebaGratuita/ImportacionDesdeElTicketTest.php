@@ -7,6 +7,7 @@ use App\Models\SupportCodexCase;
 use App\Models\SupportMessage;
 use App\Models\SupportMessageAttachment;
 use App\Models\SupportTicket;
+use App\Services\Prueba\PruebaCicloService;
 use App\Services\SupportCodexSettings;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
@@ -103,6 +104,158 @@ class ImportacionDesdeElTicketTest extends BaseDeLaPrueba
         return $this->postJson('/api/claude/support-codex/tickets/' . $ticket->id . '/import-excel', $body, $this->headers_de_claude());
     }
 
+    private function pasar_a_activo(): void
+    {
+        $this->client->estado = PruebaCicloService::CLIENTE_ACTIVO;
+        $this->client->save();
+        SupportMessage::whereKey($this->adjunto->support_message_id)
+            ->update(['whatsapp_remitente_crudo' => ltrim((string) $this->client->phone, '+')]);
+        AdminSetting::set(SupportCodexSettings::KEY_ENABLED, '1');
+        AdminSetting::set(SupportCodexSettings::KEY_ACTIVATED_AT, now()->subHour()->toDateTimeString());
+        AdminSetting::set(SupportCodexSettings::KEY_ACTIVATED_AFTER_ID, 0);
+    }
+
+    private function reservar_turno(int $message_id): array
+    {
+        $reserva = $this->postJson('/api/claude/support-codex/tickets/' . $this->ticket->id . '/claim', [
+            'worker_id' => 'martin',
+            'expected_message_id' => $message_id,
+        ], $this->headers_de_claude())->assertOk()->assertJsonPath('ticket.capabilities.soporte_import', true);
+
+        return ['lease_token' => $reserva->json('lease_token'), 'expected_message_id' => $message_id];
+    }
+
+    /** @test */
+    public function manda_el_excel_del_dueno_activo_solo_si_la_instancia_admite_el_modo_soporte(): void
+    {
+        $this->pasar_a_activo();
+        $this->fakear_http([
+            '*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response(['automatizar_soporte' => true], 200),
+            '*/admin-sync/ai-excel-import/analyze' => Http::response([
+                'analysis_uuid' => 'uuid-de-soporte', 'automatizar_soporte' => true,
+            ], 202),
+        ]);
+
+        $reserva = $this->reservar_turno((int) $this->adjunto->support_message_id);
+        $this->importar(['attachment_id' => $this->adjunto->id])->assertStatus(404)->assertJsonPath('estado', 'no_es_prueba');
+        $this->importar(['attachment_id' => $this->adjunto->id, 'automatizar_soporte' => true])->assertStatus(422);
+        $otro = $this->adjuntar($this->ticket_del_cliente($this->client), 'soporte/otro.xlsx', 'application/vnd.ms-excel');
+        $this->importar(['attachment_id' => $otro->id, 'automatizar_soporte' => true] + $reserva)
+            ->assertStatus(422)->assertJsonPath('estado', 'sin_fuente');
+
+        $this->importar(['attachment_id' => $this->adjunto->id, 'automatizar_soporte' => true] + $reserva)
+            ->assertOk()->assertJsonPath('estado', 'aceptado')->assertJsonPath('automatizar_soporte', true)
+            ->assertJsonPath('automatizar_prueba', false);
+        $this->assertNotNull($this->ticket->fresh()->importacion_soporte_iniciada_at);
+
+        $consultas = Http::recorded(function ($request) {
+            return strpos($request->url(), '/ai-excel-import/') !== false;
+        });
+        $this->assertCount(2, $consultas);
+        $this->assertSame('GET', $consultas[0][0]->method());
+        $this->assertStringContainsString('automatizar_soporte=1', $consultas[0][0]->url());
+        $upload = $consultas[1][0];
+        $this->assertSame('POST', $upload->method());
+        $this->assertTrue($upload->hasFile('excel_file', 'contenido-del-excel'));
+        $this->assertSame('1', $this->campo($upload, 'automatizar_soporte'));
+        $this->assertNull($this->campo($upload, 'automatizar_prueba'));
+        $this->assertSame((string) $this->ticket->id, $this->campo($upload, 'support_ticket_id'));
+        $this->assertSame(hash('sha256', 'contenido-del-excel'), $this->campo($upload, 'importacion_clave'));
+    }
+
+    /** @test */
+    public function una_instancia_anterior_que_ignora_la_bandera_no_recibe_el_archivo(): void
+    {
+        $this->pasar_a_activo();
+        $this->fakear_http([
+            '*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response(['en_proceso' => false], 200),
+        ]);
+        $reserva = $this->reservar_turno((int) $this->adjunto->support_message_id);
+
+        $this->importar(['attachment_id' => $this->adjunto->id, 'automatizar_soporte' => true] + $reserva)
+            ->assertOk()->assertJsonPath('estado', 'version_vieja');
+        $this->assertNull($this->ticket->fresh()->importacion_soporte_iniciada_at);
+        Http::assertNotSent(function ($request) {
+            return strpos($request->url(), '/ai-excel-import/analyze') !== false;
+        });
+    }
+
+    /** @test */
+    public function no_reconoce_como_dueno_a_un_numero_de_otra_area_con_el_mismo_sufijo(): void
+    {
+        $this->pasar_a_activo();
+        $this->ticket->update(['whatsapp_phone' => '+5493511234567']);
+        $this->importar([
+            'attachment_id' => $this->adjunto->id, 'automatizar_soporte' => true,
+            'lease_token' => str_repeat('a', 64), 'expected_message_id' => $this->adjunto->support_message_id,
+        ])->assertForbidden()->assertJsonPath('estado', 'contacto_no_habilitado');
+        Http::assertNothingSent();
+    }
+
+    /** @test */
+    public function el_ticket_normalizado_no_alcanza_para_autenticar_el_excel(): void
+    {
+        $this->pasar_a_activo();
+        SupportMessage::whereKey($this->adjunto->support_message_id)->update(['whatsapp_remitente_crudo' => null]);
+        $reserva = $this->reservar_turno((int) $this->adjunto->support_message_id);
+        $this->importar(['attachment_id' => $this->adjunto->id, 'automatizar_soporte' => true] + $reserva)
+            ->assertStatus(422)->assertJsonPath('estado', 'archivo_sin_remitente_verificado');
+        Http::assertNothingSent();
+    }
+
+    /**
+     * @test
+     * @dataProvider confirmaciones_de_soporte
+     */
+    public function la_confirmacion_exige_el_codigo_del_aviso_enviado_y_la_respuesta_del_dueno(string $body, bool $enviado, int $http): void
+    {
+        $this->pasar_a_activo();
+        $this->ticket->update(['importacion_soporte_iniciada_at' => now()]);
+        $uuid = '9b2c4f1e-7a3d-4c55-9e0b-2f6d8a1c3e70';
+        $this->fakear_http([
+            '*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response([
+                'automatizar_soporte' => true, 'en_proceso' => true, 'pendientes' => [[
+                    'analysis_uuid' => $uuid, 'revision' => 3, 'preguntas' => [[
+                        'clave' => 'confirmacion', 'codigo_confirmacion' => 'ABCDEF12',
+                    ]],
+                ]],
+            ], 200),
+            '*/admin-sync/ai-excel-import/prueba-resolver/' . $uuid => Http::response(['estado' => 'encolada'], 202),
+        ]);
+        SupportMessage::create([
+            'support_ticket_id' => $this->ticket->id, 'sender_type' => 'admin', 'kind' => 'text',
+            'body' => 'Para importar respondé CONFIRMAR ABCDEF12.', 'is_trial_import_notice' => true,
+            'whatsapp_message_id' => $enviado ? 'wamid.aviso' : null, 'delivered_at' => now(),
+        ]);
+        $respuesta = SupportMessage::create([
+            'support_ticket_id' => $this->ticket->id, 'sender_type' => 'user', 'kind' => 'text',
+            'body' => $body, 'whatsapp_message_id' => 'wamid.dueno', 'delivered_at' => now(),
+            'whatsapp_remitente_crudo' => ltrim((string) $this->client->phone, '+'),
+        ]);
+        $reserva = $this->reservar_turno((int) $respuesta->id);
+
+        $this->postJson('/api/claude/support-codex/tickets/' . $this->ticket->id . '/import-prueba-resolver', [
+            'analysis_uuid' => $uuid, 'revision' => 3, 'respuestas' => ['confirmacion' => 'confirmar'],
+        ] + $reserva, $this->headers_de_claude())->assertStatus($http);
+        $resoluciones = Http::recorded(function ($request) {
+            return strpos($request->url(), '/ai-excel-import/prueba-resolver/') !== false;
+        });
+        $this->assertCount($http === 202 ? 1 : 0, $resoluciones);
+        if ($http === 202) {
+            $this->assertSame('1', $resoluciones->first()[0]['automatizar_soporte']);
+        }
+    }
+
+    public function confirmaciones_de_soporte(): array
+    {
+        return [
+            'código correcto' => ['CONFIRMAR ABCDEF12', true, 202],
+            'respuesta ambigua' => ['Gracias, dale', true, 409],
+            'código de otra revisión' => ['CONFIRMAR ABCDEF13', true, 409],
+            'aviso sin envío confirmado' => ['CONFIRMAR ABCDEF12', false, 409],
+        ];
+    }
+
     /** @test */
     public function reenvia_el_excel_del_ticket_en_segundo_plano_con_aviso_y_con_la_clave_del_cliente(): void
     {
@@ -182,10 +335,16 @@ class ImportacionDesdeElTicketTest extends BaseDeLaPrueba
     /** @test @dataProvider conversaciones_durante_la_carga */
     public function martin_deja_una_cortesia_aislada_al_aviso_de_la_importacion(
         string $texto, bool $recibio_excel, bool $otro_entrante, bool $cita, bool $monitor_nuevo, bool $en_proceso, bool $silencio,
-        bool $mime_generico = false
+        bool $mime_generico = false, bool $soporte_activo = false
     ): void {
+        if ($soporte_activo) {
+            $this->pasar_a_activo();
+            $this->ticket->update(['importacion_soporte_iniciada_at' => now()]);
+        }
         $this->fakear_http([
-            '*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response(['en_proceso' => $en_proceso], 200),
+            '*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response([
+                'en_proceso' => $en_proceso, 'automatizar_soporte' => $soporte_activo,
+            ], 200),
         ]);
         AdminSetting::set(SupportCodexSettings::KEY_ENABLED, '1');
         AdminSetting::set(SupportCodexSettings::KEY_ACTIVATED_AT, now()->subHour()->toDateTimeString());
@@ -245,6 +404,7 @@ class ImportacionDesdeElTicketTest extends BaseDeLaPrueba
             'mensaje citado' => ['Gracias', true, false, true, true, true, false],
             'monitor anterior' => ['Gracias', true, false, false, false, true, false],
             'sin carga pendiente' => ['Gracias', true, false, false, true, false, false],
+            'activo con carga pendiente' => ['Gracias', true, false, false, true, true, true, false, true],
         ];
     }
 
@@ -302,11 +462,17 @@ class ImportacionDesdeElTicketTest extends BaseDeLaPrueba
         ], $pedido->data());
     }
 
-    /** @test */
-    public function martin_mantiene_abierto_el_ticket_mientras_queda_un_archivo_procesando(): void
+    /** @test @dataProvider clientes_con_importacion */
+    public function martin_mantiene_abierto_el_ticket_mientras_queda_un_archivo_procesando(bool $soporte_activo): void
     {
+        if ($soporte_activo) {
+            $this->pasar_a_activo();
+            $this->ticket->update(['importacion_soporte_iniciada_at' => now()]);
+        }
         $this->fakear_http([
-            '*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response(['pendientes' => [], 'en_proceso' => true], 200),
+            '*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response([
+                'pendientes' => [], 'en_proceso' => true, 'automatizar_soporte' => $soporte_activo,
+            ], 200),
         ]);
         AdminSetting::set(SupportCodexSettings::KEY_ENABLED, '1');
         AdminSetting::set(SupportCodexSettings::KEY_ACTIVATED_AT, now()->subHour()->toDateTimeString());
@@ -317,9 +483,10 @@ class ImportacionDesdeElTicketTest extends BaseDeLaPrueba
         ]);
         $base = '/api/claude/support-codex/tickets/' . $this->ticket->id;
         $mensaje = (int) $agradecimiento->id;
+        $prefijo = $soporte_activo ? 'ticket.importaciones_soporte_' : 'ticket.importaciones_prueba_';
         $reserva = $this->postJson($base . '/claim', ['worker_id' => 'martin', 'expected_message_id' => $mensaje], $this->headers_de_claude())
-            ->assertOk()->assertJsonPath('ticket.importaciones_prueba_en_proceso', true)
-            ->assertJsonPath('ticket.importaciones_prueba_pendientes', []);
+            ->assertOk()->assertJsonPath($prefijo . 'en_proceso', true)
+            ->assertJsonPath($prefijo . 'pendientes', []);
 
         $this->postJson($base . '/reply', [
             'lease_token' => $reserva->json('lease_token'), 'expected_message_id' => $mensaje,
@@ -328,6 +495,11 @@ class ImportacionDesdeElTicketTest extends BaseDeLaPrueba
             ->assertJsonPath('message', 'trial_import_pending: Hay una importación en curso en este ticket. Dejá abierta la conversación.');
         $this->assertSame('open', $this->ticket->fresh()->status);
         $this->assertDatabaseMissing('support_codex_operations', ['operation_id' => 'cerrar-gracias']);
+    }
+
+    public function clientes_con_importacion(): array
+    {
+        return ['prueba' => [false], 'activo' => [true]];
     }
 
     /** @test */

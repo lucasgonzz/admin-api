@@ -46,6 +46,9 @@ class SoporteCodexPorElNumeroPrincipalTest extends BaseDelCanal
         $this->assertNotNull($ticket, json_encode($logger->records, JSON_UNESCAPED_UNICODE));
         $this->assertSame('whatsapp', $ticket->source);
         $this->assertSame(1, SupportMessage::where('support_ticket_id', $ticket->id)->count());
+        $entrante = SupportMessage::where('support_ticket_id', $ticket->id)->firstOrFail();
+        $this->assertSame('5493418736622', $entrante->whatsapp_remitente_crudo);
+        $this->assertArrayNotHasKey('whatsapp_remitente_crudo', $entrante->toArray());
         $this->assertSame(0, ClientAssistantMessage::where('client_id', $client->id)->count());
         Queue::assertNotPushed(SendSupportAiSuggestion::class);
         Queue::assertNotPushed(EnviarMensajeAlAsistenteJob::class);

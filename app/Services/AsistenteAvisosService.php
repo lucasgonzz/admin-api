@@ -5,7 +5,9 @@ namespace App\Services;
 use App\Helpers\WhatsappNormalizer;
 use App\Models\Client;
 use App\Models\ClientAssistantMessage;
+use App\Models\SupportTicket;
 use App\Models\WhatsappConfig;
+use App\Services\Prueba\PruebaCicloService;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -303,6 +305,31 @@ class AsistenteAvisosService
             }
         }
 
+        $tickets_de_importacion = SupportTicket::query()->with('client')
+            ->whereHas('client', function ($query) {
+                $query->where('is_active', true)->where('estado', PruebaCicloService::CLIENTE_ACTIVO)
+                    ->whereNotNull('api_key')->where('api_key', '!=', '');
+            })->where('status', SupportTicket::STATUS_ABIERTO)->where('source', 'whatsapp')
+            ->whereNull('client_employee_id')->whereNotNull('importacion_soporte_iniciada_at')
+            ->where('last_client_message_at', '>=', $desde)->get(['id', 'client_id'])->groupBy('client_id');
+        foreach ($tickets_de_importacion as $tickets) {
+            $client = $tickets->first()->client;
+            if ($client === null) {
+                continue;
+            }
+            foreach ($tickets->chunk(100) as $lote) {
+                try {
+                    $resultados[] = $this->enviar_avisos_de_importacion($client, $lote->modelKeys());
+                } catch (\Throwable $exception) {
+                    Log::channel('daily')->error('AsistenteAvisos: no se pudieron procesar los avisos de soporte.', [
+                        'client_id' => $client->id,
+                        'error' => $exception->getMessage(),
+                    ]);
+                    $resultados[] = $this->resultado($client, 'error', 0, 0, $exception->getMessage());
+                }
+            }
+        }
+
         foreach ($clientes as $client) {
             try {
                 $resultados[] = $this->enviar_a($client);
@@ -389,9 +416,14 @@ class AsistenteAvisosService
         );
     }
 
+    public function enviar_a_cliente_en_prueba(Client $client): array
+    {
+        return $this->enviar_avisos_de_importacion($client);
+    }
+
     /**
-     * Los avisos de un negocio en PRUEBA GRATUITA (misión prueba-martin-importacion, 3/11/2026): se le
-     * consultan igual que a cualquier cliente, pero de lo que traiga solo sale `importacion_lista`, y sale
+     * Los avisos de importación para pruebas y negocios activos: de lo que traiga solo sale
+     * `importacion_lista`, y sale
      * por el ticket de soporte (texto libre, con la ventana del principal abierta: el negocio acaba de
      * mandar el Excel por ahí). Los demás tipos (factura, envío fallido, turno) necesitan la conversación
      * del asistente para contestarse y acá no la hay: quedan `sin_canal` hasta que el dueño le escriba al
@@ -401,19 +433,20 @@ class AsistenteAvisosService
      *
      * @return array{client_id: int, nombre: string, estado: string, avisos: int, enviados: int, detalle: string}
      */
-    public function enviar_a_cliente_en_prueba(Client $client): array
+    private function enviar_avisos_de_importacion(Client $client, array $tickets_activos = []): array
     {
         if (trim((string) $client->api_key) === '') {
             return $this->resultado($client, 'sin_api_key', 0, 0, 'El cliente no tiene cargada la api_key.');
         }
 
-        $pausa = Cache::get($this->clave_de_pausa($client));
+        $solo_soporte_activo = $tickets_activos !== [];
+        $pausa = Cache::get($this->clave_de_pausa($client, $solo_soporte_activo));
         if ($pausa !== null) {
             return $this->resultado($client, 'en_pausa', 0, 0, 'En pausa hasta la próxima consulta: ' . (string) $pausa);
         }
 
         $spa_url    = self::base_del_spa_valida($this->urls->resolve_spa_url($client));
-        $pendientes = $this->traer_avisos($client, $spa_url);
+        $pendientes = $this->traer_avisos($client, $spa_url, $tickets_activos);
 
         if ($pendientes['estado'] !== 'ok') {
             return $this->resultado($client, $pendientes['estado'], 0, 0, $pendientes['detalle']);
@@ -428,7 +461,8 @@ class AsistenteAvisosService
         $estados  = [];
         foreach ($avisos as $aviso) {
             $estado = $aviso['tipo'] === self::TIPO_IMPORTACION_LISTA
-                ? $this->avisar_importacion_por_soporte($client, $aviso, $spa_url)
+                && (!$solo_soporte_activo || in_array($aviso['support_ticket_id'], $tickets_activos, true))
+                ? $this->avisar_importacion_por_soporte($client, $aviso, $spa_url, $solo_soporte_activo)
                 : 'sin_canal';
 
             $estados[] = $aviso['id'] . '=' . $estado;
@@ -437,7 +471,7 @@ class AsistenteAvisosService
             }
         }
 
-        Log::channel('daily')->info('AsistenteAvisos: avisos de un cliente en prueba procesados.', [
+        Log::channel('daily')->info('AsistenteAvisos: avisos de importación procesados.', [
             'client_id' => $client->id,
             'avisos'    => count($avisos),
             'enviados'  => $enviados,
@@ -458,13 +492,13 @@ class AsistenteAvisosService
      *
      * @return string enviado | remarcado | ya_avisado | en_curso | ventana_cerrada | sin_contacto | error | fallido
      */
-    private function avisar_importacion_por_soporte(Client $client, array $aviso, string $spa_url): string
+    private function avisar_importacion_por_soporte(Client $client, array $aviso, string $spa_url, bool $solo_soporte_activo = false): string
     {
         $clave = $this->clave_de_reclamo($client, (string) $aviso['id']);
 
         $previo = Cache::get($clave);
         if ($previo !== null) {
-            return $this->resolver_reclamo_previo($client, $aviso, $clave, $previo);
+            return $this->resolver_reclamo_previo($client, $aviso, $clave, $previo, $solo_soporte_activo);
         }
 
         $ticket_id = $aviso['support_ticket_id'] ?? null;
@@ -502,7 +536,7 @@ class AsistenteAvisosService
             now()->addDays(self::DIAS_DEL_RECLAMO)
         );
 
-        $this->marcar_y_cerrar_el_reclamo($client, (string) $aviso['id'], $clave, $link, $whatsapp_message_id);
+        $this->marcar_y_cerrar_el_reclamo($client, (string) $aviso['id'], $clave, $link, $whatsapp_message_id, $solo_soporte_activo);
 
         return 'enviado';
     }
@@ -700,7 +734,7 @@ class AsistenteAvisosService
      *
      * @return string remarcado | ya_avisado | fallido | en_curso
      */
-    private function resolver_reclamo_previo(Client $client, array $aviso, string $clave, $previo): string
+    private function resolver_reclamo_previo(Client $client, array $aviso, string $clave, $previo, bool $solo_soporte_activo = false): string
     {
         $estado = is_array($previo) && isset($previo['estado']) ? (string) $previo['estado'] : '';
 
@@ -710,7 +744,8 @@ class AsistenteAvisosService
                 (string) $aviso['id'],
                 $clave,
                 isset($previo['url']) ? (string) $previo['url'] : '',
-                isset($previo['whatsapp_message_id']) ? (string) $previo['whatsapp_message_id'] : ''
+                isset($previo['whatsapp_message_id']) ? (string) $previo['whatsapp_message_id'] : '',
+                $solo_soporte_activo
             );
 
             return $marcado ? 'remarcado' : 'ya_avisado';
@@ -738,9 +773,9 @@ class AsistenteAvisosService
      *
      * @return bool True si el `empresa-api` ya no lo va a volver a ofrecer.
      */
-    private function marcar_y_cerrar_el_reclamo(Client $client, string $aviso_id, string $clave, string $link, string $whatsapp_message_id): bool
+    private function marcar_y_cerrar_el_reclamo(Client $client, string $aviso_id, string $clave, string $link, string $whatsapp_message_id, bool $solo_soporte_activo = false): bool
     {
-        if (! $this->marcar_avisado($client, $aviso_id, $link, $whatsapp_message_id)) {
+        if (! $this->marcar_avisado($client, $aviso_id, $link, $whatsapp_message_id, $solo_soporte_activo)) {
             return false;
         }
 
@@ -761,7 +796,7 @@ class AsistenteAvisosService
      *
      * @return array{estado: string, avisos: array<int, array<string, mixed>>, detalle: string}
      */
-    private function traer_avisos(Client $client, string $spa_url): array
+    private function traer_avisos(Client $client, string $spa_url, array $tickets_activos = []): array
     {
         $vacio = [];
 
@@ -771,6 +806,11 @@ class AsistenteAvisosService
         }
 
         $query = $spa_url !== '' ? ['spa_url' => $spa_url] : [];
+        $solo_soporte_activo = $tickets_activos !== [];
+        if ($solo_soporte_activo) {
+            $query['solo_importaciones_de_soporte'] = '1';
+            $query['support_ticket_ids'] = $tickets_activos;
+        }
 
         try {
             $respuesta = Http::withHeaders([
@@ -780,7 +820,7 @@ class AsistenteAvisosService
                 ->timeout((int) config('services.client_api.timeout', 15))
                 ->get($url, $query);
         } catch (ConnectionException $exception) {
-            return $this->pausar_por_error($client, 'No respondió el sistema del cliente: ' . $exception->getMessage());
+            return $this->pausar_por_error($client, 'No respondió el sistema del cliente: ' . $exception->getMessage(), $solo_soporte_activo);
         }
 
         $status = (int) $respuesta->status();
@@ -790,7 +830,7 @@ class AsistenteAvisosService
          * pedido). La levanta el job apenas el cliente anuncia `admite_avisos`. */
         if ($status === 404) {
             Cache::put(
-                $this->clave_de_pausa($client),
+                $this->clave_de_pausa($client, $solo_soporte_activo),
                 'sin la ruta de avisos (404)',
                 now()->addMinutes(self::MINUTOS_DE_PAUSA_SIN_LA_FUNCION)
             );
@@ -799,7 +839,7 @@ class AsistenteAvisosService
         }
 
         if ($status !== 200) {
-            return $this->pausar_por_error($client, 'El sistema del cliente respondió ' . $status . '.');
+            return $this->pausar_por_error($client, 'El sistema del cliente respondió ' . $status . '.', $solo_soporte_activo);
         }
 
         $datos = (array) $respuesta->json();
@@ -845,10 +885,10 @@ class AsistenteAvisosService
      *
      * @return array{estado: string, avisos: array<int, array<string, mixed>>, detalle: string}
      */
-    private function pausar_por_error(Client $client, string $detalle): array
+    private function pausar_por_error(Client $client, string $detalle, bool $solo_soporte_activo = false): array
     {
         Cache::put(
-            $this->clave_de_pausa($client),
+            $this->clave_de_pausa($client, $solo_soporte_activo),
             $detalle,
             now()->addMinutes(self::MINUTOS_DE_PAUSA_POR_ERROR)
         );
@@ -1112,7 +1152,7 @@ class AsistenteAvisosService
      *
      * @return bool True si ya no hay que volver a marcarlo.
      */
-    private function marcar_avisado(Client $client, string $aviso_id, string $link, string $whatsapp_message_id): bool
+    private function marcar_avisado(Client $client, string $aviso_id, string $link, string $whatsapp_message_id, bool $solo_soporte_activo = false): bool
     {
         $url = $this->urls->admin_sync_url($client, self::RUTA_AVISADO);
         if ($url === '') {
@@ -1120,6 +1160,9 @@ class AsistenteAvisosService
         }
 
         $cuerpo = ['id' => $aviso_id];
+        if ($solo_soporte_activo) {
+            $cuerpo['solo_importaciones_de_soporte'] = '1';
+        }
         if ($link !== '') {
             $cuerpo['url'] = $link;
         }
@@ -1175,9 +1218,9 @@ class AsistenteAvisosService
      *
      * @return string
      */
-    private function clave_de_pausa(Client $client): string
+    private function clave_de_pausa(Client $client, bool $solo_soporte_activo = false): string
     {
-        return self::clave_de_pausa_de((int) $client->id);
+        return self::clave_de_pausa_de((int) $client->id) . ($solo_soporte_activo ? ':soporte' : '');
     }
 
     /**

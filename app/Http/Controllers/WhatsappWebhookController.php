@@ -1880,6 +1880,7 @@ class WhatsappWebhookController extends Controller
             }
 
             $kind = substr((string) $parsed['type'], 0, 20);
+            $remitente_crudo = preg_replace('/\D+/', '', (string) ($parsed['from_crudo'] ?? ''));
 
             $message = SupportMessage::create([
                 'support_ticket_id'   => $ticket->id,
@@ -1887,6 +1888,8 @@ class WhatsappWebhookController extends Controller
                 'kind'                => $kind,
                 'body'                => $parsed['body'],
                 'whatsapp_message_id' => $parsed['message_id'],
+                // Las operaciones de escritura deben autenticar al remitente sin inferir su país.
+                'whatsapp_remitente_crudo' => $remitente_crudo !== '' && strlen($remitente_crudo) <= 20 ? $remitente_crudo : null,
                 'delivered_at'        => $delivered_at,
                 // Si el cliente respondió citando un mensaje del hilo, se guarda a cuál (null si cita
                 // algo que no está en este ticket).

@@ -2,18 +2,21 @@
 
 namespace App\Services;
 
+use App\Helpers\WhatsappNormalizer;
 use App\Models\Client;
+use App\Models\SupportMessage;
 use App\Models\SupportMessageAttachment;
 use App\Models\SupportTicket;
 use App\Services\Concerns\TapaLaClaveDelCliente;
+use App\Services\Prueba\PruebaCicloService;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 
 /**
- * Lleva el Excel (y las imágenes) que llegaron al ticket de soporte de un negocio en PRUEBA GRATUITA a su
- * instancia, por C4 (misión cruzada prueba-martin-importacion, 3/11/2026).
+ * Lleva el Excel de un ticket de soporte a la instancia del negocio. Durante la prueba gratuita
+ * también acepta Excel derivados de PDF e imágenes.
  *
  * 🔴 ES EL «SERVICIO PROPIO EN EL ADMIN» que `ClientAdminSyncPuenteService` reserva para las rutas que
  * escriben datos del negocio: `ai-excel-import/*` no entra al puente genérico. Acá el admin lee el adjunto
@@ -23,9 +26,8 @@ use Illuminate\Support\Facades\Storage;
  * queda una corrida del dueño. Para artículos de la prueba vigente, la instancia puede continuar
  * automáticamente y reservar el ticket para las preguntas que aparezcan.
  *
- * 🔴 SOLO PARA CLIENTES EN PRUEBA (`PruebaDelClienteService`), y solo desde un ticket ABIERTO de ese
- * cliente. El adjunto tiene que ser de ese ticket; el archivo que arma la tarea del PDF viaja en base64
- * (`file`), igual que los adjuntos salientes de `reply`.
+ * Para clientes activos el controlador exige un turno vigente del dueño. El servicio exige un Excel
+ * de ese ticket y confirma la capacidad de la instancia antes de reenviar el archivo.
  *
  * 🔴 COMPATIBLE CON UN EMPRESA VIEJO: si la instancia no conoce `segundo_plano` contesta 200 con el
  * análisis síncrono y sin corrida (`estado: analizado_sin_corrida`): Martín se entera y le pide al
@@ -89,14 +91,19 @@ class PruebaImportacionService
      * @return array<string, mixed> `estado`: aceptado | analizado_sin_corrida | rechazado | no_es_prueba |
      *                              ticket_cerrado | sin_fuente | archivo_invalido | sin_api_key | sin_url | no_responde.
      */
-    public function importar_excel(SupportTicket $ticket, array $input): array
+    public function importar_excel(SupportTicket $ticket, array $input, bool $soporte_activo = false): array
     {
-        $puerta = $this->puerta($ticket);
+        $puerta = $soporte_activo ? $this->puerta_activo($ticket) : $this->puerta($ticket);
         if ($puerta !== null) {
             return $puerta;
         }
 
-        $archivo = $this->archivo_excel($ticket, $input);
+        if ($soporte_activo && (!isset($input['attachment_id']) || isset($input['file']) || isset($input['pdf_attachment_id'])
+            || ($input['model'] ?? 'article') !== 'article')) {
+            return ['estado' => 'archivo_invalido', 'mensaje' => 'Adjuntá al ticket el Excel de artículos del negocio.'];
+        }
+
+        $archivo = $this->archivo_excel($ticket, $input, $soporte_activo);
         if (isset($archivo['estado'])) {
             return $archivo;
         }
@@ -130,7 +137,18 @@ class PruebaImportacionService
         if (isset($input['provider_id']) && is_numeric($input['provider_id']) && (int) $input['provider_id'] > 0) {
             $campos['provider_id'] = (int) $input['provider_id'];
         }
-        if ($modelo === 'article' && $this->automatizacion_disponible($ticket)) {
+        if ($soporte_activo) {
+            $capacidad = $this->consultar_corridas($ticket, true);
+            if ($capacidad['disponible'] !== true) {
+                return ['estado' => $capacidad['en_proceso'] === null ? 'no_responde' : 'version_vieja',
+                    'mensaje' => 'No pude confirmar que el sistema pueda importar desde soporte.'];
+            }
+
+            $ticket->forceFill(['importacion_soporte_iniciada_at' => now()])->save();
+            $campos['automatizar_soporte'] = '1';
+            $campos['support_ticket_id'] = (int) $ticket->id;
+            $campos['importacion_clave'] = $clave;
+        } elseif ($modelo === 'article' && $this->automatizacion_disponible($ticket)) {
             $campos['automatizar_prueba'] = '1';
             $campos['support_ticket_id'] = (int) $ticket->id;
             $campos['importacion_clave'] = $clave;
@@ -138,7 +156,7 @@ class PruebaImportacionService
 
         $respuesta = $this->reenviar($client, self::RUTA_ANALYZE, $campos, [
             ['nombre' => 'excel_file', 'bytes' => $archivo['bytes'], 'filename' => $archivo['filename']],
-        ], 180);
+        ], $soporte_activo ? 25 : 180);
 
         if (isset($respuesta['estado'])) {
             return $respuesta;
@@ -146,6 +164,10 @@ class PruebaImportacionService
 
         $status = $respuesta['status'];
         $cuerpo = $respuesta['cuerpo'];
+
+        if ($soporte_activo && in_array($status, [200, 202], true) && ($cuerpo['automatizar_soporte'] ?? false) !== true) {
+            return ['estado' => 'version_vieja', 'mensaje' => 'El sistema no aceptó una corrida de soporte.'];
+        }
 
         if ($status === 202 && is_array($cuerpo) && isset($cuerpo['analysis_uuid'])) {
             Log::channel('daily')->info('PruebaImportacion: Excel del ticket reenviado a la instancia, corrida encolada.', [
@@ -162,7 +184,7 @@ class PruebaImportacionService
                 'cuerpo'        => $cuerpo,
                 'filename'      => $archivo['filename'],
                 'automatizar_prueba' => ($cuerpo['automatizar_prueba'] ?? false) === true,
-            ];
+            ] + ($soporte_activo ? ['automatizar_soporte' => true] : []);
         }
 
         if ($status === 200 && is_array($cuerpo) && isset($cuerpo['column_mapping'])) {
@@ -188,36 +210,56 @@ class PruebaImportacionService
     /** Corridas de esta conversación. Una instancia anterior conserva el contexto de siempre. */
     public function estado_en_ticket(SupportTicket $ticket): array
     {
-        $sin_corrida = ['pendientes' => [], 'en_proceso' => false];
+        if ($ticket->importacion_soporte_iniciada_at !== null && $this->puerta_activo($ticket) === null) {
+            $estado = $this->consultar_corridas($ticket, true);
+            if ($estado['disponible'] !== true) {
+                $estado['en_proceso'] = null;
+            }
+            return $estado;
+        }
         if (! $this->automatizacion_disponible($ticket)) {
-            return $sin_corrida;
+            return ['pendientes' => [], 'en_proceso' => false, 'disponible' => false];
         }
 
-        $respuesta = $this->reenviar($ticket->client, self::RUTA_PENDIENTES, $this->contexto_del_ticket($ticket), [], 4, 'GET');
+        return $this->consultar_corridas($ticket, false);
+    }
+
+    private function consultar_corridas(SupportTicket $ticket, bool $soporte_activo): array
+    {
+        $respuesta = $this->reenviar($ticket->client, self::RUTA_PENDIENTES, $this->contexto_del_ticket($ticket, $soporte_activo), [], 4, 'GET');
         $status = $respuesta['status'] ?? null;
-        if ($status === 404) {
-            return $sin_corrida;
+        if (in_array($status, $soporte_activo ? [404, 409] : [404], true)
+            || ($soporte_activo && $status === 200 && ($respuesta['cuerpo']['automatizar_soporte'] ?? false) !== true)) {
+            return ['pendientes' => [], 'en_proceso' => false, 'disponible' => false];
         }
         if ($status !== 200) {
-            return ['pendientes' => [], 'en_proceso' => null];
+            return ['pendientes' => [], 'en_proceso' => null, 'disponible' => false];
         }
 
         $pendientes = $respuesta['cuerpo']['pendientes'] ?? [];
         $pendientes = is_array($pendientes) ? $pendientes : [];
 
-        return ['pendientes' => $pendientes, 'en_proceso' => $pendientes !== [] || ($respuesta['cuerpo']['en_proceso'] ?? false) === true];
+        return ['pendientes' => $pendientes, 'en_proceso' => $pendientes !== [] || ($respuesta['cuerpo']['en_proceso'] ?? false) === true,
+            'disponible' => true];
     }
 
-    public function resolver(SupportTicket $ticket, array $datos): array
+    public function resolver(SupportTicket $ticket, array $datos, SupportMessage $mensaje): array
     {
-        if (! $this->automatizacion_disponible($ticket)) {
-            return ['status' => 409, 'cuerpo' => ['message' => 'El ticket no pertenece al dueño de una prueba vigente.']];
+        $soporte_activo = $ticket->importacion_soporte_iniciada_at !== null && $this->puerta_activo($ticket) === null;
+        if (!$soporte_activo && !$this->automatizacion_disponible($ticket)) {
+            return ['status' => 409, 'cuerpo' => ['message' => 'El ticket no tiene una importación automática habilitada.']];
+        }
+        if ($soporte_activo) {
+            $validacion = $this->validar_respuesta_activo($ticket, $datos, $mensaje);
+            if ($validacion !== null) {
+                return $validacion;
+            }
         }
 
         $respuesta = $this->reenviar($ticket->client, self::RUTA_RESOLVER . $datos['analysis_uuid'], [
             'revision' => (int) $datos['revision'],
             'respuestas' => $datos['respuestas'],
-        ] + $this->contexto_del_ticket($ticket), [], 12);
+        ] + $this->contexto_del_ticket($ticket, $soporte_activo), [], 12);
 
         if (! isset($respuesta['status'])) {
             return ['status' => 502, 'cuerpo' => $respuesta];
@@ -228,6 +270,42 @@ class PruebaImportacionService
         }
 
         return $respuesta;
+    }
+
+    private function validar_respuesta_activo(SupportTicket $ticket, array $datos, SupportMessage $mensaje): ?array
+    {
+        if ($mensaje->kind !== 'text' || !$this->es_entrante_del_dueno($ticket, $mensaje)) {
+            return ['status' => 409, 'cuerpo' => ['message' => 'Hace falta una respuesta de texto del dueño por WhatsApp.']];
+        }
+        if (!array_key_exists('confirmacion', $datos['respuestas'])) {
+            return null;
+        }
+
+        $estado = $this->consultar_corridas($ticket, true);
+        $codigo = '';
+        foreach ($estado['pendientes'] as $corrida) {
+            if (($corrida['analysis_uuid'] ?? null) !== $datos['analysis_uuid']
+                || (int) ($corrida['revision'] ?? 0) !== (int) $datos['revision']) {
+                continue;
+            }
+            foreach ($corrida['preguntas'] as $pregunta) {
+                if (($pregunta['clave'] ?? null) === 'confirmacion') {
+                    $codigo = (string) ($pregunta['codigo_confirmacion'] ?? '');
+                }
+            }
+        }
+
+        $opciones = ['confirmar' => 'CONFIRMAR ', 'cancelar' => 'CANCELAR '];
+        $prefijo = $opciones[$datos['respuestas']['confirmacion']] ?? '';
+        if (count($datos['respuestas']) !== 1 || $prefijo === '' || preg_match('/^[A-Z0-9]{8}$/D', $codigo) !== 1
+            || strtoupper(trim((string) $mensaje->body)) !== $prefijo . $codigo
+            || !SupportMessage::where('support_ticket_id', $ticket->id)->where('sender_type', 'admin')
+                ->where('is_trial_import_notice', true)->whereNotNull('whatsapp_message_id')
+                ->where('id', '<', $mensaje->id)->where('body', 'like', '%' . $prefijo . $codigo . '%')->exists()) {
+            return ['status' => 409, 'cuerpo' => ['message' => 'Hace falta el código de la revisión vigente, escrito por el dueño después del aviso.']];
+        }
+
+        return null;
     }
 
     /**
@@ -319,15 +397,58 @@ class PruebaImportacionService
         return null;
     }
 
+    public function puerta_activo(SupportTicket $ticket): ?array
+    {
+        $ticket->loadMissing('client');
+        $client = $ticket->client;
+
+        if ($ticket->status !== SupportTicket::STATUS_ABIERTO) {
+            return ['estado' => 'ticket_cerrado', 'mensaje' => 'El ticket no está abierto.'];
+        }
+
+        if ($client === null || !$client->is_active || $client->estado !== PruebaCicloService::CLIENTE_ACTIVO
+            || (int) $client->user_id < 1 || $ticket->source !== 'whatsapp' || $ticket->client_employee_id !== null) {
+            return ['estado' => 'contacto_no_habilitado', 'mensaje' => 'La importación requiere un ticket de WhatsApp del dueño de un negocio activo.'];
+        }
+
+        $contacto = app(ClientPhoneDirectory::class)->resolve_for_client($client, (string) $ticket->whatsapp_phone);
+        if ($contacto === null || $contacto['client_employee_id'] !== null
+            || !WhatsappNormalizer::equals_estricto((string) $contacto['raw_phone'], (string) $ticket->whatsapp_phone)) {
+            return ['estado' => 'contacto_no_habilitado', 'mensaje' => 'El número del ticket no está registrado como contacto del dueño.'];
+        }
+
+        return null;
+    }
+
+    public function es_entrante_del_dueno(SupportTicket $ticket, ?SupportMessage $mensaje): bool
+    {
+        if ($mensaje === null) {
+            return false;
+        }
+
+        $remitente = (string) $mensaje->whatsapp_remitente_crudo;
+        $telefono = (string) $ticket->whatsapp_phone;
+        if ($mensaje->sender_type !== 'user' || (int) $mensaje->support_ticket_id !== (int) $ticket->id
+            || trim((string) $mensaje->whatsapp_message_id) === ''
+            || !WhatsappNormalizer::equals_estricto($telefono, $remitente)) {
+            return false;
+        }
+
+        $contacto = app(ClientPhoneDirectory::class)->resolve_for_client($ticket->client, $telefono);
+        return $contacto !== null && $contacto['client_employee_id'] === null
+            && WhatsappNormalizer::equals_estricto((string) $contacto['raw_phone'], $remitente);
+    }
+
     private function automatizacion_disponible(SupportTicket $ticket): bool
     {
         return $ticket->source === 'whatsapp' && $ticket->client_employee_id === null
             && $this->puerta($ticket) === null && ! $this->pruebas->datos($ticket->client)['vencida'];
     }
 
-    private function contexto_del_ticket(SupportTicket $ticket): array
+    private function contexto_del_ticket(SupportTicket $ticket, bool $soporte_activo = false): array
     {
-        return ['user_id' => (int) $ticket->client->user_id, 'support_ticket_id' => (int) $ticket->id];
+        return ['user_id' => (int) $ticket->client->user_id, 'support_ticket_id' => (int) $ticket->id]
+            + ($soporte_activo ? ['automatizar_soporte' => '1'] : []);
     }
 
     private function adjunto_del_cliente(SupportTicket $ticket, int $id): ?SupportMessageAttachment
@@ -345,13 +466,16 @@ class PruebaImportacionService
      *
      * @return array{bytes: string, filename: string}|array{estado: string, mensaje: string}
      */
-    protected function archivo_excel(SupportTicket $ticket, array $input): array
+    protected function archivo_excel(SupportTicket $ticket, array $input, bool $soporte_activo = false): array
     {
         if (isset($input['attachment_id']) && is_numeric($input['attachment_id'])) {
             $attachment = $this->adjunto_del_cliente($ticket, (int) $input['attachment_id']);
 
             if ($attachment === null) {
                 return ['estado' => 'sin_fuente', 'mensaje' => 'Ese adjunto no es de este ticket.'];
+            }
+            if ($soporte_activo && !$this->es_entrante_del_dueno($ticket, $attachment->message)) {
+                return ['estado' => 'archivo_sin_remitente_verificado', 'mensaje' => 'Reenviá el Excel desde el WhatsApp registrado del dueño para poder usarlo.'];
             }
 
             $extension = self::extension_del_adjunto($attachment);
