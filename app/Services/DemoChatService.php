@@ -9,6 +9,7 @@ use App\Models\DemoChatMensaje;
 use App\Models\DemoChatProgreso;
 use App\Models\Lead;
 use App\Services\Prueba\PruebaChatAcceso;
+use App\Services\Prueba\PruebaVideoCatalogoService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -320,7 +321,7 @@ class DemoChatService
             'espera_segundos' => $chat ? $chat->espera_segundos : self::ESPERA_SEGUNDOS,
         ], 'mensajes' => [], 'catalogo' => []];
         $es_demo = $prueba_cliente_id === null;
-        $videos = $es_demo ? app(DemoChatCatalogoService::class)->videos($lead) : [];
+        $videos = $es_demo ? app(DemoChatCatalogoService::class)->videos($lead) : app(PruebaVideoCatalogoService::class)->videos();
         $progresos = $es_demo && $chat ? $chat->progresos()->get()->keyBy('clave') : collect();
         foreach ($videos as $clave => $video) {
             $videos[$clave] = $this->video_con_progreso($video, $progresos->get($clave));
