@@ -39,20 +39,20 @@ class CatalogoVideosDePruebaTest extends TestCase
         $this->assertSame([], app(PruebaVideoCatalogoService::class)->videos());
 
         foreach (array_keys(PruebaVideoCatalogoService::PIEZAS) as $codigo) {
-            AdminSetting::set(PruebaVideoCatalogoService::key($codigo), ' https://videos.test/' . $codigo . '.mp4 ');
+            AdminSetting::set(PruebaVideoCatalogoService::key($codigo), ' ' . PruebaVideoCatalogoService::URLS_APROBADAS[$codigo] . ' ');
         }
         $videos = app(PruebaVideoCatalogoService::class)->videos();
         $this->assertSame(['prueba:04', 'prueba:05', 'prueba:06', 'prueba:07', 'prueba:08', 'prueba:09'], array_keys($videos));
         $this->assertSame([1, 2, 3, 4, 5, 6], array_column($videos, 'posicion'));
         $this->assertSame([6, 6, 6, 6, 6, 6], array_column($videos, 'cantidad'));
-        $this->assertSame('https://videos.test/04.mp4', $videos['prueba:04']['url']);
+        $this->assertSame(PruebaVideoCatalogoService::URLS_APROBADAS['04'], $videos['prueba:04']['url']);
     }
 
     /** @dataProvider urls_no_publicables */
-    public function test_no_expone_urls_que_no_sean_https_multimedia_sin_credenciales(string $url): void
+    public function test_no_expone_urls_distintas_de_la_pieza_exacta_aprobada(string $url): void
     {
         AdminSetting::set(PruebaVideoCatalogoService::key('04'), $url);
-        AdminSetting::set(PruebaVideoCatalogoService::key('08'), 'https://videos.test/venta.mp4');
+        AdminSetting::set(PruebaVideoCatalogoService::key('08'), PruebaVideoCatalogoService::URLS_APROBADAS['08']);
         $videos = app(PruebaVideoCatalogoService::class)->videos();
         $this->assertSame(['prueba:08'], array_keys($videos));
         $this->assertSame(1, $videos['prueba:08']['posicion']);
@@ -62,14 +62,20 @@ class CatalogoVideosDePruebaTest extends TestCase
     public function urls_no_publicables(): array
     {
         return [[''], ['  '], ['http://videos.test/video.mp4'], ['https://usuario:clave@videos.test/video.mp4'],
-            ['https://videos.test/pagina.html'], ['javascript:alert(1)'], ['/video.mp4'], ['https://videos.test/video con espacios.mp4']];
+            ['https://videos.test/pagina.html'], ['javascript:alert(1)'], ['/video.mp4'], ['https://videos.test/video con espacios.mp4'],
+            [PruebaVideoCatalogoService::URLS_APROBADAS['04'] . '?otro=1'],
+            [PruebaVideoCatalogoService::URLS_APROBADAS['04'] . '#fragmento'],
+            [str_replace('videos.comerciocity.store', 'otro.test', PruebaVideoCatalogoService::URLS_APROBADAS['04'])],
+            [str_replace('/20261107/', '/20261020/', PruebaVideoCatalogoService::URLS_APROBADAS['04'])],
+            [str_replace('https://', 'https://usuario:clave@', PruebaVideoCatalogoService::URLS_APROBADAS['04'])],
+            [PruebaVideoCatalogoService::URLS_APROBADAS['05']]];
     }
 
     public function test_snapshot_transporta_catalogo_y_adjuntos_propios_sin_cambiar_el_estado_del_negocio(): void
     {
         [$lead, $client] = $this->prueba();
         $headers = ['X-Demo-Eventos-Key' => $lead->demo_eventos_token, 'X-Admin-Api-Key' => $client->inbound_api_key];
-        AdminSetting::set(PruebaVideoCatalogoService::key('04'), 'https://videos.test/recorrido.mp4');
+        AdminSetting::set(PruebaVideoCatalogoService::key('04'), PruebaVideoCatalogoService::URLS_APROBADAS['04']);
         $service = app(DemoChatService::class);
         $chat = $service->conversacion($lead, $client->id);
         $chat->mensajes()->create(['rol' => 'asistente', 'contenido' => 'Elegí qué querés explorar.',
@@ -96,7 +102,7 @@ class CatalogoVideosDePruebaTest extends TestCase
     {
         [$lead, $client] = $this->prueba();
         $chat = app(DemoChatService::class)->conversacion($lead, $client->id);
-        AdminSetting::set(PruebaVideoCatalogoService::key('05'), 'https://videos.test/importar.mp4');
+        AdminSetting::set(PruebaVideoCatalogoService::key('05'), PruebaVideoCatalogoService::URLS_APROBADAS['05']);
         $this->preparar_ia(['prueba:05'], ['prueba:05']);
 
         $salida = app(DemoChatAiService::class)->responder($lead, $chat);
@@ -115,7 +121,7 @@ class CatalogoVideosDePruebaTest extends TestCase
     {
         [$lead, $client] = $this->prueba();
         $chat = app(DemoChatService::class)->conversacion($lead, $client->id);
-        AdminSetting::set(PruebaVideoCatalogoService::key('04'), 'https://videos.test/recorrido.mp4');
+        AdminSetting::set(PruebaVideoCatalogoService::key('04'), PruebaVideoCatalogoService::URLS_APROBADAS['04']);
         $this->preparar_ia([$clave], ['prueba']);
 
         $this->expectException(\RuntimeException::class);

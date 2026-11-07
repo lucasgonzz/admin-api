@@ -61,7 +61,7 @@ La demo por turno tiene `GET/PUT /api/claude/demo-media` (y editor autenticado d
 | 08 v4 | `prueba_video_guia_08_url` | Primera venta |
 | 09 v4 | `prueba_video_guia_09_url` | Probar agente con catálogo |
 
-No tienen fallback al catálogo de demo ni a la bienvenida. Se aceptan URLs HTTPS válidas, sin usuario ni contraseña y con ruta terminada en `.mp4`, `.webm` o `.m3u8` (pueden tener query). Sólo se cargan después de verificar el archivo publicado. No se hace una petición al recurso al construir el catálogo.
+No tienen fallback al catálogo de demo ni a la bienvenida. Se acepta únicamente la URL exacta de cada pieza de la tanda aprobada del 7/11/2026, en `https://videos.comerciocity.store/landing-prueba/20261107/` y con versión y hash en el nombre. No se aceptan query, fragmentos, credenciales, otro host, otra fecha ni la URL de otra pieza. Las seis URLs están en `PruebaVideoCatalogoService::URLS_APROBADAS`, verificadas contra el registro de publicación por hash completo y tamaño. Una futura tanda requiere revisión explícita del catálogo, no sólo cambiar una configuración. No se hace una petición al recurso al construir el catálogo.
 
 El snapshot ya existente de `GET /api/prueba-chat` añade estos objetos a `catalogo` y resuelve `mensajes[].videos` con el mismo catálogo vigente. Conserva `version: 1` y los campos existentes. Las claves son `prueba:04` a `prueba:09`, el origen es `prueba`; no se aceptan claves de `demo:` ni `recurso:`. Vaciar un ajuste retira el video del selector y de los adjuntos sin borrar mensajes. Los campos de reproducción (`porcentaje`, `completado`, `omitido`) permanecen en cero/false: mirar no completa una acción del negocio.
 
