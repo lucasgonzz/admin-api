@@ -11,6 +11,7 @@ use App\Models\SupportTicket;
 use App\Services\ClientScheduleResolver;
 use App\Services\PruebaImportacionService;
 use App\Services\SupportCodexDiagnosticService;
+use App\Services\SupportCodexErpVerificationService;
 use App\Services\SupportCodexService;
 use App\Services\SupportCodexSettings;
 use App\Services\SupportCodexUpgradeAgreementService;
@@ -54,6 +55,39 @@ class ClaudeSupportCodexController extends Controller
     public function pending(Request $request, SupportCodexService $service)
     {
         return response()->json($service->pending($request->boolean('supports_upgrade_agreement')) + ['local_missions' => true]);
+    }
+
+    public function erp_verification_candidates(Request $request, SupportCodexErpVerificationService $service)
+    {
+        $this->autorizar_verificador_erp($request);
+        $data = $request->validate(['after_message_id' => 'sometimes|integer|min:0']);
+        return response()->json($service->candidates((int) ($data['after_message_id'] ?? 0)));
+    }
+
+    public function erp_verification_confirm(Request $request, SupportCodexErpVerificationService $service)
+    {
+        $this->autorizar_verificador_erp($request);
+        $hash = 'regex:/\A[a-f0-9]{64}\z/';
+        $data = $request->validate([
+            'ticket_id' => 'required|integer|min:1',
+            'client_id' => 'required|integer|min:1',
+            'client_user_id' => 'required|integer|min:1',
+            'ticket_uuid' => 'required|uuid',
+            'message_id' => 'required|integer|min:1',
+            'message_uuid' => 'required|uuid',
+            'kind' => 'required|string|max:40',
+            'body_sha256' => ['required', 'string', $hash],
+            'attachments' => 'present|array|max:' . SupportCodexErpVerificationService::MAX_ADJUNTOS,
+            'attachments.*' => ['required', 'string', $hash],
+        ]);
+        $service->confirm($data);
+        return response()->json(['verified' => true]);
+    }
+
+    private function autorizar_verificador_erp(Request $request): void
+    {
+        $clave = (string) config('services.support_erp_verifier.key');
+        abort_unless($clave !== '' && hash_equals($clave, (string) $request->header('X-Support-ERP-Verifier-Key')), 403);
     }
 
     public function claim(Request $request, $id, SupportCodexService $service)

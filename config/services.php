@@ -5,6 +5,10 @@ return [
         'enabled' => env('SUPPORT_CODEX_SCHEDULED_UPGRADES_ENABLED', false),
     ],
 
+    'support_erp_verifier' => [
+        'key' => env('ADMIN_SUPPORT_ERP_VERIFIER_KEY'),
+    ],
+
     /*
     |--------------------------------------------------------------------------
     | Third Party Services

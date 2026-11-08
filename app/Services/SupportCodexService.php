@@ -1650,15 +1650,30 @@ class SupportCodexService
 
     private function pending_reason(SupportTicket $ticket, ?SupportCodexCase $case, bool $supports_upgrade_agreement = false): ?string
     {
-        if ($ticket->status !== 'open' || ($case !== null && $case->state === 'closed')
-            || $this->has_unfinished_operation($ticket->id)) {
-            return null;
-        }
         $last = $this->last_real_message($ticket->id);
         if ($last === null || ! $ticket->mensaje_confiable_para_codex($last)) {
             return null;
         }
-        if (! (bool) $ticket->claude_auto_reply) {
+
+        return $this->pending_reason_for($ticket, $case, $last, $supports_upgrade_agreement);
+    }
+
+    /** El solicitante debe haber seleccionado el último mensaje real del ticket. */
+    public function puede_cotejar_entrante_erp(SupportTicket $ticket, SupportMessage $mensaje): bool
+    {
+        $case = $ticket->support_codex_case;
+        return $ticket->es_erp_sin_identidad_verificada() && $ticket->status === 'open'
+            && $ticket->claude_auto_reply && $mensaje->sender_type === 'user' && ! $mensaje->is_trial_import_notice
+            && (int) $mensaje->support_ticket_id === (int) $ticket->id
+            && ($case === null || $case->lease_expires_at === null || ! $case->lease_expires_at->isFuture())
+            && SupportCodexSettings::manages($ticket)
+            && $this->pending_reason_for($ticket, $case, $mensaje) === 'inbound';
+    }
+
+    private function pending_reason_for(SupportTicket $ticket, ?SupportCodexCase $case, SupportMessage $last, bool $supports_upgrade_agreement = false): ?string
+    {
+        if ($ticket->status !== 'open' || ($case !== null && $case->state === 'closed')
+            || ! $ticket->claude_auto_reply || $this->has_unfinished_operation($ticket->id)) {
             return null;
         }
         if ($case !== null && $case->state === 'manual_review') {

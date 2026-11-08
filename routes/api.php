@@ -385,6 +385,8 @@ Route::middleware('claude.task.key')
         Route::put('support-codex/settings', 'Api\ClaudeSupportCodexController@update_settings');
         Route::post('support-codex/health', 'Api\ClaudeSupportCodexController@health');
         Route::get('support-codex/pending', 'Api\ClaudeSupportCodexController@pending');
+        Route::get('support-codex/erp-verification', 'Api\ClaudeSupportCodexController@erp_verification_candidates');
+        Route::post('support-codex/erp-verification', 'Api\ClaudeSupportCodexController@erp_verification_confirm');
         Route::get('support-codex/local-missions', [\App\Http\Controllers\Api\LocalMisionesController::class, 'pendientes']);
         Route::post('support-codex/local-missions/{id}/claim', [\App\Http\Controllers\Api\LocalMisionesController::class, 'reclamar'])->whereNumber('id');
         Route::get('support-codex/operations/{operation_id}', 'Api\ClaudeSupportCodexController@operation');
