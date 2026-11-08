@@ -108,6 +108,28 @@ class AgentesEnEmpresaTest extends BaseDelCanal
             ->assertJsonCount(3, 'model.messages');
     }
 
+    public function test_el_empleado_conserva_el_hilo_traspasado_sin_su_contacto_de_whatsapp(): void
+    {
+        $cliente = $this->comercio();
+        $empleado = $this->crear_empleado($cliente, '+5493415202156');
+        $usuario = $cliente->user_id + 1;
+        $empleado->update(['empresa_employee_id' => $usuario]);
+        $ticket = $this->ticket_whatsapp($cliente, ['client_employee_id' => $empleado->id, 'whatsapp_phone' => $empleado->phone]);
+        $datos = array_replace($this->datos_entrante($cliente, $ticket->uuid), [
+            'client_user_id' => $usuario, 'sender_user_id' => $usuario, 'es_dueno' => 0, 'traspasar_a_sistema' => 1,
+        ]);
+
+        $this->postJson('/api/inbound/support/messages', $datos, $this->clave($cliente))->assertCreated();
+        $empleado->delete();
+
+        $this->getJson($this->ruta($cliente, 'soporte/' . $ticket->uuid), $this->clave($cliente))->assertNotFound();
+        $this->getJson($this->ruta($cliente, 'soporte/' . $ticket->uuid, ['client_user_id' => $usuario, 'es_dueno' => 0]), $this->clave($cliente))
+            ->assertOk()->assertJsonPath('model.uuid', $ticket->uuid);
+        $datos['message_uuid'] = (string) Str::uuid();
+        $this->postJson('/api/inbound/support/messages', $datos, $this->clave($cliente))->assertCreated();
+        $this->assertSame(2, $ticket->messages()->count());
+    }
+
     public function test_el_ticket_web_firmado_se_separa_de_soporte_legado(): void
     {
         config(['services.claude_task_ingest.key' => 'codex-agentes-test']);

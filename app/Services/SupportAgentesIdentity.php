@@ -30,19 +30,19 @@ class SupportAgentesIdentity
             || ($ticket->source !== 'whatsapp' && $ticket->sistema_exclusivo_at === null)) {
             return false;
         }
-        $traspasado = $ticket->sistema_exclusivo_at !== null;
-        if ($traspasado && (int) $ticket->client_user_id !== $user_id) {
-            return false;
+        if ($ticket->sistema_exclusivo_at !== null) {
+            // El contacto de WhatsApp se verificó al trasladarlo. El historial quedó en esa cuenta del ERP.
+            return (int) $ticket->client_user_id === $user_id;
         }
         if ($ticket->client_employee_id === null) {
             return self::es_dueno($client, $user_id, $declara_dueno)
-                && ($traspasado || WhatsappNormalizer::equals_estricto((string) $client->phone, (string) $ticket->whatsapp_phone)
+                && (WhatsappNormalizer::equals_estricto((string) $client->phone, (string) $ticket->whatsapp_phone)
                     || WhatsappNormalizer::equals_estricto((string) $client->telefono_personal(), (string) $ticket->whatsapp_phone));
         }
 
         $contacto = $ticket->client_employee;
         return ! $declara_dueno && $contacto !== null && (int) $contacto->client_id === (int) $client->id
             && (int) $contacto->empresa_employee_id === $user_id
-            && ($traspasado || WhatsappNormalizer::equals_estricto((string) $contacto->phone, (string) $ticket->whatsapp_phone));
+            && WhatsappNormalizer::equals_estricto((string) $contacto->phone, (string) $ticket->whatsapp_phone);
     }
 }
