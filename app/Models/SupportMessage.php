@@ -76,7 +76,7 @@ class SupportMessage extends Model
      */
     protected $guarded = [];
 
-    protected $hidden = ['whatsapp_remitente_crudo'];
+    protected $hidden = ['whatsapp_remitente_crudo', 'erp_auto_reply'];
 
     /**
      * Casts de tiempos de estado del mensaje.
@@ -85,6 +85,7 @@ class SupportMessage extends Model
      * @var array<string, string>
      */
     protected $casts = [
+        'erp_auto_reply'          => 'array',
         'delivered_at'            => 'datetime',
         'read_at'                 => 'datetime',
         'synced_to_client_at'     => 'datetime',

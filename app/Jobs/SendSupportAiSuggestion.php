@@ -15,11 +15,13 @@ use App\Services\SupportAiSuggestionScheduler;
 use App\Services\SupportAiSuggestionService;
 use App\Services\EscalationPushNotificationService;
 use App\Services\SupportEscalationWhatsappService;
+use App\Services\SupportTourService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -49,15 +51,17 @@ class SendSupportAiSuggestion implements ShouldQueue
      * @var int Token de programación; debe coincidir con caché al ejecutar.
      */
     private $schedule_token;
+    private $erp_message_id = null;
 
     /**
      * @param int $ticket_id
      * @param int $schedule_token
      */
-    public function __construct(int $ticket_id, int $schedule_token)
+    public function __construct(int $ticket_id, int $schedule_token, ?int $erp_message_id = null)
     {
         $this->ticket_id = $ticket_id;
         $this->schedule_token = $schedule_token;
+        $this->erp_message_id = $erp_message_id;
     }
 
     /**
@@ -97,7 +101,11 @@ class SendSupportAiSuggestion implements ShouldQueue
             return;
         }
 
-        if ($this->last_message_is_from_admin($ticket->id)) {
+        if ($ticket->source === 'erp' && ($this->erp_message_id === null || ! SupportAiSettings::is_suggestions_enabled())) {
+            return;
+        }
+
+        if (! $this->mensaje_vigente($ticket->id)) {
             return;
         }
 
@@ -143,6 +151,11 @@ class SendSupportAiSuggestion implements ShouldQueue
                 'ticket_id' => $ticket->id,
             ]);
 
+            return;
+        }
+
+        if ($ticket->source === 'erp' && ($ticket->status !== 'open' || ! $this->mensaje_vigente($ticket->id)
+            || ! SupportAiSettings::is_suggestions_enabled())) {
             return;
         }
 
@@ -199,7 +212,7 @@ class SendSupportAiSuggestion implements ShouldQueue
         }
 
         /* --- Manejo de cierre de ticket --- */
-        if (! empty($result['should_close'])) {
+        if ($ticket->source !== 'erp' && ! empty($result['should_close'])) {
             $this->handle_close($ticket, $suggested_message, $delivery_service, $draft_service);
 
             return;
@@ -221,7 +234,8 @@ class SendSupportAiSuggestion implements ShouldQueue
             $ticket->save();
         }
 
-        $this->entregar_o_dejar_en_borrador($ticket, $suggested_message, $delivery_service, $draft_service);
+        $tour = $ticket->source === 'erp' ? SupportTourService::guion($result['tour'] ?? null) : null;
+        $this->entregar_o_dejar_en_borrador($ticket, $suggested_message, $delivery_service, $draft_service, $tour);
     }
 
     /**
@@ -247,11 +261,14 @@ class SendSupportAiSuggestion implements ShouldQueue
         SupportTicket $ticket,
         string $suggested_message,
         SupportAiSuggestionDeliveryService $delivery_service,
-        SupportAiSuggestionDraftService $draft_service
+        SupportAiSuggestionDraftService $draft_service,
+        ?array $tour = null
     ): bool {
         if ((bool) $ticket->requiere_verificacion_mensajes) {
             // create_draft() con demora 0 deja ai_auto_send_at en null: el borrador espera.
-            $draft_service->create_draft($ticket, $suggested_message, 0);
+            if ($this->guardar_borrador($draft_service, $ticket, $suggested_message, 0, null) === null) {
+                return false;
+            }
 
             event(new SupportAiSuggestionPending($ticket->id));
 
@@ -265,12 +282,19 @@ class SendSupportAiSuggestion implements ShouldQueue
         $delay = SupportAiSettings::get_auto_send_delay_seconds();
 
         if ($delay <= 0) {
-            $delivery_service->deliver_text_reply($ticket, $suggested_message);
+            if ($ticket->source === 'erp') {
+                $delivery_service->deliver_erp_auto_reply($ticket, $suggested_message, $this->erp_message_id, $tour);
+            } else {
+                $delivery_service->deliver_text_reply($ticket, $suggested_message);
+            }
 
             return false;
         }
 
-        $draft_message = $draft_service->create_draft($ticket, $suggested_message, $delay);
+        $draft_message = $this->guardar_borrador($draft_service, $ticket, $suggested_message, $delay, $tour);
+        if ($draft_message === null) {
+            return false;
+        }
 
         event(new SupportAiSuggestionPending($ticket->id));
 
@@ -280,6 +304,27 @@ class SendSupportAiSuggestion implements ShouldQueue
         }
 
         return true;
+    }
+
+    private function guardar_borrador(SupportAiSuggestionDraftService $draft_service, SupportTicket $ticket, string $body, int $delay, ?array $tour): ?SupportMessage
+    {
+        if ($ticket->source !== 'erp') {
+            return $draft_service->create_draft($ticket, $body, $delay);
+        }
+
+        return DB::transaction(function () use ($draft_service, $ticket, $body, $delay, $tour) {
+            $ticket = SupportTicket::lockForUpdate()->find($ticket->id);
+            if ($ticket === null || $ticket->status !== 'open' || ! $ticket->claude_auto_reply
+                || ! SupportAiSettings::is_suggestions_enabled() || ! $this->mensaje_vigente($ticket->id)) {
+                return null;
+            }
+
+            $delay = $ticket->requiere_verificacion_mensajes ? 0 : $delay;
+            return $draft_service->create_draft($ticket, $body, $delay, function (SupportMessage $borrador) use ($delay, $tour) {
+                $borrador->erp_auto_reply = ['message_id' => $this->erp_message_id, 'tour' => $delay > 0 ? $tour : null];
+                $borrador->save();
+            });
+        });
     }
 
     /**
@@ -474,7 +519,7 @@ class SendSupportAiSuggestion implements ShouldQueue
      *
      * @return bool
      */
-    private function last_message_is_from_admin(int $ticket_id): bool
+    private function mensaje_vigente(int $ticket_id): bool
     {
         $last_message = SupportMessage::query()
             ->where('support_ticket_id', $ticket_id)
@@ -482,6 +527,10 @@ class SendSupportAiSuggestion implements ShouldQueue
             ->orderBy('id', 'desc')
             ->first();
 
-        return $last_message !== null && $last_message->sender_type === 'admin';
+        if ($this->erp_message_id !== null) {
+            return $last_message !== null && $last_message->sender_type === 'user'
+                && (int) $last_message->id === $this->erp_message_id;
+        }
+        return $last_message === null || $last_message->sender_type !== 'admin';
     }
 }

@@ -112,9 +112,23 @@ class SupportAiSuggestionService
                 $user_content = $this->append_title_suggestion_to_user_content($user_content);
             }
 
+            $es_erp = $ticket->source === 'erp';
+            if ($es_erp) {
+                $system_prompt .= $this->indicaciones_para_robotito();
+            }
+
             $model   = (string) config('services.anthropic.model', 'claude-sonnet-4-20250514');
             $http    = $this->build_http_client();
             $tools   = $this->build_github_tools();
+            if ($es_erp) {
+                $tools[] = [
+                    'name' => 'buscar_video_de_ayuda',
+                    'description' => 'Busca videos publicados del Centro de recursos por tema o código.',
+                    'input_schema' => [
+                        'type' => 'object', 'properties' => ['consulta' => ['type' => 'string']], 'required' => ['consulta'],
+                    ],
+                ];
+            }
             $messages = [
                 ['role' => 'user', 'content' => $this->build_user_blocks($ticket, $user_content)],
             ];
@@ -132,6 +146,7 @@ class SupportAiSuggestionService
              * mismo worker de cola, dejando que un ticket cite lo que leyó otro. El mismo riesgo
              * ya está documentado en LeadAiService::execute_tool(). */
             $leidas = [];
+            $videos = [];
 
             while ($iterations < self::MAX_TOOL_ITERATIONS) {
                 $iterations++;
@@ -189,7 +204,7 @@ class SupportAiSuggestionService
                     ];
 
                     // Procesar cada tool_use y construir los tool_result.
-                    $tool_results = $this->execute_tool_calls($content_blocks, $ticket->id, $leidas);
+                    $tool_results = $this->execute_tool_calls($content_blocks, $ticket->id, $leidas, $es_erp, $videos);
 
                     // Agregar los resultados como mensaje de user.
                     $messages[] = [
@@ -272,6 +287,17 @@ class SupportAiSuggestionService
                 'gate_motivo'       => $veredicto['motivo'],
             ];
 
+            if ($es_erp && $veredicto['permitido'] && ! $should_escalate && $result['suggested_message'] !== '') {
+                $codigo = $parsed['video_codigo'] ?? null;
+                if (is_string($codigo) && in_array($codigo, $videos, true)) {
+                    $result['suggested_message'] .= "\n\nAcá tenés el video del Centro de recursos: " . SupportVideoResource::enlace($codigo);
+                }
+                $tour = SupportTourService::guion($parsed['tour'] ?? null);
+                if (! $should_close && $tour !== null) {
+                    $result['tour'] = $tour;
+                }
+            }
+
             if ($ticket_needs_title) {
                 $suggested_title = trim((string) ($parsed['suggested_title'] ?? ''));
                 if ($suggested_title !== '') {
@@ -338,6 +364,22 @@ Respondé SOLO en JSON con este formato exacto:
 }';
 
         return str_replace($standard_json_block, $title_json_block, $user_content);
+    }
+
+    private function indicaciones_para_robotito(): string
+    {
+        return <<<'PROMPT'
+
+
+Respondé en un solo mensaje de soporte sin separadores. Para una consulta de uso, explicá el paso a paso en suggested_message. Si hay un video que ayuda, buscá con buscar_video_de_ayuda, elegí un resultado pertinente y agregá al JSON la clave opcional video_codigo con su código exacto. El sistema agrega el enlace. No escribas ni inventes el enlace en suggested_message.
+
+Si un recorrido coincide con la consulta, agregá al JSON la clave opcional tour como objeto {"tema":"...","titulo":"...","textos":["..."]}. Estos son los recorridos y el orden de sus pasos:
+- crear_ticket: abrir Soporte, abrir un nuevo ticket, escribir y enviar la consulta.
+- buscar_articulo_nombre: abrir el buscador en Vender, escribir y buscar por nombre, revisar resultados.
+- buscar_articulo_codigo: buscar en Vender por el campo del código de barras.
+- centro_recursos: abrir Tutoriales, buscar un tema en el Centro de recursos.
+Los textos son opcionales. Si los personalizás, incluí un texto plano de hasta 240 caracteres por paso, en ese orden. Si el usuario pregunta mientras recorre un tour, resolvé la duda y reformulá la guía si hay un recorrido adecuado. Para consultas de uso dejá should_close en false. El sistema informa al usuario si la oferta se confirma. No prometas ni digas que enviaste a Robotito en suggested_message.
+PROMPT;
     }
 
     /**
@@ -757,7 +799,7 @@ USER;
      *
      * @return array<int, array<string, mixed>>
      */
-    protected function execute_tool_calls(array $content_blocks, $ticket_id, array &$leidas = []): array
+    protected function execute_tool_calls(array $content_blocks, $ticket_id, array &$leidas = [], bool $es_erp = false, array &$videos = []): array
     {
         $tool_results = [];
 
@@ -779,6 +821,10 @@ USER;
                      * devolvió sin lanzar. Si tira, la ejecución salta al catch y este path no
                      * queda registrado — que es justamente lo que hace verificable la cita. */
                     $leidas[] = $path;
+                } elseif ($es_erp && $tool_name === 'buscar_video_de_ayuda') {
+                    $hallados = app(SupportVideoResource::class)->buscar((string) ($tool_input['consulta'] ?? ''));
+                    $videos = array_merge($videos, array_column($hallados, 'codigo'));
+                    $content = json_encode($hallados, JSON_UNESCAPED_UNICODE);
                 } else {
                     $content = 'Tool desconocida: '.$tool_name;
                 }

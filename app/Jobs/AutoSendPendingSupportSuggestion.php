@@ -86,7 +86,13 @@ class AutoSendPendingSupportSuggestion implements ShouldQueue
                 return;
             }
 
-            $delivery_service->deliver_draft_message($draft_message, $ticket);
+            if ($ticket->source === 'erp') {
+                if ($delivery_service->deliver_erp_auto_draft($draft_message, $ticket) === null) {
+                    return;
+                }
+            } else {
+                $delivery_service->deliver_draft_message($draft_message, $ticket);
+            }
             $this->clear_pending_fields($ticket);
 
             Log::channel('daily')->info('AutoSendPendingSupportSuggestion: sugerencia enviada automáticamente.', [
@@ -98,7 +104,7 @@ class AutoSendPendingSupportSuggestion implements ShouldQueue
         }
 
         $pending_text = trim((string) ($ticket->ai_pending_suggestion ?? ''));
-        if ($pending_text === '') {
+        if ($pending_text === '' || $ticket->source === 'erp') {
             return;
         }
 

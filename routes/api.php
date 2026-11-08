@@ -405,6 +405,7 @@ Route::middleware('claude.task.key')
         Route::post('support-codex/tickets/{id}/implementation-note', 'Api\ClaudeSupportCodexController@implementation_note')
             ->whereNumber('id');
         Route::post('support-codex/tickets/{id}/reply', 'Api\ClaudeSupportCodexController@reply');
+        Route::post('support-codex/tickets/{id}/tour', 'Api\SupportTourController@ofrecer')->whereNumber('id');
         Route::post('support-codex/tickets/{id}/release', 'Api\ClaudeSupportCodexController@release');
         Route::post('support-codex/tickets/{id}/resume', 'Api\ClaudeSupportCodexController@resume');
         Route::post('support-codex/tickets/{id}/mission-started', 'Api\ClaudeSupportCodexController@mission_started');
@@ -1545,6 +1546,7 @@ Route::prefix('admin')->group(function () {
         // "contact-search" y el buscador del modal de alta contestaría 404.
         Route::get('support-ticket/contact-search', [\App\Http\Controllers\Api\SupportTicketController::class, 'contact_search']);
         Route::get('support-ticket/{id}', [\App\Http\Controllers\Api\SupportTicketController::class, 'show']);
+        Route::get('support-ticket/{id}/tours', [\App\Http\Controllers\Api\SupportTourController::class, 'seguimiento'])->whereNumber('id');
         Route::get('support-ticket/{id}/whatsapp-window', [\App\Http\Controllers\Api\SupportTicketController::class, 'whatsapp_window']);
         Route::post('support-ticket', [\App\Http\Controllers\Api\SupportTicketController::class, 'store']);
         Route::put('support-ticket/{id}', [\App\Http\Controllers\Api\SupportTicketController::class, 'update']);

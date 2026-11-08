@@ -10,7 +10,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Programa la sugerencia de Claude tras mensajes entrantes del cliente en soporte WhatsApp.
+ * Programa la sugerencia de Claude tras mensajes entrantes del cliente en soporte.
  *
  * Cada nuevo inbound incrementa un token en caché; solo el job cuyo token coincide ejecuta la llamada a Claude.
  * Si llegan más mensajes antes de que termine la espera o la API, el token queda obsoleto y el resultado se descarta.
@@ -30,10 +30,11 @@ class SupportAiSuggestionScheduler
      *
      * @return void
      */
-    public function schedule_after_client_inbound(int $ticket_id): void
+    public function schedule_after_client_inbound(int $ticket_id, ?int $erp_message_id = null): void
     {
         $ticket = SupportTicket::find($ticket_id);
-        if ($ticket !== null && SupportCodexSettings::manages($ticket)) {
+        $erp_en_pausa = $erp_message_id !== null && (! SupportAiSettings::is_suggestions_enabled() || ! optional($ticket)->claude_auto_reply);
+        if ($erp_en_pausa || ($ticket !== null && SupportCodexSettings::manages($ticket))) {
             // También invalida un job del proveedor anterior que ya estaba en plena consulta.
             $this->clear_stale_pending_suggestion($ticket_id);
             $this->bump_schedule_token($ticket_id);
@@ -47,7 +48,7 @@ class SupportAiSuggestionScheduler
 
         $consult_at = now()->addSeconds($delay_seconds);
 
-        SendSupportAiSuggestion::dispatch($ticket_id, $schedule_token)
+        SendSupportAiSuggestion::dispatch($ticket_id, $schedule_token, $erp_message_id)
             ->delay($consult_at);
 
         event(new SupportAiSuggestionScheduled(

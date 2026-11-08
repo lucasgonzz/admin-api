@@ -28,7 +28,9 @@ class SupportClientSyncService
         }
 
         // URL base del cliente de empresa-api.
-        $base_url = rtrim((string) $client->api_url, '/');
+        $base_url = $message->ticket->source === 'erp' && $message->ai_generated_at !== null
+            ? app(ClientEmpresaApiUrlResolver::class)->resolve_base_url($client)
+            : rtrim((string) $client->api_url, '/');
         if ($base_url === '') {
             Log::warning('SupportClientSyncService: client api_url vacío', [
                 'client_id' => $client->id,

@@ -417,6 +417,17 @@ class SupportMessageController extends BaseController
             return response()->json(['error' => 'El ticket está cerrado.'], 422);
         }
 
+        if ($ticket->source === 'erp') {
+            $data = $request->validate(['body' => 'sometimes|required|string|max:3500']);
+            $enviado = app(SupportAiSuggestionDeliveryService::class)->approve_erp_draft(
+                $ticket, (int) $message->id, $data['body'] ?? null, (int) Auth::id()
+            );
+            return response()->json([
+                'model' => SupportMessage::whereKey($message->id)->withAll()->first(),
+                'delivered' => $enviado->remote_delivery_status !== 'not_received',
+            ]);
+        }
+
         // Se toma el borrador con un UPDATE condicional en vez de leer-y-después-escribir. El
         // job de autoenvío y el operador pueden estar los dos sobre el mismo borrador —el
         // operador aprieta Enviar en el segundo 119 de una demora de 120— y sin esto los dos
@@ -908,7 +919,13 @@ class SupportMessageController extends BaseController
         $admin_id = (int) Auth::id();
         $message = SupportMessage::where('id', $id)
             ->where('sender_type', 'admin')
-            ->where('sender_admin_id', $admin_id)
+            ->where(function ($query) use ($admin_id) {
+                $query->where('sender_admin_id', $admin_id)->orWhere(function ($automatico) {
+                    $automatico->whereNull('sender_admin_id')->whereNotNull('ai_generated_at')
+                        ->where('is_ai_suggestion_draft', false)->where('remote_delivery_status', 'not_received')
+                        ->whereHas('ticket', function ($ticket) { $ticket->where('source', 'erp'); });
+                });
+            })
             ->with('ticket')
             ->firstOrFail();
 
