@@ -105,6 +105,8 @@ class SupportAiSuggestionDeliveryService
             $mensaje = SupportMessage::where('support_ticket_id', $ticket->id)->where('is_ai_suggestion_draft', true)
                 ->lockForUpdate()->find($draft_id);
             abort_unless($mensaje !== null, 422, 'Ese borrador ya se envió o se descartó.');
+            abort_if(SupportCodexSettings::manages($ticket) && isset($mensaje->erp_auto_reply['message_id']),
+                409, 'Martín ya está a cargo del ticket. Este borrador de Robotito quedó reemplazado.');
 
             $body_original = trim((string) $mensaje->body);
             $body = $edited_body !== null ? trim($edited_body) : $body_original;
@@ -136,6 +138,7 @@ class SupportAiSuggestionDeliveryService
         $mensaje = DB::transaction(function () use ($ticket, $body, $expected_message_id, $tour, $draft_id) {
             $ticket = SupportTicket::lockForUpdate()->find($ticket->id);
             if ($ticket === null || $ticket->source !== 'erp' || $ticket->status !== 'open'
+                || $ticket->agentes_erp || SupportCodexSettings::manages($ticket)
                 || ! $ticket->claude_auto_reply || $ticket->requiere_verificacion_mensajes
                 || ! SupportAiSettings::is_suggestions_enabled() || trim($body) === '') {
                 return null;

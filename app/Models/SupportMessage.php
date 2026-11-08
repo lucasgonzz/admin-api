@@ -9,6 +9,9 @@ class SupportMessage extends Model
 {
     use HasUuid;
 
+    public const MARCA_ERP_VERIFICADO_PARA_CODEX = 'codex_inbound_verified';
+    public const MARCA_TRANSICION_ERP_PARA_CODEX = 'codex_erp_legacy_transition';
+
     /**
      * 🔴 LA definición de "este mensaje del hilo es real", y la única que hay.
      *

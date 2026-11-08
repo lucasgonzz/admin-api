@@ -15,6 +15,7 @@ use App\Models\SupportTypingState;
 use App\Services\SupportAiSuggestionScheduler;
 use App\Services\SupportAgentesIdentity;
 use App\Services\SupportCodexService;
+use App\Services\SupportCodexSettings;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -61,12 +62,14 @@ class InboundSupportMessageController extends Controller
             // support_messages no tiene una clave foránea que bloquee esa inserción por sí sola.
             $ticket_uuid = $request->input('ticket_uuid');
             $ticket = SupportTicket::where('uuid', $ticket_uuid)->lockForUpdate()->first();
+            $transicion_desde_legado = $ticket !== null && $ticket->es_erp_sin_identidad_verificada();
             $message_uuid = $request->input('message_uuid');
             $traspaso = $request->boolean('traspasar_a_sistema');
             $version_agentes = in_array($request->input('agentes_version'), [1, '1'], true);
             $usuario = (int) $request->input('client_user_id');
             $protegido = $ticket !== null && ($ticket->agentes_erp || $ticket->sistema_exclusivo_at !== null);
-            if ($traspaso || $version_agentes || $protegido) {
+            $requiere_firma = $traspaso || $version_agentes || $protegido;
+            if ($requiere_firma) {
                 abort_unless(SupportAgentesIdentity::firmada($request, $client), 401);
                 $request->validate([
                     'ticket_uuid' => 'required|uuid', 'message_uuid' => 'required|uuid',
@@ -113,7 +116,7 @@ class InboundSupportMessageController extends Controller
                     'lease_expires_at' => null,
                 ]);
             }
-            if ($traspaso || $version_agentes || $protegido) {
+            if ($requiere_firma) {
                 abort_unless($ticket->status === 'open', 409, 'El ticket está cerrado.');
                 if ($ticket->sistema_exclusivo_at === null && $ticket->client_employee_id === null
                     && $usuario !== (int) $client->user_id) {
@@ -121,6 +124,8 @@ class InboundSupportMessageController extends Controller
                         ->where('empresa_employee_id', $usuario)->value('id');
                 }
                 $ticket->agentes_erp = true;
+            }
+            if ($request->input('sender_type', 'user') === 'user') {
                 $ticket->last_client_message_at = now();
             }
 
@@ -129,8 +134,8 @@ class InboundSupportMessageController extends Controller
             $ticket->client_user_email = $request->input('sender_user_email', $ticket->client_user_email);
             $ticket->save();
 
-            // La capacidad se guarda al crear el entrante firmado. Una repetición no puede
-            // agregarla a una fila histórica o a una que entró sin autenticación.
+            // Las marcas se guardan al crear el entrante. Un replay no puede acreditar
+            // una fila que ya existe: su texto y sus adjuntos se recibieron en otra llamada.
             $datos = [
                 'uuid' => $message_uuid,
                 'support_ticket_id' => $ticket->id,
@@ -140,12 +145,24 @@ class InboundSupportMessageController extends Controller
                 'delivered_at' => now(),
                 'synced_to_client_at' => now(),
             ];
+            $marcas = [];
             if ($this->entrada_robotito_valida($request, $client, $ticket)) {
-                $datos['erp_auto_reply'] = ['inbound_version' => 1];
+                $marcas['inbound_version'] = 1;
+            }
+            if ($datos['sender_type'] === 'user' && $usuario > 0 && $usuario === (int) $ticket->client_user_id
+                && $usuario === (int) $request->input('sender_user_id')
+                && ($requiere_firma || SupportAgentesIdentity::firmada($request, $client))) {
+                $marcas[SupportMessage::MARCA_ERP_VERIFICADO_PARA_CODEX] = true;
+                if ($transicion_desde_legado && $ticket->agentes_erp) {
+                    $marcas[SupportMessage::MARCA_TRANSICION_ERP_PARA_CODEX] = true;
+                }
+            }
+            if ($marcas !== []) {
+                $datos['erp_auto_reply'] = $marcas;
             }
             $message = SupportMessage::create($datos);
             $this->persistir_adjuntos($request, $message);
-            if ($ticket->agentes_erp) {
+            if ($ticket->agentes_erp || SupportCodexSettings::manages($ticket)) {
                 app(SupportCodexService::class)->invalidate_stale_approval($ticket);
             }
             return [$message, true];
@@ -210,7 +227,8 @@ class InboundSupportMessageController extends Controller
                 $message->refresh();
                 $marca = $message->erp_auto_reply;
                 $ticket = $message->ticket;
-                if (isset($marca['scheduled_at']) || $ticket === null || $ticket->status !== 'open' || $message->sender_type !== 'user') {
+                if (isset($marca['scheduled_at']) || $ticket === null || $ticket->status !== 'open'
+                    || SupportCodexSettings::manages($ticket) || $message->sender_type !== 'user') {
                     return;
                 }
                 $hay_mas_nuevo = SupportMessage::where('support_ticket_id', $ticket->id)

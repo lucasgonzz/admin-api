@@ -315,6 +315,7 @@ class SendSupportAiSuggestion implements ShouldQueue
         return DB::transaction(function () use ($draft_service, $ticket, $body, $delay, $tour) {
             $ticket = SupportTicket::lockForUpdate()->find($ticket->id);
             if ($ticket === null || $ticket->status !== 'open' || ! $ticket->claude_auto_reply
+                || $ticket->agentes_erp || \App\Services\SupportCodexSettings::manages($ticket)
                 || ! SupportAiSettings::is_suggestions_enabled() || ! $this->mensaje_vigente($ticket->id)) {
                 return null;
             }

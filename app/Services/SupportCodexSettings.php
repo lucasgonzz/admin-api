@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\AdminSetting;
+use App\Models\SupportMessage;
 use App\Models\SupportTicket;
 use Illuminate\Support\Facades\DB;
 
@@ -26,15 +27,29 @@ class SupportCodexSettings
 
     public static function manages(SupportTicket $ticket): bool
     {
-        if (! self::enabled() || ($ticket->source !== 'whatsapp' && ! $ticket->agentes_erp)) {
+        if (! self::enabled() || ! in_array($ticket->source, ['whatsapp', 'erp'], true)) {
             return false;
         }
         // El corte se evalúa contra el entrante, no contra la apertura: un caso viejo puede
         // retomarse si el cliente escribe otra vez DESPUÉS de activar el nuevo circuito.
-        return self::activated_at() !== null && $ticket->last_client_message_at !== null
-            && $ticket->last_client_message_at->gte(self::activated_at())
-            && \App\Models\SupportMessage::where('support_ticket_id', $ticket->id)
-                ->where('sender_type', 'user')->where('id', '>', (int) AdminSetting::get(self::KEY_ACTIVATED_AFTER_ID, 0))->exists();
+        $activado = self::activated_at();
+        if ($activado === null) {
+            return false;
+        }
+        if ($ticket->source === 'erp' && $ticket->last_client_message_at === null) {
+            // Las versiones anteriores guardaban el mensaje sin actualizar la fecha del ticket.
+            return self::entrantes_desde_el_corte($ticket->messages(), $activado)->exists();
+        }
+
+        return $ticket->last_client_message_at !== null && $ticket->last_client_message_at->gte($activado)
+            && self::entrantes_desde_el_corte($ticket->messages())->exists();
+    }
+
+    public static function entrantes_desde_el_corte($query, ?string $activado = null)
+    {
+        SupportMessage::apply_mensaje_real_conditions($query, 'support_messages');
+        $query->where('sender_type', 'user')->where('id', '>', (int) AdminSetting::get(self::KEY_ACTIVATED_AFTER_ID, 0));
+        return $activado === null ? $query : $query->where('created_at', '>=', $activado);
     }
 
     public static function set_enabled(bool $enabled): array

@@ -124,9 +124,10 @@ class SupportClientSyncService
      * Sincroniza actualización de ticket (estado/nombre) hacia empresa-api.
      *
      * @param \App\Models\SupportTicket $ticket
+     * @param bool $usar_frente_activo
      * @return bool
      */
-    public function sync_ticket_to_client($ticket): bool
+    public function sync_ticket_to_client($ticket, bool $usar_frente_activo = false): bool
     {
         // Carga cliente para resolver URL y api_key.
         $ticket->loadMissing('client');
@@ -135,7 +136,7 @@ class SupportClientSyncService
             return false;
         }
 
-        $base_url = $ticket->agentes_erp
+        $base_url = $usar_frente_activo || $ticket->agentes_erp
             ? app(ClientEmpresaApiUrlResolver::class)->resolve_base_url($client)
             : rtrim((string) $client->api_url, '/');
         if ($base_url === '') {

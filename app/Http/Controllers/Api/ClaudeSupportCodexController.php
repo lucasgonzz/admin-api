@@ -426,7 +426,9 @@ class ClaudeSupportCodexController extends Controller
         $attachment = SupportMessageAttachment::where('id', $attachment_id)
             ->whereHas('message', function ($query) use ($id) {
                 $query->where('support_ticket_id', $id);
-            })->firstOrFail();
+            })->with('message.ticket')->firstOrFail();
+        abort_unless($attachment->message->ticket !== null
+            && $attachment->message->ticket->mensaje_confiable_para_codex($attachment->message), 404);
         $disk = Storage::disk($attachment->disk);
         abort_unless($disk->exists($attachment->path), 404);
         return $disk->download($attachment->path, 'adjunto-' . (int) $attachment->id, [

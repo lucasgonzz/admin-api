@@ -37,6 +37,12 @@ class SupportRetryPendingSyncs extends Command
             // Un borrador del agente no se replica a ningún lado: todavía no es un mensaje.
             ->where('is_ai_suggestion_draft', false)
             ->whereNull('synced_to_client_at')
+            // Codex conserva su propia operación. Una entrega incierta se concilia antes de actuar.
+            ->whereNotExists(function ($query) {
+                $query->selectRaw('1')->from('support_codex_operations')
+                    ->whereColumn('support_codex_operations.support_ticket_id', 'support_messages.support_ticket_id')
+                    ->whereColumn('support_codex_operations.message_id', 'support_messages.id');
+            })
             ->whereHas('ticket', function ($query) {
                 $query->where('source', '!=', 'whatsapp');
             })

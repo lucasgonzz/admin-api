@@ -51,8 +51,17 @@ class SupportCodexService
         $settings = SupportCodexSettings::to_array();
         $items = [];
         if ($settings['enabled'] && $settings['activated_at'] !== null) {
+            $activado = $settings['activated_at'];
             $tickets = SupportTicket::where('status', 'open')->paraCodex()
-                ->where('last_client_message_at', '>=', $settings['activated_at'])
+                ->where(function ($candidatos) use ($activado) {
+                    $candidatos->where('last_client_message_at', '>=', $activado)
+                        ->orWhere(function ($erp) use ($activado) {
+                            $erp->where('source', 'erp')->whereNull('last_client_message_at')
+                                ->whereHas('messages', function ($entrantes) use ($activado) {
+                                    SupportCodexSettings::entrantes_desde_el_corte($entrantes, $activado);
+                                });
+                        });
+                })
                 ->with('client', 'client_employee')->orderBy('last_client_message_at')->get();
             foreach ($tickets as $ticket) {
                 if (! SupportCodexSettings::manages($ticket)) {
@@ -73,7 +82,7 @@ class SupportCodexService
                     'client_id' => (int) $ticket->client_id,
                     'canal' => $ticket->source === 'erp' ? 'sistema' : 'whatsapp',
                     'client_name' => $ticket->client ? $ticket->client->resolve_display_name() : 'Cliente',
-                    'contact_name' => $ticket->resolve_contact_display_name(),
+                    'contact_name' => $ticket->es_erp_sin_identidad_verificada() ? null : $ticket->resolve_contact_display_name(),
                     'expected_message_id' => (int) $last->id,
                     'thread_id' => $case ? $case->thread_id : null,
                     'reason' => $reason,
@@ -208,6 +217,9 @@ class SupportCodexService
         SupportMessage::apply_mensaje_real_conditions($messages, 'support_messages');
         $messages = $messages->with('attachments')->orderByDesc('id')->limit(100)->get()->reverse()->values();
         $last = $messages->last();
+        $messages = $messages->filter(function (SupportMessage $mensaje) use ($ticket) {
+            return $ticket->mensaje_confiable_para_codex($mensaje);
+        })->values();
         if ($last !== null && $last->is_trial_import_notice) {
             $last = $this->last_real_message($ticket->id);
         }
@@ -218,7 +230,7 @@ class SupportCodexService
         return [
             'id' => (int) $ticket->id,
             'status' => $ticket->status,
-            'name' => $ticket->name,
+            'name' => $ticket->es_erp_sin_identidad_verificada() ? null : $ticket->name,
             'source' => $ticket->source,
             'canal' => $ticket->source === 'erp' ? 'sistema' : 'whatsapp',
             'client' => [
@@ -230,7 +242,7 @@ class SupportCodexService
                 // `prueba` si el negocio está en prueba gratuita (misión prueba-martin-importacion, 3/11/2026); si no, null.
                 'estado' => app(PruebaDelClienteService::class)->es_cliente_en_prueba($ticket->client) ? (string) $ticket->client->estado : null,
             ],
-            'contact_name' => $ticket->resolve_contact_display_name(),
+            'contact_name' => $ticket->es_erp_sin_identidad_verificada() ? null : $ticket->resolve_contact_display_name(),
             'contact_role' => $ticket->es_contacto_empleado() ? 'employee' : 'owner',
             'client_employee_id' => $ticket->client_employee_id ? (int) $ticket->client_employee_id : null,
             'can_query_system' => $ticket->contacto_puede_consultar(),
@@ -352,14 +364,16 @@ class SupportCodexService
                 $mensajes = SupportMessage::where('support_ticket_id', $anterior->id);
                 SupportMessage::apply_mensaje_real_conditions($mensajes, 'support_messages');
                 $mensajes = $mensajes->with('attachments')->orderByDesc('id')
-                    ->limit(self::MENSAJES_POR_TICKET_ANTERIOR)->get()->reverse()->values();
+                    ->limit(self::MENSAJES_POR_TICKET_ANTERIOR)->get()->filter(function (SupportMessage $mensaje) use ($anterior) {
+                        return $anterior->mensaje_confiable_para_codex($mensaje);
+                    })->reverse()->values();
 
                 return [
                     'id' => (int) $anterior->id,
                     'status' => $anterior->status,
                     'opened_at' => $anterior->opened_at ? $anterior->opened_at->toIso8601String() : null,
                     'closed_at' => $anterior->closed_at ? $anterior->closed_at->toIso8601String() : null,
-                    'contact_name' => $anterior->resolve_contact_display_name(),
+                    'contact_name' => $anterior->es_erp_sin_identidad_verificada() ? null : $anterior->resolve_contact_display_name(),
                     'contact_role' => $anterior->es_contacto_empleado() ? 'employee' : 'owner',
                     'messages' => $mensajes->map(function (SupportMessage $mensaje) use ($anterior) {
                         return [
@@ -402,7 +416,7 @@ class SupportCodexService
      */
     private function consulta_de_tickets_anteriores(SupportTicket $ticket)
     {
-        if (empty($ticket->client_id)) {
+        if (empty($ticket->client_id) || $ticket->es_erp_sin_identidad_verificada()) {
             return null;
         }
 
@@ -863,7 +877,7 @@ class SupportCodexService
     {
         if ($ticket->source === 'erp') {
             DB::afterCommit(function () use ($ticket) {
-                app(SupportClientSyncService::class)->sync_ticket_to_client($ticket);
+                app(SupportClientSyncService::class)->sync_ticket_to_client($ticket, true);
             });
         }
     }
@@ -1019,6 +1033,7 @@ class SupportCodexService
             }
             $last = $this->last_real_message((int) $ticket->id);
             if ($ticket->status !== 'open' || ! $ticket->claude_auto_reply || $last === null
+                || ! $ticket->mensaje_confiable_para_codex($last)
                 || (int) $last->id !== (int) $operation->expected_message_id) {
                 $this->fail(409, 'stale_message', 'Cambió la conversación o el agente está apagado; no se envió el borrador.');
             }
@@ -1080,6 +1095,7 @@ class SupportCodexService
             $message = SupportMessage::findOrFail($operation->message_id);
             // La fila sigue siendo borrador hasta completar todas las validaciones del envío.
             if ($ticket->status !== 'open' || ! $ticket->claude_auto_reply || $last === null
+                || ! $ticket->mensaje_confiable_para_codex($last)
                 || (int) $last->id !== (int) $operation->expected_message_id
                 || ! $this->puede_entregar($ticket)) {
                 $operation->status = 'cancelled';
@@ -1332,6 +1348,9 @@ class SupportCodexService
                 || ($case !== null && (int) $last->id <= (int) $case->handled_message_id)) {
                 return $result('blocked', 'no_pending_inbound', 'Sin consulta pendiente: el último mensaje ya fue atendido o es una respuesta del equipo.');
             }
+            if (! $ticket->mensaje_confiable_para_codex($last)) {
+                return $result('blocked', 'inbound_not_verified', 'El origen del último mensaje del sistema no está verificado. Requiere atención humana.');
+            }
             if (! $this->puede_entregar($ticket)) {
                 return $result('blocked', 'whatsapp_window_closed', 'Bloqueado: venció la ventana de WhatsApp; hace falta un nuevo mensaje del cliente o una plantilla aprobada.');
             }
@@ -1358,7 +1377,7 @@ class SupportCodexService
         $this->assert_lease($case, $input['lease_token']);
         $last = $this->last_real_message($ticket->id);
         if ($last === null || (int) $last->id !== (int) $input['expected_message_id']
-            || (int) $case->expected_message_id !== (int) $last->id) {
+            || (int) $case->expected_message_id !== (int) $last->id || ! $ticket->mensaje_confiable_para_codex($last)) {
             $this->fail(409, 'stale_message', 'Cambió la conversación; se descarta la respuesta vieja.');
         }
         if (in_array($case->state, ['manual_review', 'closed'], true)
@@ -1389,7 +1408,8 @@ class SupportCodexService
                 $this->fail(409, 'delivery_unknown', 'Primero conciliá el envío ambiguo; retomar no autoriza reenviarlo.');
             }
             $last = $this->last_real_message($id);
-            if ($last === null || (int) $last->id !== (int) $input['expected_message_id']) {
+            if ($last === null || (int) $last->id !== (int) $input['expected_message_id']
+                || ! $ticket->mensaje_confiable_para_codex($last)) {
                 $this->fail(409, 'stale_message', 'Cambió la conversación.');
             }
             if (! empty($input['continue_pending'])) {
@@ -1635,7 +1655,7 @@ class SupportCodexService
             return null;
         }
         $last = $this->last_real_message($ticket->id);
-        if ($last === null) {
+        if ($last === null || ! $ticket->mensaje_confiable_para_codex($last)) {
             return null;
         }
         if (! (bool) $ticket->claude_auto_reply) {
@@ -1779,6 +1799,9 @@ class SupportCodexService
             ? SupportMessage::where('support_ticket_id', $ticket->id)->where('id', $case->last_reply_id)
                 ->where('sender_type', 'admin')->first()
             : null;
+        if ($question !== null && ! $ticket->mensaje_confiable_para_codex($question)) {
+            $question = null;
+        }
         $question_body = $question === null ? '' : Str::ascii(mb_strtolower((string) $question->body));
         $answer_to_resolution = $case->state === 'awaiting_confirmation'
             && $question !== null && $question->id < $message->id
@@ -1875,7 +1898,7 @@ class SupportCodexService
         if ($last === null) {
             return true; // Solo llegó una despedida; no hay consulta anterior que dejar abierta.
         }
-        if ($last->sender_type !== 'admin') {
+        if ($last->sender_type !== 'admin' || ! $ticket->mensaje_confiable_para_codex($last)) {
             return false; // Hay otra consulta entrante que todavía nadie contestó.
         }
         // El «?» de un enlace al centro de recursos no es una pregunta pendiente.
@@ -1920,7 +1943,7 @@ class SupportCodexService
             return $previous !== null && $previous->is($guidance)
                 && ($quoted === null || $quoted === (int) $guidance->id);
         }
-        if ($previous === null || $previous->sender_type !== 'user'
+        if ($previous === null || $previous->sender_type !== 'user' || ! $ticket->mensaje_confiable_para_codex($previous)
             || ($previous->reply_to_message_id !== null && (int) $previous->reply_to_message_id !== (int) $guidance->id)
             || ! preg_match('/^listo[.! ]*$/D', mb_strtolower(trim((string) $previous->body)))) {
             return false;

@@ -35,6 +35,8 @@ class SupportTicket extends Model
     // La bandeja recibe el resumen; nunca las reservas ni el diagnóstico privado del caso.
     protected $hidden = ['support_codex_case'];
 
+    private $codex_erp_transicion_desde_legado;
+
     /**
      * Valor por defecto del interruptor del agente.
      *
@@ -105,20 +107,44 @@ class SupportTicket extends Model
 
     public function scopeParaCodex($query)
     {
-        return $query->where(function ($canal) {
-            $canal->where('source', 'whatsapp')->orWhere('agentes_erp', true);
-        });
+        return $query->whereIn('source', ['whatsapp', 'erp']);
+    }
+
+    public function es_erp_sin_identidad_verificada(): bool
+    {
+        return $this->source === 'erp' && ! $this->agentes_erp;
+    }
+
+    public function mensaje_confiable_para_codex(SupportMessage $mensaje): bool
+    {
+        if ($this->source !== 'erp') {
+            return true;
+        }
+        if ($mensaje->sender_type === 'user'
+            && ($mensaje->erp_auto_reply[SupportMessage::MARCA_ERP_VERIFICADO_PARA_CODEX] ?? false) === true) {
+            return true;
+        }
+        // El ERP anterior aceptaba también sender_type=admin por el canal sin firma.
+        if ($mensaje->sender_type === 'admin' && ($mensaje->sender_admin_id !== null || $mensaje->ai_generated_at !== null)) {
+            return true;
+        }
+
+        // La primera firma habilita el modo Agentes, pero no acredita los entrantes anteriores.
+        // Los hilos que ya nacieron firmados o que se traspasaron desde WhatsApp siguen siendo válidos.
+        return $this->agentes_erp && ! ($this->codex_erp_transicion_desde_legado ??= $this->messages()
+            ->where('erp_auto_reply->' . SupportMessage::MARCA_TRANSICION_ERP_PARA_CODEX, true)->exists());
     }
 
     public function es_contacto_empleado(): bool
     {
-        return $this->client_employee_id !== null || ($this->agentes_erp && $this->source === 'erp'
+        return $this->es_erp_sin_identidad_verificada() || $this->client_employee_id !== null || ($this->source === 'erp'
             && (int) $this->client_user_id !== (int) optional($this->client)->user_id);
     }
 
     public function contacto_puede_consultar(): bool
     {
-        return $this->client !== null && (! $this->es_contacto_empleado() || $this->client_employee !== null)
+        return ! $this->es_erp_sin_identidad_verificada() && $this->client !== null
+            && (! $this->es_contacto_empleado() || $this->client_employee !== null)
             && SistemaQueryService::client_employee_can_query($this->client, $this->client_employee);
     }
 

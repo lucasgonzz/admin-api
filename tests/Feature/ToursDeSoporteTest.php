@@ -140,7 +140,9 @@ class ToursDeSoporteTest extends TestCase
             ->andThrow(new \RuntimeException('La cola está caída.'));
         $this->postJson(self::INBOUND, $body, $headers)->assertStatus(503);
         $entrante = SupportMessage::where('uuid', $body['message_uuid'])->firstOrFail();
-        $this->assertSame(['inbound_version' => 1], $entrante->erp_auto_reply);
+        $this->assertSame([
+            'inbound_version' => 1, SupportMessage::MARCA_ERP_VERIFICADO_PARA_CODEX => true,
+        ], $entrante->erp_auto_reply);
         Queue::assertNotPushed(SendSupportAiSuggestion::class);
 
         $this->app->forgetInstance(SupportAiSuggestionScheduler::class);
@@ -360,6 +362,9 @@ class ToursDeSoporteTest extends TestCase
 
     private function mensaje_erp(Client $cliente): array
     {
+        // Estos casos prueban Robotito en instalaciones anteriores cuando Martín está pausado.
+        SupportCodexSettings::set_enabled(false);
+
         return [
             'client_uuid' => $cliente->uuid, 'ticket_uuid' => (string) Str::uuid(), 'message_uuid' => (string) Str::uuid(),
             'client_user_id' => 17, 'sender_user_id' => 17, 'sender_type' => 'user', 'kind' => 'text',

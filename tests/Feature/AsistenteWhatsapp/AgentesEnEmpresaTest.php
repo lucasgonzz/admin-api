@@ -2,17 +2,165 @@
 
 namespace Tests\Feature\AsistenteWhatsapp;
 
+use App\Jobs\SendSupportAiSuggestion;
+use App\Models\AdminSetting;
 use App\Models\Client;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
+use App\Services\SupportAiSettings;
+use App\Services\SupportAiSuggestionDeliveryService;
+use App\Services\SupportClientSyncService;
 use App\Services\SupportCodexSettings;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 
 class AgentesEnEmpresaTest extends BaseDelCanal
 {
     private const INBOUND = '/api/inbound/agentes';
     private const CODEX = '/api/claude/support-codex';
+
+    public function test_martin_toma_un_ticket_del_sistema_anterior_y_entrega_una_vez_en_empresa(): void
+    {
+        $cliente = $this->comercio();
+        $clave = $this->activar_martin_para_erp();
+        $anterior = $this->ticket_whatsapp($cliente, [
+            'source' => 'erp', 'whatsapp_phone' => null, 'last_client_message_at' => null,
+        ]);
+        $this->mensaje($anterior, 'Consulta histórica', ['created_at' => now()->subHours(2)]);
+        $ticket = $this->ticket_whatsapp($cliente, [
+            'source' => 'erp', 'whatsapp_phone' => null, 'last_client_message_at' => null,
+            'client_user_id' => $cliente->user_id,
+        ]);
+        $entrada = $this->mensaje($ticket, 'Necesito ayuda con una venta.', [
+            'erp_auto_reply' => [SupportMessage::MARCA_ERP_VERIFICADO_PARA_CODEX => true],
+        ]);
+
+        $this->getJson(self::CODEX . '/pending', $clave)->assertOk()->assertJsonCount(1, 'tickets')
+            ->assertJsonPath('tickets.0.id', $ticket->id)->assertJsonPath('tickets.0.canal', 'sistema');
+        $ruta = self::CODEX . '/tickets/' . $ticket->id;
+        $reserva = $this->postJson($ruta . '/claim', [
+            'worker_id' => 'codex-erp-anterior-test', 'expected_message_id' => $entrada->id,
+        ], $clave)->assertOk()->assertJsonPath('ticket.canal', 'sistema')
+            ->assertJsonPath('ticket.window.open', null)->assertJsonPath('ticket.contact_role', 'employee')
+            ->assertJsonPath('ticket.can_query_system', false)->assertJsonCount(0, 'ticket.previous_tickets');
+
+        $respuesta = [
+            'lease_token' => $reserva->json('lease_token'), 'expected_message_id' => $entrada->id,
+            'operation_id' => 'respuesta-erp-anterior-' . $ticket->id, 'action' => 'responder',
+            'body' => 'Te contesto desde el chat de soporte del sistema.',
+        ];
+        $this->postJson($ruta . '/reply', $respuesta, $clave)->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->postJson($ruta . '/reply', $respuesta, $clave)->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->getJson(self::CODEX . '/pending', $clave)->assertOk()->assertJsonCount(0, 'tickets');
+        Http::assertSentCount(1);
+        Http::assertSent(function ($request) use ($ticket, $respuesta) {
+            return strpos($request->url(), '/api/admin-sync/support/messages') !== false
+                && $request['ticket_uuid'] === $ticket->uuid && $request['body'] === $respuesta['body'];
+        });
+    }
+
+    public function test_un_entrante_erp_anterior_va_a_martin_sin_programar_ni_entregar_robotito(): void
+    {
+        $cliente = $this->comercio();
+        $clave = $this->activar_martin_para_erp();
+        AdminSetting::set(SupportAiSettings::KEY_SUGGESTIONS_ENABLED, '1');
+        Queue::fake();
+        $datos = $this->datos_entrante($cliente, (string) Str::uuid());
+        unset($datos['agentes_version']);
+        $datos['robotito_support_version'] = 1;
+        $entrada = $this->postJson('/api/inbound/support/messages', $datos, $this->clave($cliente))->assertCreated();
+        $mensaje = SupportMessage::findOrFail($entrada->json('model.id'));
+        $ticket = $mensaje->ticket;
+        $this->assertFalse($ticket->agentes_erp);
+        $this->assertNotNull($ticket->last_client_message_at);
+        $this->assertTrue($mensaje->erp_auto_reply[SupportMessage::MARCA_ERP_VERIFICADO_PARA_CODEX]);
+        Queue::assertNotPushed(SendSupportAiSuggestion::class);
+        $this->getJson(self::CODEX . '/pending', $clave)->assertOk()->assertJsonCount(1, 'tickets')
+            ->assertJsonPath('tickets.0.id', $ticket->id);
+
+        $borrador = $this->mensaje($ticket, 'Respuesta vieja de Robotito', [
+            'sender_type' => 'admin', 'is_ai_suggestion_draft' => true, 'ai_auto_send_at' => now()->subMinute(),
+            'erp_auto_reply' => ['message_id' => $mensaje->id],
+        ]);
+        $servicio = app(SupportAiSuggestionDeliveryService::class);
+        $this->assertNull($servicio->deliver_erp_auto_draft($borrador, $ticket));
+        $this->assertNull($servicio->deliver_erp_auto_reply($ticket, 'Respuesta que ya no corresponde.', $mensaje->id, null));
+        $this->assertTrue($borrador->fresh()->is_ai_suggestion_draft);
+        Http::assertNothingSent();
+    }
+
+    public function test_un_entrante_erp_sin_firma_queda_para_atencion_humana_y_no_se_acredita_con_un_replay(): void
+    {
+        $cliente = $this->comercio();
+        $clave = $this->activar_martin_para_erp();
+        $datos = $this->datos_entrante($cliente, (string) Str::uuid());
+        unset($datos['agentes_version']);
+        $entrada = $this->postJson('/api/inbound/support/messages', $datos)->assertCreated();
+        $mensaje = SupportMessage::findOrFail($entrada->json('model.id'));
+        $ticket = $mensaje->ticket;
+        $ruta = self::CODEX . '/tickets/' . $ticket->id;
+        $this->postJson('/api/inbound/support/messages', array_replace($datos, ['body' => 'Otro texto.']), $this->clave($cliente))
+            ->assertOk()->assertJsonPath('model.id', $mensaje->id);
+        $this->assertSame($datos['body'], $mensaje->fresh()->body);
+        $this->assertNull($mensaje->fresh()->erp_auto_reply);
+
+        $this->getJson(self::CODEX . '/pending', $clave)->assertOk()->assertJsonCount(0, 'tickets');
+        $this->getJson($ruta, $clave)->assertOk()->assertJsonCount(0, 'ticket.messages');
+        $bloqueada = $this->postJson($ruta . '/claim', ['worker_id' => 'codex-erp-test', 'expected_message_id' => $mensaje->id], $clave)
+            ->assertStatus(409);
+        $this->assertStringStartsWith('not_pending:', $bloqueada->json('message'));
+
+        $datos['message_uuid'] = (string) Str::uuid();
+        $datos['body'] = 'Consulta nueva con firma.';
+        $firmado = $this->postJson('/api/inbound/support/messages', $datos, $this->clave($cliente))->assertCreated();
+        $reserva = $this->postJson($ruta . '/claim', [
+            'worker_id' => 'codex-erp-test', 'expected_message_id' => $firmado->json('model.id'),
+        ], $clave)->assertOk()->assertJsonCount(1, 'ticket.messages')
+            ->assertJsonPath('ticket.messages.0.body', 'Consulta nueva con firma.');
+
+        $datos['message_uuid'] = (string) Str::uuid();
+        $this->postJson('/api/inbound/support/messages', $datos)->assertCreated();
+        $respuesta = $this->postJson($ruta . '/reply', [
+            'lease_token' => $reserva->json('lease_token'), 'expected_message_id' => $firmado->json('model.id'),
+            'operation_id' => 'respuesta-superada-' . $ticket->id, 'action' => 'responder', 'body' => 'Quedó superada.',
+        ], $clave)->assertStatus(409);
+        $this->assertStringStartsWith('stale_message:', $respuesta->json('message'));
+        Http::assertNothingSent();
+    }
+
+    public function test_el_cierre_de_martin_en_erp_anterior_sincroniza_al_frente_activo(): void
+    {
+        $cliente = $this->comercio();
+        $frente = $this->crear_client_api($cliente, 'https://frente-actual.test', 'vps');
+        $ticket = $this->ticket_whatsapp($cliente, ['source' => 'erp', 'status' => 'closed', 'whatsapp_phone' => null]);
+
+        $this->assertTrue(app(SupportClientSyncService::class)->sync_ticket_to_client($ticket, true));
+        Http::assertSentCount(1);
+        Http::assertSent(function ($request) use ($frente, $ticket) {
+            return $request->url() === $frente->url . '/api/admin-sync/support/tickets/' . $ticket->uuid
+                && $request->method() === 'PUT' && $request['status'] === 'closed';
+        });
+    }
+
+    public function test_el_primer_entrante_de_agentes_no_acredita_un_mensaje_previo_del_erp(): void
+    {
+        $cliente = $this->comercio();
+        $clave = $this->activar_martin_para_erp();
+        $datos = $this->datos_entrante($cliente, (string) Str::uuid());
+        $sin_firma = array_diff_key($datos, ['agentes_version' => true]);
+        $anterior = $this->postJson('/api/inbound/support/messages', $sin_firma)->assertCreated();
+
+        $datos['message_uuid'] = (string) Str::uuid();
+        $datos['body'] = 'Consulta desde la versión nueva.';
+        $entrada = $this->postJson('/api/inbound/support/messages', $datos, $this->clave($cliente))->assertCreated();
+        $mensaje = SupportMessage::findOrFail($entrada->json('model.id'));
+        $this->assertTrue($mensaje->ticket->agentes_erp);
+        $this->assertTrue($mensaje->erp_auto_reply[SupportMessage::MARCA_TRANSICION_ERP_PARA_CODEX]);
+        $this->getJson(self::CODEX . '/tickets/' . $mensaje->support_ticket_id, $clave)->assertOk()
+            ->assertJsonCount(1, 'ticket.messages')->assertJsonPath('ticket.messages.0.id', $mensaje->id);
+        $this->assertNull(SupportMessage::findOrFail($anterior->json('model.id'))->erp_auto_reply);
+    }
 
     public function test_el_historial_y_los_numeros_exigen_la_identidad_del_comercio_y_del_usuario(): void
     {
@@ -130,19 +278,19 @@ class AgentesEnEmpresaTest extends BaseDelCanal
         $this->assertSame(2, $ticket->messages()->count());
     }
 
-    public function test_el_ticket_web_firmado_se_separa_de_soporte_legado(): void
+    public function test_el_ticket_web_firmado_se_encola_sin_reabrir_el_soporte_legado_previo_al_corte(): void
     {
-        config(['services.claude_task_ingest.key' => 'codex-agentes-test']);
         $cliente = $this->comercio();
-        SupportCodexSettings::set_enabled(true);
-        $agentes = $this->datos_entrante($cliente, (string) Str::uuid());
         $legado = $this->datos_entrante($cliente, (string) Str::uuid());
         unset($legado['agentes_version']);
         $this->postJson('/api/inbound/support/messages', $legado)->assertCreated();
+
+        $clave_codex = $this->activar_martin_para_erp();
+        $agentes = $this->datos_entrante($cliente, (string) Str::uuid());
         $this->postJson('/api/inbound/support/messages', $agentes, $this->clave($cliente))->assertCreated();
 
         $ticket = SupportTicket::where('uuid', $agentes['ticket_uuid'])->firstOrFail();
-        $this->getJson(self::CODEX . '/pending', ['X-Claude-Task-Key' => 'codex-agentes-test'])->assertOk()
+        $this->getJson(self::CODEX . '/pending', $clave_codex)->assertOk()
             ->assertJsonCount(1, 'tickets')->assertJsonPath('tickets.0.id', $ticket->id);
     }
 
@@ -176,6 +324,16 @@ class AgentesEnEmpresaTest extends BaseDelCanal
         $cliente = $this->crear_cliente();
         $cliente->update(['user_id' => 893400, 'inbound_api_key' => 'firma-agentes-test']);
         return $cliente;
+    }
+
+    private function activar_martin_para_erp(): array
+    {
+        config(['services.claude_task_ingest.key' => 'codex-agentes-test']);
+        AdminSetting::set(SupportCodexSettings::KEY_ENABLED, '1');
+        AdminSetting::set(SupportCodexSettings::KEY_ACTIVATED_AT, now()->subHour()->toDateTimeString());
+        AdminSetting::set(SupportCodexSettings::KEY_ACTIVATED_AFTER_ID, (int) SupportMessage::max('id'));
+
+        return ['X-Claude-Task-Key' => 'codex-agentes-test'];
     }
 
     private function clave(Client $cliente): array

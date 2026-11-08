@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\Admin;
 use App\Models\Client;
+use App\Models\SupportCodexOperation;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
@@ -278,5 +279,25 @@ class GuardasDeCanalEnElSyncDeSoporteTest extends TestCase
         $this->artisan('support:retry-pending-syncs')->assertExitCode(0);
 
         Http::assertSentCount(1);
+    }
+
+    public function test_el_cron_no_reenvia_una_operacion_incierta_o_conciliada_de_martin_en_erp(): void
+    {
+        $datos = $this->crear_ticket_con_mensaje($this->crear_cliente(), 'erp');
+        foreach (['unknown', 'reconciled_not_sent'] as $estado) {
+            $saliente = $datos['ticket']->messages()->create([
+                'sender_type' => 'admin', 'kind' => 'text', 'body' => 'Respuesta de Martín',
+                'remote_delivery_status' => 'not_received',
+            ]);
+            SupportCodexOperation::create([
+                'support_ticket_id' => $datos['ticket']->id, 'expected_message_id' => $datos['message']->id,
+                'message_id' => $saliente->id, 'operation_id' => 'codex-erp-' . $saliente->id,
+                'request_hash' => str_repeat('a', 64), 'status' => $estado, 'action' => 'responder',
+            ]);
+        }
+
+        $this->artisan('support:retry-pending-syncs')->assertExitCode(0);
+
+        Http::assertNothingSent();
     }
 }

@@ -186,7 +186,7 @@ class SupportImplementationContextService
 
             /* El dueño es el contacto que no resolvió a ningún empleado: no hay otro flag de dueño en
              * este repo (ver la rama del asistente en `WhatsappWebhookController::receive`). */
-            $es_el_dueno = $ticket->client_employee_id === null;
+            $es_el_dueno = ! $ticket->es_contacto_empleado();
 
             $sistema = $this->bloque_del_sistema($client, $es_el_dueno);
             $tienda  = $this->bloque_de_la_tienda($client, $es_el_dueno);
