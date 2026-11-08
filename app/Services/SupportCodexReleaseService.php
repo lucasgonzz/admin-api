@@ -229,7 +229,7 @@ class SupportCodexReleaseService
 
     private function current_evidence(SupportTicket $ticket, SupportCodexUpgradeAgreement $agreement): ?SupportCodexMissionFixEvidence
     {
-        if (! $ticket->claude_auto_reply || $ticket->client_employee_id !== null || ! SupportCodexSettings::manages($ticket)
+        if (! $ticket->claude_auto_reply || $ticket->source !== 'whatsapp' || $ticket->client_employee_id !== null || ! SupportCodexSettings::manages($ticket)
             || $agreement->accepted_at === null || $agreement->confirmation_message_id === null) {
             return null;
         }

@@ -28,7 +28,7 @@ class SupportClientSyncService
         }
 
         // URL base del cliente de empresa-api.
-        $base_url = $message->ticket->source === 'erp' && $message->ai_generated_at !== null
+        $base_url = $message->ticket->source === 'erp' && ($message->ai_generated_at !== null || $message->ticket->agentes_erp)
             ? app(ClientEmpresaApiUrlResolver::class)->resolve_base_url($client)
             : rtrim((string) $client->api_url, '/');
         if ($base_url === '') {
@@ -135,6 +135,13 @@ class SupportClientSyncService
             return false;
         }
 
+        $base_url = $ticket->agentes_erp
+            ? app(ClientEmpresaApiUrlResolver::class)->resolve_base_url($client)
+            : rtrim((string) $client->api_url, '/');
+        if ($base_url === '') {
+            return false;
+        }
+
         try {
             // Envía actualización simple de estado/nombre al ticket remoto.
             $response = Http::withHeaders([
@@ -143,7 +150,7 @@ class SupportClientSyncService
                 ])
                 ->timeout((int) config('services.client_api.timeout', 15))
                 ->retry((int) config('services.client_api.retries', 2), 500)
-                ->put(rtrim($client->api_url, '/') . '/api/admin-sync/support/tickets/' . $ticket->uuid, [
+                ->put($base_url . '/api/admin-sync/support/tickets/' . $ticket->uuid, [
                     'name' => $ticket->name,
                     'status' => $ticket->status,
                 ]);

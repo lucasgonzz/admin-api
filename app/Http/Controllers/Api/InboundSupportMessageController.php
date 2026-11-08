@@ -6,11 +6,15 @@ use App\Events\SupportMessageRead;
 use App\Events\SupportMessageReceived;
 use App\Http\Controllers\Controller;
 use App\Models\Client;
+use App\Models\ClientEmployee;
+use App\Models\SupportCodexCase;
 use App\Models\SupportMessage;
 use App\Models\SupportMessageAttachment;
 use App\Models\SupportTicket;
 use App\Models\SupportTypingState;
 use App\Services\SupportAiSuggestionScheduler;
+use App\Services\SupportAgentesIdentity;
+use App\Services\SupportCodexService;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -39,10 +43,15 @@ class InboundSupportMessageController extends Controller
         if ($creado) {
             SupportMessageReceived::dispatch_after_commit($message->id);
         }
-        if ($message->ticket !== null && $this->entrada_robotito_valida($request, $client, $message->ticket)) {
+        if ($message->ticket !== null && ! $message->ticket->agentes_erp
+            && $this->entrada_robotito_valida($request, $client, $message->ticket)) {
             $this->programar_robotito($message);
         }
-        return response()->json(['model' => $message], $creado ? 201 : 200);
+        $datos = ['model' => $message];
+        if ($message->ticket !== null && $message->ticket->sistema_exclusivo_at !== null) {
+            $datos['sistema_exclusivo_at'] = $message->ticket->sistema_exclusivo_at->toIso8601String();
+        }
+        return response()->json($datos, $creado ? 201 : 200);
     }
 
     private function guardar_entrante(Request $request, Client $client): array
@@ -52,12 +61,32 @@ class InboundSupportMessageController extends Controller
             // support_messages no tiene una clave foránea que bloquee esa inserción por sí sola.
             $ticket_uuid = $request->input('ticket_uuid');
             $ticket = SupportTicket::where('uuid', $ticket_uuid)->lockForUpdate()->first();
-            abort_if($ticket !== null && ((int) $ticket->client_id !== (int) $client->id || $ticket->source !== 'erp'), 404);
-
             $message_uuid = $request->input('message_uuid');
+            $traspaso = $request->boolean('traspasar_a_sistema');
+            $version_agentes = in_array($request->input('agentes_version'), [1, '1'], true);
+            $usuario = (int) $request->input('client_user_id');
+            $protegido = $ticket !== null && ($ticket->agentes_erp || $ticket->sistema_exclusivo_at !== null);
+            if ($traspaso || $version_agentes || $protegido) {
+                abort_unless(SupportAgentesIdentity::firmada($request, $client), 401);
+                $request->validate([
+                    'ticket_uuid' => 'required|uuid', 'message_uuid' => 'required|uuid',
+                    'client_user_id' => 'required|integer|min:1', 'sender_user_id' => 'required|integer|min:1',
+                ]);
+                abort_unless($usuario === (int) $request->input('sender_user_id') && $request->input('sender_type') === 'user', 403);
+            }
+            abort_if($ticket !== null && (int) $ticket->client_id !== (int) $client->id, 404);
+            if ($traspaso || ($ticket !== null && $ticket->sistema_exclusivo_at !== null)) {
+                $request->validate(['es_dueno' => 'required|boolean']);
+                abort_unless($ticket !== null && SupportAgentesIdentity::puede_ver($ticket, $client, $usuario, $request->boolean('es_dueno')), 404);
+            } else {
+                abort_if($ticket !== null && $ticket->source !== 'erp', 404);
+                abort_if(($version_agentes || $protegido) && $ticket !== null && (int) $ticket->client_user_id !== $usuario, 404);
+            }
+
             $existing = SupportMessage::where('uuid', $message_uuid)->first();
             if ($existing !== null) {
                 abort_unless($ticket !== null && (int) $existing->support_ticket_id === (int) $ticket->id, 404);
+                abort_if(($traspaso || $version_agentes || $protegido) && $existing->sender_type !== 'user', 404);
                 return [$existing, false];
             }
 
@@ -72,6 +101,27 @@ class InboundSupportMessageController extends Controller
                     'source' => 'erp',
                     'opened_at' => now(),
                 ]);
+            }
+            if ($traspaso && $ticket->sistema_exclusivo_at === null) {
+                abort_unless($ticket->status === 'open', 409, 'El ticket de WhatsApp ya está cerrado.');
+                $ticket->source = 'erp';
+                $ticket->client_user_id = $usuario;
+                $ticket->sistema_exclusivo_at = now();
+                // El monitor conservará su hilo, pero la respuesta reservada por WhatsApp quedó vieja.
+                SupportCodexCase::where('support_ticket_id', $ticket->id)->update([
+                    'lease_hash' => null,
+                    'lease_expires_at' => null,
+                ]);
+            }
+            if ($traspaso || $version_agentes || $protegido) {
+                abort_unless($ticket->status === 'open', 409, 'El ticket está cerrado.');
+                if ($ticket->sistema_exclusivo_at === null && $ticket->client_employee_id === null
+                    && $usuario !== (int) $client->user_id) {
+                    $ticket->client_employee_id = ClientEmployee::where('client_id', $client->id)
+                        ->where('empresa_employee_id', $usuario)->value('id');
+                }
+                $ticket->agentes_erp = true;
+                $ticket->last_client_message_at = now();
             }
 
             // Actualiza snapshot de usuario remoto para listado lateral.
@@ -95,6 +145,9 @@ class InboundSupportMessageController extends Controller
             }
             $message = SupportMessage::create($datos);
             $this->persistir_adjuntos($request, $message);
+            if ($ticket->agentes_erp) {
+                app(SupportCodexService::class)->invalidate_stale_approval($ticket);
+            }
             return [$message, true];
         });
     }
@@ -189,6 +242,10 @@ class InboundSupportMessageController extends Controller
             return response()->json(['error' => 'message not found'], 404);
         }
 
+        $ticket = $message->ticket;
+        if ($ticket !== null && $ticket->agentes_erp) {
+            $this->validar_metadatos_agentes($request, $ticket);
+        }
         $message->read_at = $request->input('read_at') ?: now();
         $message->save();
 
@@ -211,6 +268,11 @@ class InboundSupportMessageController extends Controller
             return response()->json(['error' => 'ticket not found'], 404);
         }
 
+        if ($ticket->agentes_erp) {
+            $this->validar_metadatos_agentes($request, $ticket);
+            abort_unless((int) $request->input('actor_id') === (int) $ticket->client_user_id && $request->input('actor_type') === 'user', 403);
+        }
+
         $typing_state = SupportTypingState::firstOrNew([
             'support_ticket_id' => $ticket->id,
             'actor_type' => $request->input('actor_type', 'user'),
@@ -220,6 +282,13 @@ class InboundSupportMessageController extends Controller
         $typing_state->save();
 
         return response()->json(['ok' => true], 200);
+    }
+
+    private function validar_metadatos_agentes(Request $request, SupportTicket $ticket): void
+    {
+        $client = $request->attributes->get('sync_client');
+        abort_unless($client !== null && (int) $client->id === (int) $ticket->client_id
+            && SupportAgentesIdentity::firmada($request, $client), 401);
     }
 
     /**

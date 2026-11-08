@@ -31,7 +31,7 @@ class SupportTourController extends Controller
             if ($ticket->requiere_verificacion_mensajes) {
                 return ['ok' => false, 'status' => 409, 'code' => 'verification_required', 'message' => 'El ticket exige aprobación humana.'];
             }
-            if (! app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone)['open']) {
+            if ($ticket->source === 'whatsapp' && ! app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone)['open']) {
                 return ['ok' => false, 'status' => 422, 'code' => 'window_expired', 'message' => 'Venció la ventana de WhatsApp.'];
             }
 

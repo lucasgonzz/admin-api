@@ -13,6 +13,7 @@ use App\Models\SupportTicket;
 use Carbon\Carbon;
 use Database\Seeders\PipelineLeadSeeder;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -439,24 +440,34 @@ class PruebaWhatsappService
             $variables[] = $this->opener->sanitize_template_variable($numero_asistente);
         }
 
-        $wamid = $this->sender->send_template(
-            (string) $contacto['phone'],
-            $plantilla,
-            $variables,
-            $idioma,
-            'Prueba gratuita - ' . $plantilla . ' - cliente #' . $client->id
-        );
+        $mensaje = DB::transaction(function () use ($ticket, $client, $contacto, $plantilla, $variables, $idioma, $admin, $primer_nombre, $numero_asistente) {
+            $actual = SupportTicket::lockForUpdate()->find($ticket->id);
+            if ($actual === null || $actual->source !== 'whatsapp') {
+                return null;
+            }
+            $wamid = $this->sender->send_template(
+                (string) $contacto['phone'],
+                $plantilla,
+                $variables,
+                $idioma,
+                'Prueba gratuita - ' . $plantilla . ' - cliente #' . $client->id
+            );
 
-        $mensaje = SupportMessage::create([
-            'support_ticket_id'      => $ticket->id,
-            'sender_type'            => 'admin',
-            'sender_admin_id'        => (int) $admin->id,
-            'kind'                   => 'text',
-            'body'                   => $this->plantillas->cuerpo_renderizado($plantilla, $primer_nombre, $numero_asistente),
-            'delivered_at'           => now(),
-            'whatsapp_message_id'    => $wamid,
-            'remote_delivery_status' => $wamid === null ? 'not_received' : null,
-        ]);
+            return SupportMessage::create([
+                'support_ticket_id'      => $ticket->id,
+                'sender_type'            => 'admin',
+                'sender_admin_id'        => (int) $admin->id,
+                'kind'                   => 'text',
+                'body'                   => $this->plantillas->cuerpo_renderizado($plantilla, $primer_nombre, $numero_asistente),
+                'delivered_at'           => now(),
+                'whatsapp_message_id'    => $wamid,
+                'remote_delivery_status' => $wamid === null ? 'not_received' : null,
+            ]);
+        });
+        if ($mensaje === null) {
+            return ['estado' => 'fallido', 'detalle' => 'La conversación continúa en el sistema.'];
+        }
+        $wamid = $mensaje->whatsapp_message_id;
 
         try {
             event(new SupportMessageReceived((int) $mensaje->id));
@@ -544,11 +555,16 @@ class PruebaWhatsappService
             'delivered_at'      => now(),
         ] + ($ticket_id === null ? [] : ['is_trial_import_notice' => true]));
 
-        $wamid = $this->sender->send_text((string) $contacto['phone'], $texto, 'Soporte - aviso de importación - cliente #' . $client->id, true);
-
-        $mensaje->whatsapp_message_id    = $wamid;
-        $mensaje->remote_delivery_status = $wamid === null ? 'not_received' : null;
-        $mensaje->save();
+        $wamid = DB::transaction(function () use ($ticket, $contacto, $texto, $client, $mensaje) {
+            $actual = SupportTicket::lockForUpdate()->find($ticket->id);
+            $wamid = $actual !== null && $actual->source === 'whatsapp'
+                ? $this->sender->send_text((string) $contacto['phone'], $texto, 'Soporte - aviso de importación - cliente #' . $client->id, true)
+                : null;
+            $mensaje->whatsapp_message_id = $wamid;
+            $mensaje->remote_delivery_status = $wamid === null ? 'not_received' : null;
+            $mensaje->save();
+            return $wamid;
+        });
 
         try {
             event(new SupportMessageReceived((int) $mensaje->id));

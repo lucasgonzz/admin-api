@@ -51,7 +51,7 @@ class SupportCodexService
         $settings = SupportCodexSettings::to_array();
         $items = [];
         if ($settings['enabled'] && $settings['activated_at'] !== null) {
-            $tickets = SupportTicket::where('status', 'open')->where('source', 'whatsapp')
+            $tickets = SupportTicket::where('status', 'open')->paraCodex()
                 ->where('last_client_message_at', '>=', $settings['activated_at'])
                 ->with('client', 'client_employee')->orderBy('last_client_message_at')->get();
             foreach ($tickets as $ticket) {
@@ -71,6 +71,7 @@ class SupportCodexService
                 $items[] = [
                     'id' => (int) $ticket->id,
                     'client_id' => (int) $ticket->client_id,
+                    'canal' => $ticket->source === 'erp' ? 'sistema' : 'whatsapp',
                     'client_name' => $ticket->client ? $ticket->client->resolve_display_name() : 'Cliente',
                     'contact_name' => $ticket->resolve_contact_display_name(),
                     'expected_message_id' => (int) $last->id,
@@ -219,6 +220,7 @@ class SupportCodexService
             'status' => $ticket->status,
             'name' => $ticket->name,
             'source' => $ticket->source,
+            'canal' => $ticket->source === 'erp' ? 'sistema' : 'whatsapp',
             'client' => [
                 'id' => (int) $ticket->client_id,
                 'name' => $ticket->client ? $ticket->client->resolve_display_name() : 'Cliente',
@@ -229,9 +231,9 @@ class SupportCodexService
                 'estado' => app(PruebaDelClienteService::class)->es_cliente_en_prueba($ticket->client) ? (string) $ticket->client->estado : null,
             ],
             'contact_name' => $ticket->resolve_contact_display_name(),
-            'contact_role' => $ticket->client_employee_id ? 'employee' : 'owner',
+            'contact_role' => $ticket->es_contacto_empleado() ? 'employee' : 'owner',
             'client_employee_id' => $ticket->client_employee_id ? (int) $ticket->client_employee_id : null,
-            'can_query_system' => $ticket->client !== null && SistemaQueryService::client_employee_can_query($ticket->client, $ticket->client_employee),
+            'can_query_system' => $ticket->contacto_puede_consultar(),
             'state' => $case ? $case->state : 'ready',
             'thread_id' => $case ? $case->thread_id : null,
             'mission' => $case ? $case->mission : null,
@@ -246,7 +248,9 @@ class SupportCodexService
                 'soporte_import' => $soporte_activo, 'soporte_import_resolver' => $soporte_activo],
             'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
-            'window' => app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone),
+            'window' => $ticket->source === 'erp'
+                ? ['open' => null, 'last_inbound_at' => null, 'expires_at' => null, 'origin' => null]
+                : app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone),
             'client_context' => app(SupportClientContextService::class)->bloque_para_el_prompt($ticket),
             /* La prueba gratuita del cliente (misión prueba-alta-instancia, 3/11/2026): estado, vencimiento, días
              * restantes y los hitos `prueba.*` recibidos por C2. Solo datos; el protocolo de Martín para un negocio en
@@ -343,7 +347,7 @@ class SupportCodexService
         return [
             'ticket_id' => (int) $ticket->id,
             'client_id' => $ticket->client_id ? (int) $ticket->client_id : null,
-            'contact_role' => $ticket->client_employee_id ? 'employee' : 'owner',
+            'contact_role' => $ticket->es_contacto_empleado() ? 'employee' : 'owner',
             'tickets' => $tickets->map(function (SupportTicket $anterior) {
                 $mensajes = SupportMessage::where('support_ticket_id', $anterior->id);
                 SupportMessage::apply_mensaje_real_conditions($mensajes, 'support_messages');
@@ -356,7 +360,7 @@ class SupportCodexService
                     'opened_at' => $anterior->opened_at ? $anterior->opened_at->toIso8601String() : null,
                     'closed_at' => $anterior->closed_at ? $anterior->closed_at->toIso8601String() : null,
                     'contact_name' => $anterior->resolve_contact_display_name(),
-                    'contact_role' => $anterior->client_employee_id ? 'employee' : 'owner',
+                    'contact_role' => $anterior->es_contacto_empleado() ? 'employee' : 'owner',
                     'messages' => $mensajes->map(function (SupportMessage $mensaje) use ($anterior) {
                         return [
                             'id' => (int) $mensaje->id,
@@ -406,6 +410,8 @@ class SupportCodexService
 
         if ($ticket->client_employee_id) {
             $consulta->where('client_employee_id', (int) $ticket->client_employee_id);
+        } elseif ($ticket->es_contacto_empleado()) {
+            $consulta->where('source', 'erp')->where('client_user_id', (int) $ticket->client_user_id);
         }
 
         return $consulta->orderByDesc('id')->limit(self::TICKETS_ANTERIORES);
@@ -690,8 +696,7 @@ class SupportCodexService
             if ($input['action'] === 'pedir_revision' && trim((string) ($input['review_reason'] ?? '')) === '') {
                 $this->fail(422, 'review_reason_required', 'La revisión requiere un motivo concreto para Lucas.');
             }
-            $window = app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone);
-            if (! $window['open']) {
+            if (! $this->puede_entregar($ticket)) {
                 $this->fail(422, 'window_expired', 'Venció la ventana de WhatsApp; no se envía texto libre ni una plantilla improvisada.');
             }
             if (! empty($input['thread_id'])) {
@@ -794,7 +799,7 @@ class SupportCodexService
             $operation->message_id = (int) $message->id;
             $result = null;
             try {
-                $result = app(SupportWhatsappOpenerService::class)->deliver_follow_up($ticket, $message, 'Martín, asistente técnico');
+                $result = $this->entregar_respuesta($ticket, $message);
             } catch (\Throwable $exception) {
                 // No se devuelve el error crudo: puede contener encabezados/credenciales remotas.
                 $message->remote_delivery_status = 'not_received';
@@ -802,7 +807,9 @@ class SupportCodexService
             }
             if ($result === null || ($result['delivery'] ?? '') !== 'sent') {
                 $operation->status = 'unknown';
-                $operation->detail = 'Entrega no confirmada. Revisá WhatsApp antes de reintentar manualmente.';
+                $operation->detail = $ticket->source === 'erp'
+                    ? 'Entrega no confirmada. Revisá el chat del sistema antes de reintentar manualmente.'
+                    : 'Entrega no confirmada. Revisá WhatsApp antes de reintentar manualmente.';
                 $case->state = 'manual_review';
                 $case->review_reason = $operation->detail;
                 $case->review_requested_message_id = null;
@@ -829,6 +836,36 @@ class SupportCodexService
             }
             return $this->operation_result($operation);
         });
+    }
+
+    private function puede_entregar(SupportTicket $ticket): bool
+    {
+        return $ticket->source === 'erp'
+            || app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone)['open'];
+    }
+
+    private function entregar_respuesta(SupportTicket $ticket, SupportMessage $message): array
+    {
+        if ($ticket->source === 'whatsapp') {
+            return app(SupportWhatsappOpenerService::class)->deliver_follow_up($ticket, $message, 'Martín, asistente técnico');
+        }
+
+        $enviado = app(SupportClientSyncService::class)->sync_message_to_client($message);
+        if (! $enviado) {
+            $message->remote_delivery_status = 'not_received';
+            $message->save();
+        }
+
+        return ['delivery' => $enviado ? 'sent' : 'unknown'];
+    }
+
+    private function sincronizar_cierre_en_sistema(SupportTicket $ticket): void
+    {
+        if ($ticket->source === 'erp') {
+            DB::afterCommit(function () use ($ticket) {
+                app(SupportClientSyncService::class)->sync_ticket_to_client($ticket);
+            });
+        }
     }
 
     private function request_attention(SupportTicket $ticket): void
@@ -985,7 +1022,7 @@ class SupportCodexService
                 || (int) $last->id !== (int) $operation->expected_message_id) {
                 $this->fail(409, 'stale_message', 'Cambió la conversación o el agente está apagado; no se envió el borrador.');
             }
-            if (! app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone)['open']) {
+            if (! $this->puede_entregar($ticket)) {
                 $this->fail(422, 'window_expired', 'Venció la ventana de WhatsApp; el borrador no se envió.');
             }
             $message = SupportMessage::whereKey($message_id)->where('is_ai_suggestion_draft', true)->firstOrFail();
@@ -1044,7 +1081,7 @@ class SupportCodexService
             // La fila sigue siendo borrador hasta completar todas las validaciones del envío.
             if ($ticket->status !== 'open' || ! $ticket->claude_auto_reply || $last === null
                 || (int) $last->id !== (int) $operation->expected_message_id
-                || ! app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone)['open']) {
+                || ! $this->puede_entregar($ticket)) {
                 $operation->status = 'cancelled';
                 $operation->detail = 'La conversación cambió antes del envío aprobado; no se envió.';
                 $operation->save();
@@ -1071,7 +1108,7 @@ class SupportCodexService
             $message->save();
             $result = null;
             try {
-                $result = app(SupportWhatsappOpenerService::class)->deliver_follow_up($ticket, $message, 'Martín, asistente técnico');
+                $result = $this->entregar_respuesta($ticket, $message);
             } catch (\Throwable $exception) {
                 $message->remote_delivery_status = 'not_received';
                 $message->save();
@@ -1083,7 +1120,9 @@ class SupportCodexService
                 $this->apply_action($ticket, $case, $input);
             } else {
                 $operation->status = 'unknown';
-                $operation->detail = 'Entrega no confirmada. Revisá WhatsApp antes de reintentar manualmente.';
+                $operation->detail = $ticket->source === 'erp'
+                    ? 'Entrega no confirmada. Revisá el chat del sistema antes de reintentar manualmente.'
+                    : 'Entrega no confirmada. Revisá WhatsApp antes de reintentar manualmente.';
                 $case->state = 'manual_review';
                 $case->review_reason = $operation->detail;
                 $case->review_requested_message_id = null;
@@ -1145,6 +1184,7 @@ class SupportCodexService
             $ticket->escalated_at = null;
             $ticket->escalation_reason = null;
             $ticket->save();
+            $this->sincronizar_cierre_en_sistema($ticket);
         } elseif ($input['action'] === 'pedir_revision') {
             $this->request_attention($ticket);
             // Una urgencia humana no exige inventar una misión; si ya existe, se conserva.
@@ -1292,7 +1332,7 @@ class SupportCodexService
                 || ($case !== null && (int) $last->id <= (int) $case->handled_message_id)) {
                 return $result('blocked', 'no_pending_inbound', 'Sin consulta pendiente: el último mensaje ya fue atendido o es una respuesta del equipo.');
             }
-            if (! app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone)['open']) {
+            if (! $this->puede_entregar($ticket)) {
                 return $result('blocked', 'whatsapp_window_closed', 'Bloqueado: venció la ventana de WhatsApp; hace falta un nuevo mensaje del cliente o una plantilla aprobada.');
             }
             $can_resume_human_pause = $case !== null && $this->is_human_reply_pause($case) && empty($case->mission);
@@ -1359,7 +1399,7 @@ class SupportCodexService
                 if ($last->sender_type !== 'user' || (int) $last->id <= (int) $case->handled_message_id) {
                     $this->fail(409, 'not_pending', 'No hay una consulta nueva del cliente sin atender.');
                 }
-                if (! app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone)['open']) {
+                if (! $this->puede_entregar($ticket)) {
                     $this->fail(422, 'window_expired', 'Venció la ventana de WhatsApp; no se retoma el texto libre.');
                 }
                 // Recuperar una consulta técnica rechazada NO resuelve la misión que ya existía.
@@ -1529,7 +1569,8 @@ class SupportCodexService
                     'at' => $operation->reconciled_at,
                     'reason' => $operation->reconciliation_reason,
                     'evidence' => $operation->reconciliation_evidence,
-                    'whatsapp_message_id' => $operation->reconciliation_reference,
+                    'whatsapp_message_id' => Str::isUuid((string) $operation->reconciliation_reference) ? null : $operation->reconciliation_reference,
+                    'erp_message_uuid' => Str::isUuid((string) $operation->reconciliation_reference) ? $operation->reconciliation_reference : null,
                 ],
             ],
             'ticket' => $this->context(SupportTicket::findOrFail($operation->support_ticket_id)),
@@ -1550,8 +1591,17 @@ class SupportCodexService
             if ($case !== null && $case->lease_expires_at !== null && $case->lease_expires_at->isFuture()) {
                 $this->fail(423, 'lease_busy', 'Esperá a que termine o venza la reserva antes de conciliar.');
             }
-            if ($input['outcome'] === 'sent' && (empty($input['whatsapp_message_id']) || empty($input['evidence']))) {
-                $this->fail(422, 'evidence_required', 'Confirmar un envío exige su ID de WhatsApp y evidencia de la verificación manual.');
+            $erp_uuid = $input['erp_message_uuid'] ?? null;
+            $message = $operation->message_id === null ? null : SupportMessage::where('id', $operation->message_id)
+                ->where('support_ticket_id', $ticket->id)->first();
+            if ($input['outcome'] === 'sent') {
+                if (empty($input['evidence']) || ($erp_uuid === null && empty($input['whatsapp_message_id']))) {
+                    $this->fail(422, 'evidence_required', 'Confirmar un envío exige su identificador y evidencia de la verificación manual.');
+                }
+                if ($erp_uuid !== null && ($ticket->source !== 'erp' || $message === null || $message->synced_to_client_at === null
+                        || ! hash_equals((string) $message->uuid, $erp_uuid))) {
+                    $this->fail(422, 'evidence_required', 'El mensaje indicado todavía no tiene confirmación del sistema.');
+                }
             }
             $operation->status = $input['outcome'] === 'sent' ? 'reconciled_sent' : 'reconciled_not_sent';
             $operation->reconciliation_outcome = $input['outcome'];
@@ -1559,7 +1609,7 @@ class SupportCodexService
             $operation->reconciled_by = $input['confirmed_by'];
             $operation->reconciliation_reason = trim($input['reason']);
             $operation->reconciliation_evidence = $input['evidence'] ?? null;
-            $operation->reconciliation_reference = $input['whatsapp_message_id'] ?? null;
+            $operation->reconciliation_reference = $erp_uuid ?? ($input['whatsapp_message_id'] ?? null);
             $operation->detail = 'Conciliado manualmente por Lucas; no hubo reenvío ni cierre automático.';
             $operation->save();
             if ($case !== null) {
@@ -1569,13 +1619,10 @@ class SupportCodexService
                 $case->handled_message_id = max((int) $case->handled_message_id, (int) $operation->expected_message_id);
                 $case->save();
             }
-            if ($input['outcome'] === 'sent' && $operation->message_id !== null) {
-                $message = SupportMessage::where('id', $operation->message_id)->where('support_ticket_id', $ticket->id)->first();
-                if ($message !== null && empty($message->whatsapp_message_id)) {
-                    $message->whatsapp_message_id = $input['whatsapp_message_id'];
-                    $message->remote_delivery_status = null;
-                    $message->save();
-                }
+            if ($input['outcome'] === 'sent' && $erp_uuid === null && $message !== null && empty($message->whatsapp_message_id)) {
+                $message->whatsapp_message_id = $input['whatsapp_message_id'];
+                $message->remote_delivery_status = null;
+                $message->save();
             }
             return $this->operation_result($operation);
         });
@@ -1604,7 +1651,7 @@ class SupportCodexService
         }
         if ($case !== null && $case->state === 'ready_to_confirm'
             && (int) $last->id === (int) $case->handled_message_id
-            && app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone)['open']) {
+            && $this->puede_entregar($ticket)) {
             return 'mission_completed';
         }
         if ($last->sender_type === 'user' && ($case === null || (int) $last->id > (int) $case->handled_message_id)) {
@@ -1612,12 +1659,12 @@ class SupportCodexService
         }
         if ($supports_upgrade_agreement && $case !== null
             && app(SupportCodexUpgradeAgreementService::class)->pending_offer($ticket, $case)
-            && app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone)['open']) {
+            && $this->puede_entregar($ticket)) {
             return 'fix_ready_for_upgrade';
         }
         if ($case !== null && (int) $last->id === (int) $case->last_reply_id
             && $this->is_follow_up($case, (int) $last->id)
-            && app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone)['open']) {
+            && $this->puede_entregar($ticket)) {
             return 'follow_up';
         }
         return null;

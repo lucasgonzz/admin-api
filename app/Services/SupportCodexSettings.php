@@ -26,7 +26,7 @@ class SupportCodexSettings
 
     public static function manages(SupportTicket $ticket): bool
     {
-        if (! self::enabled() || $ticket->source !== 'whatsapp') {
+        if (! self::enabled() || ($ticket->source !== 'whatsapp' && ! $ticket->agentes_erp)) {
             return false;
         }
         // El corte se evalúa contra el entrante, no contra la apertura: un caso viejo puede

@@ -278,6 +278,12 @@ Route::withoutMiddleware('throttle:api')
     Route::post('local/actividad', [\App\Http\Controllers\LocalActividadInboundController::class, 'store']);
 });
 
+Route::middleware('admin.inbound.strict')->prefix('inbound/agentes')->group(function () {
+    Route::get('canales', 'Api\InboundAgentesController@canales');
+    Route::get('soporte', 'Api\InboundAgentesController@soporte');
+    Route::get('soporte/{uuid}', 'Api\InboundAgentesController@conversacion')->whereUuid('uuid');
+});
+
 Route::middleware('admin.inbound.key')
     ->prefix('inbound')
     ->group(function () {

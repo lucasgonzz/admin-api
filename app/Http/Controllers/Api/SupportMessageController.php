@@ -288,11 +288,12 @@ class SupportMessageController extends BaseController
         }
         try {
             $message->refresh();
+            $ticket->refresh();
             if ($ticket->source === 'whatsapp') {
                 if (empty($message->whatsapp_message_id)) {
                     $this->deliver_admin_message_via_whatsapp($ticket, $message);
                 }
-            } elseif ($ticket->source === 'erp' && $message->synced_to_client_at === null) {
+            } elseif ($ticket->source === 'erp' && $message->synced_to_client_at === null && empty($message->whatsapp_message_id)) {
                 $sync_ok = $sync_service->sync_message_to_client($message);
                 $message->remote_delivery_status = $sync_ok ? null : 'not_received';
                 $message->save();
@@ -598,9 +599,15 @@ class SupportMessageController extends BaseController
         ]);
 
         // Mensaje reaccionado con su ticket (404 si no existe).
-        $message = SupportMessage::with('ticket')->findOrFail($id);
-        $ticket = $message->ticket;
+        $message = SupportMessage::findOrFail($id);
+        return DB::transaction(function () use ($request, $message, $send_service) {
+            $ticket = SupportTicket::lockForUpdate()->find($message->support_ticket_id);
+            return $this->guardar_reaccion($request, $message, $ticket, $send_service);
+        });
+    }
 
+    private function guardar_reaccion(Request $request, SupportMessage $message, ?SupportTicket $ticket, WhatsappSendService $send_service)
+    {
         // Solo los mensajes del cliente que vinieron por WhatsApp tienen a qué engancharse.
         if ($message->sender_type !== 'user') {
             return $this->reaction_error('Solo se puede reaccionar a los mensajes que mandó el cliente.');

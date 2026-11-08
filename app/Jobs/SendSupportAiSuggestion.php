@@ -93,7 +93,7 @@ class SendSupportAiSuggestion implements ShouldQueue
             return;
         }
 
-        if (\App\Services\SupportCodexSettings::manages($ticket)) {
+        if ($ticket->agentes_erp || \App\Services\SupportCodexSettings::manages($ticket)) {
             return;
         }
 
@@ -142,7 +142,7 @@ class SendSupportAiSuggestion implements ShouldQueue
 
         // El cambio de proveedor puede ocurrir mientras está esperando la API. No alcanza
         // con frenar el envío: también hay que impedir el cierre/escalado de esa respuesta vieja.
-        if (\App\Services\SupportCodexSettings::manages($ticket)) {
+        if ($ticket->agentes_erp || \App\Services\SupportCodexSettings::manages($ticket)) {
             return;
         }
 

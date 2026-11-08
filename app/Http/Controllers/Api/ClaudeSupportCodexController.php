@@ -10,7 +10,6 @@ use App\Models\SupportMessageAttachment;
 use App\Models\SupportTicket;
 use App\Services\ClientScheduleResolver;
 use App\Services\PruebaImportacionService;
-use App\Services\SistemaQueryService;
 use App\Services\SupportCodexDiagnosticService;
 use App\Services\SupportCodexService;
 use App\Services\SupportCodexSettings;
@@ -110,7 +109,7 @@ class ClaudeSupportCodexController extends Controller
                 'expected_message_id' => $data['expected_message_id'],
                 'action' => 'responder',
             ]);
-            abort_unless($ticket->client !== null && SistemaQueryService::client_employee_can_query($ticket->client, $ticket->client_employee), 403, 'Este contacto no tiene permiso para consultar datos del negocio.');
+            abort_unless($ticket->contacto_puede_consultar(), 403, 'Este contacto no tiene permiso para consultar datos del negocio.');
 
             $desde = now();
             if (isset($data['not_before'])) {
@@ -237,7 +236,7 @@ class ClaudeSupportCodexController extends Controller
         $ticket = SupportTicket::with('client', 'client_employee')->findOrFail($id);
         $service->assert_lease(SupportCodexCase::where('support_ticket_id', $id)->first(), $data['lease_token']);
         abort_unless(SupportCodexSettings::manages($ticket) && $ticket->status === 'open', 409, 'Ticket fuera de atención automática.');
-        abort_unless(\App\Services\SistemaQueryService::client_employee_can_query($ticket->client, $ticket->client_employee), 403, 'Este contacto no tiene permiso para consultar datos del negocio.');
+        abort_unless($ticket->contacto_puede_consultar(), 403, 'Este contacto no tiene permiso para consultar datos del negocio.');
         // El ID de cliente/owner/URL no se toma del body: no hay forma de saltar a otra empresa.
         $result = $diagnostic->read($ticket->client, $data['query']);
         if ($result === null) {
@@ -294,7 +293,8 @@ class ClaudeSupportCodexController extends Controller
             'outcome' => 'required|in:sent,not_sent',
             'reason' => 'required|string|min:10|max:2000',
             'confirmed_by' => 'required|in:Lucas González',
-            'whatsapp_message_id' => 'required_if:outcome,sent|nullable|string|max:255',
+            'whatsapp_message_id' => 'nullable|string|max:255',
+            'erp_message_uuid' => 'nullable|uuid',
             'evidence' => 'required_if:outcome,sent|nullable|string|min:15|max:3000',
         ]);
         return response()->json($service->reconcile((string) $operation_id, $data));

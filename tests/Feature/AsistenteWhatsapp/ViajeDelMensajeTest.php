@@ -317,6 +317,71 @@ class ViajeDelMensajeTest extends BaseDelCanal
      *
      * @return string
      */
+    public function test_la_cita_al_hilo_traspasado_no_genera_respuesta_por_whatsapp(): void
+    {
+        $espia = $this->espiar_sender();
+        $fila = $this->fila_entrante($this->crear_cliente(), 'Retomo lo de ayer', 91);
+        $this->fakear_http(['*/asistente/mensajes' => Http::response(['code' => 'conversacion_solo_sistema'], 409)]);
+
+        $job = new EnviarMensajeAlAsistenteJob((int) $fila->id);
+        $this->correr_job($job, $espia);
+        $this->correr_job($job, $espia);
+
+        $this->assertSame(ClientAssistantMessage::ESTADO_RESPONDIDO, $fila->fresh()->estado);
+        $this->assertNull($fila->fresh()->error);
+        $this->assertSame([], $espia->textos);
+        Http::assertSentCount(1);
+    }
+
+    public function test_el_polling_tras_el_traspaso_tampoco_responde_por_whatsapp(): void
+    {
+        $espia = $this->espiar_sender();
+        $fila = $this->fila_entrante($this->crear_cliente());
+        $this->fakear_http([
+            '*/asistente/mensajes' => Http::response(['ai_conversation_id' => 91, 'ai_message_id' => 305, 'estado' => 'pendiente'], 202),
+            '*/asistente/mensajes/305' => Http::response(['estado' => 'solo_sistema', 'ai_conversation_id' => 91], 200),
+        ]);
+
+        $job = new EnviarMensajeAlAsistenteJob((int) $fila->id);
+        $this->correr_job($job, $espia);
+        $this->correr_job($job, $espia);
+        $this->correr_job($job, $espia);
+
+        $this->assertSame(ClientAssistantMessage::ESTADO_RESPONDIDO, $fila->fresh()->estado);
+        $this->assertNull($fila->fresh()->error);
+        $this->assertSame([], $espia->textos);
+        Http::assertSentCount(2);
+    }
+
+    public function test_reserva_la_entrega_al_consultar_y_la_libera_despues_del_envio(): void
+    {
+        $espia = $this->espiar_sender();
+        $fila = $this->fila_entrante($this->crear_cliente());
+        $token = '5d2323a9-488f-41d0-8496-0d85e917ff38';
+        $this->fakear_http([
+            '*/asistente/mensajes' => Http::response(['ai_conversation_id' => 91, 'ai_message_id' => 305, 'estado' => 'pendiente'], 202),
+            '*/asistente/mensajes/305' => Http::response([
+                'estado' => 'listo', 'contenido' => 'Respuesta reservada', 'ai_conversation_id' => 91,
+                'entrega_reservada' => true, 'entrega_token' => $token,
+            ], 200),
+            '*/asistente/mensajes/305/liberar-entrega' => function ($request) use ($espia, $token) {
+                $this->assertCount(1, $espia->textos);
+                $this->assertSame($token, $request['entrega_token']);
+                return Http::response(['ok' => true]);
+            },
+        ]);
+
+        $job = new EnviarMensajeAlAsistenteJob((int) $fila->id);
+        $this->correr_job($job, $espia);
+        $this->correr_job($job, $espia);
+
+        $this->assertSame(ClientAssistantMessage::ESTADO_RESPONDIDO, $fila->fresh()->estado);
+        Http::assertSent(function ($request) {
+            return $request->method() === 'GET' && $request->hasHeader('X-Reservar-Entrega-Whatsapp', '1');
+        });
+        Http::assertSentCount(3);
+    }
+
     private function cuerpo_del_ultimo_post(): string
     {
         $cuerpo = '';

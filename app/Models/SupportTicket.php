@@ -5,6 +5,7 @@ namespace App\Models;
 use App\Helpers\AppTime;
 use App\Models\Concerns\HasUuid;
 use App\Services\SupportAiSettings;
+use App\Services\SistemaQueryService;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
@@ -63,6 +64,8 @@ class SupportTicket extends Model
         'opened_at' => 'datetime',
         'closed_at' => 'datetime',
         'last_client_message_at' => 'datetime',
+        'sistema_exclusivo_at' => 'datetime',
+        'agentes_erp' => 'boolean',
         'alert_sent_at' => 'datetime',
         'ai_suggestion_send_at' => 'datetime',
         /* Momento en que Claude escaló el ticket a revisión humana. */
@@ -98,6 +101,25 @@ class SupportTicket extends Model
     public function support_codex_case()
     {
         return $this->hasOne(SupportCodexCase::class, 'support_ticket_id');
+    }
+
+    public function scopeParaCodex($query)
+    {
+        return $query->where(function ($canal) {
+            $canal->where('source', 'whatsapp')->orWhere('agentes_erp', true);
+        });
+    }
+
+    public function es_contacto_empleado(): bool
+    {
+        return $this->client_employee_id !== null || ($this->agentes_erp && $this->source === 'erp'
+            && (int) $this->client_user_id !== (int) optional($this->client)->user_id);
+    }
+
+    public function contacto_puede_consultar(): bool
+    {
+        return $this->client !== null && (! $this->es_contacto_empleado() || $this->client_employee !== null)
+            && SistemaQueryService::client_employee_can_query($this->client, $this->client_employee);
     }
 
     /** Misión y atención humana son ejes independientes: una no debe esconder a la otra. */

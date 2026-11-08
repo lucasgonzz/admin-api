@@ -160,6 +160,9 @@ class WhatsappSessionWindowService
                 ->whereNotNull('support_messages.delivered_at')
                 ->where('support_messages.delivered_at', '>=', $cutoff)
                 ->whereNotNull('support_tickets.whatsapp_phone')
+                ->where(function ($canal) {
+                    $canal->where('support_tickets.source', 'whatsapp')->orWhereNotNull('support_messages.whatsapp_message_id');
+                })
                 ->select('support_tickets.whatsapp_phone as phone', 'support_messages.delivered_at as at')
                 ->orderByDesc('support_messages.delivered_at')
                 ->get();

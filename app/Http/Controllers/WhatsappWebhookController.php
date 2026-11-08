@@ -1840,6 +1840,20 @@ class WhatsappWebhookController extends Controller
             $normalized_phone = $parsed['from'];
             $delivered_at = $this->resolve_message_datetime($parsed['timestamp']);
 
+            // Una cita explícita a un hilo traspasado no se convierte en una consulta nueva.
+            $cita = $parsed['reply_to_message_id'] ?? null;
+            if ($cita !== null) {
+                $citado = SupportTicket::where('client_id', $client->id)
+                    ->where('client_employee_id', optional($client_employee)->id)
+                    ->where('whatsapp_phone', $normalized_phone)
+                    ->whereHas('messages', function ($mensajes) use ($cita) {
+                        $mensajes->where('whatsapp_message_id', $cita);
+                    })->lockForUpdate()->first();
+                if ($citado !== null && $citado->sistema_exclusivo_at !== null) {
+                    return;
+                }
+            }
+
             $ticket_query = SupportTicket::where('client_id', $client->id)
                 ->where('source', 'whatsapp')
                 ->where('whatsapp_phone', $normalized_phone)

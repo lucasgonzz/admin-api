@@ -101,7 +101,7 @@ class SupportCodexUpgradeAgreementService
 
     public function pending_offer(SupportTicket $ticket, SupportCodexCase $case): bool
     {
-        if ($case->state !== 'mission_pending' || $ticket->client_employee_id !== null || $ticket->client === null) {
+        if ($case->state !== 'mission_pending' || $ticket->source !== 'whatsapp' || $ticket->client_employee_id !== null || $ticket->client === null) {
             return false;
         }
         $evidence = SupportCodexMissionFixEvidence::current_for($ticket, $case);
@@ -207,7 +207,7 @@ class SupportCodexUpgradeAgreementService
 
     private function assert_owner(SupportTicket $ticket): void
     {
-        if ($ticket->client_employee_id !== null || $ticket->client === null) {
+        if ($ticket->source !== 'whatsapp' || $ticket->client_employee_id !== null || $ticket->client === null) {
             $this->fail(403, 'upgrade_owner_required', 'La actualización se coordina con el dueño del negocio.');
         }
     }

@@ -119,9 +119,7 @@ class SupportWhatsappOpenerService
         $normalized_phone = '';
         $contact_name = '';
 
-        // La transacción cubre solo la escritura local. El POST a Kapso queda afuera a
-        // propósito: tiene timeout de 15s y dos reintentos, y no se sostiene una transacción
-        // abierta durante 45 segundos.
+        // Persiste el intento antes de enviarlo. El lock de entrega coordina con un traspaso al ERP.
         DB::transaction(function () use (
             $client,
             $phone,
@@ -172,15 +170,20 @@ class SupportWhatsappOpenerService
         // la frase-.
         $partes_de_apertura = (new SeparadorDeMensajesManuales())->partir($operator_text);
 
-        if (! $use_template && count($partes_de_apertura) > 1) {
-            $delivery = $this->deliver_en_partes($ticket, $message, $partes_de_apertura);
-        } else {
+        $delivery = DB::transaction(function () use ($ticket, $message, $use_template, $partes_de_apertura, $operator_text, $normalized_phone, $contact_name, $admin_name) {
+            $ticket = SupportTicket::lockForUpdate()->findOrFail($ticket->id);
+            if ($ticket->source !== 'whatsapp') {
+                return $this->mark_failed($message, 'La conversación continúa en el sistema.', false, false, null);
+            }
+            if (! $use_template && count($partes_de_apertura) > 1) {
+                return $this->deliver_en_partes($ticket, $message, $partes_de_apertura);
+            }
             $texto_de_apertura = count($partes_de_apertura) > 1
                 ? implode("\n\n", $partes_de_apertura)
                 : $operator_text;
 
-            $delivery = $this->deliver($normalized_phone, $message, $use_template, $contact_name, $admin_name, $texto_de_apertura);
-        }
+            return $this->deliver($normalized_phone, $message, $use_template, $contact_name, $admin_name, $texto_de_apertura);
+        });
 
         $message = SupportMessage::where('id', $message->id)->withAll()->first();
         event(new SupportMessageReceived((int) $message->id));
@@ -310,6 +313,17 @@ class SupportWhatsappOpenerService
      * @return array{delivery: string, message_id: string|null, error: string|null, used_template: bool, window_open: bool, template_name: string|null, sent_parts?: int, total_parts?: int}
      */
     public function deliver_follow_up(SupportTicket $ticket, SupportMessage $message, string $admin_name): array
+    {
+        return DB::transaction(function () use ($ticket, $message, $admin_name) {
+            $ticket = SupportTicket::lockForUpdate()->findOrFail($ticket->id);
+            if ($ticket->source !== 'whatsapp') {
+                return $this->mark_failed($message, 'La conversación continúa en el sistema.', false, false, null);
+            }
+            return $this->entregar_respuesta_whatsapp($ticket, $message, $admin_name);
+        });
+    }
+
+    private function entregar_respuesta_whatsapp(SupportTicket $ticket, SupportMessage $message, string $admin_name): array
     {
         $to = (string) $ticket->whatsapp_phone;
         $window = $this->window_service->window_state($to);

@@ -723,6 +723,10 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
          * está actualizado, y el problema real —una variable sin cargar— no lo vería nadie. Se
          * arregla con una configuración, así que no se reintenta. */
         if ($status === 409) {
+            if ($respuesta->json('code') === 'conversacion_solo_sistema') {
+                $this->cerrar_por_traspaso($fila, $asistente);
+                return;
+            }
             $this->cerrar_con_error(
                 $asistente,
                 $fila,
@@ -907,7 +911,8 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
         try {
             $respuesta = Http::withHeaders([
                     'X-Admin-Api-Key' => trim((string) $client->api_key),
-                    'Accept'          => 'application/json',
+                    'Accept' => 'application/json',
+                    'X-Reservar-Entrega-Whatsapp' => '1',
                 ])
                 ->timeout((int) config('services.client_api.timeout', 15))
                 ->get($url);
@@ -952,8 +957,45 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             return;
         }
 
-        $datos  = (array) $respuesta->json();
+        $datos = (array) $respuesta->json();
+        $token = ($datos['entrega_reservada'] ?? false) === true ? ($datos['entrega_token'] ?? null) : null;
+        $procesado = false;
+        try {
+            $this->procesar_estado_del_mensaje($asistente, $sender, $fotos, $fila, $client, $datos);
+            $procesado = true;
+        } finally {
+            if ($procesado && is_string($token) && $token !== '') {
+                $this->liberar_entrega($url, $client, $token);
+            }
+        }
+    }
+
+    private function liberar_entrega(string $url, Client $client, string $token): void
+    {
+        try {
+            Http::withHeaders([
+                'X-Admin-Api-Key' => trim((string) $client->api_key),
+                'Accept' => 'application/json',
+            ])->timeout(3)->post($url . '/liberar-entrega', ['entrega_token' => $token]);
+        } catch (ConnectionException $exception) {
+            // Si se pierde el acuse, la reserva vence sola. La respuesta no se reenvía.
+        }
+    }
+
+    private function procesar_estado_del_mensaje(
+        AsistenteWhatsappService $asistente,
+        WhatsappSendService $sender,
+        AsistenteFotoSalienteService $fotos,
+        ClientAssistantMessage $fila,
+        Client $client,
+        array $datos
+    ): void {
         $estado = trim((string) ($datos['estado'] ?? ''));
+
+        if ($estado === 'solo_sistema') {
+            $this->cerrar_por_traspaso($fila, $asistente);
+            return;
+        }
 
         if ($estado === 'pendiente') {
             $this->esperar_y_volver($asistente, $fila, $client, $sender);
@@ -1777,6 +1819,15 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             'client_id'            => $client !== null ? $client->id : null,
             'detalle'              => $detalle,
         ]);
+    }
+
+    private function cerrar_por_traspaso(ClientAssistantMessage $fila, AsistenteWhatsappService $asistente): void
+    {
+        $fila->estado = ClientAssistantMessage::ESTADO_RESPONDIDO;
+        $fila->error = null;
+        $this->soltar_media_en_espera($fila);
+        $fila->save();
+        $asistente->cerrar_fotos_anteriores_en_espera($fila, 'La conversación continúa en el sistema.');
     }
 
     /**

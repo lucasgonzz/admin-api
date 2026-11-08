@@ -7,6 +7,7 @@ use App\Models\Admin;
 use App\Models\ClientTemplate;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -66,6 +67,15 @@ class SupportTemplateSendService
      * @return array{message: SupportMessage, delivery: string, error: string|null}
      */
     public function enviar(SupportTicket $ticket, ClientTemplate $template, array $variables, Admin $admin): array
+    {
+        return DB::transaction(function () use ($ticket, $template, $variables, $admin) {
+            $ticket = SupportTicket::lockForUpdate()->findOrFail($ticket->id);
+            abort_unless($ticket->source === 'whatsapp', 409, 'La conversación continúa en el sistema.');
+            return $this->entregar($ticket, $template, $variables, $admin);
+        });
+    }
+
+    private function entregar(SupportTicket $ticket, ClientTemplate $template, array $variables, Admin $admin): array
     {
         // Meta rechaza el envío entero si un parámetro trae saltos de línea, tabs o espacios de
         // más. El saneo es el del opener y no uno propio: si mañana Meta cambia lo que acepta, el
