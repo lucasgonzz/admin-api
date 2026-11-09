@@ -21,6 +21,7 @@ use App\Services\SupportAiSuggestionScheduler;
 use App\Services\SupportAiSuggestionService;
 use App\Services\SupportCodexSettings;
 use App\Services\SupportTourService;
+use App\Services\SupportWhatsappOpenerService;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\Event;
@@ -37,6 +38,12 @@ class ToursDeSoporteTest extends TestCase
     private const PUENTE = 'https://empresa-tours.test/api/admin-sync/support/tours';
     private const INBOUND = '/api/inbound/support/messages';
     private const GUION = ['tema' => 'crear_ticket', 'titulo' => 'Crear un ticket'];
+    private const GUION_IMPORTACION = [
+        'tema' => 'revertir_importacion_articulos',
+        'titulo' => 'Revertir la importación del proveedor',
+        'import_history_id' => 735,
+        'textos' => ['Abrí Crear en Listado.', 'Tocá Historial.', 'Revisá el botón de esta importación.'],
+    ];
 
     protected function setUp(): void
     {
@@ -78,6 +85,97 @@ class ToursDeSoporteTest extends TestCase
                 'uuid' => $entrante->uuid, 'ticket_uuid' => $ticket->uuid, 'source' => 'whatsapp',
             ];
         });
+    }
+
+    public function test_martin_invita_con_el_objetivo_verificado_y_solo_envia_el_mismo_tour_aceptado(): void
+    {
+        $cliente = $this->cliente(['user_id' => 17]);
+        [$ticket, $consulta] = $this->ticket_whatsapp($cliente, $cliente->phone, null, false);
+        $headers = $this->reserva($ticket, $consulta);
+        $body = [
+            'lease_token' => $headers['X-Support-Lease-Token'], 'operation_id' => 'invitar-tour-' . $consulta->id,
+            'expected_message_id' => $consulta->id, 'action' => 'responder',
+            'body' => "En Listado abrí el historial.\nhttps://recursos.comerciocity.com/?v=T0.1\n\n" . SupportTourService::INVITACION,
+            'tour_invitation' => self::GUION_IMPORTACION,
+        ];
+        Http::fakeSequence(self::PUENTE . '/importaciones/candidatas*')->push([], 404)->push(['model' => [
+            ['id' => 735, 'created_at' => '2026-11-08 10:37:12', 'provider_name' => 'Proveedor ejemplo'],
+        ]]);
+        $this->mock(SupportWhatsappOpenerService::class)->shouldReceive('deliver_follow_up')->once()
+            ->andReturnUsing(function ($ticket, $message) {
+                $message->update(['whatsapp_message_id' => 'wamid.plan-personalizado']);
+                return ['delivery' => 'sent'];
+            });
+        $url = self::CLAUDE . $ticket->id;
+        $this->postJson($url . '/reply', $body, $headers)->assertStatus(422)
+            ->assertJsonPath('message', 'tour_target_unavailable: El sistema no confirmó que esa persona pueda encontrar la importación en el historial.');
+        $this->assertSame(0, $ticket->messages()->where('sender_type', 'admin')->count());
+
+        $this->postJson($url . '/reply', $body, $headers)->assertOk()->assertJsonPath('operation.status', 'sent');
+        $invitacion = $ticket->messages()->where('sender_type', 'admin')->firstOrFail();
+        $this->assertEquals(self::GUION_IMPORTACION, $invitacion->erp_auto_reply['tour_invitation']);
+        Http::assertSent(function ($request) {
+            return $request->method() === 'GET' && $request->hasHeader('X-Admin-Api-Key', 'clave-empresa')
+                && strpos($request->url(), '/importaciones/candidatas?user_id=17&import_history_id=735') !== false;
+        });
+
+        $this->entrante_whatsapp($ticket, 'Sí');
+        $aceptacion = $this->entrante_whatsapp($ticket, 'Por favor.');
+        $headers = $this->reserva($ticket, $aceptacion);
+        $this->getJson($url, $headers)->assertOk()
+            ->assertJsonPath('ticket.capabilities.support_tour_consent', true)
+            ->assertJsonPath('ticket.accepted_tour', self::GUION_IMPORTACION);
+        Http::fake([self::PUENTE => Http::response(['ok' => true, 'uuid' => $aceptacion->uuid])]);
+        $payload = self::GUION_IMPORTACION + ['expected_message_id' => $aceptacion->id];
+        $this->postJson($url . '/tour', array_replace($payload, ['import_history_id' => 736]), $headers)
+            ->assertStatus(409)->assertJsonPath('code', 'tour_invitation_mismatch');
+        $this->postJson($url . '/tour', $payload, $headers)->assertOk()->assertJsonPath('uuid', $aceptacion->uuid);
+
+        $otro = $this->entrante_whatsapp($ticket, 'Sí, quiero el tour', ['reply_to_message_id' => $invitacion->id]);
+        $this->getJson($url, $headers)->assertOk()->assertJsonPath('ticket.expected_message_id', $otro->id)
+            ->assertJsonPath('ticket.accepted_tour', null);
+        Http::assertSentCount(1);
+    }
+
+    /** @dataProvider respuestas_sin_consentimiento */
+    public function test_no_programa_robotito_sin_una_invitacion_entregada_y_un_si_inequivoco(string $respuesta, array $cambios): void
+    {
+        [$ticket, $consulta] = $this->ticket_whatsapp($this->cliente(), '+5493419843001', null, false);
+        $this->invitacion($ticket, self::GUION, $cambios);
+        $entrante = $this->entrante_whatsapp($ticket, $respuesta);
+        $headers = $this->reserva($ticket, $entrante);
+        Http::fake();
+        $this->postJson(self::CLAUDE . $ticket->id . '/tour', self::GUION + ['expected_message_id' => $entrante->id], $headers)
+            ->assertStatus(409)->assertJsonPath('code', 'tour_consent_required');
+        Http::assertNothingSent();
+    }
+
+    public function test_la_aceptacion_que_cita_la_invitacion_no_se_pierde_con_un_entrante_intermedio(): void
+    {
+        [$ticket, $consulta] = $this->ticket_whatsapp($this->cliente(), '+5493419843001', null, false);
+        $invitacion = $this->invitacion($ticket, self::GUION);
+        $this->entrante_whatsapp($ticket, 'Vi el video.');
+        $otra_cita = $this->entrante_whatsapp($ticket, 'Sí', ['reply_to_message_id' => $consulta->id]);
+        $aceptacion = $this->entrante_whatsapp($ticket, 'Sí, quiero que me lo prepares', ['reply_to_message_id' => $invitacion->id]);
+        $tours = app(SupportTourService::class);
+        $this->assertNull($tours->guion_aceptado($ticket, $otra_cita));
+        $this->assertSame(self::GUION, $tours->guion_aceptado($ticket, $aceptacion));
+    }
+
+    public function respuestas_sin_consentimiento(): array
+    {
+        return [
+            'agradecimiento' => ['Gracias!', []],
+            'acuse ambiguo' => ['Ok', []],
+            'negativa' => ['No, gracias.', []],
+            'otra consulta' => ['Sí, pero ya lo resolví.', []],
+            'borrador' => ['Sí, por favor.', ['is_ai_suggestion_draft' => true]],
+            'no confirmada' => ['Sí, por favor.', ['whatsapp_message_id' => null]],
+            'falló en Meta' => ['Sí, por favor.', ['whatsapp_delivery_status' => 'fallido']],
+            'pregunta editada' => ['Sí, por favor.', ['body' => 'Querés revisar el historial?']],
+            'dos preguntas' => ['Sí, por favor.', ['body' => "Lo pudiste abrir?\n\n" . SupportTourService::INVITACION]],
+            'invitación anterior sin guion guardado' => ['Sí, por favor.', ['erp_auto_reply' => null]],
+        ];
     }
 
     public function test_whatsapp_envia_empleado_sincronizado_con_su_numero_actual_y_rechaza_coincidencias_ambiguas(): void
@@ -173,22 +271,35 @@ class ToursDeSoporteTest extends TestCase
         $cliente = $this->cliente();
         $body = $this->mensaje_erp($cliente);
         $this->postJson(self::INBOUND, $body, ['X-Admin-Api-Key' => 'clave-inbound'])->assertCreated();
+        Http::fake(['empresa-tours.test/api/admin-sync/support/messages' => Http::response(['ok' => true])]);
+        $this->simular_agente(SupportTourService::INVITACION, self::GUION_IMPORTACION);
+        app()->call([Queue::pushed(SendSupportAiSuggestion::class)->first(), 'handle']);
+        Http::assertSentCount(1);
+        $invitacion = $this->respuesta_erp($body);
+        $this->assertEquals(self::GUION_IMPORTACION, $invitacion->erp_auto_reply['tour_invitation']);
+        $this->assertStringContainsString('https://recursos.comerciocity.com/?v=T0.1', $invitacion->body);
+        $this->assertStringContainsString(SupportTourService::INVITACION, $invitacion->body);
+        $this->assertStringNotContainsString(SupportTourService::AVISO, $invitacion->body);
+        $this->assertArrayNotHasKey('erp_auto_reply', $invitacion->toArray());
+
+        $body = array_replace($body, ['message_uuid' => (string) Str::uuid(), 'body' => 'Sí, me vendría bien']);
+        $this->postJson(self::INBOUND, $body, ['X-Admin-Api-Key' => 'clave-inbound'])->assertCreated();
         Http::fake([
             self::PUENTE => Http::response(['ok' => true, 'uuid' => $body['message_uuid']]),
             'empresa-tours.test/api/admin-sync/support/messages' => Http::response(['ok' => true]),
         ]);
-        $this->simular_agente();
-        app()->call([Queue::pushed(SendSupportAiSuggestion::class)->first(), 'handle']);
+        $this->mock(SupportAiSuggestionService::class)->shouldNotReceive('generate');
+        app()->call([Queue::pushed(SendSupportAiSuggestion::class)->last(), 'handle']);
 
         Http::assertSentCount(2);
         Http::assertSent(function ($request) use ($body) {
             return $request->url() === self::PUENTE && $request['source'] === 'sistema' && $request['user_id'] === 17
-                && $request['uuid'] === $body['message_uuid'];
+                && $request['uuid'] === $body['message_uuid'] && $request['import_history_id'] === 735
+                && $request['textos'] === self::GUION_IMPORTACION['textos'];
         });
         $respuesta = $this->respuesta_erp($body);
         $this->assertNotNull($respuesta->synced_to_client_at);
         $this->assertStringContainsString(SupportTourService::AVISO, $respuesta->body);
-        $this->assertStringContainsString('https://recursos.comerciocity.com/?v=T0.1', $respuesta->body);
         Http::assertSent(function ($request) use ($respuesta) {
             return $request->url() === 'https://empresa-tours.test/api/admin-sync/support/messages'
                 && $request['body'] === $respuesta->body && $request['message_uuid'] === $respuesta->uuid;
@@ -198,10 +309,14 @@ class ToursDeSoporteTest extends TestCase
     public function test_erp_demorado_guarda_el_plan_y_mantiene_la_respuesta_si_el_frente_es_anterior(): void
     {
         AdminSetting::set(SupportAiSettings::KEY_AUTO_SEND_DELAY_SECONDS, '30');
-        $body = $this->mensaje_erp($this->cliente());
+        $cliente = $this->cliente();
+        $body = $this->mensaje_erp($cliente);
+        $ticket = SupportTicket::create(['uuid' => $body['ticket_uuid'], 'client_id' => $cliente->id, 'client_user_id' => 17, 'source' => 'erp', 'status' => 'open']);
+        $this->invitacion($ticket, self::GUION);
+        $body['body'] = 'Sí, por favor.';
         $this->postJson(self::INBOUND, $body, ['X-Admin-Api-Key' => 'clave-inbound'])->assertCreated();
         Http::fake([self::PUENTE => Http::response([], 404), 'empresa-tours.test/api/admin-sync/support/messages' => Http::response(['ok' => true])]);
-        $this->simular_agente();
+        $this->mock(SupportAiSuggestionService::class)->shouldNotReceive('generate');
         app()->call([Queue::pushed(SendSupportAiSuggestion::class)->first(), 'handle']);
         $borrador = $this->respuesta_erp($body);
         $this->assertTrue($borrador->is_ai_suggestion_draft);
@@ -214,7 +329,7 @@ class ToursDeSoporteTest extends TestCase
         $this->assertFalse($respuesta->is_ai_suggestion_draft);
         $this->assertNull($respuesta->erp_auto_reply);
         $this->assertStringNotContainsString('Te mandé a Robotito', $respuesta->body);
-        $this->assertStringContainsString('https://recursos.comerciocity.com/?v=T0.1', $respuesta->body);
+        $this->assertStringContainsString('No pude confirmar que Robotito quedara disponible', $respuesta->body);
     }
 
     public function test_erp_con_revision_no_ofrece_tour_ni_envia_respuesta_automatica(): void
@@ -261,7 +376,7 @@ class ToursDeSoporteTest extends TestCase
         ]]]);
         $fin = [
             'suggested_message' => 'Abrí Soporte y tocá Nuevo ticket.', 'tipo_respuesta' => 'afirmacion_del_sistema',
-            'fuentes_kb' => ['manual_sistema/general/soporte-tecnico.md'], 'tour' => self::GUION,
+            'fuentes_kb' => ['manual_sistema/general/soporte-tecnico.md'], 'tour' => self::GUION, 'invitar_tour' => true,
         ];
         Http::fakeSequence('api.anthropic.com/*')->push([
             'stop_reason' => 'tool_use', 'content' => [
@@ -273,7 +388,61 @@ class ToursDeSoporteTest extends TestCase
         ])->push([
             'stop_reason' => 'end_turn', 'content' => [['type' => 'text', 'text' => json_encode($fin + ['video_codigo' => 'T0.4'])]],
         ]);
-        $agente = new class extends SupportAiSuggestionService {
+        $agente = $this->agente_documental();
+        $respuesta = $agente->generate($ticket);
+        $this->assertSame(self::GUION, $respuesta['tour']);
+        $this->assertStringContainsString('https://recursos.comerciocity.com/?v=T0.4', $respuesta['suggested_message']);
+        $this->assertStringContainsString(SupportTourService::INVITACION, $respuesta['suggested_message']);
+        $this->assertStringNotContainsString('https://recursos.comerciocity.com/', $agente->generate($ticket)['suggested_message']);
+        Http::assertSent(function ($request) {
+            return strpos($request['system'][0]['text'], 'buscar_video_de_ayuda') !== false
+                && in_array('buscar_video_de_ayuda', array_column($request['tools'], 'name'), true);
+        });
+    }
+
+    public function test_el_agente_web_solo_puede_invitar_a_un_objetivo_verificado_en_ese_turno(): void
+    {
+        SupportCodexSettings::set_enabled(false);
+        config(['services.anthropic.api_key' => 'clave-falsa']);
+        $ticket = SupportTicket::create(['client_id' => $this->cliente()->id, 'client_user_id' => 17, 'source' => 'erp', 'status' => 'open']);
+        $ticket->messages()->create(['sender_type' => 'user', 'kind' => 'text', 'body' => 'Quiero revertir toda la importación 735.']);
+        $fin = [
+            'suggested_message' => 'En Listado abrí Historial de importaciones y buscá la carga del proveedor.',
+            'tipo_respuesta' => 'afirmacion_del_sistema', 'fuentes_kb' => ['manual_sistema/general/soporte-tecnico.md'],
+            'tour' => self::GUION_IMPORTACION, 'invitar_tour' => true,
+        ];
+        $tools = [
+            'stop_reason' => 'tool_use', 'content' => [
+                ['type' => 'tool_use', 'id' => 'manual', 'name' => 'get_manual_file', 'input' => ['path' => 'manual_sistema/general/soporte-tecnico.md']],
+                ['type' => 'tool_use', 'id' => 'importacion', 'name' => 'buscar_importaciones_reversibles', 'input' => ['import_history_id' => 735]],
+            ],
+        ];
+        $resultado = ['stop_reason' => 'end_turn', 'content' => [['type' => 'text', 'text' => json_encode($fin)]]];
+        Http::fakeSequence('api.anthropic.com/*')->push($tools)->push($resultado)->push($tools)->push($resultado);
+        Http::fakeSequence(self::PUENTE . '/importaciones/candidatas*')->push(['model' => [
+            ['id' => 735, 'created_at' => '2026-11-08 10:37:12', 'provider_name' => 'Proveedor ejemplo', 'private' => 'No compartir'],
+        ]])->push(['model' => [
+            ['id' => 736, 'created_at' => '2026-11-08 11:20:00', 'provider_name' => 'Otro proveedor'],
+        ]]);
+
+        $agente = $this->agente_documental();
+        $respuesta = $agente->generate($ticket);
+        $this->assertSame(self::GUION_IMPORTACION, $respuesta['tour']);
+        $this->assertStringContainsString(SupportTourService::INVITACION, $respuesta['suggested_message']);
+        $respuesta = $agente->generate($ticket);
+        $this->assertArrayNotHasKey('tour', $respuesta);
+        $this->assertStringNotContainsString(SupportTourService::INVITACION, $respuesta['suggested_message']);
+        Http::assertSent(function ($request) {
+            return strpos($request->url(), '/importaciones/candidatas?user_id=17&import_history_id=735') !== false;
+        });
+        Http::assertNotSent(function ($request) {
+            return strpos($request->body(), 'No compartir') !== false;
+        });
+    }
+
+    private function agente_documental(): SupportAiSuggestionService
+    {
+        return new class extends SupportAiSuggestionService {
             protected function fetch_manual_file_list(): string
             {
                 return '- manual_sistema/general/soporte-tecnico.md';
@@ -289,14 +458,6 @@ class ToursDeSoporteTest extends TestCase
                 return 'Abrí Soporte y tocá Nuevo ticket.';
             }
         };
-        $respuesta = $agente->generate($ticket);
-        $this->assertSame(self::GUION, $respuesta['tour']);
-        $this->assertStringContainsString('https://recursos.comerciocity.com/?v=T0.4', $respuesta['suggested_message']);
-        $this->assertStringNotContainsString('https://recursos.comerciocity.com/', $agente->generate($ticket)['suggested_message']);
-        Http::assertSent(function ($request) {
-            return strpos($request['system'][0]['text'], 'buscar_video_de_ayuda') !== false
-                && in_array('buscar_video_de_ayuda', array_column($request['tools'], 'name'), true);
-        });
     }
 
     public function test_un_envio_erp_automatico_fallido_se_reintenta_desde_la_bandeja_con_el_mismo_uuid(): void
@@ -340,17 +501,36 @@ class ToursDeSoporteTest extends TestCase
         ]);
     }
 
-    private function ticket_whatsapp(Client $cliente, string $telefono = '+5493419843001', ?ClientEmployee $empleado = null): array
+    private function ticket_whatsapp(Client $cliente, string $telefono = '+5493419843001', ?ClientEmployee $empleado = null, bool $aceptado = true): array
     {
         $ticket = SupportTicket::create([
             'client_id' => $cliente->id, 'client_employee_id' => optional($empleado)->id, 'client_user_id' => 0,
             'status' => 'open', 'source' => 'whatsapp', 'whatsapp_phone' => $telefono, 'opened_at' => now(), 'last_client_message_at' => now(),
         ]);
-        $entrante = SupportMessage::create([
-            'support_ticket_id' => $ticket->id, 'sender_type' => 'user', 'kind' => 'text', 'body' => '¿Cómo hago un ticket?',
-            'delivered_at' => now(), 'whatsapp_remitente_crudo' => ltrim($telefono, '+'),
-        ]);
+        if ($aceptado) {
+            $this->invitacion($ticket, self::GUION);
+        }
+        $entrante = $this->entrante_whatsapp($ticket, $aceptado ? 'Sí, por favor.' : '¿Cómo hago un ticket?');
         return [$ticket, $entrante];
+    }
+
+    private function entrante_whatsapp(SupportTicket $ticket, string $body, array $extra = []): SupportMessage
+    {
+        return SupportMessage::create($extra + [
+            'support_ticket_id' => $ticket->id, 'sender_type' => 'user', 'kind' => 'text', 'body' => $body,
+            'delivered_at' => now(), 'whatsapp_remitente_crudo' => ltrim($ticket->whatsapp_phone, '+'),
+        ]);
+    }
+
+    private function invitacion(SupportTicket $ticket, array $guion, array $extra = []): SupportMessage
+    {
+        return SupportMessage::create($extra + [
+            'support_ticket_id' => $ticket->id, 'sender_type' => 'admin', 'kind' => 'text',
+            'body' => "Abrí Soporte.\nhttps://recursos.comerciocity.com/?v=T0.1\n\n" . SupportTourService::INVITACION,
+            'ai_generated_at' => now(), 'delivered_at' => now(), 'erp_auto_reply' => ['tour_invitation' => $guion],
+            'whatsapp_message_id' => $ticket->source === 'whatsapp' ? 'wamid.invitacion-' . $ticket->id : null,
+            'synced_to_client_at' => $ticket->source === 'erp' ? now() : null,
+        ]);
     }
 
     private function reserva(SupportTicket $ticket, SupportMessage $entrante): array
@@ -372,11 +552,11 @@ class ToursDeSoporteTest extends TestCase
         ];
     }
 
-    private function simular_agente(): void
+    private function simular_agente(string $invitacion = '', array $tour = self::GUION): void
     {
         $this->mock(SupportAiSuggestionService::class)->shouldReceive('generate')->once()->andReturn([
-            'suggested_message' => "Abrí Soporte y tocá Nuevo ticket.\nhttps://recursos.comerciocity.com/?v=T0.1",
-            'tour' => self::GUION,
+            'suggested_message' => trim("Abrí Soporte y tocá Nuevo ticket.\nhttps://recursos.comerciocity.com/?v=T0.1\n\n" . $invitacion),
+            'tour' => $tour,
         ]);
     }
 
@@ -384,6 +564,6 @@ class ToursDeSoporteTest extends TestCase
     {
         return SupportMessage::whereHas('ticket', function ($ticket) use ($body) {
             $ticket->where('uuid', $body['ticket_uuid']);
-        })->where('sender_type', 'admin')->firstOrFail();
+        })->where('sender_type', 'admin')->latest('id')->firstOrFail();
     }
 }

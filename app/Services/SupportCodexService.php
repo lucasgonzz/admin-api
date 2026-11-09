@@ -257,9 +257,11 @@ class SupportCodexService
             // El helper debe verificar esta capacidad ANTES de pedir el modo nuevo: un admin
             // anterior ignoraría el campo y ejecutaría el resume que consume la consulta.
             'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => true, 'prueba_import_resolver' => true,
-                'soporte_import' => $soporte_activo, 'soporte_import_resolver' => $soporte_activo],
+                'soporte_import' => $soporte_activo, 'soporte_import_resolver' => $soporte_activo, 'support_tour_consent' => true],
             'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
+            'accepted_tour' => $last && ! $ticket->requiere_verificacion_mensajes
+                ? app(SupportTourService::class)->guion_aceptado($ticket, $last) : null,
             'window' => $ticket->source === 'erp'
                 ? ['open' => null, 'last_inbound_at' => null, 'expires_at' => null, 'origin' => null]
                 : app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone),
@@ -631,6 +633,16 @@ class SupportCodexService
 
     public function reply(int $id, array $input): array
     {
+        $tour_invitation = null;
+        if (isset($input['tour_invitation'])) {
+            $tour_invitation = SupportTourService::guion($input['tour_invitation']);
+            if ($tour_invitation === null || ! SupportTourService::tiene_invitacion($input['body'])
+                || SupportTourService::quitar_invitacion($input['body']) === ''
+                || $input['action'] !== 'responder' || isset($input['attachment']) || isset($input['upgrade_proposal'])) {
+                $this->fail(422, 'tour_invitation_invalid', 'Para invitar a Robotito, mandá el guion y terminá el mensaje de texto con su pregunta.');
+            }
+            $input['tour_invitation'] = $tour_invitation;
+        }
         $attachment = null;
         if (isset($input['attachment'])) {
             if ($input['action'] === 'cerrar' || mb_strlen(trim($input['body'])) > SupportCodexOutboundAttachment::MAX_CAPTION_LENGTH) {
@@ -657,6 +669,9 @@ class SupportCodexService
         if ($proposal !== null) {
             $hash_payload[] = $proposal;
         }
+        if ($tour_invitation !== null) {
+            $hash_payload[] = $tour_invitation;
+        }
         $hash = hash('sha256', json_encode($hash_payload));
         // La operación se confirma en una transacción ANTES de enviar. Si el proceso cae
         // durante el HTTP, queda sending y requiere conciliación: jamás otro intento ciego.
@@ -677,8 +692,17 @@ class SupportCodexService
             }
             $case = $this->assert_current($ticket, $input);
             $evidence = $proposal === null ? null : app(SupportCodexUpgradeAgreementService::class)->assert_valid_proposal($ticket, $case, $proposal);
+            if ($ticket->requiere_verificacion_mensajes && isset($input['tour_invitation'])) {
+                $this->fail(422, 'verification_required', 'Este ticket exige aprobación. Prepará la respuesta escrita sin invitar a Robotito.');
+            }
             if ($ticket->requiere_verificacion_mensajes && empty($input['supports_human_approval'])) {
                 $this->fail(422, 'verification_required', 'Este ticket exige aprobación. Actualizá el monitor para preparar el borrador.');
+            }
+            $id_importacion = $input['tour_invitation']['import_history_id'] ?? null;
+            if ($id_importacion !== null && ! app(SupportTourService::class)->objetivo_disponible(
+                $ticket, SupportMessage::findOrFail($input['expected_message_id']), $id_importacion
+            )) {
+                $this->fail(422, 'tour_target_unavailable', 'El sistema no confirmó que esa persona pueda encontrar la importación en el historial.');
             }
             if ($input['action'] === 'cerrar') {
                 $confirmation = $this->confirmation_message($ticket, $input);
@@ -773,9 +797,9 @@ class SupportCodexService
             }
             // El operador pudo encender la verificación después de la primera transacción.
             if ($ticket->requiere_verificacion_mensajes) {
-                if (empty($input['supports_human_approval'])) {
+                if (empty($input['supports_human_approval']) || isset($input['tour_invitation'])) {
                     $operation->status = 'cancelled';
-                    $operation->detail = 'La verificación fue activada; no se envió con el monitor anterior.';
+                    $operation->detail = 'La verificación fue activada; no se envió automáticamente.';
                     $operation->save();
                     return $this->operation_result($operation);
                 }
@@ -798,6 +822,7 @@ class SupportCodexService
                 'body' => $body,
                 'ai_generated_at' => now(),
                 'delivered_at' => now(),
+                'erp_auto_reply' => isset($input['tour_invitation']) ? ['tour_invitation' => $input['tour_invitation']] : null,
             ]);
             if ($attachment !== null) {
                 try {

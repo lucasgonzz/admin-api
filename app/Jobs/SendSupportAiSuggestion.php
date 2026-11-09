@@ -119,9 +119,19 @@ class SendSupportAiSuggestion implements ShouldQueue
             return;
         }
 
-        event(new SupportAiSuggestionGenerating($ticket->id));
-
-        $result = $suggestion_service->generate($ticket);
+        $tour_aceptado = null;
+        if ($ticket->source === 'erp' && ! $ticket->requiere_verificacion_mensajes) {
+            $entrante = $ticket->messages()->find($this->erp_message_id);
+            if ($entrante !== null) {
+                $tour_aceptado = app(SupportTourService::class)->guion_aceptado($ticket, $entrante);
+            }
+        }
+        if ($tour_aceptado === null) {
+            event(new SupportAiSuggestionGenerating($ticket->id));
+            $result = $suggestion_service->generate($ticket);
+        } else {
+            $result = ['suggested_message' => 'Dale, gracias por confirmarme.', 'tour' => $tour_aceptado];
+        }
 
         if (! $scheduler->is_schedule_token_current($this->ticket_id, $this->schedule_token)) {
             Log::channel('daily')->info('SendSupportAiSuggestion: sugerencia descartada (mensajes nuevos del cliente durante la API).', [
@@ -321,6 +331,9 @@ class SendSupportAiSuggestion implements ShouldQueue
             }
 
             $delay = $ticket->requiere_verificacion_mensajes ? 0 : $delay;
+            if ($ticket->requiere_verificacion_mensajes) {
+                $body = SupportTourService::quitar_invitacion($body);
+            }
             return $draft_service->create_draft($ticket, $body, $delay, function (SupportMessage $borrador) use ($delay, $tour) {
                 $borrador->erp_auto_reply = ['message_id' => $this->erp_message_id, 'tour' => $delay > 0 ? $tour : null];
                 $borrador->save();

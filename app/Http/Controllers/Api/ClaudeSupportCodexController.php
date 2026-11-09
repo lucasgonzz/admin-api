@@ -231,6 +231,7 @@ class ClaudeSupportCodexController extends Controller
             'operation_id' => 'required|string|max:120|regex:/^[a-zA-Z0-9_-]+$/',
             'action' => 'required|in:responder,solicitar_confirmacion,cerrar,escalar,pedir_revision',
             'body' => 'required|string|max:3500',
+            'tour_invitation' => 'sometimes|required|array|prohibited_unless:action,responder',
             'attachment' => 'sometimes|required|array',
             'attachment.filename' => 'required_with:attachment|string|max:160',
             'attachment.content_base64' => 'required_with:attachment|string|max:' . \App\Services\SupportCodexOutboundAttachment::MAX_ENCODED_LENGTH,

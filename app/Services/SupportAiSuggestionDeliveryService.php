@@ -110,6 +110,7 @@ class SupportAiSuggestionDeliveryService
 
             $body_original = trim((string) $mensaje->body);
             $body = $edited_body !== null ? trim($edited_body) : $body_original;
+            $body = SupportTourService::quitar_invitacion($body);
             abort_if($body === '', 422, 'El mensaje no puede quedar vacío.');
 
             $esperado = $mensaje->erp_auto_reply['message_id'] ?? null;
@@ -163,11 +164,19 @@ class SupportAiSuggestionDeliveryService
                 ]);
             }
 
-            if ($tour !== null && app(SupportTourService::class)->ofrecer($ticket, $entrante, $tour)['ok']) {
-                $body .= "\n\n" . SupportTourService::AVISO;
+            $invitacion = $tour !== null && SupportTourService::tiene_invitacion($body) ? $tour : null;
+            if ($invitacion === null && $tour !== null) {
+                $resultado = app(SupportTourService::class)->ofrecer($ticket, $entrante, $tour);
+                if ($resultado['ok']) {
+                    $body .= "\n\n" . SupportTourService::AVISO;
+                } elseif (! in_array($resultado['code'], ['tour_consent_required', 'tour_invitation_mismatch'], true)) {
+                    $body .= "\n\nNo pude confirmar que Robotito quedara disponible. Podés seguir los pasos que te pasé antes.";
+                }
+            } elseif ($invitacion === null) {
+                $body = SupportTourService::quitar_invitacion($body);
             }
             $mensaje->body = $body;
-            $this->preparar_erp_message($mensaje);
+            $this->preparar_erp_message($mensaje, $invitacion);
             return $mensaje;
         });
 
@@ -175,11 +184,11 @@ class SupportAiSuggestionDeliveryService
         return $mensaje === null ? null : $this->sincronizar_erp_message($mensaje);
     }
 
-    private function preparar_erp_message(SupportMessage $message): void
+    private function preparar_erp_message(SupportMessage $message, ?array $invitacion = null): void
     {
         $message->is_ai_suggestion_draft = false;
         $message->ai_auto_send_at = null;
-        $message->erp_auto_reply = null;
+        $message->erp_auto_reply = $invitacion === null ? null : ['tour_invitation' => $invitacion];
         $message->delivered_at = now();
         $message->remote_delivery_status = 'not_received';
         $message->save();

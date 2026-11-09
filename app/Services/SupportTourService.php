@@ -14,14 +14,19 @@ use Illuminate\Support\Str;
 class SupportTourService
 {
     private const PATH = 'api/admin-sync/support/tours';
+    public const INVITACION = 'Querés que te prepare un tour con Robotito?';
 
     public const AVISO = 'Te mandé a Robotito a tu sistema para que te lo muestre. Tocá su aviso en la barra de navegación para empezar.';
+
+    public const TEMA_REVERTIR_IMPORTACION = 'revertir_importacion_articulos';
+    public const MAX_IMPORT_HISTORY_ID = 9007199254740991;
 
     public const TEMAS = [
         'crear_ticket' => 3,
         'buscar_articulo_nombre' => 3,
         'buscar_articulo_codigo' => 1,
         'centro_recursos' => 2,
+        self::TEMA_REVERTIR_IMPORTACION => 3,
     ];
 
     public function __construct(ClientEmpresaApiUrlResolver $urls)
@@ -31,7 +36,7 @@ class SupportTourService
 
     private $urls;
 
-    /** Solo se admite el guion textual de un recorrido que ya existe en Empresa. */
+    /** Solo se admiten recorridos y parámetros que Empresa conoce. */
     public static function guion($datos): ?array
     {
         if (! is_array($datos) || ! is_string($datos['tema'] ?? null) || ! isset(self::TEMAS[$datos['tema']])
@@ -45,6 +50,16 @@ class SupportTourService
         }
 
         $guion = ['tema' => $datos['tema'], 'titulo' => $titulo];
+        if ($guion['tema'] === self::TEMA_REVERTIR_IMPORTACION) {
+            $id = $datos['import_history_id'] ?? null;
+            if (! is_int($id) || $id < 1 || $id > self::MAX_IMPORT_HISTORY_ID) {
+                return null;
+            }
+            $guion['import_history_id'] = $id;
+        } elseif (array_key_exists('import_history_id', $datos)) {
+            return null;
+        }
+
         if (! array_key_exists('textos', $datos)) {
             return $guion;
         }
@@ -64,6 +79,134 @@ class SupportTourService
         return $guion;
     }
 
+    public static function tiene_invitacion(string $texto): bool
+    {
+        $lineas = preg_split('/\R/u', trim($texto));
+        return ltrim(trim((string) end($lineas)), '¿') === self::INVITACION;
+    }
+
+    public static function quitar_invitacion(string $texto): string
+    {
+        if (! self::tiene_invitacion($texto)) {
+            return $texto;
+        }
+
+        $lineas = preg_split('/\R/u', trim($texto));
+        array_pop($lineas);
+        return rtrim(implode("\n", $lineas));
+    }
+
+    public function guion_aceptado(SupportTicket $ticket, SupportMessage $entrante): ?array
+    {
+        $invitacion = $this->invitacion_aceptada($ticket, $entrante);
+        return $invitacion === null ? null : self::guion($invitacion->erp_auto_reply['tour_invitation']);
+    }
+
+    private function invitacion_aceptada(SupportTicket $ticket, SupportMessage $entrante): ?SupportMessage
+    {
+        if ((int) $entrante->support_ticket_id !== (int) $ticket->id || $entrante->sender_type !== 'user'
+            || ! $ticket->mensaje_confiable_para_codex($entrante)) {
+            return null;
+        }
+
+        $anteriores = SupportMessage::where('support_ticket_id', $ticket->id)->where('id', '<', $entrante->id);
+        SupportMessage::apply_mensaje_real_conditions($anteriores, 'support_messages');
+        $invitacion = (clone $anteriores)->latest('id')->first();
+        $respuesta = ltrim(Str::ascii(mb_strtolower(trim((string) $entrante->body))), '! ');
+        $cita = $entrante->reply_to_message_id;
+        if ($invitacion !== null && $invitacion->sender_type === 'user') {
+            if ($cita !== null) {
+                $invitacion = $anteriores->where('sender_type', 'admin')->latest('id')->first();
+            } elseif (preg_match('/^(?:por favor|porfa|por fi)[.!, ]*$/D', $respuesta)
+                && $invitacion->reply_to_message_id === null && $ticket->mensaje_confiable_para_codex($invitacion)) {
+                $respuesta = Str::ascii(mb_strtolower(trim((string) $invitacion->body))) . ' ' . $respuesta;
+                $invitacion = $anteriores->where('id', '<', $invitacion->id)->latest('id')->first();
+            }
+        }
+        if ($invitacion === null || $invitacion->sender_type !== 'admin'
+            || ! $ticket->mensaje_confiable_para_codex($invitacion)
+            || ($cita !== null && (int) $cita !== (int) $invitacion->id)) {
+            return null;
+        }
+
+        $entregada = $ticket->source === 'erp' ? $invitacion->synced_to_client_at !== null
+            : trim((string) $invitacion->whatsapp_message_id) !== '' && $invitacion->remote_delivery_status !== 'not_received'
+                && $invitacion->whatsapp_delivery_status !== 'fallido';
+        $guion = self::guion($invitacion->erp_auto_reply['tour_invitation'] ?? null);
+        $uuid_usado = $invitacion->erp_auto_reply['tour_acceptance_uuid'] ?? null;
+        if (! $entregada || $guion === null || ($uuid_usado !== null && $uuid_usado !== $entrante->uuid)
+            || ! self::tiene_invitacion((string) $invitacion->body)) {
+            return null;
+        }
+
+        // Una respuesta breve solo es inequívoca si la invitación era la única pregunta.
+        if (preg_match('/^(?:(?:si|dale|ok)[,.! ]+)?(?:preparame|mandame|pasame|enviame|quiero) (?:el|un) (?:tour|recorrido)(?: de robotito)?(?:[,.! ]+(?:por favor|porfa|gracias))*[.!, ]*$/D', $respuesta)) {
+            return $invitacion;
+        }
+
+        $afirmativa = ! preg_match('/[?¿]/u', preg_replace('~https?://\S+~u', '', self::quitar_invitacion((string) $invitacion->body)))
+            && preg_match('/^(?:si|dale|de una|de acuerdo|(?:ok|bueno)[,.! ]+dale)(?:[,.! ]+(?:si|dale|quiero|mandamelo|preparamelo|pasamelo|enviamelo|por favor|porfa|por fi|gracias|me (?:sirve|vendria bien|gustaria)|quiero que (?:me )?lo prepares))*[.!, ]*$/D', $respuesta);
+        return $afirmativa ? $invitacion : null;
+    }
+
+    /** El agente web puede ubicar una importación únicamente dentro del comercio del ticket. */
+    public function importaciones_candidatas(SupportTicket $ticket, ?int $import_history_id): array
+    {
+        if ($ticket->source !== 'erp') {
+            return [];
+        }
+        return $this->buscar_importaciones($ticket, (int) $ticket->client_user_id, $import_history_id);
+    }
+
+    public function objetivo_disponible(SupportTicket $ticket, SupportMessage $entrante, int $import_history_id): bool
+    {
+        $ticket->loadMissing('client');
+        $persona = $ticket->source === 'whatsapp' ? $this->destinatario_whatsapp($ticket, $entrante) : (int) $ticket->client_user_id;
+        if ($persona === false) {
+            return false;
+        }
+        return $this->buscar_importaciones($ticket, $persona ?? (int) optional($ticket->client)->user_id, $import_history_id) !== [];
+    }
+
+    private function buscar_importaciones(SupportTicket $ticket, int $persona, ?int $import_history_id): array
+    {
+        $ticket->loadMissing('client');
+        $cliente = $ticket->client;
+        if ($cliente === null || ! $cliente->is_active || $persona < 1) {
+            return [];
+        }
+        $url = $this->urls->admin_sync_url($cliente, self::PATH . '/importaciones/candidatas');
+        if ($url === '' || trim((string) $cliente->api_key) === '') {
+            return [];
+        }
+
+        $query = ['user_id' => $persona];
+        if ($import_history_id !== null) {
+            $query['import_history_id'] = $import_history_id;
+        }
+        try {
+            $respuesta = $this->http($cliente)->get($url, $query);
+        } catch (ConnectionException $exception) {
+            return [];
+        }
+
+        $modelos = $respuesta->json('model');
+        if (! $respuesta->successful() || ! is_array($modelos)) {
+            return [];
+        }
+
+        $candidatas = [];
+        foreach (array_slice($modelos, 0, 30) as $modelo) {
+            if (! is_array($modelo) || ! is_int($modelo['id'] ?? null) || $modelo['id'] < 1
+                || ! is_string($modelo['created_at'] ?? null)
+                || ($import_history_id !== null && $modelo['id'] !== $import_history_id)) {
+                continue;
+            }
+            $candidatas[] = array_intersect_key($modelo, array_flip(['id', 'created_at', 'provider_id', 'provider_name']));
+        }
+        return $candidatas;
+    }
+
     /** El mensaje entrante es la clave idempotente y fija el destinatario. */
     public function ofrecer(SupportTicket $ticket, SupportMessage $entrante, array $guion): array
     {
@@ -73,6 +216,15 @@ class SupportTourService
             || ! Str::isUuid((string) $entrante->uuid) || (int) $entrante->support_ticket_id !== (int) $ticket->id
             || $entrante->sender_type !== 'user') {
             return $this->fallo(409, 'tour_recipient_unresolved', 'No se pudo verificar la cuenta de quien hizo la consulta.');
+        }
+
+        $invitacion = $this->invitacion_aceptada($ticket, $entrante);
+        if ($invitacion === null) {
+            return $this->fallo(409, 'tour_consent_required', 'La persona todavía no aceptó una invitación enviada en este ticket.');
+        }
+        $aceptado = self::guion($invitacion->erp_auto_reply['tour_invitation']);
+        if ($aceptado !== $guion) {
+            return $this->fallo(409, 'tour_invitation_mismatch', 'El recorrido no coincide con el que aceptó la persona.');
         }
 
         $es_whatsapp = $ticket->source === 'whatsapp';
@@ -97,6 +249,11 @@ class SupportTourService
         if ($url === '' || trim((string) $cliente->api_key) === '') {
             return $this->fallo(503, 'tour_unavailable', 'El sistema del comercio todavía no está conectado a Robotito.');
         }
+
+        // Las dos entradas mantienen bloqueado el ticket. Si llega otro «sí», no puede
+        // recrear la misma invitación con otro UUID, aunque la confirmación HTTP se pierda.
+        $invitacion->erp_auto_reply = $invitacion->erp_auto_reply + ['tour_acceptance_uuid' => $entrante->uuid];
+        $invitacion->save();
 
         try {
             $respuesta = $this->http($cliente)->post($url, $body);
