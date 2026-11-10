@@ -349,6 +349,20 @@ class ClaudeSupportCodexController extends Controller
      */
     public function import_excel(Request $request, $id, PruebaImportacionService $service, SupportCodexService $soporte)
     {
+        abort_if($request->has('alcance'), 422, 'Usá la ruta de importación de solo stock para indicar un alcance.');
+
+        return $this->importar_excel_del_ticket($request, $id, $service, $soporte);
+    }
+
+    public function import_excel_stock_existente(Request $request, $id, PruebaImportacionService $service, SupportCodexService $soporte)
+    {
+        abort_unless($request->boolean('automatizar_soporte'), 422, 'El alcance de stock requiere el modo de soporte.');
+
+        return $this->importar_excel_del_ticket($request, $id, $service, $soporte, true);
+    }
+
+    private function importar_excel_del_ticket(Request $request, $id, PruebaImportacionService $service, SupportCodexService $soporte, bool $solo_stock = false)
+    {
         $data = $request->validate([
             'attachment_id' => 'sometimes|nullable|integer|min:1',
             'file' => 'sometimes|required|array',
@@ -361,7 +375,7 @@ class ClaudeSupportCodexController extends Controller
             'automatizar_soporte' => 'sometimes|boolean',
             'lease_token' => 'required_if:automatizar_soporte,true|nullable|string|min:32|max:128',
             'expected_message_id' => 'required_if:automatizar_soporte,true|nullable|integer|min:1',
-        ]);
+        ] + ($solo_stock ? ['alcance' => 'required|in:' . PruebaImportacionService::ALCANCE_STOCK_EXISTENTE] : []));
         if ($request->boolean('automatizar_soporte')) {
             $resultado = DB::transaction(function () use ($id, $data, $service, $soporte) {
                 $ticket = SupportTicket::lockForUpdate()->findOrFail($id);

@@ -104,6 +104,12 @@ class ImportacionDesdeElTicketTest extends BaseDeLaPrueba
         return $this->postJson('/api/claude/support-codex/tickets/' . $ticket->id . '/import-excel', $body, $this->headers_de_claude());
     }
 
+    private function importar_stock(array $body)
+    {
+        return $this->postJson('/api/claude/support-codex/tickets/' . $this->ticket->id . '/import-excel-stock-existente',
+            $body, $this->headers_de_claude());
+    }
+
     private function pasar_a_activo(): void
     {
         $this->client->estado = PruebaCicloService::CLIENTE_ACTIVO;
@@ -120,7 +126,8 @@ class ImportacionDesdeElTicketTest extends BaseDeLaPrueba
         $reserva = $this->postJson('/api/claude/support-codex/tickets/' . $this->ticket->id . '/claim', [
             'worker_id' => 'martin',
             'expected_message_id' => $message_id,
-        ], $this->headers_de_claude())->assertOk()->assertJsonPath('ticket.capabilities.soporte_import', true);
+        ], $this->headers_de_claude())->assertOk()->assertJsonPath('ticket.capabilities.soporte_import', true)
+            ->assertJsonPath('ticket.capabilities.soporte_import_stock_existente', true);
 
         return ['lease_token' => $reserva->json('lease_token'), 'expected_message_id' => $message_id];
     }
@@ -178,6 +185,89 @@ class ImportacionDesdeElTicketTest extends BaseDeLaPrueba
         Http::assertNotSent(function ($request) {
             return strpos($request->url(), '/ai-excel-import/analyze') !== false;
         });
+    }
+
+    /** @test */
+    public function un_excel_de_stock_solo_se_reenvia_si_empresa_anuncia_el_alcance(): void
+    {
+        $this->pasar_a_activo();
+        $this->fakear_http([
+            '*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response(['automatizar_soporte' => true], 200),
+        ]);
+        $reserva = $this->reservar_turno((int) $this->adjunto->support_message_id);
+
+        $this->importar_stock([
+            'attachment_id' => $this->adjunto->id, 'automatizar_soporte' => true, 'alcance' => 'stock_existente',
+        ] + $reserva)->assertOk()->assertJsonPath('estado', 'version_vieja');
+
+        $this->assertNull($this->ticket->fresh()->importacion_soporte_iniciada_at);
+        Http::assertNotSent(function ($request) {
+            return strpos($request->url(), '/ai-excel-import/analyze') !== false;
+        });
+    }
+
+    /**
+     * @test
+     * @dataProvider respuestas_de_empresa_para_stock
+     */
+    public function usa_solo_la_ruta_de_stock_y_exige_el_alcance_en_la_respuesta(int $status, array $cuerpo, string $estado): void
+    {
+        $this->pasar_a_activo();
+        $this->fakear_http([
+            '*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response([
+                'automatizar_soporte' => true, 'alcances_soporte' => ['stock_existente'],
+            ], 200),
+            '*/admin-sync/ai-excel-import/analyze-stock-existente' => Http::response($cuerpo, $status),
+        ]);
+        $reserva = $this->reservar_turno((int) $this->adjunto->support_message_id);
+
+        $respuesta = $this->importar_stock([
+            'attachment_id' => $this->adjunto->id, 'automatizar_soporte' => true, 'alcance' => 'stock_existente',
+        ] + $reserva)->assertOk()->assertJsonPath('estado', $estado);
+        if ($estado === 'aceptado') {
+            $respuesta->assertJsonPath('alcance', 'stock_existente')
+                ->assertJsonPath('analysis_uuid', 'uuid-de-stock');
+        }
+
+        Http::assertSent(function ($request) {
+            return $request->method() === 'POST'
+                && strpos($request->url(), '/ai-excel-import/analyze-stock-existente') !== false
+                && $request->hasFile('excel_file', 'contenido-del-excel')
+                && $this->campo($request, 'alcance') === 'stock_existente'
+                && $this->campo($request, 'model') === 'article'
+                && $this->campo($request, 'automatizar_soporte') === '1'
+                && $this->campo($request, 'support_ticket_id') === (string) $this->ticket->id;
+        });
+        Http::assertNotSent(function ($request) {
+            return substr($request->url(), -strlen('/ai-excel-import/analyze')) === '/ai-excel-import/analyze';
+        });
+    }
+
+    public function respuestas_de_empresa_para_stock(): array
+    {
+        return [
+            'acepta solo stock' => [202, [
+                'automatizar_soporte' => true, 'alcance' => 'stock_existente', 'analysis_uuid' => 'uuid-de-stock',
+            ], 'aceptado'],
+            'falta la confirmación de alcance' => [202, [
+                'automatizar_soporte' => true, 'analysis_uuid' => 'uuid-sin-alcance',
+            ], 'version_vieja'],
+            'la ruta específica no existe' => [404, [], 'version_vieja'],
+        ];
+    }
+
+    /** @test */
+    public function el_alcance_de_stock_no_pasa_por_la_ruta_general_ni_por_una_prueba(): void
+    {
+        $datos = ['attachment_id' => $this->adjunto->id, 'alcance' => 'stock_existente'];
+        $this->importar($datos)->assertStatus(422);
+        $this->importar_stock($datos)->assertStatus(422);
+        $this->importar_stock($datos + [
+            'automatizar_soporte' => true,
+            'lease_token' => str_repeat('a', 64),
+            'expected_message_id' => $this->adjunto->support_message_id,
+        ])->assertForbidden()->assertJsonPath('estado', 'contacto_no_habilitado');
+        Http::assertNothingSent();
     }
 
     /** @test */

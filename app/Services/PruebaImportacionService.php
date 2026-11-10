@@ -40,6 +40,7 @@ class PruebaImportacionService
     use TapaLaClaveDelCliente;
 
     const RUTA_ANALYZE  = 'api/admin-sync/ai-excel-import/analyze';
+    const RUTA_STOCK_EXISTENTE = 'api/admin-sync/ai-excel-import/analyze-stock-existente';
     const RUTA_IMAGENES = 'api/admin-sync/ai-excel-import/imagenes';
     const RUTA_PENDIENTES = 'api/admin-sync/ai-excel-import/prueba-pendientes';
     const RUTA_RESOLVER = 'api/admin-sync/ai-excel-import/prueba-resolver/';
@@ -53,6 +54,7 @@ class PruebaImportacionService
 
     /** Modelos del importador que se aceptan. */
     const MODELOS = ['article', 'client', 'provider'];
+    const ALCANCE_STOCK_EXISTENTE = 'stock_existente';
 
     /** Extensiones de Excel y de imagen, con el mime que se declara al reenviar. */
     const EXCEL = [
@@ -93,6 +95,11 @@ class PruebaImportacionService
      */
     public function importar_excel(SupportTicket $ticket, array $input, bool $soporte_activo = false): array
     {
+        $alcance = $input['alcance'] ?? null;
+        if ($alcance !== null && (!$soporte_activo || $alcance !== self::ALCANCE_STOCK_EXISTENTE)) {
+            return ['estado' => 'archivo_invalido', 'mensaje' => 'El alcance de stock requiere una importación de soporte de un cliente activo.'];
+        }
+
         $puerta = $soporte_activo ? $this->puerta_activo($ticket) : $this->puerta($ticket);
         if ($puerta !== null) {
             return $puerta;
@@ -143,18 +150,28 @@ class PruebaImportacionService
                 return ['estado' => $capacidad['en_proceso'] === null ? 'no_responde' : 'version_vieja',
                     'mensaje' => 'No pude confirmar que el sistema pueda importar desde soporte.'];
             }
+            if ($alcance !== null && !in_array($alcance, $capacidad['alcances_soporte'], true)) {
+                return ['estado' => 'version_vieja',
+                    'mensaje' => 'El sistema todavía no admite importar solo el stock de artículos existentes desde soporte.'];
+            }
 
             $ticket->forceFill(['importacion_soporte_iniciada_at' => now()])->save();
             $campos['automatizar_soporte'] = '1';
             $campos['support_ticket_id'] = (int) $ticket->id;
             $campos['importacion_clave'] = $clave;
+            if ($alcance !== null) {
+                $campos['alcance'] = $alcance;
+            }
         } elseif ($modelo === 'article' && $this->automatizacion_disponible($ticket)) {
             $campos['automatizar_prueba'] = '1';
             $campos['support_ticket_id'] = (int) $ticket->id;
             $campos['importacion_clave'] = $clave;
         }
 
-        $respuesta = $this->reenviar($client, self::RUTA_ANALYZE, $campos, [
+        // Si la instancia vuelve a una versión anterior después de la consulta, la ruta
+        // específica rechaza el pedido antes de que un importador general lea el archivo.
+        $ruta = $alcance === null ? self::RUTA_ANALYZE : self::RUTA_STOCK_EXISTENTE;
+        $respuesta = $this->reenviar($client, $ruta, $campos, [
             ['nombre' => 'excel_file', 'bytes' => $archivo['bytes'], 'filename' => $archivo['filename']],
         ], $soporte_activo ? 25 : 180);
 
@@ -167,6 +184,10 @@ class PruebaImportacionService
 
         if ($soporte_activo && in_array($status, [200, 202], true) && ($cuerpo['automatizar_soporte'] ?? false) !== true) {
             return ['estado' => 'version_vieja', 'mensaje' => 'El sistema no aceptó una corrida de soporte.'];
+        }
+        if ($alcance !== null && ($status === 404
+            || ($status >= 200 && $status < 300 && ($cuerpo['alcance'] ?? null) !== $alcance))) {
+            return ['estado' => 'version_vieja', 'mensaje' => 'El sistema no confirmó la importación de solo stock.'];
         }
 
         if ($status === 202 && is_array($cuerpo) && isset($cuerpo['analysis_uuid'])) {
@@ -184,7 +205,8 @@ class PruebaImportacionService
                 'cuerpo'        => $cuerpo,
                 'filename'      => $archivo['filename'],
                 'automatizar_prueba' => ($cuerpo['automatizar_prueba'] ?? false) === true,
-            ] + ($soporte_activo ? ['automatizar_soporte' => true] : []);
+            ] + ($soporte_activo ? ['automatizar_soporte' => true] : [])
+                + ($alcance !== null ? ['alcance' => $alcance] : []);
         }
 
         if ($status === 200 && is_array($cuerpo) && isset($cuerpo['column_mapping'])) {
@@ -238,9 +260,10 @@ class PruebaImportacionService
 
         $pendientes = $respuesta['cuerpo']['pendientes'] ?? [];
         $pendientes = is_array($pendientes) ? $pendientes : [];
+        $alcances = $respuesta['cuerpo']['alcances_soporte'] ?? [];
 
         return ['pendientes' => $pendientes, 'en_proceso' => $pendientes !== [] || ($respuesta['cuerpo']['en_proceso'] ?? false) === true,
-            'disponible' => true];
+            'disponible' => true, 'alcances_soporte' => is_array($alcances) ? $alcances : []];
     }
 
     public function resolver(SupportTicket $ticket, array $datos, SupportMessage $mensaje): array

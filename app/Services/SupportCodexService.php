@@ -258,6 +258,7 @@ class SupportCodexService
             // anterior ignoraría el campo y ejecutaría el resume que consume la consulta.
             'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => true, 'prueba_import_resolver' => true,
                 'soporte_import' => $soporte_activo, 'soporte_import_resolver' => $soporte_activo,
+                'soporte_import_stock_existente' => $soporte_activo,
                 'support_tour_consent' => true, 'support_dynamic_tour' => true],
             'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
