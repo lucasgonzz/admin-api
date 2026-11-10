@@ -17,6 +17,7 @@ use App\Services\SupportAttachmentFileResolver;
 use App\Services\SupportAttachmentPlaybackService;
 use App\Services\SupportClientSyncService;
 use App\Services\SupportOutboundMediaService;
+use App\Services\SupportTourService;
 use App\Services\SupportWhatsappOpenerService;
 use App\Services\WhatsappSendService;
 use Illuminate\Http\Request;
@@ -142,6 +143,18 @@ class SupportMessageController extends BaseController
                 }
                 if ($reply_to_message_id !== null) {
                     $attributes['reply_to_message_id'] = $reply_to_message_id;
+                }
+                if ($kind === 'text' && is_string($body) && $prepared_attachment === null
+                    && SupportTourService::version_habilita_oferta($locked_ticket) === true) {
+                    $mensajes = $locked_ticket->messages();
+                    SupportMessage::apply_mensaje_real_conditions($mensajes, 'support_messages');
+                    $entrante = $reply_to_message_id === null
+                        ? $mensajes->reorder('id', 'desc')->first() : $mensajes->find($reply_to_message_id);
+                    $oferta = SupportTourService::preparar_oferta($locked_ticket, $entrante, $body);
+                    if ($oferta !== null) {
+                        $attributes['body'] = $oferta;
+                        $attributes['erp_auto_reply'] = ['tour_requested' => true];
+                    }
                 }
                 $message = SupportMessage::create($attributes);
 

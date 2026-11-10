@@ -42,7 +42,7 @@ class SupportAiSuggestionDeliveryService
      *
      * @return SupportMessage|null Mensaje persistido o null si no se pudo enviar.
      */
-    public function deliver_text_reply(SupportTicket $ticket, string $body): ?SupportMessage
+    public function deliver_text_reply(SupportTicket $ticket, string $body, ?int $tour_message_id = null): ?SupportMessage
     {
         if (SupportCodexSettings::manages($ticket)) {
             return null;
@@ -60,6 +60,13 @@ class SupportAiSuggestionDeliveryService
             return null;
         }
 
+        $oferta = $tour_message_id === null ? null : $this->oferta_whatsapp_vigente($ticket, $text_body, $tour_message_id);
+        if ($tour_message_id !== null) {
+            $text_body = $oferta ?? SupportTourService::quitar_invitacion($text_body);
+            if ($text_body === '') {
+                return null;
+            }
+        }
         $message = SupportMessage::create([
             'support_ticket_id' => $ticket->id,
             'sender_type'       => 'admin',
@@ -69,6 +76,7 @@ class SupportAiSuggestionDeliveryService
             'delivered_at'      => now(),
             /* Lo escribió el agente, aunque salga sin pasar por una persona. */
             'ai_generated_at'   => now(),
+            'erp_auto_reply'    => $oferta === null ? null : ['tour_requested' => true],
         ]);
 
         $this->entregar($ticket, $message, 'excepción al enviar');
@@ -118,12 +126,22 @@ class SupportAiSuggestionDeliveryService
             abort_if($esperado !== null ? (int) $ultimo !== (int) $esperado : (int) $ultimo > $mensaje->id,
                 409, 'La conversación cambió desde que se preparó el borrador.');
 
+            $invitacion = null;
+            if (SupportTourService::version_habilita_oferta($ticket) === true) {
+                $uso_confirmado = ($mensaje->erp_auto_reply['tour_requested'] ?? null) === true
+                    && $body === SupportTourService::quitar_invitacion($body_original);
+                $oferta = SupportTourService::preparar_oferta($ticket, SupportMessage::find($ultimo), $body, $uso_confirmado);
+                if ($oferta !== null) {
+                    $body = $oferta;
+                    $invitacion = ['tour_requested' => true];
+                }
+            }
             if ($body !== $body_original) {
                 $mensaje->ai_original_body = $body_original;
                 $mensaje->body = $body;
             }
             $mensaje->sender_admin_id = $admin_id;
-            $this->preparar_erp_message($mensaje);
+            $this->preparar_erp_message($mensaje, $invitacion);
 
             $ticket->ai_pending_suggestion = null;
             $ticket->ai_suggestion_send_at = null;
@@ -166,9 +184,19 @@ class SupportAiSuggestionDeliveryService
 
             $invitacion = null;
             if (SupportTourService::tiene_invitacion($body)) {
-                if (SupportTourService::entrante_admite_robotito($ticket, $entrante)) {
-                    $invitacion = $solicitud_tour ? ['tour_requested' => true]
-                        : ($tour !== null ? ['tour_invitation' => $tour] : null);
+                if ($solicitud_tour) {
+                    $version_habilita = SupportTourService::version_habilita_oferta($ticket);
+                    if ($version_habilita === true) {
+                        $oferta = SupportTourService::preparar_oferta($ticket, $entrante, $body, true);
+                        if ($oferta !== null) {
+                            $body = $oferta;
+                            $invitacion = ['tour_requested' => true];
+                        }
+                    } elseif ($version_habilita === null && SupportTourService::entrante_admite_robotito($ticket, $entrante)) {
+                        $invitacion = ['tour_requested' => true];
+                    }
+                } elseif ($tour !== null && SupportTourService::entrante_admite_robotito($ticket, $entrante)) {
+                    $invitacion = ['tour_invitation' => $tour];
                 }
                 if ($invitacion === null) {
                     $body = SupportTourService::quitar_invitacion($body);
@@ -237,6 +265,18 @@ class SupportAiSuggestionDeliveryService
             return null;
         }
 
+        $turno = $message->erp_auto_reply['whatsapp_tour_message_id'] ?? null;
+        if ($turno !== null) {
+            $editado = $message->ai_original_body !== null
+                && SupportTourService::quitar_invitacion($text_body) !== SupportTourService::quitar_invitacion($message->ai_original_body);
+            $oferta = $this->oferta_whatsapp_vigente($ticket, $text_body, (int) $turno, (int) $message->id, ! $editado);
+            $text_body = $oferta ?? SupportTourService::quitar_invitacion($text_body);
+            if ($text_body === '') {
+                return null;
+            }
+            $message->body = $text_body;
+            $message->erp_auto_reply = $oferta === null ? null : ['tour_requested' => true];
+        }
         $message->is_ai_suggestion_draft = false;
         $message->ai_auto_send_at = null;
         $message->delivered_at = now();
@@ -250,6 +290,27 @@ class SupportAiSuggestionDeliveryService
         }
 
         return $message;
+    }
+
+    private function oferta_whatsapp_vigente(
+        SupportTicket $ticket,
+        string $texto,
+        int $turno,
+        ?int $borrador_id = null,
+        bool $clasificacion_vigente = true
+    ): ?string {
+        if (SupportTourService::version_habilita_oferta($ticket) !== true) {
+            return null;
+        }
+        $mensajes = SupportMessage::where('support_ticket_id', $ticket->id);
+        SupportMessage::apply_mensaje_real_conditions($mensajes, 'support_messages');
+        if ($borrador_id !== null) {
+            $mensajes->where('id', '<>', $borrador_id);
+        }
+        $ultimo = $mensajes->latest('id')->first();
+        $uso_confirmado = $clasificacion_vigente && SupportTourService::tiene_invitacion($texto);
+        return $ultimo !== null && (int) $ultimo->id === $turno
+            ? SupportTourService::preparar_oferta($ticket, $ultimo, $texto, $uso_confirmado) : null;
     }
 
     /**

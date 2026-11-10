@@ -416,7 +416,8 @@ class SupportWhatsappOpenerService
             // esa significa "el operador corrigió al agente" y el historial que se le manda a
             // Claude la lee así. Escribir ahí le diría que lo corrigieron cada vez que su
             // respuesta salió tal cual pero envuelta en la plantilla.
-            if ($message->ai_generated_at !== null && trim((string) ($message->ai_body_before_template ?? '')) === '') {
+            if (($message->ai_generated_at !== null || ($message->erp_auto_reply['tour_requested'] ?? false) === true)
+                && trim((string) ($message->ai_body_before_template ?? '')) === '') {
                 $message->ai_body_before_template = $operator_text;
             }
 
@@ -513,6 +514,12 @@ class SupportWhatsappOpenerService
         // Persistiendo antes, una parte que no salio queda en el hilo marcada como no entregada
         // y con el boton de reintentar que ya existe. El estado a medias pasa a ser visible y
         // reparable en vez de silencioso y perdido.
+        $oferta = ($message->erp_auto_reply['tour_requested'] ?? false) === true
+            && SupportTourService::tiene_invitacion($partes[$total - 1]) ? $message->erp_auto_reply : null;
+        if ($oferta !== null) {
+            // El consentimiento tiene que quedar asociado al mensaje que contiene la pregunta.
+            $message->erp_auto_reply = null;
+        }
         $filas = [$message];
         $message->body = $partes[0];
         $message->remote_delivery_status = 'not_received';
@@ -520,7 +527,7 @@ class SupportWhatsappOpenerService
         $message->save();
 
         for ($indice = 1; $indice < $total; $indice++) {
-            $filas[] = $this->persistir_parte($ticket, $message, $partes[$indice]);
+            $filas[] = $this->persistir_parte($ticket, $message, $partes[$indice], $indice === $total - 1 ? $oferta : null);
         }
 
         $enviadas = 0;
@@ -688,7 +695,7 @@ class SupportWhatsappOpenerService
      *
      * @return SupportMessage
      */
-    private function persistir_parte(SupportTicket $ticket, SupportMessage $original, string $parte): SupportMessage
+    private function persistir_parte(SupportTicket $ticket, SupportMessage $original, string $parte, ?array $oferta): SupportMessage
     {
         return SupportMessage::create([
             'support_ticket_id'      => $ticket->id,
@@ -699,6 +706,7 @@ class SupportWhatsappOpenerService
             'delivered_at'           => now(),
             'remote_delivery_status' => 'not_received',
             'ai_generated_at'        => $original->ai_generated_at,
+            'erp_auto_reply'         => $oferta,
         ]);
     }
 

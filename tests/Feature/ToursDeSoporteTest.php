@@ -15,6 +15,8 @@ use App\Models\Client;
 use App\Models\ClientEmployee;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
+use App\Models\TrialInstance;
+use App\Models\Version;
 use App\Services\RecursosCatalogoService;
 use App\Services\SupportAiSettings;
 use App\Services\SupportAiSuggestionDeliveryService;
@@ -342,6 +344,161 @@ class ToursDeSoporteTest extends TestCase
         $this->postJson($url . '/tour/prepare', ['expected_message_id' => $aceptacion->id], $headers)
             ->assertStatus(409)->assertJsonPath('code', 'tour_consent_required');
         Http::assertNothingSent();
+    }
+
+    /** @dataProvider umbrales_de_version */
+    public function test_martin_ofrece_por_version_sin_marca_de_sesion(
+        ?string $version,
+        bool $ofrece,
+        ?string $leyenda
+    ): void {
+        $body = array_replace($this->mensaje_erp($this->cliente_con_version($version)), [
+            'body' => '¿Me explicás cómo indico recargos en una venta?', 'robotito_support_version' => null,
+        ]);
+        SupportCodexSettings::set_enabled(true);
+        $consulta = SupportMessage::findOrFail($this->postJson(self::INBOUND, $body, ['X-Admin-Api-Key' => 'clave-inbound'])
+            ->assertCreated()->json('model.id'));
+        $this->assertArrayNotHasKey('inbound_version', $consulta->erp_auto_reply);
+        $ticket = $consulta->ticket;
+        $url = self::CLAUDE . $ticket->id;
+        $headers = $this->reserva($ticket, $consulta);
+        $this->getJson($url, $headers)->assertOk()
+            ->assertJsonPath('ticket.capabilities.support_tour_offer', $ofrece)
+            ->assertJsonPath('ticket.capabilities.support_dynamic_tour', false);
+        Http::fake(['empresa-tours.test/api/admin-sync/support/messages' => Http::response(['ok' => true])]);
+        $texto = "En Vender, abrí Cierre y opciones y tildá el recargo.\nhttps://recursos.comerciocity.com/?v=T11.34";
+        $this->postJson($url . '/reply', [
+            'lease_token' => $headers['X-Support-Lease-Token'], 'operation_id' => 'version-robotito-' . $consulta->id,
+            'expected_message_id' => $consulta->id, 'action' => 'responder', 'body' => $texto,
+        ], $headers)->assertOk()->assertJsonPath('operation.status', 'sent');
+        $respuesta = $this->respuesta_erp($body);
+        $this->assertSame($ofrece ? $texto . "\n\n" . $leyenda . "\n\n" . SupportTourService::INVITACION : $texto, $respuesta->body);
+        $this->assertSame($ofrece ? ['tour_requested' => true] : null, $respuesta->erp_auto_reply);
+        Http::assertSentCount(1);
+    }
+
+    public function umbrales_de_version(): array
+    {
+        return [
+            'sin registro conserva el origen como criterio' => [null, true, SupportTourService::ACEPTAR_DESDE_CUENTA_PROPIA],
+            'antes del umbral' => ['3.2.46', false, null],
+            'umbral exacto' => ['3.2.47', false, null],
+            'cuarto componente cero equivale al umbral' => ['3.2.47.0', false, null],
+            'por encima y sin recorrido personalizado' => ['3.2.48', true, SupportTourService::ACTUALIZAR_PARA_ABRIR],
+            'con recorrido personalizado' => ['4.3.44+build.7', true, SupportTourService::ACEPTAR_DESDE_CUENTA_PROPIA],
+        ];
+    }
+
+    public function test_la_version_habilita_oferta_escrita_pero_no_reserva_automatica_sin_firma_erp(): void
+    {
+        $body = array_replace($this->mensaje_erp($this->cliente_con_version('4.3.47')), ['robotito_support_version' => null]);
+        SupportCodexSettings::set_enabled(true);
+        $consulta = SupportMessage::findOrFail($this->postJson(self::INBOUND, $body)->assertCreated()->json('model.id'));
+        $this->assertTrue(SupportTourService::entrante_admite_oferta($consulta->ticket, $consulta));
+        $this->assertFalse(SupportTourService::entrante_admite_robotito($consulta->ticket, $consulta));
+        $this->postJson(self::CLAUDE . $consulta->support_ticket_id . '/claim', [
+            'worker_id' => 'tour-tests', 'expected_message_id' => $consulta->id,
+        ], ['X-Claude-Task-Key' => 'clave-monitor-tour'])->assertStatus(409);
+    }
+
+    public function test_oferta_usa_version_de_la_instancia_de_prueba_ocupada_y_conserva_el_registro_del_cliente_como_respaldo(): void
+    {
+        $cliente = $this->cliente_con_version('4.3.47');
+        $body = $this->mensaje_erp($cliente);
+        $consulta = SupportMessage::findOrFail($this->postJson(self::INBOUND, $body, ['X-Admin-Api-Key' => 'clave-inbound'])
+            ->assertCreated()->json('model.id'));
+        $instancia = TrialInstance::create([
+            'nombre' => 'prueba-version-tour', 'estado' => TrialInstance::ESTADO_ASIGNADA,
+            'client_id' => $cliente->id, 'user_id' => 17, 'erp_vps_path' => 'prueba-version-tour',
+            'ecommerce_vps_path' => 'tienda-prueba-version-tour', 'version' => '3.2.47',
+        ]);
+        $this->assertFalse(SupportTourService::entrante_admite_oferta($consulta->ticket, $consulta));
+        $instancia->update(['version' => null]);
+        $this->assertTrue(SupportTourService::entrante_admite_oferta($consulta->ticket, $consulta));
+    }
+
+    public function test_nativa_erp_persiste_la_oferta_por_version_en_un_entrante_sin_marca(): void
+    {
+        $body = array_replace($this->mensaje_erp($this->cliente_con_version('4.3.27')), ['robotito_support_version' => null]);
+        $consulta = SupportMessage::findOrFail($this->postJson(self::INBOUND, $body, ['X-Admin-Api-Key' => 'clave-inbound'])
+            ->assertCreated()->json('model.id'));
+        Http::fake(['empresa-tours.test/api/admin-sync/support/messages' => Http::response(['ok' => true])]);
+        $respuesta = app(SupportAiSuggestionDeliveryService::class)->deliver_erp_auto_reply(
+            $consulta->ticket, "Abrí Soporte y tocá Nuevo ticket.\n\n" . SupportTourService::INVITACION, $consulta->id, null, true
+        );
+        $this->assertStringContainsString(SupportTourService::ACTUALIZAR_PARA_ABRIR, $respuesta->body);
+        $this->assertSame(['tour_requested' => true], $respuesta->erp_auto_reply);
+        Http::assertSentCount(1);
+    }
+
+    public function test_nativa_erp_muestra_la_oferta_antes_de_aprobar_y_envia_solo_al_confirmar(): void
+    {
+        $body = $this->mensaje_erp($this->cliente_con_version('4.3.47'));
+        $this->postJson(self::INBOUND, $body, ['X-Admin-Api-Key' => 'clave-inbound'])->assertCreated();
+        SupportTicket::where('uuid', $body['ticket_uuid'])->update(['requiere_verificacion_mensajes' => true]);
+        $this->mock(SupportAiSuggestionService::class)->shouldReceive('generate')->once()->andReturn([
+            'suggested_message' => "Abrí Soporte y tocá Nuevo ticket.\n\n" . SupportTourService::INVITACION,
+            'tour_requested' => true,
+        ]);
+        Http::fake(['empresa-tours.test/api/admin-sync/support/messages' => Http::response(['ok' => true])]);
+        app()->call([Queue::pushed(SendSupportAiSuggestion::class)->first(), 'handle']);
+        $borrador = $this->respuesta_erp($body);
+        $this->assertTrue($borrador->is_ai_suggestion_draft);
+        $this->assertStringContainsString(SupportTourService::REVISION_ANTES_DE_PREPARAR, $borrador->body);
+        Http::assertNothingSent();
+        $admin = Admin::create(['name' => 'Operador', 'email' => 'operador-version-tour@test.local', 'password' => bcrypt('test')]);
+        $this->actingAs($admin, 'sanctum')->postJson('/api/admin/support-message/' . $borrador->id . '/approve-ai-draft')
+            ->assertOk()->assertJsonPath('delivered', true);
+        $enviado = $borrador->fresh();
+        $this->assertFalse($enviado->is_ai_suggestion_draft);
+        $this->assertSame(['tour_requested' => true], $enviado->erp_auto_reply);
+        $this->assertSame($borrador->body, $enviado->body);
+        Http::assertSentCount(1);
+    }
+
+    public function test_nativa_whatsapp_vincula_la_oferta_al_turno_y_prepara_al_aceptar(): void
+    {
+        SupportCodexSettings::set_enabled(false);
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
+        [$ticket, $consulta] = $this->ticket_whatsapp($this->cliente_con_version('4.3.44'), '+5493419843001', null, false);
+        $consulta->update(['body' => '¿Cómo aplico un recargo en Vender?']);
+        $this->mock(SupportAiSuggestionService::class)->shouldReceive('generate')->once()->andReturn([
+            'suggested_message' => "En Vender, elegí el recargo.\n\n" . SupportTourService::INVITACION,
+            'tour_requested' => true,
+        ]);
+        $this->mock(SupportWhatsappOpenerService::class)->shouldReceive('deliver_follow_up')->twice()
+            ->andReturnUsing(function (SupportTicket $ticket, SupportMessage $mensaje) {
+                $mensaje->update(['whatsapp_message_id' => 'wamid.version-tour-' . $mensaje->id, 'remote_delivery_status' => null]);
+                return ['delivery' => 'sent', 'message_id' => $mensaje->whatsapp_message_id, 'error' => null];
+            });
+        $scheduler = app(SupportAiSuggestionScheduler::class);
+        $scheduler->schedule_after_client_inbound($ticket->id);
+        app()->call([Queue::pushed(SendSupportAiSuggestion::class)->last(), 'handle']);
+        $invitacion = $ticket->messages()->where('sender_type', 'admin')->latest('id')->firstOrFail();
+        $this->assertSame(['tour_requested' => true], $invitacion->erp_auto_reply);
+        $this->assertTrue(SupportTourService::tiene_invitacion($invitacion->body));
+
+        $aceptacion = $this->entrante_whatsapp($ticket, 'Sí, quiero hacer el tour.');
+        $this->assertSame($invitacion->id, optional(app(SupportTourService::class)->solicitud_aceptada($ticket, $aceptacion))->id);
+        Http::fake([
+            self::PUENTE . '/catalogo*' => Http::response(self::CATALOGO_DINAMICO),
+            'api.deepseek.com/*' => Http::response($this->respuesta_deepseek(self::GUION_DINAMICO)),
+            self::PUENTE => Http::response(['ok' => true, 'uuid' => $aceptacion->uuid]),
+        ]);
+        $scheduler->schedule_after_client_inbound($ticket->id);
+        app()->call([Queue::pushed(SendSupportAiSuggestion::class)->last(), 'handle']);
+        Http::assertSentCount(3);
+        $this->assertSame(SupportTourService::AVISO, $ticket->messages()->where('sender_type', 'admin')->reorder('id', 'desc')->value('body'));
+        Http::assertSent(function ($request) use ($aceptacion) {
+            return $request->url() === self::PUENTE && $request['uuid'] === $aceptacion->uuid;
+        });
+    }
+
+    private function cliente_con_version(?string $version): Client
+    {
+        $registro = $version === null ? null : Version::firstOrCreate(['version' => $version],
+            ['title' => 'Versión del negocio', 'status' => 'published', 'published_at' => now()]);
+        return $this->cliente(['current_version_id' => optional($registro)->id]);
     }
 
     /** @dataProvider sesiones_de_consulta_y_aceptacion */

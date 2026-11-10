@@ -6,7 +6,9 @@ use App\Models\Admin;
 use App\Models\Client;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
+use App\Models\Version;
 use App\Services\ClientPhoneDirectory;
+use App\Services\SupportTourService;
 use App\Services\SupportWhatsappOpenerService;
 use App\Services\WhatsappSendService;
 use App\Services\WhatsappSessionWindowService;
@@ -265,6 +267,33 @@ class SeparadorDeMensajesManualesEnSoporteTest extends TestCase
         $this->assertSame('Ya lo vi.', (string) $original->body, 'El mensaje original no quedó con la primera parte.');
     }
 
+    public function test_una_oferta_de_robotito_en_partes_conserva_el_consentimiento_en_la_ultima(): void
+    {
+        $admin = $this->crear_admin('separador-robotito@test.local');
+        $client = $this->crear_cliente('+5493417780001');
+        $version = Version::firstOrCreate(['version' => '4.3.47'], ['status' => 'published']);
+        $client->forceFill(['current_version_id' => $version->id])->save();
+        $ticket = $this->crear_ticket($client, '+5493417780001');
+        SupportMessage::create([
+            'support_ticket_id' => $ticket->id, 'sender_type' => 'user', 'kind' => 'text',
+            'body' => '¿Cómo aplico un recargo a una venta?', 'delivered_at' => now(),
+        ]);
+        $espia = $this->espiar_sender();
+        $this->opener_sin_pausas();
+
+        $this->actingAs($admin, 'sanctum')->postJson('/api/admin/support-ticket/' . $ticket->id . '/message', [
+            'kind' => 'text',
+            'body' => "Abrí Vender y revisá Recargos.\n\n---\n\nAcá tenés el video https://recursos.comerciocity.com/?v=T11.34",
+        ])->assertCreated();
+
+        $mensajes = $this->mensajes_del_operador($ticket);
+        $this->assertCount(2, $espia->textos);
+        $this->assertNull($mensajes->first()->erp_auto_reply);
+        $this->assertTrue($mensajes->last()->erp_auto_reply['tour_requested']);
+        $this->assertStringContainsString('T11.34', $espia->textos[1]);
+        $this->assertSame(1, substr_count($espia->textos[1], SupportTourService::INVITACION));
+    }
+
     /**
      * Tres guiones sueltos entre dos renglones no parten nada.
      *
@@ -361,6 +390,36 @@ class SeparadorDeMensajesManualesEnSoporteTest extends TestCase
 
         $this->assertCount(0, $espia->textos, 'Mandó texto libre con la ventana cerrada.');
         $this->assertCount(1, $espia->plantillas, 'No salió por plantilla con la ventana cerrada.');
+    }
+
+    public function test_una_oferta_en_plantilla_de_whatsapp_se_puede_aceptar_al_reabrir_la_ventana(): void
+    {
+        $admin = $this->crear_admin('plantilla-robotito@test.local');
+        $client = $this->crear_cliente('+5493417780015');
+        $version = Version::firstOrCreate(['version' => '4.3.47'], ['status' => 'published']);
+        $client->forceFill(['current_version_id' => $version->id])->save();
+        $ticket = $this->crear_ticket_sin_ventana($client, '+5493417780015');
+        SupportMessage::create([
+            'support_ticket_id' => $ticket->id, 'sender_type' => 'user', 'kind' => 'text',
+            'body' => '¿Cómo aplico un recargo a una venta?', 'delivered_at' => now()->subDays(2),
+            'created_at' => now()->subDays(2),
+        ]);
+        $espia = $this->espiar_sender();
+        $this->opener_sin_pausas();
+
+        $this->actingAs($admin, 'sanctum')->postJson('/api/admin/support-ticket/' . $ticket->id . '/message', [
+            'kind' => 'text', 'body' => 'Abrí Vender y revisá Recargos.',
+        ])->assertCreated();
+        $oferta = $this->mensajes_del_operador($ticket)->sole();
+        $this->assertCount(1, $espia->plantillas);
+        $this->assertTrue(SupportTourService::tiene_invitacion($oferta->ai_body_before_template));
+        $this->assertStringContainsString(SupportTourService::INVITACION, $oferta->body);
+
+        $confirmacion = SupportMessage::create([
+            'support_ticket_id' => $ticket->id, 'sender_type' => 'user', 'kind' => 'text',
+            'body' => 'Sí', 'delivered_at' => now(),
+        ]);
+        $this->assertSame($oferta->id, app(SupportTourService::class)->solicitud_aceptada($ticket, $confirmacion)->id);
     }
 
     /**

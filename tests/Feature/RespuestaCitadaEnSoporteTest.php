@@ -7,7 +7,9 @@ use App\Models\Admin;
 use App\Models\Client;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
+use App\Models\Version;
 use App\Models\WhatsappConfig;
+use App\Services\SupportTourService;
 use App\Services\WhatsappSendService;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\Event;
@@ -117,6 +119,42 @@ class RespuestaCitadaEnSoporteTest extends TestCase
 
         $respuesta->assertJsonPath('model.reply_to_message_id', null)->assertJsonPath('model.reply_to_message', null);
         $this->assertArrayNotHasKey('context', $this->payload_enviado());
+    }
+
+    /** @dataProvider versiones_para_oferta_de_robotito */
+    public function test_la_respuesta_manual_de_uso_ofrece_robotito_segun_version(string $version, bool $ofrece, bool $requiere_actualizar): void
+    {
+        $this->actingAs($this->admin(), 'sanctum');
+        $ticket = $this->ticket();
+        $registrada = Version::firstOrCreate(['version' => $version], ['status' => 'published']);
+        $ticket->client->forceFill(['current_version_id' => $registrada->id])->save();
+        $entrante = $this->entrante($ticket, 'wamid.DEL_CLIENTE', 'Como indico recargos en una venta?');
+        $this->entrante($ticket, 'wamid.SIGUIENTE', 'Te mando una captura.');
+        $cuerpo = "Abrí Vender y tildá el recargo en el panel de Recargos.\nVideo: https://recursos.comerciocity.com/?v=T11.34";
+        $datos = ['kind' => 'text', 'body' => $cuerpo, 'reply_to_message_id' => $entrante->id,
+            'client_message_id' => 'recargos-robotito-123'];
+        $respuesta = $this->responder($ticket, $datos)->assertCreated();
+        $mensaje = SupportMessage::findOrFail($respuesta->json('model.id'));
+        $payload = $this->payload_enviado();
+
+        $this->assertSame($mensaje->body, $payload['text']['body']);
+        $this->assertStringContainsString($cuerpo, $mensaje->body);
+        $this->assertSame($ofrece ? 1 : 0, substr_count($mensaje->body, SupportTourService::INVITACION));
+        $this->assertSame($ofrece, $mensaje->erp_auto_reply['tour_requested'] ?? false);
+        $this->assertSame($requiere_actualizar, mb_stripos($mensaje->body, 'actualiz') !== false);
+        $this->responder($ticket, $datos)->assertOk()->assertJsonPath('model.id', $mensaje->id);
+        Http::assertSentCount(1);
+    }
+
+    public function versiones_para_oferta_de_robotito(): array
+    {
+        return [
+            'inferior' => ['3.2.46', false, false],
+            'límite estricto' => ['3.2.47', false, false],
+            'límite con cuarto componente cero' => ['3.2.47.0', false, false],
+            'superior sin guía personalizada' => ['3.2.48', true, true],
+            'versión con guía personalizada' => ['4.3.47', true, false],
+        ];
     }
 
     public function test_no_se_puede_citar_un_mensaje_de_otro_ticket(): void

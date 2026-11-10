@@ -113,8 +113,12 @@ class SupportAiSuggestionService
             }
 
             $es_erp = $ticket->source === 'erp';
+            $version_habilita = SupportTourService::version_habilita_oferta($ticket);
             if ($es_erp) {
                 $system_prompt .= $this->indicaciones_para_robotito();
+            } elseif ($ticket->source === 'whatsapp' && $version_habilita === true) {
+                $system_prompt .= "\n\nSi respondés cómo hacer una tarea en el sistema, explicá los pasos y marcá invitar_tour: true en el JSON. "
+                    . 'El sistema agrega la oferta de Robotito. No la escribas en suggested_message ni la marques en saludos, aclaraciones o rechazos.';
             }
 
             $model   = (string) config('services.anthropic.model', 'claude-sonnet-4-20250514');
@@ -293,16 +297,20 @@ class SupportAiSuggestionService
                 if (is_string($codigo) && in_array($codigo, $videos, true)) {
                     $result['suggested_message'] .= "\n\nAcá tenés el video del Centro de recursos: " . SupportVideoResource::enlace($codigo);
                 }
-                if ($result['suggested_message'] !== '' && ! $should_close && ! $ticket->requiere_verificacion_mensajes) {
+            }
+            if ($veredicto['permitido'] && ! $should_escalate && ! $should_close && $result['suggested_message'] !== '') {
+                if ($version_habilita === true || ($es_erp && $version_habilita === null && ! $ticket->requiere_verificacion_mensajes)) {
                     $ultimo = SupportMessage::where('support_ticket_id', $ticket->id);
                     SupportMessage::apply_mensaje_real_conditions($ultimo, 'support_messages');
                     $entrante = $ultimo->latest('id')->first();
                     $invitar = $parsed['invitar_tour'] ?? null;
-                    if (SupportTourService::entrante_admite_robotito($ticket, $entrante)
-                        && ($invitar === true || ($invitar === null
-                            && SupportTourService::respuesta_admite_oferta($entrante, $result['suggested_message'], false)))) {
-                        $result['tour_requested'] = true;
-                        $result['suggested_message'] = SupportTourService::con_invitacion($result['suggested_message'], false);
+                    if (($invitar !== false || $version_habilita === true)
+                        && ($version_habilita === true || SupportTourService::entrante_admite_robotito($ticket, $entrante))) {
+                        $oferta = SupportTourService::preparar_oferta($ticket, $entrante, $result['suggested_message'], $invitar === true);
+                        if ($oferta !== null) {
+                            $result['tour_requested'] = true;
+                            $result['suggested_message'] = $oferta;
+                        }
                     }
                 }
             }

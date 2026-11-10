@@ -261,7 +261,8 @@ class SupportCodexService
             'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => true, 'prueba_import_resolver' => true,
                 'soporte_import' => $soporte_activo, 'soporte_import_resolver' => $soporte_activo,
                 'soporte_import_stock_existente' => $soporte_activo,
-                'support_tour_consent' => true, 'support_dynamic_tour' => $robotito_disponible,
+                'support_tour_consent' => true, 'support_dynamic_tour' => $robotito_disponible
+                    && SupportTourService::version_admite_tour_personalizado($ticket) !== false,
                 'support_tour_offer' => SupportTourService::entrante_admite_oferta($ticket, $last)],
             'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
@@ -848,12 +849,17 @@ class SupportCodexService
             // Una sola pieza: no hay reintentos de partes ni demoras de separación de mensajes.
             $body = preg_replace('/^\s*---\s*$/m', '', $body);
             $tour_requested = $input['tour_requested'];
-            if (! $tour_requested && $input['action'] === 'responder' && $attachment === null
+            if ($tour_requested && SupportTourService::version_habilita_oferta($ticket) === false) {
+                $body = SupportTourService::quitar_invitacion($body);
+                $tour_requested = false;
+            } elseif ($tour_requested && SupportTourService::version_admite_tour_personalizado($ticket) === false) {
+                $body = SupportTourService::con_invitacion($body, false, true);
+            } elseif (! $tour_requested && $input['action'] === 'responder' && $attachment === null
                 && $proposal === null && ! isset($input['tour_invitation'])) {
-                $entrante = SupportMessage::find($input['expected_message_id']);
-                if (SupportTourService::entrante_admite_oferta($ticket, $entrante)
-                    && SupportTourService::respuesta_admite_oferta($entrante, $body, ! empty($input['usage_answer']))) {
-                    $body = SupportTourService::con_invitacion($body, ! SupportTourService::entrante_admite_robotito($ticket, $entrante));
+                $oferta = SupportTourService::preparar_oferta($ticket, SupportMessage::find($input['expected_message_id']),
+                    $body, ! empty($input['usage_answer']));
+                if ($oferta !== null) {
+                    $body = $oferta;
                     $tour_requested = true;
                 }
             }
@@ -963,6 +969,15 @@ class SupportCodexService
     {
         if ($input['action'] === 'cerrar' && mb_stripos($input['body'], 'de nada') === false) {
             $input['body'] = 'De nada! ' . trim($input['body']);
+        }
+        if ($input['action'] === 'responder' && $attachment === null && ! isset($input['upgrade_proposal'])
+            && SupportTourService::version_habilita_oferta($ticket) === true) {
+            $oferta = SupportTourService::preparar_oferta($ticket, SupportMessage::find($input['expected_message_id']),
+                trim($input['body']), ! empty($input['usage_answer']));
+            if ($oferta !== null) {
+                $input['body'] = $oferta;
+                $input['_tour_en_borrador'] = true;
+            }
         }
         $draft_service = app(SupportAiSuggestionDraftService::class);
         $prepare = null;
@@ -1138,6 +1153,19 @@ class SupportCodexService
                     $this->fail(422, 'invalid_attachment_caption', 'El texto del adjunto admite hasta 1024 caracteres.');
                 }
                 $this->assert_approval_attachment($message);
+            }
+            if ($input['action'] === 'responder' && empty($input['requires_attachment']) && ! isset($input['upgrade_proposal'])) {
+                $uso_confirmado = ! empty($input['usage_answer']) && $final === trim($message->body);
+                if (! empty($input['_tour_en_borrador'])) {
+                    $final = SupportTourService::quitar_invitacion($final);
+                }
+                if (SupportTourService::version_habilita_oferta($ticket) === true) {
+                    $oferta = SupportTourService::preparar_oferta($ticket, $last, $final, $uso_confirmado);
+                    if ($oferta !== null) {
+                        $final = $oferta;
+                        $message->erp_auto_reply = ['tour_requested' => true];
+                    }
+                }
             }
             if ($message->body !== $final) {
                 $message->ai_original_body = $message->body;

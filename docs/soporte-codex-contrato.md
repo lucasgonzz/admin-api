@@ -219,11 +219,11 @@ El contexto incluye `can_query_system`. Un empleado sin ese permiso recibe 403 e
 
 ### Oferta de Robotito
 
-`capabilities.support_dynamic_tour` indica que el entrante admite Robotito en esa sesión. `capabilities.support_tour_offer` también cubre un entrante autenticado del ERP sin la marca de Robotito. En ese caso, Martín puede ofrecer el tour por escrito y Admin agrega cómo aceptarlo desde una cuenta propia en el mismo chat.
+`capabilities.support_tour_offer` habilita la oferta escrita para un entrante real del cliente cuando la versión registrada de su sistema es estrictamente superior a 3.2.47. Si falta el dato de versión, se conserva el criterio de canal u origen autenticado. `capabilities.support_dynamic_tour` exige además la aptitud del entrante y, si la versión es conocida, que admita guías personalizadas desde 4.3.44.
 
-En una respuesta de texto que explica cómo usar el sistema, el monitor puede mandar `usage_answer: true` con `action: responder` cuando `support_tour_offer` está disponible. El cuerpo trae la explicación y el video pertinente si existe. Admin agrega la pregunta de Robotito y registra la solicitud. Si el monitor omite el campo, Admin puede inferir una consulta directa de uso y agregar la misma oferta. Los pedidos de aclaración, rechazos, adjuntos, cierres y borradores con aprobación conservan su flujo.
+En una respuesta de texto que explica cómo usar el sistema, el monitor puede mandar `usage_answer: true` con `action: responder` cuando `support_tour_offer` está disponible. El cuerpo trae la explicación y el video pertinente si existe. Admin agrega la pregunta de Robotito y explica cómo actualizar o volver a entrar con la cuenta propia si corresponde. Si el monitor omite el campo, Admin puede inferir una consulta directa de uso. Los pedidos de aclaración, rechazos, adjuntos y cierres conservan su flujo. Una oferta en borrador sigue sujeta a la aprobación de la respuesta.
 
-`tour_requested: true` conserva su contrato anterior. Exige la pregunta canónica en el cuerpo y la capacidad de Robotito en el entrante. En ambos casos, Admin solo prepara y envía el tour si el cliente acepta la invitación entregada en ese ticket desde una sesión apta.
+`tour_requested: true` sigue exigiendo la pregunta canónica en el cuerpo y la capacidad de Robotito en el entrante. Admin comprueba el umbral si conoce la versión y ajusta el texto a la capacidad de esa instalación. Para preparar y enviar el tour, el cliente debe aceptar una invitación entregada en ese ticket desde una sesión o un contacto apto. Los tickets que requieren revisión no preparan el tour automáticamente.
 
 ## Nota en la implementación: `POST tickets/{id}/implementation-note` (desde el 26/10/2026)
 
