@@ -225,7 +225,7 @@ class ToursDeSoporteTest extends TestCase
     }
 
     /** @dataProvider preguntas_durante_recorrido */
-    public function test_robotito_recalcula_solo_por_una_pregunta_acreditada_y_con_un_control_real(array $marcas, int $estado): void
+    public function test_robotito_recalcula_solo_por_una_pregunta_acreditada_con_pasos_del_catalogo(array $marcas, int $estado, string $clave): void
     {
         config(['services.deepseek.api_key' => 'deepseek-prueba']);
         $body = $this->mensaje_erp($this->cliente());
@@ -249,24 +249,30 @@ class ToursDeSoporteTest extends TestCase
         $this->getJson($url, $headers)->assertOk()->assertJsonPath('ticket.accepted_tour_request', $estado !== 409)
             ->assertJsonPath('ticket.accepted_tour', null);
 
-        $paso = ['clave' => $estado === 422 ? 'indicacion' : 'vender.metodos_pago', 'texto' => 'Elegí los dos medios.'];
+        $paso = ['clave' => $clave, 'texto' => 'En Vender, abrí el reparto de pago y cargá un importe para cada medio.'];
         $guion = ['tema' => 'guia_dinamica', 'titulo' => 'Combinar medios de pago', 'pasos' => [$paso]];
+        $esperado = $clave === 'aclaracion' ? [[
+            'clave' => 'indicacion',
+            'texto' => 'Contame qué querés hacer y en qué pantalla. Podés agregar ese detalle en «Preguntale a Robotito».',
+        ]] : $guion['pasos'];
         $catalogo = self::CATALOGO_DINAMICO;
         $catalogo['pasos'][] = ['clave' => 'vender.metodos_pago', 'descripcion' => 'Distribuir el cobro entre distintos medios'];
         Http::fake([
             self::PUENTE . '/catalogo?user_id=17' => Http::response($catalogo),
-            'api.deepseek.com/*' => function ($request) use ($guion, $pregunta) {
+            'api.deepseek.com/*' => function ($request) use ($guion, $pregunta, $clave) {
                 $datos = json_decode($request['messages'][0]['content'], true);
                 $this->assertSame($pregunta, $datos['pregunta_durante_recorrido']);
                 $this->assertStringContainsString('«Revertir una importación» en el paso 2', $datos['contexto_del_recorrido']);
                 $this->assertNull($datos['respuesta_que_invito']);
-                return Http::response($this->respuesta_deepseek($guion));
+                return Http::response($clave === 'aclaracion'
+                    ? ['content' => [['type' => 'text', 'text' => '{}']]]
+                    : $this->respuesta_deepseek($guion));
             },
-            self::PUENTE => function ($request) use ($entrante, $ticket, $guion) {
+            self::PUENTE => function ($request) use ($entrante, $ticket, $esperado) {
                 $this->assertSame($entrante->uuid, $request['uuid']);
                 $this->assertSame($ticket->uuid, $request['ticket_uuid']);
                 $this->assertSame(17, $request['user_id']);
-                $this->assertSame($guion['pasos'], $request['pasos']);
+                $this->assertSame($esperado, $request['pasos']);
                 return Http::response(['ok' => true, 'uuid' => $request['uuid']]);
             },
         ]);
@@ -286,10 +292,68 @@ class ToursDeSoporteTest extends TestCase
     {
         $formulario = ['robotito_followup' => true, 'robotito_question' => '¿Cómo uso dos medios de pago en una venta?'];
         return [
-            'pregunta de la guía' => [$formulario, 200],
-            'plan sin un control' => [$formulario, 422],
-            'mismo texto escrito en el chat' => [[], 409],
-            'marca sin sesión apta para Robotito' => [['robotito_support_version' => null] + $formulario, 409],
+            'pregunta de la guía' => [$formulario, 200, 'vender.metodos_pago'],
+            'indicación sin ancla' => [$formulario, 200, 'indicacion'],
+            'aclaración dentro de la guía' => [$formulario, 200, 'aclaracion'],
+            'ancla fuera del catálogo' => [$formulario, 422, 'vender.pago_inexistente'],
+            'mismo texto escrito en el chat' => [[], 409, 'vender.metodos_pago'],
+            'marca sin sesión apta para Robotito' => [['robotito_support_version' => null] + $formulario, 409, 'vender.metodos_pago'],
+        ];
+    }
+
+    /** @dataProvider catalogos_para_editar_porcentaje */
+    public function test_robotito_recalcula_de_aplicar_un_recargo_a_editar_su_porcentaje(string $ajuste, bool $controles): void
+    {
+        config(['services.deepseek.api_key' => '']);
+        $body = $this->mensaje_erp($this->cliente());
+        SupportCodexSettings::set_enabled(true);
+        $firma = ['X-Admin-Api-Key' => 'clave-inbound'];
+        $body['body'] = '¿Cómo aplico un recargo en Vender?';
+        $consulta = SupportMessage::findOrFail($this->postJson(self::INBOUND, $body, $firma)->assertCreated()->json('model.id'));
+        $ticket = $consulta->ticket;
+        $this->invitacion($ticket, self::GUION_DINAMICO, ['erp_auto_reply' => ['tour_requested' => true]]);
+        $pregunta = "Como cambio el porcentaje de un {$ajuste}?";
+        $body = array_replace($body, [
+            'body' => 'Pregunta para Robotito sobre «Elegir un recargo existente en una venta sin guardar» en el paso 3: ' . $pregunta,
+            'message_uuid' => (string) Str::uuid(),
+            'robotito_followup' => true,
+            'robotito_question' => $pregunta,
+        ]);
+        $entrante = SupportMessage::findOrFail($this->postJson(self::INBOUND, $body, $firma)->assertCreated()->json('model.id'));
+        $headers = $this->reserva($ticket, $entrante);
+
+        $catalogo = self::CATALOGO_DINAMICO;
+        $catalogo['pasos'][] = ['clave' => 'vista.abm', 'descripcion' => 'Abrir el ABM.'];
+        $claves = ['abm.editar_' . $ajuste, 'abm.porcentaje_' . $ajuste];
+        if ($controles) {
+            $catalogo['pasos'][] = ['clave' => $claves[0], 'descripcion' => 'Señalar la edición en ABM.'];
+            $catalogo['pasos'][] = ['clave' => $claves[1], 'descripcion' => 'Señalar el campo Porcentaje.'];
+        }
+        Http::fake([
+            self::PUENTE . '/catalogo?user_id=17' => Http::response($catalogo),
+            self::PUENTE => function ($request) use ($entrante, $ajuste, $claves, $controles) {
+                $this->assertSame($entrante->uuid, $request['uuid']);
+                $this->assertSame($controles ? $claves : ['vista.abm'], array_column($request['pasos'], 'clave'));
+                $ultimo_paso = collect($request['pasos'])->last();
+                $this->assertStringContainsString('Porcentaje', $ultimo_paso['texto']);
+                if (! $controles) {
+                    $this->assertStringContainsString('Precios → ' . ucfirst($ajuste) . 's', $ultimo_paso['texto']);
+                }
+                return Http::response(['ok' => true, 'uuid' => $request['uuid']]);
+            },
+        ]);
+
+        $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare', ['expected_message_id' => $entrante->id], $headers)
+            ->assertOk()->assertExactJson(['ok' => true, 'uuid' => $entrante->uuid]);
+        Http::assertSentCount(2);
+    }
+
+    public function catalogos_para_editar_porcentaje(): array
+    {
+        return [
+            'recargo con controles de ABM' => ['recargo', true],
+            'recargo con catálogo anterior' => ['recargo', false],
+            'descuento con controles de ABM' => ['descuento', true],
         ];
     }
 
