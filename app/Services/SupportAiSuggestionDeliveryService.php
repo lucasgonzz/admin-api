@@ -166,11 +166,11 @@ class SupportAiSuggestionDeliveryService
 
             $invitacion = null;
             if (SupportTourService::tiene_invitacion($body)) {
-                if ($solicitud_tour) {
-                    $invitacion = ['tour_requested' => true];
-                } elseif ($tour !== null) {
-                    $invitacion = ['tour_invitation' => $tour];
-                } else {
+                if (SupportTourService::entrante_admite_robotito($ticket, $entrante)) {
+                    $invitacion = $solicitud_tour ? ['tour_requested' => true]
+                        : ($tour !== null ? ['tour_invitation' => $tour] : null);
+                }
+                if ($invitacion === null) {
                     $body = SupportTourService::quitar_invitacion($body);
                 }
             } elseif ($tour !== null) {

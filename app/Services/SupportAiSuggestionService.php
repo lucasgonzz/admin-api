@@ -295,8 +295,12 @@ class SupportAiSuggestionService
                 }
                 if ($result['suggested_message'] !== '' && ! $should_close && ! $ticket->requiere_verificacion_mensajes
                     && ($parsed['invitar_tour'] ?? null) === true) {
-                    $result['tour_requested'] = true;
-                    $result['suggested_message'] .= "\n\n" . SupportTourService::INVITACION;
+                    $ultimo = SupportMessage::where('support_ticket_id', $ticket->id);
+                    SupportMessage::apply_mensaje_real_conditions($ultimo, 'support_messages');
+                    if (SupportTourService::entrante_admite_robotito($ticket, $ultimo->latest('id')->first())) {
+                        $result['tour_requested'] = true;
+                        $result['suggested_message'] .= "\n\n" . SupportTourService::INVITACION;
+                    }
                 }
             }
 

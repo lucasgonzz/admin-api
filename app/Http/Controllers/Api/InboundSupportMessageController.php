@@ -147,7 +147,7 @@ class InboundSupportMessageController extends Controller
             ];
             $marcas = [];
             if ($this->entrada_robotito_valida($request, $client, $ticket)) {
-                $marcas['inbound_version'] = 1;
+                $marcas['inbound_version'] = SupportMessage::VERSION_ROBOTITO_ERP;
             }
             if ($datos['sender_type'] === 'user' && $usuario > 0 && $usuario === (int) $ticket->client_user_id
                 && $usuario === (int) $request->input('sender_user_id')
@@ -205,9 +205,10 @@ class InboundSupportMessageController extends Controller
 
     private function entrada_robotito_valida(Request $request, Client $client, SupportTicket $ticket): bool
     {
-        $clave = (string) $client->inbound_api_key;
-        return in_array($request->input('robotito_support_version'), [1, '1'], true)
-            && $clave !== '' && hash_equals($clave, (string) $request->header('X-Admin-Api-Key'))
+        return in_array($request->input('robotito_support_version'), [
+            SupportMessage::VERSION_ROBOTITO_ERP, (string) SupportMessage::VERSION_ROBOTITO_ERP,
+        ], true)
+            && SupportAgentesIdentity::firmada($request, $client)
             && Str::isUuid((string) $request->input('message_uuid')) && Str::isUuid((string) $ticket->uuid)
             && $ticket->source === 'erp' && $ticket->status === 'open' && $request->input('sender_type', 'user') === 'user'
             && (int) $ticket->client_user_id > 0 && (int) $ticket->client_user_id === (int) $request->input('sender_user_id');
@@ -216,7 +217,7 @@ class InboundSupportMessageController extends Controller
     private function programar_robotito(SupportMessage $message): void
     {
         $marca = $message->erp_auto_reply;
-        if (($marca['inbound_version'] ?? null) !== 1 || isset($marca['scheduled_at'])) {
+        if (($marca['inbound_version'] ?? null) !== SupportMessage::VERSION_ROBOTITO_ERP || isset($marca['scheduled_at'])) {
             return;
         }
 

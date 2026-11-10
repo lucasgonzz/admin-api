@@ -261,6 +261,7 @@ class SupportCodexService
                 'support_tour_consent' => true, 'support_dynamic_tour' => true],
             'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
+            'robotito_available' => SupportTourService::entrante_admite_robotito($ticket, $last),
             'accepted_tour' => $last && ! $ticket->requiere_verificacion_mensajes
                 ? app(SupportTourService::class)->guion_aceptado($ticket, $last) : null,
             'accepted_tour_request' => $last && ! $ticket->requiere_verificacion_mensajes
@@ -717,6 +718,10 @@ class SupportCodexService
             }
             if ($ticket->requiere_verificacion_mensajes && empty($input['supports_human_approval'])) {
                 $this->fail(422, 'verification_required', 'Este ticket exige aprobación. Actualizá el monitor para preparar el borrador.');
+            }
+            if (($input['tour_requested'] || isset($input['tour_invitation']))
+                && ! SupportTourService::entrante_admite_robotito($ticket, SupportMessage::find($input['expected_message_id']))) {
+                $this->fail(422, 'tour_target_unavailable', 'Este mensaje llegó desde una sesión del sistema sin Robotito disponible.');
             }
             $id_importacion = $input['tour_invitation']['import_history_id'] ?? null;
             if ($id_importacion !== null && ! app(SupportTourService::class)->objetivo_disponible(

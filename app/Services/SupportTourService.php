@@ -142,10 +142,21 @@ class SupportTourService
         return ($invitacion->erp_auto_reply['tour_requested'] ?? null) === true ? $invitacion : null;
     }
 
+    public static function entrante_admite_robotito(SupportTicket $ticket, ?SupportMessage $entrante): bool
+    {
+        if ($entrante === null || (int) $entrante->support_ticket_id !== (int) $ticket->id
+            || $entrante->sender_type !== 'user' || ! SupportMessage::es_mensaje_real($entrante)) {
+            return false;
+        }
+
+        // Identidad acreditada y presencia de Robotito son capacidades distintas del ERP.
+        return $ticket->source === 'whatsapp' || ($ticket->source === 'erp'
+            && ($entrante->erp_auto_reply['inbound_version'] ?? null) === SupportMessage::VERSION_ROBOTITO_ERP);
+    }
+
     private function invitacion_aceptada(SupportTicket $ticket, SupportMessage $entrante): ?SupportMessage
     {
-        if ((int) $entrante->support_ticket_id !== (int) $ticket->id || $entrante->sender_type !== 'user'
-            || ! $ticket->mensaje_confiable_para_codex($entrante)) {
+        if (! self::entrante_admite_robotito($ticket, $entrante) || ! $ticket->mensaje_confiable_para_codex($entrante)) {
             return null;
         }
 
@@ -157,8 +168,8 @@ class SupportTourService
         if ($invitacion !== null && $invitacion->sender_type === 'user') {
             if ($cita !== null) {
                 $invitacion = $anteriores->where('sender_type', 'admin')->latest('id')->first();
-            } elseif (preg_match('/^(?:por favor|porfa|por fi)[.!, ]*$/D', $respuesta)
-                && $invitacion->reply_to_message_id === null && $ticket->mensaje_confiable_para_codex($invitacion)) {
+            } elseif (preg_match('/^(?:por favor|porfa|por fi)[.!, ]*$/D', $respuesta) && $invitacion->reply_to_message_id === null
+                && self::entrante_admite_robotito($ticket, $invitacion) && $ticket->mensaje_confiable_para_codex($invitacion)) {
                 $respuesta = Str::ascii(mb_strtolower(trim((string) $invitacion->body))) . ' ' . $respuesta;
                 $invitacion = $anteriores->where('id', '<', $invitacion->id)->latest('id')->first();
             }

@@ -17,6 +17,7 @@ use App\Models\SupportMessage;
 use App\Models\SupportTicket;
 use App\Services\RecursosCatalogoService;
 use App\Services\SupportAiSettings;
+use App\Services\SupportAiSuggestionDeliveryService;
 use App\Services\SupportAiSuggestionScheduler;
 use App\Services\SupportAiSuggestionService;
 use App\Services\SupportCodexSettings;
@@ -217,6 +218,120 @@ class ToursDeSoporteTest extends TestCase
         $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare', ['expected_message_id' => $aceptacion->id], $headers)
             ->assertStatus(409);
         Http::assertSentCount(2);
+    }
+
+    public function test_martin_conserva_atencion_escrita_en_erp_firmado_sin_robotito(): void
+    {
+        $body = $this->mensaje_erp($this->cliente());
+        SupportCodexSettings::set_enabled(true);
+        $body['robotito_support_version'] = null;
+        $firma = ['X-Admin-Api-Key' => 'clave-inbound'];
+        $consulta = SupportMessage::findOrFail($this->postJson(self::INBOUND, $body, $firma)->assertCreated()->json('model.id'));
+        $this->assertTrue($consulta->erp_auto_reply[SupportMessage::MARCA_ERP_VERIFICADO_PARA_CODEX]);
+        $this->assertArrayNotHasKey('inbound_version', $consulta->erp_auto_reply);
+        $ticket = $consulta->ticket;
+        $url = self::CLAUDE . $ticket->id;
+        $headers = $this->reserva($ticket, $consulta);
+        $this->getJson($url, $headers)->assertOk()->assertJsonPath('ticket.robotito_available', false);
+        $texto = "Abrí Listado y buscá Exportación.\nhttps://recursos.comerciocity.com/?v=T0.1";
+        $respuesta = [
+            'lease_token' => $headers['X-Support-Lease-Token'], 'operation_id' => 'sin-robotito-' . $consulta->id,
+            'expected_message_id' => $consulta->id, 'action' => 'responder',
+        ];
+        Http::fake(['empresa-tours.test/api/admin-sync/support/messages' => Http::response(['ok' => true])]);
+        $this->postJson($url . '/reply', $respuesta + [
+            'body' => $texto . "\n\n" . SupportTourService::INVITACION, 'tour_requested' => true,
+        ], $headers)->assertStatus(422)
+            ->assertJsonPath('message', 'tour_target_unavailable: Este mensaje llegó desde una sesión del sistema sin Robotito disponible.');
+        Http::assertNothingSent();
+        $this->postJson($url . '/reply', $respuesta + ['body' => $texto], $headers)
+            ->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->assertSame($texto, $this->respuesta_erp($body)->body);
+        Http::assertSentCount(1);
+    }
+
+    public function test_no_planifica_el_si_de_una_sesion_sin_robotito_aunque_la_invitacion_ya_salio(): void
+    {
+        $body = $this->mensaje_erp($this->cliente());
+        SupportCodexSettings::set_enabled(true);
+        $firma = ['X-Admin-Api-Key' => 'clave-inbound'];
+        $consulta = SupportMessage::findOrFail($this->postJson(self::INBOUND, $body, $firma)->assertCreated()->json('model.id'));
+        $ticket = $consulta->ticket;
+        $this->invitacion($ticket, self::GUION, ['erp_auto_reply' => ['tour_requested' => true]]);
+        $body = array_replace($body, ['body' => 'Sí, quiero hacer el tour.', 'message_uuid' => (string) Str::uuid(), 'robotito_support_version' => null]);
+        $aceptacion = SupportMessage::findOrFail($this->postJson(self::INBOUND, $body, $firma)->assertCreated()->json('model.id'));
+        $url = self::CLAUDE . $ticket->id;
+        $headers = $this->reserva($ticket, $aceptacion);
+        $this->getJson($url, $headers)->assertOk()->assertJsonPath('ticket.robotito_available', false)
+            ->assertJsonPath('ticket.accepted_tour_request', false)->assertJsonPath('ticket.accepted_tour', null);
+        Http::fake();
+        $this->postJson($url . '/tour/prepare', ['expected_message_id' => $aceptacion->id], $headers)
+            ->assertStatus(409)->assertJsonPath('code', 'tour_consent_required');
+        Http::assertNothingSent();
+    }
+
+    public function test_robotito_no_acredita_una_version_enviada_con_una_llave_compartida(): void
+    {
+        $body = $this->mensaje_erp($this->cliente());
+        $this->cliente(['phone' => '+5493419843009']);
+        $id = $this->postJson(self::INBOUND, $body, ['X-Admin-Api-Key' => 'clave-inbound'])->assertCreated()->json('model.id');
+        $mensaje = SupportMessage::findOrFail($id);
+        $this->assertArrayNotHasKey('inbound_version', $mensaje->erp_auto_reply ?? []);
+        Queue::assertNotPushed(SendSupportAiSuggestion::class);
+    }
+
+    public function test_el_agente_documental_descarta_la_invitacion_si_el_entrante_web_no_admite_robotito(): void
+    {
+        $body = $this->mensaje_erp($this->cliente());
+        unset($body['robotito_support_version']);
+        $firma = ['X-Admin-Api-Key' => 'clave-inbound'];
+        $entrante = SupportMessage::findOrFail($this->postJson(self::INBOUND, $body, $firma)->assertCreated()->json('model.id'));
+        $texto = "Abrí Listado y buscá Exportación.\nhttps://recursos.comerciocity.com/?v=T0.1";
+        Http::fake(['empresa-tours.test/api/admin-sync/support/messages' => Http::response(['ok' => true])]);
+        $respuesta = app(SupportAiSuggestionDeliveryService::class)->deliver_erp_auto_reply(
+            $entrante->ticket, $texto . "\n\n" . SupportTourService::INVITACION, $entrante->id, null, true
+        );
+        $this->assertSame($texto, $respuesta->body);
+        $this->assertNull($respuesta->erp_auto_reply);
+        Http::assertSentCount(1);
+    }
+
+    /** @dataProvider controles_exportacion */
+    public function test_robotito_distingue_el_historial_de_exportaciones_del_de_importaciones(string $clave, bool $valido): void
+    {
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
+        [$ticket, $consulta] = $this->ticket_whatsapp($this->cliente(), '+5493419843001', null, false);
+        $consulta->update(['body' => '¿Dónde veo el historial de exportaciones del Listado?']);
+        $this->invitacion($ticket, self::GUION, ['erp_auto_reply' => ['tour_requested' => true]]);
+        $aceptacion = $this->entrante_whatsapp($ticket, 'Sí, quiero hacer el tour.');
+        $headers = $this->reserva($ticket, $aceptacion);
+        $catalogo = ['available' => true, 'pasos' => [
+            ['clave' => 'listado.opcion_historial_exportaciones', 'descripcion' => 'Historial de exportaciones'],
+            ['clave' => 'listado.historial_importaciones', 'descripcion' => 'Historial de importaciones'],
+        ]];
+        $guion = ['tema' => 'guia_dinamica', 'titulo' => 'Historial de exportaciones', 'pasos' => [
+            ['clave' => $clave, 'texto' => 'Abrí Historial de exportaciones.'],
+        ]];
+        Http::fake([
+            self::PUENTE . '/catalogo' => Http::response($catalogo),
+            'api.deepseek.com/*' => Http::response($this->respuesta_deepseek($guion)),
+            self::PUENTE => Http::response(['ok' => true, 'uuid' => $aceptacion->uuid]),
+        ]);
+        $respuesta = $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare', ['expected_message_id' => $aceptacion->id], $headers);
+        if ($valido) {
+            $respuesta->assertOk()->assertJsonPath('uuid', $aceptacion->uuid);
+        } else {
+            $respuesta->assertStatus(422)->assertJsonPath('code', 'tour_plan_unavailable');
+        }
+        Http::assertSentCount($valido ? 3 : 2);
+    }
+
+    public function controles_exportacion(): array
+    {
+        return [
+            'exportaciones' => ['listado.opcion_historial_exportaciones', true],
+            'importaciones no es exportaciones' => ['listado.historial_importaciones', false],
+        ];
     }
 
     /** @dataProvider disponibilidad_catalogo_dinamico */
@@ -503,7 +618,12 @@ class ToursDeSoporteTest extends TestCase
     public function test_el_agente_web_agrega_solo_el_video_verificado_por_la_herramienta(): void
     {
         config(['services.anthropic.api_key' => 'clave-falsa']);
+        SupportCodexSettings::set_enabled(false);
         $ticket = SupportTicket::create(['client_id' => $this->cliente()->id, 'client_user_id' => 17, 'source' => 'erp', 'status' => 'open']);
+        $ticket->messages()->create([
+            'sender_type' => 'user', 'kind' => 'text', 'body' => '¿Cómo creo un ticket?',
+            'erp_auto_reply' => ['inbound_version' => SupportMessage::VERSION_ROBOTITO_ERP],
+        ]);
         $this->mock(RecursosCatalogoService::class)->shouldReceive('catalogo')->once()->andReturn(['videos' => [[
             'codigo' => 'T0.4', 'titulo' => 'Crear un ticket de soporte', 'para_que' => 'Pedir ayuda desde el sistema', 'url' => 'https://cdn.test/video.mp4',
         ]]]);
