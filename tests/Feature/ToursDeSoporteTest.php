@@ -535,12 +535,12 @@ class ToursDeSoporteTest extends TestCase
     }
 
     /** @dataProvider verificacion_destino_dinamico */
-    public function test_robotito_solo_señala_la_importacion_que_empresa_confirma(bool $confirmada): void
+    public function test_robotito_solo_señala_la_importacion_que_empresa_confirma(string $consulta_texto, ?int $referencia, ?int $id_pedido, bool $confirmada): void
     {
         config(['services.deepseek.api_key' => 'deepseek-prueba']);
         [$ticket, $consulta] = $this->ticket_whatsapp($this->cliente(), '+5493419843001', null, false);
-        $consulta->update(['body' => 'Quiero revertir toda la importación del proveedor de esta mañana.']);
-        $this->invitacion($ticket, self::GUION, ['erp_auto_reply' => ['tour_requested' => true, 'tour_import_history_id' => 735]]);
+        $consulta->update(['body' => $consulta_texto]);
+        $this->invitacion($ticket, self::GUION, ['erp_auto_reply' => array_filter(['tour_requested' => true, 'tour_import_history_id' => $referencia])]);
         $aceptacion = $this->entrante_whatsapp($ticket, 'Sí, por favor.');
         $headers = $this->reserva($ticket, $aceptacion);
         $catalogo = [
@@ -566,14 +566,19 @@ class ToursDeSoporteTest extends TestCase
             $respuesta->assertStatus(422)->assertJsonPath('code', 'tour_plan_unavailable');
         }
         Http::assertSentCount($confirmada ? 3 : 2);
-        Http::assertSent(function ($request) {
-            return $request->url() === self::PUENTE . '/catalogo?import_history_id=735';
+        Http::assertSent(function ($request) use ($id_pedido) {
+            return $request->url() === self::PUENTE . '/catalogo' . ($id_pedido === null ? '' : '?import_history_id=' . $id_pedido);
         });
     }
 
     public function verificacion_destino_dinamico(): array
     {
-        return ['ID habilitado' => [true], 'ID rechazado por Empresa' => [false]];
+        return [
+            'referencia de Martín habilitada' => ['Quiero revertir toda la importación del proveedor de esta mañana.', 735, 735, true],
+            'referencia de Martín rechazada' => ['Quiero revertir toda la importación del proveedor de esta mañana.', 735, 735, false],
+            'ID mencionado por la persona' => ['Quiero revertir toda la importación #735.', null, 735, true],
+            'fecha ambigua' => ['Quiero revertir toda la importación 9 de noviembre.', null, null, false],
+        ];
     }
 
     private function agente_documental(): SupportAiSuggestionService

@@ -118,7 +118,7 @@ class SupportTourPlannerService
     {
         $ids = [];
         foreach ($historial as $mensaje) {
-            if ($mensaje['autor'] === 'cliente' && preg_match_all('/\b(?:importaci[oó]n|historial)\s*(?:n[úu]mero\s*)?#?\s*([1-9][0-9]{0,15})(?![0-9]|[.\/:-][0-9])/iu', $mensaje['texto'], $coincidencias)) {
+            if ($mensaje['autor'] === 'cliente' && preg_match_all('/\b(?:importaci[oó]n|historial)\s+(?:#\s*|(?:id|n[úu]mero)\s*:?\s*#?\s*)([1-9][0-9]{0,15})(?![0-9]|[.\/:-][0-9])/iu', $mensaje['texto'], $coincidencias)) {
                 foreach ($coincidencias[1] as $id) {
                     if ((int) $id <= SupportTourService::MAX_IMPORT_HISTORY_ID) {
                         $ids[] = (int) $id;
