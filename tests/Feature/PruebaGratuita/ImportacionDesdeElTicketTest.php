@@ -271,6 +271,48 @@ class ImportacionDesdeElTicketTest extends BaseDeLaPrueba
     }
 
     /** @test */
+    public function conserva_el_alcance_y_reenvia_el_codigo_que_el_dueno_aclaro_en_el_ticket(): void
+    {
+        $this->pasar_a_activo();
+        $this->ticket->update(['importacion_soporte_iniciada_at' => now()]);
+        $uuid = '9b2c4f1e-7a3d-4c55-9e0b-2f6d8a1c3e70';
+        $clave = 'stock_codigo_0_1002';
+        $this->fakear_http([
+            '*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response([
+                'automatizar_soporte' => true, 'en_proceso' => true, 'pendientes' => [[
+                    'analysis_uuid' => $uuid, 'revision' => 3, 'alcance' => 'stock_existente', 'preguntas' => [[
+                        'clave' => $clave, 'acepta_codigo_articulo' => true,
+                    ]],
+                ]],
+            ], 200),
+            '*/admin-sync/ai-excel-import/prueba-resolver/' . $uuid => Http::response(['estado' => 'encolada'], 202),
+        ]);
+        $mensaje = SupportMessage::create([
+            'support_ticket_id' => $this->ticket->id, 'sender_type' => 'user', 'kind' => 'text',
+            'body' => 'En la fila 1002 el código correcto es A9024 7.',
+            'whatsapp_message_id' => 'wamid.codigo-del-dueno', 'delivered_at' => now(),
+            'whatsapp_remitente_crudo' => ltrim((string) $this->client->phone, '+'),
+        ]);
+        $ruta = '/api/claude/support-codex/tickets/' . $this->ticket->id;
+        $reserva = $this->postJson($ruta . '/claim', [
+            'worker_id' => 'martin', 'expected_message_id' => $mensaje->id,
+        ], $this->headers_de_claude())->assertOk()
+            ->assertJsonPath('ticket.importaciones_soporte_pendientes.0.alcance', 'stock_existente')
+            ->assertJsonPath('ticket.importaciones_soporte_pendientes.0.preguntas.0.acepta_codigo_articulo', true);
+
+        $this->postJson($ruta . '/import-prueba-resolver', [
+            'analysis_uuid' => $uuid, 'revision' => 3, 'respuestas' => [$clave => 'codigo:A9024 7'],
+            'lease_token' => $reserva->json('lease_token'), 'expected_message_id' => $mensaje->id,
+        ], $this->headers_de_claude())->assertStatus(202);
+
+        Http::assertSent(function ($request) use ($uuid, $clave) {
+            return strpos($request->url(), '/ai-excel-import/prueba-resolver/' . $uuid) !== false
+                && $request['respuestas'] === [$clave => 'codigo:A9024 7']
+                && $request['automatizar_soporte'] === '1';
+        });
+    }
+
+    /** @test */
     public function no_reconoce_como_dueno_a_un_numero_de_otra_area_con_el_mismo_sufijo(): void
     {
         $this->pasar_a_activo();
