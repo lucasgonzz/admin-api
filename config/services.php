@@ -586,6 +586,13 @@ return [
         'rate_limit_per_minute' => (int) env('SHARED_CATALOG_RATE_LIMIT_PER_MINUTE', 180),
     ],
 
+    // Pedidos por minuto de cada operador logueado en el panel (misión admin-too-many-attempts,
+    // 10/11/2026). Cubeta por operador, no por IP: ver el limitador `api` en RouteServiceProvider.
+    // API_RATE_LIMIT_PER_MINUTE funciona de piso: si es más alto que esto, manda ese.
+    'panel_admin' => [
+        'rate_limit_per_minute' => env('ADMIN_PANEL_RATE_LIMIT_PER_MINUTE', 1200),
+    ],
+
     // Ingesta de tareas creadas por Claude desde la conversación (grupo 180).
     // Si la clave no está definida, el endpoint queda cerrado: no se acepta ninguna request.
     'claude_task_ingest' => [

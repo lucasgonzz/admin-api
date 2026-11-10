@@ -985,16 +985,23 @@ Route::prefix('admin')->group(function () {
      * La seguridad se garantiza por la firma HMAC del parámetro state. */
     Route::get('calendar/google/callback', [AdminCalendarConnectionController::class, 'callback']);
 
-    /* Adjuntos de lead: URL firmada (abre en nueva pestaña sin symlink /storage en el hosting). */
+    /* Adjuntos de lead: URL firmada (abre en nueva pestaña sin symlink /storage en el hosting).
+       Cubeta propia (`adjuntos-firmados`, misión admin-too-many-attempts, 10/11/2026): los pide el navegador sin
+       token, y en la cubeta por IP de todo /api un hilo con muchas fotos le gastaba los 60/min al resto. El
+       `withoutMiddleware` hace falta porque el grupo `api` del Kernel ya trae `throttle:api`. */
     Route::get('lead-message-attachment/{id}/file', [LeadController::class, 'serve_message_attachment_file_json'])
         ->name('lead.message.attachment.file')
-        ->middleware('signed');
+        ->withoutMiddleware('throttle:api')
+        ->middleware('signed')
+        ->middleware('throttle:adjuntos-firmados');
 
     /* Adjuntos de soporte (imagen, audio, video, documento): URL firmada, igual que los de lead. Responde con
        BinaryFileResponse para que el navegador pueda pedir rangos (206): iOS Safari lo exige para reproducir audio/video. */
     Route::get('support-message-attachment/{id}/file', [\App\Http\Controllers\Api\SupportMessageController::class, 'serve_attachment_file'])
         ->name('support.message.attachment.file')
-        ->middleware('signed');
+        ->withoutMiddleware('throttle:api')
+        ->middleware('signed')
+        ->middleware('throttle:adjuntos-firmados');
 
     Route::middleware('auth:sanctum')->group(function () {
         Route::post('logout', [AuthController::class, 'logout']);

@@ -114,7 +114,37 @@ class RouteServiceProvider extends ServiceProvider
                 $per_minute = $default_per_minute;
             }
 
-            return Limit::perMinute($per_minute)->by(optional($request->user())->id ?: $request->ip());
+            /*
+             * Operador del panel: cubeta propia y mucho más ancha (misión admin-too-many-attempts,
+             * 10/11/2026). Abrir un ticket no leído son varios pedidos seguidos (hilo, marcar leído,
+             * badges, tours, ventana de WhatsApp) y Pusher suma los suyos: alguien pasando por los
+             * tickets cada 2 s anda en 200-300 pedidos por minuto, y con 60 se le apilaban los
+             * «Too Many Attempts.» y dejaban de cargar las conversaciones.
+             *
+             * Acá `$request->user()` ya está resuelto: `$middlewarePriority` corre `auth` antes que el
+             * throttle. El `max()` es para que un API_RATE_LIMIT_PER_MINUTE más alto cargado en el
+             * .env nunca termine bajando el tope de los operadores.
+             */
+            $operador = $request->user();
+            if ($operador) {
+                $tope_del_panel = max($per_minute, (int) config('services.panel_admin.rate_limit_per_minute', 1200));
+
+                return Limit::perMinute($tope_del_panel)->by('panel-admin:' . $operador->id);
+            }
+
+            return Limit::perMinute($per_minute)->by($request->ip());
+        });
+
+        /*
+         * Cubeta PROPIA para los adjuntos por URL firmada (misión admin-too-many-attempts, 10/11/2026).
+         *
+         * Los pide el navegador directo (`<img>`, `<audio>`, sin token), así que caían en la cubeta
+         * por IP de arriba: un hilo con muchas fotos se comía los 60 pedidos de esa oficina, y un
+         * audio en iOS encima pide por rangos. La firma ya dice que el enlace lo emitió el admin;
+         * este tope es solo para que un enlace filtrado no se pueda martillar sin freno.
+         */
+        RateLimiter::for('adjuntos-firmados', function (Request $request) {
+            return Limit::perMinute(600)->by('adjuntos-firmados:' . $request->ip());
         });
 
         /*
