@@ -251,7 +251,7 @@ class ToursDeSoporteTest extends TestCase
         $catalogo = self::CATALOGO_DINAMICO;
         $catalogo['pasos'][] = ['clave' => 'vender.metodos_pago', 'descripcion' => 'Distribuir el cobro entre distintos medios'];
         Http::fake([
-            self::PUENTE . '/catalogo' => Http::response($catalogo),
+            self::PUENTE . '/catalogo?user_id=17' => Http::response($catalogo),
             'api.deepseek.com/*' => function ($request) use ($guion, $pregunta) {
                 $datos = json_decode($request['messages'][0]['content'], true);
                 $this->assertSame($pregunta, $datos['pregunta_durante_recorrido']);
