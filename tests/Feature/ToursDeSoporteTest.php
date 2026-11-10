@@ -192,6 +192,7 @@ class ToursDeSoporteTest extends TestCase
         Http::assertSent(function ($request) {
             return $request->url() === 'https://api.deepseek.com/anthropic/v1/messages'
                 && $request->hasHeader('x-api-key', 'deepseek-prueba')
+                && strpos($request['system'], 'vender.recargos señala el grupo de interruptores reales') !== false
                 && strpos($request['messages'][0]['content'], 'Cómo aplico un recargo') !== false;
         });
         Http::assertSent(function ($request) use ($aceptacion) {
