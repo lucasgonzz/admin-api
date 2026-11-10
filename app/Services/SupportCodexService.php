@@ -739,7 +739,7 @@ class SupportCodexService
             }
             if ($input['action'] === 'cerrar') {
                 $confirmation = $this->confirmation_message($ticket, $input);
-                if (! $this->confirms_resolution($ticket, $case, $confirmation)) {
+                if (! $this->confirms_explicit_closure($ticket, $case, $confirmation)) {
                     if (! empty($input['thread_id'])) {
                         $this->bind_thread($case, $input['thread_id']);
                     }
@@ -1829,7 +1829,11 @@ class SupportCodexService
 
     private function assert_confirmation(SupportTicket $ticket, SupportCodexCase $case, array $input, bool $allow_thanks_only = true): void
     {
-        if (! $this->confirms_resolution($ticket, $case, $this->confirmation_message($ticket, $input), $allow_thanks_only)) {
+        $message = $this->confirmation_message($ticket, $input);
+        $confirmed = $allow_thanks_only
+            ? $this->confirms_explicit_closure($ticket, $case, $message)
+            : $this->confirms_resolution($ticket, $case, $message, false);
+        if (! $confirmed) {
             $this->fail(422, 'confirmation_required', 'El mensaje no confirma de forma suficiente que el caso quedó resuelto.');
         }
     }
@@ -1868,6 +1872,69 @@ class SupportCodexService
     private function is_closing_farewell(string $body): bool
     {
         return (bool) preg_match('/^de nada(?: [a-z]+)?[.! ]*$/D', Str::ascii(mb_strtolower(trim($body))));
+    }
+
+    private function confirms_explicit_closure(SupportTicket $ticket, SupportCodexCase $case, SupportMessage $message): bool
+    {
+        return $this->confirms_resolution($ticket, $case, $message)
+            || $this->confirms_recent_exchange($ticket, $case, $message);
+    }
+
+    private function confirms_recent_exchange(SupportTicket $ticket, SupportCodexCase $case, SupportMessage $message): bool
+    {
+        $thanks = '(?:(?:muchas|muchisimas|mil)\s+)?(?:gracias|te agradezco(?: mucho)?)(?:[,.!\s]+(?:martin|lucas|hno|hermano|amigo|capo|crack|genio|por todo|por la ayuda|por responder|un abrazo))*';
+        $brief_result = '(?:si|ahora\s+si|ahi\s+esta|ya\s+aparecio|ya\s+lo\s+veo)';
+        $farewell = '/^(?:(?:ok|oka|perfecto|buenisimo|genial|listo)[,.!\s]+)*' . $thanks . '[.!\s]*$/D';
+        $brief = '/^' . $brief_result . '(?:[,.!\s]+' . $thanks . ')?[.!\s]*$/D';
+        $last_body = Str::ascii(mb_strtolower(trim((string) $message->body)));
+        if ($case->last_reply_id === null || (! preg_match($farewell, $last_body) && ! preg_match($brief, $last_body))) {
+            return false;
+        }
+
+        // La respuesta más reciente de Martín delimita el tramo. No se recupera una
+        // confirmación anterior a esa respuesta ni se salta un mensaje intermedio.
+        $query = SupportMessage::where('support_ticket_id', $ticket->id)
+            ->whereBetween('id', [$case->last_reply_id, $message->id]);
+        SupportMessage::apply_mensaje_real_conditions($query, 'support_messages');
+        $exchange = $query->withCount('attachments')->orderBy('id')->limit(7)->get();
+        $guidance = $exchange->shift();
+        if ($guidance === null || (int) $guidance->id !== (int) $case->last_reply_id || $guidance->sender_type !== 'admin'
+            || ! $ticket->mensaje_confiable_para_codex($guidance)
+            || $exchange->count() > 5 || $exchange->last() === null || ! $exchange->last()->is($message)) {
+            return false;
+        }
+
+        $question = Str::ascii(mb_strtolower((string) $guidance->body));
+        $asks_for_result = preg_match('/(?:^|[!?\r\n]|\.\h+)\h*((?:(?!\.\h)[^!?\r\n])+)\?\s*$/D', $question, $parts)
+            && ! preg_match('/\b(?:que|cual|cuales|como|donde|adonde|cuanto|cuanta|cuantos|cuantas|quien|quienes)\b/', $parts[1])
+            && ! preg_match('/\b(manana|luego|despues|cuando|no|sin|sigue|falta|error|problema|dificultad|todavia|aun|o|(?:podes|puedes) probar)\b/', $parts[1])
+            && preg_match('/\b(pudiste|pudieron|lograste|lograron|(?:te|les) (?:aparece[n]?|figura[n]?|sale[n]?|muestra[n]?|deja[n]?|abre[n]?)|(?:ya|ahora) (?:se )?(?:ve|ves|ven|funciona|anda|abre))\b/', $parts[1])
+            && SupportCodexOperation::where('support_ticket_id', $ticket->id)->where('message_id', $guidance->id)
+                ->where('action', 'solicitar_confirmacion')->whereIn('status', ['sent', 'reconciled_sent'])->exists();
+
+        $has_confirmation = false;
+        $same_exchange = [(int) $guidance->id];
+        $since = $message->created_at->copy()->subDay();
+        foreach ($exchange as $entry) {
+            if ($entry->sender_type !== 'user' || $entry->kind !== 'text' || (int) $entry->attachments_count !== 0
+                || ! $ticket->mensaje_confiable_para_codex($entry) || $entry->created_at->lt($since)
+                || $entry->whatsapp_remitente_crudo !== $message->whatsapp_remitente_crudo
+                || ($entry->reply_to_message_id !== null && ! in_array((int) $entry->reply_to_message_id, $same_exchange, true))) {
+                return false;
+            }
+            $same_exchange[] = (int) $entry->id;
+            $body = Str::ascii(mb_strtolower(trim((string) $entry->body)));
+            $is_result = preg_match($brief, $body)
+                ? $asks_for_result
+                : $this->confirms_resolution($ticket, $case, $entry, false);
+            if ($is_result) {
+                $has_confirmation = true;
+            } elseif (! preg_match($farewell, $body)) {
+                return false;
+            }
+        }
+
+        return $has_confirmation;
     }
 
     private function confirms_resolution(SupportTicket $ticket, SupportCodexCase $case, SupportMessage $message, bool $allow_thanks_only = true): bool

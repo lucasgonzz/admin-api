@@ -1972,6 +1972,114 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         $this->assertSame('Ahora abrí el comprobante.', end($this->deliveries->bodies));
     }
 
+    /** @dataProvider cierres_en_varios_mensajes */
+    public function test_cierra_confirmacion_y_agradecimiento_del_mismo_turno(
+        array $answers,
+        bool $approval,
+        bool $resumed
+    ): void {
+        $ticket = $this->ticket();
+        $question = 'Con ese cambio, te aparece el recibo 8203 por $73.690?';
+        $this->reply($ticket, $this->claim($ticket), ['action' => 'solicitar_confirmacion', 'body' => $question])
+            ->assertOk()->assertJsonPath('ticket.state', 'awaiting_confirmation');
+        foreach ($answers as $answer) {
+            $last = $this->inbound($ticket, $answer);
+        }
+
+        if ($resumed) {
+            SupportCodexCase::where('support_ticket_id', $ticket->id)->update(['state' => 'manual_review']);
+            $this->postJson($this->base . '/tickets/' . $ticket->id . '/resume', [
+                'expected_message_id' => $last->id,
+                'reason' => 'Recuperar el cierre tras el rechazo anterior.',
+                'continue_pending' => true,
+            ], $this->headers)->assertOk()->assertJsonPath('ticket.state', 'ready');
+        }
+        if ($approval) {
+            $ticket->update(['requiere_verificacion_mensajes' => true]);
+        }
+        $claim = $this->claim($ticket);
+        $payload = ['action' => 'cerrar', 'confirmation_message_id' => $last->id, 'body' => 'De nada Franco!'];
+        if ($approval) {
+            $payload['supports_human_approval'] = true;
+            $draft = $this->reply($ticket, $claim, $payload)->assertOk()
+                ->assertJsonPath('operation.status', 'awaiting_approval')->assertJsonPath('ticket.status', 'open')->json();
+            $this->assertSame([$question], $this->deliveries->bodies);
+            $admin = Admin::create(['name' => 'Lucas', 'email' => uniqid('cierre') . '@test.local', 'password' => bcrypt('prueba')]);
+            $this->actingAs($admin, 'sanctum')->postJson('/api/admin/support-message/' . $draft['operation']['message_id'] . '/approve-ai-draft')
+                ->assertOk()->assertJsonPath('delivered', true);
+        } else {
+            $this->reply($ticket, $claim, $payload)->assertOk()->assertJsonPath('ticket.status', 'closed');
+        }
+
+        $this->reply($ticket, $claim, $payload)->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->assertSame('closed', $ticket->fresh()->status);
+        $this->assertSame([$question, 'De nada Franco!'], $this->deliveries->bodies);
+        $this->assertSame(['open', 'open'], $this->deliveries->ticket_states_during_delivery);
+    }
+
+    public function cierres_en_varios_mensajes(): array
+    {
+        return [
+            'ticket 91' => [['Ahí está', 'Ahora si', 'Gracias hno'], false, false],
+            'confirmación explícita separada' => [['Ya quedó resuelto.', 'Muchas gracias Martín.'], false, false],
+            'respuesta breve en un mensaje' => [['Ahora sí, gracias!'], false, false],
+            'sí tras la pregunta concreta' => [['Sí', 'Gracias capo'], false, false],
+            'aprobación tras reanudar' => [['Sí', 'Te agradezco mucho.'], true, true],
+        ];
+    }
+
+    /** @dataProvider impedimentos_de_cierre_en_varios_mensajes */
+    public function test_no_cierra_si_la_confirmacion_no_pertenece_al_mismo_turno(
+        string $obstacle,
+        string $question
+    ): void {
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        $previous_id = $claim['ticket']['expected_message_id'];
+        $this->reply($ticket, $claim, ['action' => 'solicitar_confirmacion', 'body' => $question])->assertOk();
+        $result = $this->inbound($ticket, 'Sí');
+        if ($obstacle === 'cita') {
+            $result->update(['reply_to_message_id' => $previous_id]);
+        } elseif ($obstacle === 'adjunto') {
+            $result->attachments()->create(['disk' => 'public', 'path' => 'soporte/cierre.png', 'mime' => 'image/png', 'size' => 10]);
+        } elseif ($obstacle === 'otro_remitente') {
+            $result->update(['whatsapp_remitente_crudo' => '+5493417770001']);
+        } elseif ($obstacle === 'otro_turno') {
+            SupportMessage::create(['support_ticket_id' => $ticket->id, 'sender_type' => 'admin', 'kind' => 'text',
+                'body' => 'Necesito revisar otro comprobante.']);
+        } elseif ($obstacle !== '') {
+            $this->inbound($ticket, $obstacle);
+        }
+        $last = $this->inbound($ticket, 'Gracias hno');
+        $this->reply($ticket, $this->claim($ticket), [
+            'action' => 'cerrar', 'confirmation_message_id' => $last->id, 'body' => 'De nada!',
+        ])->assertStatus(422);
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->assertSame([$question], $this->deliveries->bodies);
+    }
+
+    public function impedimentos_de_cierre_en_varios_mensajes(): array
+    {
+        $question = 'Con ese cambio, te aparece el recibo 8203?';
+
+        return [
+            'pregunta pendiente' => ['Cómo veo el otro pago?', $question],
+            'dificultad persistente' => ['Pero sigue sin aparecer el otro recibo.', $question],
+            'prueba futura' => ['Lo pruebo mañana.', $question],
+            'resultado de otro tema' => ['cita', $question],
+            'captura intermedia' => ['adjunto', $question],
+            'otro remitente' => ['otro_remitente', $question],
+            'otra intervención de soporte' => ['otro_turno', $question],
+            'aceptación de una prueba futura' => ['', 'Podés probarlo mañana?'],
+            'confirmación de que sigue el error' => ['', 'Te aparece el error?'],
+            'pregunta de datos' => ['', 'Qué importe te aparece?'],
+            'pregunta de datos que menciona la tarea' => ['', 'Qué recibo pudiste ver?'],
+            'pregunta de datos con encabezado' => ['', 'Para revisar: cuál recibo te aparece?'],
+            'pedido indirecto de datos' => ['', 'Me decís qué importe te aparece?'],
+            'la afirmación anterior no es la pregunta' => ['', 'Te aparece el recibo. Mandaste el archivo?'],
+        ];
+    }
+
     /** @dataProvider agradecimientos_naturales */
     public function test_agradecimiento_natural_cierra_despues_de_despedir_sin_duplicar(string $thanks): void
     {
