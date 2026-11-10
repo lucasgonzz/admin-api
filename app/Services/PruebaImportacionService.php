@@ -445,21 +445,30 @@ class PruebaImportacionService
 
     public function es_entrante_del_dueno(SupportTicket $ticket, ?SupportMessage $mensaje): bool
     {
-        if ($mensaje === null) {
-            return false;
-        }
+        return $mensaje !== null && isset($this->entrantes_del_dueno($ticket, [$mensaje])[(int) $mensaje->id]);
+    }
 
-        $remitente = (string) $mensaje->whatsapp_remitente_crudo;
+    /** Índice de entrantes acreditados. El directorio se consulta una sola vez por contexto. */
+    public function entrantes_del_dueno(SupportTicket $ticket, iterable $mensajes): array
+    {
         $telefono = (string) $ticket->whatsapp_phone;
-        if ($mensaje->sender_type !== 'user' || (int) $mensaje->support_ticket_id !== (int) $ticket->id
-            || trim((string) $mensaje->whatsapp_message_id) === ''
-            || !WhatsappNormalizer::equals_estricto($telefono, $remitente)) {
-            return false;
+        $contacto = $ticket->client === null ? null : app(ClientPhoneDirectory::class)->resolve_for_client($ticket->client, $telefono);
+        if ($contacto === null || $contacto['client_employee_id'] !== null) {
+            return [];
         }
 
-        $contacto = app(ClientPhoneDirectory::class)->resolve_for_client($ticket->client, $telefono);
-        return $contacto !== null && $contacto['client_employee_id'] === null
-            && WhatsappNormalizer::equals_estricto((string) $contacto['raw_phone'], $remitente);
+        $verificados = [];
+        foreach ($mensajes as $mensaje) {
+            $remitente = (string) $mensaje->whatsapp_remitente_crudo;
+            if ($mensaje->sender_type === 'user' && (int) $mensaje->support_ticket_id === (int) $ticket->id
+                && trim((string) $mensaje->whatsapp_message_id) !== ''
+                && WhatsappNormalizer::equals_estricto($telefono, $remitente)
+                && WhatsappNormalizer::equals_estricto((string) $contacto['raw_phone'], $remitente)) {
+                $verificados[(int) $mensaje->id] = true;
+            }
+        }
+
+        return $verificados;
     }
 
     private function automatizacion_disponible(SupportTicket $ticket): bool

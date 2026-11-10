@@ -227,6 +227,7 @@ class SupportCodexService
         $importador = app(PruebaImportacionService::class);
         $importaciones = $importador->estado_en_ticket($ticket);
         $soporte_activo = $importador->puerta_activo($ticket) === null;
+        $remitentes_verificados = $soporte_activo ? $importador->entrantes_del_dueno($ticket, $messages) : [];
         $robotito_disponible = SupportTourService::entrante_admite_robotito($ticket, $last);
         return [
             'id' => (int) $ticket->id,
@@ -288,10 +289,11 @@ class SupportCodexService
             /* Los tickets anteriores del cliente, resumidos (hasta 5, sin el actual; de un empleado, solo los
              * suyos), para que Martín sepa que existen y los pida con GET .../history si le hacen falta. */
             'previous_tickets' => $this->previous_tickets($ticket),
-            'messages' => $messages->map(function ($message) use ($ticket) {
+            'messages' => $messages->map(function ($message) use ($ticket, $remitentes_verificados) {
                 return [
                     'id' => (int) $message->id,
                     'sender_type' => $message->sender_type,
+                    'remitente_dueno_verificado' => isset($remitentes_verificados[(int) $message->id]),
                     'body' => $this->cuerpo_para_el_monitor($message),
                     'kind' => $message->kind,
                     'is_trial_import_notice' => (bool) $message->is_trial_import_notice,
