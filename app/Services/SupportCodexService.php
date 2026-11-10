@@ -704,6 +704,10 @@ class SupportCodexService
             )) {
                 $this->fail(422, 'tour_target_unavailable', 'El sistema no confirmó que esa persona pueda encontrar la importación en el historial.');
             }
+            if (($input['tour_invitation']['tema'] ?? null) === SupportTourService::TEMA_APLICAR_RECARGO
+                && ! app(SupportTourService::class)->recargos_disponibles($ticket, SupportMessage::findOrFail($input['expected_message_id']))) {
+                $this->fail(422, 'tour_target_unavailable', 'El sistema no confirmó que esa persona pueda usar el tour de recargos en Vender.');
+            }
             if ($input['action'] === 'cerrar') {
                 $confirmation = $this->confirmation_message($ticket, $input);
                 if (! $this->confirms_resolution($ticket, $case, $confirmation)) {

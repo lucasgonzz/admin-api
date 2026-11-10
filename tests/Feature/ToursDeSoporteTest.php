@@ -38,6 +38,10 @@ class ToursDeSoporteTest extends TestCase
     private const PUENTE = 'https://empresa-tours.test/api/admin-sync/support/tours';
     private const INBOUND = '/api/inbound/support/messages';
     private const GUION = ['tema' => 'crear_ticket', 'titulo' => 'Crear un ticket'];
+    private const GUION_RECARGO = [
+        'tema' => 'aplicar_recargo_venta', 'titulo' => 'Aplicar un recargo a la venta',
+        'textos' => ['Elegí el recargo que querés aplicar.', 'Revisá el total antes de guardar.'],
+    ];
     private const GUION_IMPORTACION = [
         'tema' => 'revertir_importacion_articulos',
         'titulo' => 'Revertir la importación del proveedor',
@@ -135,6 +139,110 @@ class ToursDeSoporteTest extends TestCase
         $this->getJson($url, $headers)->assertOk()->assertJsonPath('ticket.expected_message_id', $otro->id)
             ->assertJsonPath('ticket.accepted_tour', null);
         Http::assertSentCount(1);
+    }
+
+    public function test_martin_conserva_texto_y_video_si_empresa_no_admite_el_tour_de_recargos(): void
+    {
+        [$ticket, $consulta] = $this->ticket_whatsapp($this->cliente(), '+5493419843001', null, false);
+        $headers = $this->reserva($ticket, $consulta);
+        $texto = "En Vender, elegí el recargo en Cierre y opciones.\nhttps://recursos.comerciocity.com/?v=T11.34";
+        $payload = [
+            'lease_token' => $headers['X-Support-Lease-Token'], 'operation_id' => 'invitar-recargos-' . $consulta->id,
+            'expected_message_id' => $consulta->id, 'action' => 'responder',
+            'body' => $texto . "\n\n" . SupportTourService::INVITACION, 'tour_invitation' => self::GUION_RECARGO,
+        ];
+        Http::fake([self::PUENTE . '/recargos/disponibilidad' => Http::response([], 404)]);
+        $this->mock(SupportWhatsappOpenerService::class)->shouldReceive('deliver_follow_up')->once()
+            ->andReturnUsing(function ($ticket, $message) use ($texto) {
+                $this->assertSame($texto, $message->body);
+                $this->assertNull($message->erp_auto_reply);
+                return ['delivery' => 'sent'];
+            });
+        $url = self::CLAUDE . $ticket->id . '/reply';
+        $this->postJson($url, $payload, $headers)->assertStatus(422)
+            ->assertJsonPath('message', 'tour_target_unavailable: El sistema no confirmó que esa persona pueda usar el tour de recargos en Vender.');
+        $this->assertSame(0, $ticket->messages()->where('sender_type', 'admin')->count());
+
+        unset($payload['tour_invitation']);
+        $payload['body'] = $texto;
+        $this->postJson($url, $payload, $headers)->assertOk()->assertJsonPath('operation.status', 'sent');
+        Http::assertSentCount(1);
+        Http::assertSent(function ($request) {
+            return $request->method() === 'GET' && $request->url() === self::PUENTE . '/recargos/disponibilidad'
+                && $request->hasHeader('X-Admin-Api-Key', 'clave-empresa');
+        });
+    }
+
+    public function test_martin_verifica_recargos_para_el_empleado_y_envia_el_tour_despues_del_si(): void
+    {
+        $cliente = $this->cliente();
+        $empleado = ClientEmployee::create(['client_id' => $cliente->id, 'name' => 'Empleado', 'phone' => '3519843002', 'empresa_employee_id' => 33]);
+        [$ticket, $consulta] = $this->ticket_whatsapp($cliente, '+5493519843002', $empleado, false);
+        $headers = $this->reserva($ticket, $consulta);
+        Http::fake([self::PUENTE . '/recargos/disponibilidad*' => Http::response(['available' => true])]);
+        $this->mock(SupportWhatsappOpenerService::class)->shouldReceive('deliver_follow_up')->once()
+            ->andReturnUsing(function ($ticket, $message) {
+                $message->update(['whatsapp_message_id' => 'wamid.invitacion-recargos']);
+                return ['delivery' => 'sent'];
+            });
+        $url = self::CLAUDE . $ticket->id;
+        $this->postJson($url . '/reply', [
+            'lease_token' => $headers['X-Support-Lease-Token'], 'operation_id' => 'invitar-recargos-' . $consulta->id,
+            'expected_message_id' => $consulta->id, 'action' => 'responder',
+            'body' => "Buscá el panel Recargos en Vender.\n\n" . SupportTourService::INVITACION, 'tour_invitation' => self::GUION_RECARGO,
+        ], $headers)->assertOk()->assertJsonPath('operation.status', 'sent');
+        Http::assertSentCount(1);
+        Http::assertSent(function ($request) {
+            return $request->method() === 'GET' && $request->url() === self::PUENTE . '/recargos/disponibilidad?user_id=33';
+        });
+
+        $aceptacion = $this->entrante_whatsapp($ticket, 'Sí, por favor.');
+        $headers = $this->reserva($ticket, $aceptacion);
+        Http::fake([self::PUENTE => Http::response(['ok' => true, 'uuid' => $aceptacion->uuid])]);
+        $this->getJson($url, $headers)->assertOk()->assertJsonPath('ticket.accepted_tour', self::GUION_RECARGO);
+        $this->postJson($url . '/tour', self::GUION_RECARGO + ['expected_message_id' => $aceptacion->id], $headers)
+            ->assertOk()->assertJsonPath('uuid', $aceptacion->uuid);
+        Http::assertSent(function ($request) use ($aceptacion) {
+            return $request->method() === 'POST' && $request->url() === self::PUENTE && $request['user_id'] === 33
+                && $request['uuid'] === $aceptacion->uuid && $request['tema'] === 'aplicar_recargo_venta'
+                && $request['textos'] === self::GUION_RECARGO['textos'];
+        });
+    }
+
+    /** @dataProvider disponibilidad_recargos_web */
+    public function test_erp_solo_invita_al_tour_de_recargos_cuando_empresa_confirma_disponibilidad(int $estado, array $respuesta, bool $disponible): void
+    {
+        $cliente = $this->cliente();
+        $body = $this->mensaje_erp($cliente);
+        $body['body'] = '¿Cómo aplico el recargo que ya tengo?';
+        $this->postJson(self::INBOUND, $body, ['X-Admin-Api-Key' => 'clave-inbound'])->assertCreated();
+        Http::fake([
+            self::PUENTE . '/recargos/disponibilidad*' => Http::response($respuesta, $estado),
+            'empresa-tours.test/api/admin-sync/support/messages' => Http::response(['ok' => true]),
+        ]);
+        $texto = "Elegí el recargo en Vender.\nhttps://recursos.comerciocity.com/?v=T11.34";
+        $this->mock(SupportAiSuggestionService::class)->shouldReceive('generate')->once()->andReturn([
+            'suggested_message' => $texto . "\n\n" . SupportTourService::INVITACION, 'tour' => self::GUION_RECARGO,
+        ]);
+        app()->call([Queue::pushed(SendSupportAiSuggestion::class)->first(), 'handle']);
+
+        $invitacion = $this->respuesta_erp($body);
+        $this->assertSame($texto . ($disponible ? "\n\n" . SupportTourService::INVITACION : ''), $invitacion->body);
+        $this->assertEquals($disponible ? self::GUION_RECARGO : null, $invitacion->erp_auto_reply['tour_invitation'] ?? null);
+        Http::assertSentCount(2);
+        Http::assertSent(function ($request) {
+            return $request->method() === 'GET' && $request->url() === self::PUENTE . '/recargos/disponibilidad?user_id=17'
+                && $request->hasHeader('X-Admin-Api-Key', 'clave-empresa');
+        });
+    }
+
+    public function disponibilidad_recargos_web(): array
+    {
+        return [
+            'habilitado' => [200, ['available' => true], true],
+            'sin permiso o catálogo' => [200, ['available' => false], false],
+            'ERP anterior' => [404, [], false],
+        ];
     }
 
     /** @dataProvider respuestas_sin_consentimiento */

@@ -164,16 +164,24 @@ class SupportAiSuggestionDeliveryService
                 ]);
             }
 
-            $invitacion = $tour !== null && SupportTourService::tiene_invitacion($body) ? $tour : null;
-            if ($invitacion === null && $tour !== null) {
+            $invitacion = null;
+            if (SupportTourService::tiene_invitacion($body)) {
+                if ($tour !== null && ($tour['tema'] !== SupportTourService::TEMA_APLICAR_RECARGO
+                    || app(SupportTourService::class)->recargos_disponibles($ticket, $entrante))) {
+                    $invitacion = $tour;
+                } else {
+                    $body = SupportTourService::quitar_invitacion($body);
+                }
+            } elseif ($tour !== null) {
                 $resultado = app(SupportTourService::class)->ofrecer($ticket, $entrante, $tour);
                 if ($resultado['ok']) {
                     $body .= "\n\n" . SupportTourService::AVISO;
                 } elseif (! in_array($resultado['code'], ['tour_consent_required', 'tour_invitation_mismatch'], true)) {
                     $body .= "\n\nNo pude confirmar que Robotito quedara disponible. Podés seguir los pasos que te pasé antes.";
                 }
-            } elseif ($invitacion === null) {
-                $body = SupportTourService::quitar_invitacion($body);
+            }
+            if (trim($body) === '') {
+                return null;
             }
             $mensaje->body = $body;
             $this->preparar_erp_message($mensaje, $invitacion);

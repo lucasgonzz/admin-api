@@ -19,6 +19,7 @@ class SupportTourService
     public const AVISO = 'Te mandé a Robotito a tu sistema para que te lo muestre. Tocá su aviso en la barra de navegación para empezar.';
 
     public const TEMA_REVERTIR_IMPORTACION = 'revertir_importacion_articulos';
+    public const TEMA_APLICAR_RECARGO = 'aplicar_recargo_venta';
     public const MAX_IMPORT_HISTORY_ID = 9007199254740991;
 
     public const TEMAS = [
@@ -27,6 +28,7 @@ class SupportTourService
         'buscar_articulo_codigo' => 1,
         'centro_recursos' => 2,
         self::TEMA_REVERTIR_IMPORTACION => 3,
+        self::TEMA_APLICAR_RECARGO => 2,
     ];
 
     public function __construct(ClientEmpresaApiUrlResolver $urls)
@@ -168,30 +170,35 @@ class SupportTourService
         return $this->buscar_importaciones($ticket, $persona ?? (int) optional($ticket->client)->user_id, $import_history_id) !== [];
     }
 
-    private function buscar_importaciones(SupportTicket $ticket, int $persona, ?int $import_history_id): array
+    public function recargos_disponibles(SupportTicket $ticket, SupportMessage $entrante): bool
     {
-        $ticket->loadMissing('client');
-        $cliente = $ticket->client;
-        if ($cliente === null || ! $cliente->is_active || $persona < 1) {
-            return [];
+        if ($ticket->source === 'whatsapp') {
+            $persona = $this->destinatario_whatsapp($ticket, $entrante);
+        } else {
+            $persona = (int) $ticket->client_user_id;
         }
-        $url = $this->urls->admin_sync_url($cliente, self::PATH . '/importaciones/candidatas');
-        if ($url === '' || trim((string) $cliente->api_key) === '') {
-            return [];
+        if ($persona === false || ($persona !== null && $persona < 1)) {
+            return false;
         }
 
+        // Un dueño de WhatsApp ya verificado se resuelve en Empresa, como al enviarle el tour.
+        $query = $persona === null ? [] : ['user_id' => $persona];
+        $respuesta = $this->consultar_empresa($ticket, '/recargos/disponibilidad', $query);
+
+        return ($respuesta['available'] ?? null) === true;
+    }
+
+    private function buscar_importaciones(SupportTicket $ticket, int $persona, ?int $import_history_id): array
+    {
+        if ($persona < 1) {
+            return [];
+        }
         $query = ['user_id' => $persona];
         if ($import_history_id !== null) {
             $query['import_history_id'] = $import_history_id;
         }
-        try {
-            $respuesta = $this->http($cliente)->get($url, $query);
-        } catch (ConnectionException $exception) {
-            return [];
-        }
-
-        $modelos = $respuesta->json('model');
-        if (! $respuesta->successful() || ! is_array($modelos)) {
+        $modelos = $this->consultar_empresa($ticket, '/importaciones/candidatas', $query)['model'] ?? null;
+        if (! is_array($modelos)) {
             return [];
         }
 
@@ -205,6 +212,28 @@ class SupportTourService
             $candidatas[] = array_intersect_key($modelo, array_flip(['id', 'created_at', 'provider_id', 'provider_name']));
         }
         return $candidatas;
+    }
+
+    private function consultar_empresa(SupportTicket $ticket, string $ruta, array $query): array
+    {
+        $ticket->loadMissing('client');
+        $cliente = $ticket->client;
+        if ($cliente === null || ! $cliente->is_active || trim((string) $cliente->api_key) === '') {
+            return [];
+        }
+        $url = $this->urls->admin_sync_url($cliente, self::PATH . $ruta);
+        if ($url === '') {
+            return [];
+        }
+
+        try {
+            $respuesta = $this->http($cliente)->get($url, $query);
+        } catch (ConnectionException $exception) {
+            return [];
+        }
+
+        $datos = $respuesta->json();
+        return $respuesta->successful() && is_array($datos) ? $datos : [];
     }
 
     /** El mensaje entrante es la clave idempotente y fija el destinatario. */
