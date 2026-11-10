@@ -13,6 +13,7 @@ use App\Services\SupportAiSuggestionDraftService;
 use App\Services\SupportAiSuggestionDeliveryService;
 use App\Services\SupportAiSuggestionScheduler;
 use App\Services\SupportAiSuggestionService;
+use App\Services\SupportDynamicTourService;
 use App\Services\EscalationPushNotificationService;
 use App\Services\SupportEscalationWhatsappService;
 use App\Services\SupportTourService;
@@ -23,6 +24,7 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Symfony\Component\HttpKernel\Exception\HttpException;
 
 /**
  * Genera sugerencia de Claude tras un mensaje entrante de WhatsApp (si la configuración está activa).
@@ -120,13 +122,35 @@ class SendSupportAiSuggestion implements ShouldQueue
         }
 
         $tour_aceptado = null;
+        $solicitud_aceptada = false;
         if ($ticket->source === 'erp' && ! $ticket->requiere_verificacion_mensajes) {
             $entrante = $ticket->messages()->find($this->erp_message_id);
             if ($entrante !== null) {
-                $tour_aceptado = app(SupportTourService::class)->guion_aceptado($ticket, $entrante);
+                $tours = app(SupportTourService::class);
+                $solicitud_aceptada = $tours->solicitud_aceptada($ticket, $entrante) !== null;
+                $tour_aceptado = $solicitud_aceptada ? null : $tours->guion_aceptado($ticket, $entrante);
             }
         }
-        if ($tour_aceptado === null) {
+        if ($solicitud_aceptada) {
+            try {
+                $preparado = app(SupportDynamicTourService::class)->preparar((int) $ticket->id, $this->erp_message_id, function (SupportTicket $vigente) use ($scheduler) {
+                    abort_unless($scheduler->is_schedule_token_current($this->ticket_id, $this->schedule_token)
+                        && $vigente->source === 'erp' && $vigente->status === 'open' && $vigente->claude_auto_reply
+                        && ! $vigente->agentes_erp && ! \App\Services\SupportCodexSettings::manages($vigente)
+                        && SupportAiSettings::is_suggestions_enabled(), 409, 'La atención de soporte cambió.');
+                });
+            } catch (HttpException $exception) {
+                if ($exception->getStatusCode() !== 409) {
+                    throw $exception;
+                }
+                return;
+            }
+            if (($preparado['code'] ?? null) === 'tour_planning') {
+                return;
+            }
+            $result = ['suggested_message' => $preparado['ok'] ? SupportTourService::AVISO
+                : 'No pude confirmar que Robotito quedara disponible. Podés seguir los pasos que te pasé antes.'];
+        } elseif ($tour_aceptado === null) {
             event(new SupportAiSuggestionGenerating($ticket->id));
             $result = $suggestion_service->generate($ticket);
         } else {
@@ -245,7 +269,8 @@ class SendSupportAiSuggestion implements ShouldQueue
         }
 
         $tour = $ticket->source === 'erp' ? SupportTourService::guion($result['tour'] ?? null) : null;
-        $this->entregar_o_dejar_en_borrador($ticket, $suggested_message, $delivery_service, $draft_service, $tour);
+        $solicitud_tour = $ticket->source === 'erp' && ($result['tour_requested'] ?? null) === true;
+        $this->entregar_o_dejar_en_borrador($ticket, $suggested_message, $delivery_service, $draft_service, $tour, $solicitud_tour);
     }
 
     /**
@@ -272,7 +297,8 @@ class SendSupportAiSuggestion implements ShouldQueue
         string $suggested_message,
         SupportAiSuggestionDeliveryService $delivery_service,
         SupportAiSuggestionDraftService $draft_service,
-        ?array $tour = null
+        ?array $tour = null,
+        bool $solicitud_tour = false
     ): bool {
         if ((bool) $ticket->requiere_verificacion_mensajes) {
             // create_draft() con demora 0 deja ai_auto_send_at en null: el borrador espera.
@@ -293,7 +319,7 @@ class SendSupportAiSuggestion implements ShouldQueue
 
         if ($delay <= 0) {
             if ($ticket->source === 'erp') {
-                $delivery_service->deliver_erp_auto_reply($ticket, $suggested_message, $this->erp_message_id, $tour);
+                $delivery_service->deliver_erp_auto_reply($ticket, $suggested_message, $this->erp_message_id, $tour, $solicitud_tour);
             } else {
                 $delivery_service->deliver_text_reply($ticket, $suggested_message);
             }
@@ -301,7 +327,7 @@ class SendSupportAiSuggestion implements ShouldQueue
             return false;
         }
 
-        $draft_message = $this->guardar_borrador($draft_service, $ticket, $suggested_message, $delay, $tour);
+        $draft_message = $this->guardar_borrador($draft_service, $ticket, $suggested_message, $delay, $tour, $solicitud_tour);
         if ($draft_message === null) {
             return false;
         }
@@ -316,13 +342,13 @@ class SendSupportAiSuggestion implements ShouldQueue
         return true;
     }
 
-    private function guardar_borrador(SupportAiSuggestionDraftService $draft_service, SupportTicket $ticket, string $body, int $delay, ?array $tour): ?SupportMessage
+    private function guardar_borrador(SupportAiSuggestionDraftService $draft_service, SupportTicket $ticket, string $body, int $delay, ?array $tour, bool $solicitud_tour = false): ?SupportMessage
     {
         if ($ticket->source !== 'erp') {
             return $draft_service->create_draft($ticket, $body, $delay);
         }
 
-        return DB::transaction(function () use ($draft_service, $ticket, $body, $delay, $tour) {
+        return DB::transaction(function () use ($draft_service, $ticket, $body, $delay, $tour, $solicitud_tour) {
             $ticket = SupportTicket::lockForUpdate()->find($ticket->id);
             if ($ticket === null || $ticket->status !== 'open' || ! $ticket->claude_auto_reply
                 || $ticket->agentes_erp || \App\Services\SupportCodexSettings::manages($ticket)
@@ -334,8 +360,11 @@ class SendSupportAiSuggestion implements ShouldQueue
             if ($ticket->requiere_verificacion_mensajes) {
                 $body = SupportTourService::quitar_invitacion($body);
             }
-            return $draft_service->create_draft($ticket, $body, $delay, function (SupportMessage $borrador) use ($delay, $tour) {
+            return $draft_service->create_draft($ticket, $body, $delay, function (SupportMessage $borrador) use ($delay, $tour, $solicitud_tour) {
                 $borrador->erp_auto_reply = ['message_id' => $this->erp_message_id, 'tour' => $delay > 0 ? $tour : null];
+                if ($delay > 0 && $solicitud_tour) {
+                    $borrador->erp_auto_reply = $borrador->erp_auto_reply + ['tour_requested' => true];
+                }
                 $borrador->save();
             });
         });

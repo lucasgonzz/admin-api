@@ -81,9 +81,9 @@ class SupportAiSuggestionDeliveryService
         return $message;
     }
 
-    public function deliver_erp_auto_reply(SupportTicket $ticket, string $body, int $expected_message_id, ?array $tour): ?SupportMessage
+    public function deliver_erp_auto_reply(SupportTicket $ticket, string $body, int $expected_message_id, ?array $tour, bool $solicitud_tour = false): ?SupportMessage
     {
-        return $this->deliver_erp_auto($ticket, $body, $expected_message_id, $tour, null);
+        return $this->deliver_erp_auto($ticket, $body, $expected_message_id, $tour, null, $solicitud_tour);
     }
 
     public function deliver_erp_auto_draft(SupportMessage $borrador, SupportTicket $ticket): ?SupportMessage
@@ -94,7 +94,7 @@ class SupportAiSuggestionDeliveryService
         }
 
         return $this->deliver_erp_auto($ticket, (string) $borrador->body, (int) $datos['message_id'],
-            SupportTourService::guion($datos['tour'] ?? null), (int) $borrador->id);
+            SupportTourService::guion($datos['tour'] ?? null), (int) $borrador->id, ($datos['tour_requested'] ?? null) === true);
     }
 
     public function approve_erp_draft(SupportTicket $ticket, int $draft_id, ?string $edited_body, int $admin_id): SupportMessage
@@ -134,9 +134,9 @@ class SupportAiSuggestionDeliveryService
         return $this->sincronizar_erp_message($mensaje);
     }
 
-    private function deliver_erp_auto(SupportTicket $ticket, string $body, int $expected_message_id, ?array $tour, ?int $draft_id): ?SupportMessage
+    private function deliver_erp_auto(SupportTicket $ticket, string $body, int $expected_message_id, ?array $tour, ?int $draft_id, bool $solicitud_tour): ?SupportMessage
     {
-        $mensaje = DB::transaction(function () use ($ticket, $body, $expected_message_id, $tour, $draft_id) {
+        $mensaje = DB::transaction(function () use ($ticket, $body, $expected_message_id, $tour, $draft_id, $solicitud_tour) {
             $ticket = SupportTicket::lockForUpdate()->find($ticket->id);
             if ($ticket === null || $ticket->source !== 'erp' || $ticket->status !== 'open'
                 || $ticket->agentes_erp || SupportCodexSettings::manages($ticket)
@@ -166,9 +166,10 @@ class SupportAiSuggestionDeliveryService
 
             $invitacion = null;
             if (SupportTourService::tiene_invitacion($body)) {
-                if ($tour !== null && ($tour['tema'] !== SupportTourService::TEMA_APLICAR_RECARGO
-                    || app(SupportTourService::class)->recargos_disponibles($ticket, $entrante))) {
-                    $invitacion = $tour;
+                if ($solicitud_tour) {
+                    $invitacion = ['tour_requested' => true];
+                } elseif ($tour !== null) {
+                    $invitacion = ['tour_invitation' => $tour];
                 } else {
                     $body = SupportTourService::quitar_invitacion($body);
                 }
@@ -196,7 +197,7 @@ class SupportAiSuggestionDeliveryService
     {
         $message->is_ai_suggestion_draft = false;
         $message->ai_auto_send_at = null;
-        $message->erp_auto_reply = $invitacion === null ? null : ['tour_invitation' => $invitacion];
+        $message->erp_auto_reply = $invitacion;
         $message->delivered_at = now();
         $message->remote_delivery_status = 'not_received';
         $message->save();

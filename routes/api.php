@@ -414,6 +414,7 @@ Route::middleware('claude.task.key')
             ->whereNumber('id');
         Route::post('support-codex/tickets/{id}/reply', 'Api\ClaudeSupportCodexController@reply');
         Route::post('support-codex/tickets/{id}/tour', 'Api\SupportTourController@ofrecer')->whereNumber('id');
+        Route::post('support-codex/tickets/{id}/tour/prepare', 'Api\SupportTourController@preparar')->whereNumber('id');
         Route::post('support-codex/tickets/{id}/release', 'Api\ClaudeSupportCodexController@release');
         Route::post('support-codex/tickets/{id}/resume', 'Api\ClaudeSupportCodexController@resume');
         Route::post('support-codex/tickets/{id}/mission-started', 'Api\ClaudeSupportCodexController@mission_started');

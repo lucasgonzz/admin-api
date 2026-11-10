@@ -128,14 +128,6 @@ class SupportAiSuggestionService
                         'type' => 'object', 'properties' => ['consulta' => ['type' => 'string']], 'required' => ['consulta'],
                     ],
                 ];
-                $tools[] = [
-                    'name' => 'buscar_importaciones_reversibles',
-                    'description' => 'Consulta importaciones reversibles de artículos del comercio del ticket. Usá el ID solo si la conversación identifica ese ID.',
-                    'input_schema' => [
-                        'type' => 'object',
-                        'properties' => ['import_history_id' => ['type' => 'integer', 'minimum' => 1, 'maximum' => SupportTourService::MAX_IMPORT_HISTORY_ID]],
-                    ],
-                ];
             }
             $messages = [
                 ['role' => 'user', 'content' => $this->build_user_blocks($ticket, $user_content)],
@@ -155,7 +147,6 @@ class SupportAiSuggestionService
              * ya está documentado en LeadAiService::execute_tool(). */
             $leidas = [];
             $videos = [];
-            $importaciones = [];
 
             while ($iterations < self::MAX_TOOL_ITERATIONS) {
                 $iterations++;
@@ -213,7 +204,7 @@ class SupportAiSuggestionService
                     ];
 
                     // Procesar cada tool_use y construir los tool_result.
-                    $tool_results = $this->execute_tool_calls($content_blocks, $ticket, $leidas, $videos, $importaciones);
+                    $tool_results = $this->execute_tool_calls($content_blocks, $ticket, $leidas, $videos);
 
                     // Agregar los resultados como mensaje de user.
                     $messages[] = [
@@ -302,11 +293,9 @@ class SupportAiSuggestionService
                 if (is_string($codigo) && in_array($codigo, $videos, true)) {
                     $result['suggested_message'] .= "\n\nAcá tenés el video del Centro de recursos: " . SupportVideoResource::enlace($codigo);
                 }
-                $tour = SupportTourService::guion($parsed['tour'] ?? null);
-                if ($result['suggested_message'] !== '' && ! $should_close && ! $ticket->requiere_verificacion_mensajes && $tour !== null
-                    && ($parsed['invitar_tour'] ?? null) === true
-                    && (! isset($tour['import_history_id']) || in_array($tour['import_history_id'], $importaciones, true))) {
-                    $result['tour'] = $tour;
+                if ($result['suggested_message'] !== '' && ! $should_close && ! $ticket->requiere_verificacion_mensajes
+                    && ($parsed['invitar_tour'] ?? null) === true) {
+                    $result['tour_requested'] = true;
                     $result['suggested_message'] .= "\n\n" . SupportTourService::INVITACION;
                 }
             }
@@ -386,16 +375,8 @@ Respondé SOLO en JSON con este formato exacto:
 
 Respondé en un solo mensaje de soporte sin separadores. Para una consulta de uso, explicá el paso a paso en suggested_message. Si hay un video que ayuda, buscá con buscar_video_de_ayuda, elegí un resultado pertinente y agregá al JSON la clave opcional video_codigo con su código exacto. El sistema agrega el enlace. No escribas ni inventes el enlace en suggested_message.
 
-Si un recorrido coincide con una consulta de uso, agregá al JSON la clave opcional tour como objeto {"tema":"...","titulo":"...","textos":["..."]}. Cuando corresponda invitar a un recorrido, agregá invitar_tour: true y explicá la tarea por escrito. El sistema suma la pregunta de Robotito al final. No agregues otra pregunta de sí o no en el mismo mensaje.
-Si la persona rechaza, agradece sin aceptar, plantea otra duda o la respuesta es ambigua, no mandes ni repitas la invitación por la misma tarea. No prometas ni digas que enviaste a Robotito en suggested_message.
-Estos son los recorridos y el orden de sus pasos:
-- crear_ticket: abrir Soporte, abrir un nuevo ticket, escribir y enviar la consulta.
-- buscar_articulo_nombre: abrir el buscador en Vender, escribir y buscar por nombre, revisar resultados.
-- buscar_articulo_codigo: buscar en Vender por el campo del código de barras.
-- centro_recursos: abrir Tutoriales, buscar un tema en el Centro de recursos.
-- aplicar_recargo_venta: solo si la persona quiere aplicar un recargo ya configurado a una venta en curso. Los pasos son 1) elegir el interruptor del recargo en el panel Recargos de Vender y 2) revisar el total recalculado antes de guardar. El diseño predeterminado muestra el panel en Cierre y opciones. Robotito abre la etapa donde está configurado el panel. No uses esta guía para crear recargos ni para recargos de cuotas, medios de pago o sucursales. Explicá por texto y compartí el video pertinente. Si pregunta cómo aplicar el recargo, ofrecé la guía aunque ya se lo hayas explicado antes, siempre que todavía no la hayas ofrecido. Si la rechazó, no repitas la invitación. La invitación tiene que ser la única pregunta en esa respuesta. El sistema verifica si la guía está disponible para esa cuenta antes de invitar.
-- revertir_importacion_articulos: solo para quien quiere revertir toda la importación y cuando eso coincide con la orientación escrita. Si quiere corregir solo los precios, no le ofrezcas revertir la importación completa. En Listado tocar la flecha de Crear, tocar Historial de importaciones dentro de Importación, ubicar Revertir o Reintentar en la fila exacta y revisar la confirmación. Incluí import_history_id como número entero. Verificalo con buscar_importaciones_reversibles en este turno y cruzalo con una referencia inequívoca de la persona (ID o fecha, hora y proveedor que distingan una sola fila). Nombrá la fecha y hora confirmadas y el proveedor, si corresponde, tanto en el mensaje como en el título del recorrido para que la persona sepa cuál está aceptando. La primera fila y la única candidata visible por sí solas no identifican la importación. Si hay ambigüedad o la importación no está disponible, pedí solo el dato que falta o explicá cómo verificarlo. No ofrezcas una guía a otra fila.
-Los textos son opcionales. Si los personalizás, incluí un texto plano de hasta 240 caracteres por paso, en ese orden. Si la persona pregunta mientras recorre un tour, resolvé la duda y ofrecé una guía reformulada si ayuda. Para consultas de uso dejá should_close en false. El sistema avisa si el envío se confirma.
+En cualquier consulta sobre cómo hacer una tarea en el sistema, agregá al JSON invitar_tour: true después de explicar el procedimiento. El sistema suma la pregunta de Robotito al final, también si no conocés un recorrido fijo. No prepares un plan ni escribas la pregunta en suggested_message. La invitación tiene que ser la única pregunta en la respuesta, salvo que todavía te falte un dato indispensable para entender qué quiere hacer la persona.
+Si ya se lo explicaste y vuelve a preguntar, ofrecé la guía cuando no se la hayas ofrecido. Si rechaza o agradece sin aceptar, no repitas la invitación. Para consultas de uso dejá should_close en false. El sistema espera el consentimiento y avisa si confirmó el envío. No prometas que ya se envió Robotito.
 PROMPT;
     }
 
@@ -808,7 +789,7 @@ USER;
      * Ejecuta las tool calls de un bloque de contenido del asistente y retorna los tool_result.
      *
      * @param array<int, mixed>  $content_blocks Bloques content devueltos por Claude.
-     * @param SupportTicket      $ticket         Para limitar la consulta de importaciones al comercio.
+     * @param SupportTicket      $ticket         Para limitar las herramientas al canal.
      * @param array<int, string> $leidas         Se le agregan los paths leídos CON ÉXITO. Es la
      *                                           evidencia contra la que el gate verifica las
      *                                           citas del agente: un path cuya lectura falló no
@@ -816,7 +797,7 @@ USER;
      *
      * @return array<int, array<string, mixed>>
      */
-    protected function execute_tool_calls(array $content_blocks, SupportTicket $ticket, array &$leidas, array &$videos, array &$importaciones): array
+    protected function execute_tool_calls(array $content_blocks, SupportTicket $ticket, array &$leidas, array &$videos): array
     {
         $tool_results = [];
 
@@ -842,13 +823,6 @@ USER;
                     $hallados = app(SupportVideoResource::class)->buscar((string) ($tool_input['consulta'] ?? ''));
                     $videos = array_merge($videos, array_column($hallados, 'codigo'));
                     $content = json_encode($hallados, JSON_UNESCAPED_UNICODE);
-                } elseif ($ticket->source === 'erp' && $tool_name === 'buscar_importaciones_reversibles') {
-                    $id = $tool_input['import_history_id'] ?? null;
-                    $halladas = $id === null || (is_int($id) && $id > 0 && $id <= SupportTourService::MAX_IMPORT_HISTORY_ID)
-                        ? app(SupportTourService::class)->importaciones_candidatas($ticket, $id)
-                        : [];
-                    $importaciones = array_merge($importaciones, array_column($halladas, 'id'));
-                    $content = json_encode($halladas, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
                 } else {
                     $content = 'Tool desconocida: '.$tool_name;
                 }

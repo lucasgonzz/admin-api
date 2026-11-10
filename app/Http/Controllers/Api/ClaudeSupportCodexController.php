@@ -232,6 +232,8 @@ class ClaudeSupportCodexController extends Controller
             'action' => 'required|in:responder,solicitar_confirmacion,cerrar,escalar,pedir_revision',
             'body' => 'required|string|max:3500',
             'tour_invitation' => 'sometimes|required|array|prohibited_unless:action,responder',
+            'tour_requested' => 'sometimes|boolean|prohibited_unless:action,responder',
+            'tour_import_history_id' => 'sometimes|required|integer|min:1|max:' . \App\Services\SupportTourService::MAX_IMPORT_HISTORY_ID,
             'attachment' => 'sometimes|required|array',
             'attachment.filename' => 'required_with:attachment|string|max:160',
             'attachment.content_base64' => 'required_with:attachment|string|max:' . \App\Services\SupportCodexOutboundAttachment::MAX_ENCODED_LENGTH,

@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
 use App\Services\SupportCodexService;
+use App\Services\SupportDynamicTourService;
 use App\Services\SupportTourService;
 use App\Services\WhatsappSessionWindowService;
 use Illuminate\Http\Request;
@@ -17,7 +18,7 @@ class SupportTourController extends Controller
     {
         $data = $request->validate(['expected_message_id' => 'required|integer|min:1']);
         $guion = $tours::guion($request->all());
-        if ($guion === null) {
+        if ($guion === null || $guion['tema'] === SupportTourService::TEMA_DINAMICO) {
             return response()->json(['ok' => false, 'code' => 'tour_invalid', 'message' => 'El recorrido o sus textos son inválidos.'], 422);
         }
 
@@ -37,6 +38,23 @@ class SupportTourController extends Controller
 
             $entrante = SupportMessage::findOrFail($data['expected_message_id']);
             return $tours->ofrecer($ticket, $entrante, $guion);
+        });
+
+        return $this->respuesta($resultado);
+    }
+
+    public function preparar(Request $request, $id, SupportCodexService $soporte, SupportDynamicTourService $tours)
+    {
+        $data = $request->validate(['expected_message_id' => 'required|integer|min:1']);
+        $resultado = $tours->preparar((int) $id, (int) $data['expected_message_id'], function (SupportTicket $ticket) use ($request, $data, $soporte) {
+            $soporte->assert_current($ticket, [
+                'lease_token' => (string) $request->header('X-Support-Lease-Token'),
+                'expected_message_id' => $data['expected_message_id'],
+                'action' => 'responder',
+            ]);
+            abort_if($ticket->source === 'whatsapp'
+                && ! app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone)['open'],
+                422, 'window_expired: Venció la ventana de WhatsApp.');
         });
 
         return $this->respuesta($resultado);

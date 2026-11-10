@@ -38,9 +38,19 @@ class ToursDeSoporteTest extends TestCase
     private const PUENTE = 'https://empresa-tours.test/api/admin-sync/support/tours';
     private const INBOUND = '/api/inbound/support/messages';
     private const GUION = ['tema' => 'crear_ticket', 'titulo' => 'Crear un ticket'];
-    private const GUION_RECARGO = [
-        'tema' => 'aplicar_recargo_venta', 'titulo' => 'Aplicar un recargo a la venta',
-        'textos' => ['Elegí el recargo que querés aplicar.', 'Revisá el total antes de guardar.'],
+    private const GUION_DINAMICO = [
+        'tema' => 'guia_dinamica', 'titulo' => 'Aplicar un recargo en Vender',
+        'pasos' => [
+            ['clave' => 'vender.recargos', 'texto' => 'Activá el recargo que corresponde a esta venta.'],
+            ['clave' => 'vender.total', 'texto' => 'Revisá el total antes de guardar.'],
+        ],
+    ];
+    private const CATALOGO_DINAMICO = [
+        'available' => true, 'pasos' => [
+            ['clave' => 'vender.recargos', 'descripcion' => 'Interruptores de recargos de venta'],
+            ['clave' => 'vender.total', 'descripcion' => 'Total de la venta'],
+            ['clave' => 'indicacion', 'descripcion' => 'Indicación textual en pantalla'],
+        ],
     ];
     private const GUION_IMPORTACION = [
         'tema' => 'revertir_importacion_articulos',
@@ -141,108 +151,123 @@ class ToursDeSoporteTest extends TestCase
         Http::assertSentCount(1);
     }
 
-    public function test_martin_conserva_texto_y_video_si_empresa_no_admite_el_tour_de_recargos(): void
+    public function test_martin_invita_sin_guion_y_solo_llama_deepseek_una_vez_despues_del_si(): void
     {
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
         [$ticket, $consulta] = $this->ticket_whatsapp($this->cliente(), '+5493419843001', null, false);
+        $consulta->update(['body' => '¿Cómo aplico un recargo que ya existe?']);
         $headers = $this->reserva($ticket, $consulta);
-        $texto = "En Vender, elegí el recargo en Cierre y opciones.\nhttps://recursos.comerciocity.com/?v=T11.34";
-        $payload = [
-            'lease_token' => $headers['X-Support-Lease-Token'], 'operation_id' => 'invitar-recargos-' . $consulta->id,
-            'expected_message_id' => $consulta->id, 'action' => 'responder',
-            'body' => $texto . "\n\n" . SupportTourService::INVITACION, 'tour_invitation' => self::GUION_RECARGO,
-        ];
-        Http::fake([self::PUENTE . '/recargos/disponibilidad' => Http::response([], 404)]);
-        $this->mock(SupportWhatsappOpenerService::class)->shouldReceive('deliver_follow_up')->once()
-            ->andReturnUsing(function ($ticket, $message) use ($texto) {
-                $this->assertSame($texto, $message->body);
-                $this->assertNull($message->erp_auto_reply);
-                return ['delivery' => 'sent'];
-            });
-        $url = self::CLAUDE . $ticket->id . '/reply';
-        $this->postJson($url, $payload, $headers)->assertStatus(422)
-            ->assertJsonPath('message', 'tour_target_unavailable: El sistema no confirmó que esa persona pueda usar el tour de recargos en Vender.');
-        $this->assertSame(0, $ticket->messages()->where('sender_type', 'admin')->count());
-
-        unset($payload['tour_invitation']);
-        $payload['body'] = $texto;
-        $this->postJson($url, $payload, $headers)->assertOk()->assertJsonPath('operation.status', 'sent');
-        Http::assertSentCount(1);
-        Http::assertSent(function ($request) {
-            return $request->method() === 'GET' && $request->url() === self::PUENTE . '/recargos/disponibilidad'
-                && $request->hasHeader('X-Admin-Api-Key', 'clave-empresa');
-        });
-    }
-
-    public function test_martin_verifica_recargos_para_el_empleado_y_envia_el_tour_despues_del_si(): void
-    {
-        $cliente = $this->cliente();
-        $empleado = ClientEmployee::create(['client_id' => $cliente->id, 'name' => 'Empleado', 'phone' => '3519843002', 'empresa_employee_id' => 33]);
-        [$ticket, $consulta] = $this->ticket_whatsapp($cliente, '+5493519843002', $empleado, false);
-        $headers = $this->reserva($ticket, $consulta);
-        Http::fake([self::PUENTE . '/recargos/disponibilidad*' => Http::response(['available' => true])]);
+        $url = self::CLAUDE . $ticket->id;
         $this->mock(SupportWhatsappOpenerService::class)->shouldReceive('deliver_follow_up')->once()
             ->andReturnUsing(function ($ticket, $message) {
-                $message->update(['whatsapp_message_id' => 'wamid.invitacion-recargos']);
+                $message->update(['whatsapp_message_id' => 'wamid.invitacion-dinamica']);
                 return ['delivery' => 'sent'];
             });
-        $url = self::CLAUDE . $ticket->id;
+        Http::fake([
+            self::PUENTE . '/catalogo' => Http::response(self::CATALOGO_DINAMICO),
+            'api.deepseek.com/*' => Http::response($this->respuesta_deepseek(self::GUION_DINAMICO)),
+            self::PUENTE => function ($request) {
+                return Http::response(['ok' => true, 'uuid' => $request['uuid']]);
+            },
+        ]);
+        $this->postJson($url . '/tour/prepare', ['expected_message_id' => $consulta->id], $headers)
+            ->assertStatus(409)->assertJsonPath('code', 'tour_consent_required');
         $this->postJson($url . '/reply', [
-            'lease_token' => $headers['X-Support-Lease-Token'], 'operation_id' => 'invitar-recargos-' . $consulta->id,
-            'expected_message_id' => $consulta->id, 'action' => 'responder',
-            'body' => "Buscá el panel Recargos en Vender.\n\n" . SupportTourService::INVITACION, 'tour_invitation' => self::GUION_RECARGO,
+            'lease_token' => $headers['X-Support-Lease-Token'], 'operation_id' => 'invitar-dinamico-' . $consulta->id,
+            'expected_message_id' => $consulta->id, 'action' => 'responder', 'tour_requested' => true,
+            'body' => "Elegí el recargo en Vender.\nhttps://recursos.comerciocity.com/?v=T11.34\n\n" . SupportTourService::INVITACION,
         ], $headers)->assertOk()->assertJsonPath('operation.status', 'sent');
-        Http::assertSentCount(1);
-        Http::assertSent(function ($request) {
-            return $request->method() === 'GET' && $request->url() === self::PUENTE . '/recargos/disponibilidad?user_id=33';
-        });
+        Http::assertNothingSent();
 
-        $aceptacion = $this->entrante_whatsapp($ticket, 'Sí, por favor.');
+        $aceptacion = $this->entrante_whatsapp($ticket, 'Sí, quiero hacer el tour.');
         $headers = $this->reserva($ticket, $aceptacion);
-        Http::fake([self::PUENTE => Http::response(['ok' => true, 'uuid' => $aceptacion->uuid])]);
-        $this->getJson($url, $headers)->assertOk()->assertJsonPath('ticket.accepted_tour', self::GUION_RECARGO);
-        $this->postJson($url . '/tour', self::GUION_RECARGO + ['expected_message_id' => $aceptacion->id], $headers)
-            ->assertOk()->assertJsonPath('uuid', $aceptacion->uuid);
+        $this->getJson($url, $headers)->assertOk()->assertJsonPath('ticket.capabilities.support_dynamic_tour', true)
+            ->assertJsonPath('ticket.accepted_tour_request', true)->assertJsonPath('ticket.accepted_tour', null);
+        for ($intento = 0; $intento < 2; $intento++) {
+            $this->postJson($url . '/tour/prepare', ['expected_message_id' => $aceptacion->id], $headers)
+                ->assertOk()->assertExactJson(['ok' => true, 'uuid' => $aceptacion->uuid]);
+        }
+        Http::assertSentCount(3);
+        Http::assertSent(function ($request) {
+            return $request->url() === 'https://api.deepseek.com/anthropic/v1/messages'
+                && $request->hasHeader('x-api-key', 'deepseek-prueba')
+                && strpos($request['messages'][0]['content'], 'Cómo aplico un recargo') !== false;
+        });
         Http::assertSent(function ($request) use ($aceptacion) {
-            return $request->method() === 'POST' && $request->url() === self::PUENTE && $request['user_id'] === 33
-                && $request['uuid'] === $aceptacion->uuid && $request['tema'] === 'aplicar_recargo_venta'
-                && $request['textos'] === self::GUION_RECARGO['textos'];
+            return $request->method() === 'POST' && $request->url() === self::PUENTE
+                && $request->hasHeader('X-Admin-Api-Key', 'clave-empresa')
+                && $request['uuid'] === $aceptacion->uuid && $request['pasos'] === self::GUION_DINAMICO['pasos'];
         });
     }
 
-    /** @dataProvider disponibilidad_recargos_web */
-    public function test_erp_solo_invita_al_tour_de_recargos_cuando_empresa_confirma_disponibilidad(int $estado, array $respuesta, bool $disponible): void
+    public function test_la_planificacion_no_entrega_un_tour_si_llega_otro_mensaje_mientras_deepseek_trabaja(): void
     {
-        $cliente = $this->cliente();
-        $body = $this->mensaje_erp($cliente);
-        $body['body'] = '¿Cómo aplico el recargo que ya tengo?';
-        $this->postJson(self::INBOUND, $body, ['X-Admin-Api-Key' => 'clave-inbound'])->assertCreated();
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
+        [$ticket, $consulta] = $this->ticket_whatsapp($this->cliente(), '+5493419843001', null, false);
+        $this->invitacion($ticket, self::GUION, ['erp_auto_reply' => ['tour_requested' => true]]);
+        $aceptacion = $this->entrante_whatsapp($ticket, 'Sí.');
+        $headers = $this->reserva($ticket, $aceptacion);
         Http::fake([
-            self::PUENTE . '/recargos/disponibilidad*' => Http::response($respuesta, $estado),
+            self::PUENTE . '/catalogo' => Http::response(self::CATALOGO_DINAMICO),
+            'api.deepseek.com/*' => function () use ($ticket) {
+                $this->entrante_whatsapp($ticket, 'Ya pude, gracias.');
+                return Http::response($this->respuesta_deepseek(self::GUION_DINAMICO));
+            },
+        ]);
+        $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare', ['expected_message_id' => $aceptacion->id], $headers)
+            ->assertStatus(409);
+        Http::assertSentCount(2);
+    }
+
+    /** @dataProvider disponibilidad_catalogo_dinamico */
+    public function test_el_agente_web_persiste_la_invitacion_sin_planear_y_actua_tras_el_si(bool $disponible): void
+    {
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
+        $body = $this->mensaje_erp($this->cliente());
+        $body['body'] = '¿Cómo aplico un recargo en Vender?';
+        $firma = ['X-Admin-Api-Key' => 'clave-inbound'];
+        $this->postJson(self::INBOUND, $body, $firma)->assertCreated();
+        $texto = "Elegí el recargo en Vender.\nhttps://recursos.comerciocity.com/?v=T11.34\n\n" . SupportTourService::INVITACION;
+        $this->mock(SupportAiSuggestionService::class)->shouldReceive('generate')->once()->andReturn([
+            'suggested_message' => $texto, 'tour_requested' => true,
+        ]);
+        Http::fake(['empresa-tours.test/api/admin-sync/support/messages' => Http::response(['ok' => true])]);
+        app()->call([Queue::pushed(SendSupportAiSuggestion::class)->first(), 'handle']);
+        Http::assertSentCount(1);
+        $invitacion = $this->respuesta_erp($body);
+        $this->assertSame($texto, $invitacion->body);
+        $this->assertSame(['tour_requested' => true], $invitacion->erp_auto_reply);
+
+        $aceptacion = array_replace($body, ['body' => 'Sí, por favor.', 'message_uuid' => (string) Str::uuid()]);
+        $this->postJson(self::INBOUND, $aceptacion, $firma)->assertCreated();
+        $this->mock(SupportAiSuggestionService::class)->shouldNotReceive('generate');
+        Http::fake([
+            self::PUENTE . '/catalogo*' => $disponible ? Http::response(self::CATALOGO_DINAMICO) : Http::response([], 404),
+            'api.deepseek.com/*' => Http::response($this->respuesta_deepseek(self::GUION_DINAMICO)),
+            self::PUENTE => Http::response(['ok' => true, 'uuid' => $aceptacion['message_uuid']]),
             'empresa-tours.test/api/admin-sync/support/messages' => Http::response(['ok' => true]),
         ]);
-        $texto = "Elegí el recargo en Vender.\nhttps://recursos.comerciocity.com/?v=T11.34";
-        $this->mock(SupportAiSuggestionService::class)->shouldReceive('generate')->once()->andReturn([
-            'suggested_message' => $texto . "\n\n" . SupportTourService::INVITACION, 'tour' => self::GUION_RECARGO,
-        ]);
-        app()->call([Queue::pushed(SendSupportAiSuggestion::class)->first(), 'handle']);
-
-        $invitacion = $this->respuesta_erp($body);
-        $this->assertSame($texto . ($disponible ? "\n\n" . SupportTourService::INVITACION : ''), $invitacion->body);
-        $this->assertEquals($disponible ? self::GUION_RECARGO : null, $invitacion->erp_auto_reply['tour_invitation'] ?? null);
-        Http::assertSentCount(2);
+        app()->call([Queue::pushed(SendSupportAiSuggestion::class)->last(), 'handle']);
+        Http::assertSentCount($disponible ? 4 : 2);
         Http::assertSent(function ($request) {
-            return $request->method() === 'GET' && $request->url() === self::PUENTE . '/recargos/disponibilidad?user_id=17'
-                && $request->hasHeader('X-Admin-Api-Key', 'clave-empresa');
+            return $request->method() === 'GET' && $request->url() === self::PUENTE . '/catalogo?user_id=17';
         });
+        $respuesta = $this->respuesta_erp($body);
+        if ($disponible) {
+            $this->assertSame(SupportTourService::AVISO, $respuesta->body);
+        } else {
+            $this->assertStringContainsString('No pude confirmar que Robotito', $respuesta->body);
+        }
     }
 
-    public function disponibilidad_recargos_web(): array
+    public function disponibilidad_catalogo_dinamico(): array
     {
-        return [
-            'habilitado' => [200, ['available' => true], true],
-            'sin permiso o catálogo' => [200, ['available' => false], false],
-            'ERP anterior' => [404, [], false],
-        ];
+        return ['actualizado' => [true], 'anterior' => [false]];
+    }
+
+    private function respuesta_deepseek(array $guion): array
+    {
+        return ['content' => [['type' => 'text', 'text' => json_encode($guion)]]];
     }
 
     /** @dataProvider respuestas_sin_consentimiento */
@@ -498,7 +523,8 @@ class ToursDeSoporteTest extends TestCase
         ]);
         $agente = $this->agente_documental();
         $respuesta = $agente->generate($ticket);
-        $this->assertSame(self::GUION, $respuesta['tour']);
+        $this->assertTrue($respuesta['tour_requested']);
+        $this->assertArrayNotHasKey('tour', $respuesta);
         $this->assertStringContainsString('https://recursos.comerciocity.com/?v=T0.4', $respuesta['suggested_message']);
         $this->assertStringContainsString(SupportTourService::INVITACION, $respuesta['suggested_message']);
         $this->assertStringNotContainsString('https://recursos.comerciocity.com/', $agente->generate($ticket)['suggested_message']);
@@ -508,44 +534,46 @@ class ToursDeSoporteTest extends TestCase
         });
     }
 
-    public function test_el_agente_web_solo_puede_invitar_a_un_objetivo_verificado_en_ese_turno(): void
+    /** @dataProvider verificacion_destino_dinamico */
+    public function test_robotito_solo_señala_la_importacion_que_empresa_confirma(bool $confirmada): void
     {
-        SupportCodexSettings::set_enabled(false);
-        config(['services.anthropic.api_key' => 'clave-falsa']);
-        $ticket = SupportTicket::create(['client_id' => $this->cliente()->id, 'client_user_id' => 17, 'source' => 'erp', 'status' => 'open']);
-        $ticket->messages()->create(['sender_type' => 'user', 'kind' => 'text', 'body' => 'Quiero revertir toda la importación 735.']);
-        $fin = [
-            'suggested_message' => 'En Listado abrí Historial de importaciones y buscá la carga del proveedor.',
-            'tipo_respuesta' => 'afirmacion_del_sistema', 'fuentes_kb' => ['manual_sistema/general/soporte-tecnico.md'],
-            'tour' => self::GUION_IMPORTACION, 'invitar_tour' => true,
-        ];
-        $tools = [
-            'stop_reason' => 'tool_use', 'content' => [
-                ['type' => 'tool_use', 'id' => 'manual', 'name' => 'get_manual_file', 'input' => ['path' => 'manual_sistema/general/soporte-tecnico.md']],
-                ['type' => 'tool_use', 'id' => 'importacion', 'name' => 'buscar_importaciones_reversibles', 'input' => ['import_history_id' => 735]],
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
+        [$ticket, $consulta] = $this->ticket_whatsapp($this->cliente(), '+5493419843001', null, false);
+        $consulta->update(['body' => 'Quiero revertir toda la importación del proveedor de esta mañana.']);
+        $this->invitacion($ticket, self::GUION, ['erp_auto_reply' => ['tour_requested' => true, 'tour_import_history_id' => 735]]);
+        $aceptacion = $this->entrante_whatsapp($ticket, 'Sí, por favor.');
+        $headers = $this->reserva($ticket, $aceptacion);
+        $catalogo = [
+            'available' => true, 'pasos' => [
+                ['clave' => 'indicacion', 'descripcion' => 'Indicación sin ancla'],
+                ['clave' => 'listado.revertir_importacion', 'descripcion' => 'Botón Revertir de la fila', 'requiere_destino' => true],
             ],
+            'destinos' => ['listado.revertir_importacion' => $confirmada ? [['id' => 735, 'created_at' => '2026-11-08 10:37:12']] : []],
         ];
-        $resultado = ['stop_reason' => 'end_turn', 'content' => [['type' => 'text', 'text' => json_encode($fin)]]];
-        Http::fakeSequence('api.anthropic.com/*')->push($tools)->push($resultado)->push($tools)->push($resultado);
-        Http::fakeSequence(self::PUENTE . '/importaciones/candidatas*')->push(['model' => [
-            ['id' => 735, 'created_at' => '2026-11-08 10:37:12', 'provider_name' => 'Proveedor ejemplo', 'private' => 'No compartir'],
-        ]])->push(['model' => [
-            ['id' => 736, 'created_at' => '2026-11-08 11:20:00', 'provider_name' => 'Otro proveedor'],
-        ]]);
-
-        $agente = $this->agente_documental();
-        $respuesta = $agente->generate($ticket);
-        $this->assertSame(self::GUION_IMPORTACION, $respuesta['tour']);
-        $this->assertStringContainsString(SupportTourService::INVITACION, $respuesta['suggested_message']);
-        $respuesta = $agente->generate($ticket);
-        $this->assertArrayNotHasKey('tour', $respuesta);
-        $this->assertStringNotContainsString(SupportTourService::INVITACION, $respuesta['suggested_message']);
+        $guion = [
+            'tema' => 'guia_dinamica', 'titulo' => 'Revertir importación',
+            'pasos' => [['clave' => 'listado.revertir_importacion', 'texto' => 'Revisá el botón Revertir de la fila.', 'destino' => 735]],
+        ];
+        Http::fake([
+            self::PUENTE . '/catalogo*' => Http::response($catalogo),
+            'api.deepseek.com/*' => Http::response($this->respuesta_deepseek($guion)),
+            self::PUENTE => Http::response(['ok' => true, 'uuid' => $aceptacion->uuid]),
+        ]);
+        $respuesta = $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare', ['expected_message_id' => $aceptacion->id], $headers);
+        if ($confirmada) {
+            $respuesta->assertOk()->assertJsonPath('uuid', $aceptacion->uuid);
+        } else {
+            $respuesta->assertStatus(422)->assertJsonPath('code', 'tour_plan_unavailable');
+        }
+        Http::assertSentCount($confirmada ? 3 : 2);
         Http::assertSent(function ($request) {
-            return strpos($request->url(), '/importaciones/candidatas?user_id=17&import_history_id=735') !== false;
+            return $request->url() === self::PUENTE . '/catalogo?import_history_id=735';
         });
-        Http::assertNotSent(function ($request) {
-            return strpos($request->body(), 'No compartir') !== false;
-        });
+    }
+
+    public function verificacion_destino_dinamico(): array
+    {
+        return ['ID habilitado' => [true], 'ID rechazado por Empresa' => [false]];
     }
 
     private function agente_documental(): SupportAiSuggestionService

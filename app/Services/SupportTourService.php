@@ -19,7 +19,7 @@ class SupportTourService
     public const AVISO = 'Te mandé a Robotito a tu sistema para que te lo muestre. Tocá su aviso en la barra de navegación para empezar.';
 
     public const TEMA_REVERTIR_IMPORTACION = 'revertir_importacion_articulos';
-    public const TEMA_APLICAR_RECARGO = 'aplicar_recargo_venta';
+    public const TEMA_DINAMICO = 'guia_dinamica';
     public const MAX_IMPORT_HISTORY_ID = 9007199254740991;
 
     public const TEMAS = [
@@ -28,7 +28,6 @@ class SupportTourService
         'buscar_articulo_codigo' => 1,
         'centro_recursos' => 2,
         self::TEMA_REVERTIR_IMPORTACION => 3,
-        self::TEMA_APLICAR_RECARGO => 2,
     ];
 
     public function __construct(ClientEmpresaApiUrlResolver $urls)
@@ -41,7 +40,8 @@ class SupportTourService
     /** Solo se admiten recorridos y parámetros que Empresa conoce. */
     public static function guion($datos): ?array
     {
-        if (! is_array($datos) || ! is_string($datos['tema'] ?? null) || ! isset(self::TEMAS[$datos['tema']])
+        if (! is_array($datos) || ! is_string($datos['tema'] ?? null)
+            || (! isset(self::TEMAS[$datos['tema']]) && $datos['tema'] !== self::TEMA_DINAMICO)
             || ! is_string($datos['titulo'] ?? null)) {
             return null;
         }
@@ -52,6 +52,10 @@ class SupportTourService
         }
 
         $guion = ['tema' => $datos['tema'], 'titulo' => $titulo];
+        if ($guion['tema'] === self::TEMA_DINAMICO) {
+            $pasos = self::pasos_dinamicos($datos);
+            return $pasos === null ? null : $guion + ['pasos' => $pasos];
+        }
         if ($guion['tema'] === self::TEMA_REVERTIR_IMPORTACION) {
             $id = $datos['import_history_id'] ?? null;
             if (! is_int($id) || $id < 1 || $id > self::MAX_IMPORT_HISTORY_ID) {
@@ -81,6 +85,34 @@ class SupportTourService
         return $guion;
     }
 
+    private static function pasos_dinamicos(array $datos): ?array
+    {
+        $pasos = $datos['pasos'] ?? null;
+        if (array_key_exists('textos', $datos) || array_key_exists('import_history_id', $datos)
+            || ! is_array($pasos) || count($pasos) < 1 || count($pasos) > 8 || array_keys($pasos) !== range(0, count($pasos) - 1)) {
+            return null;
+        }
+
+        $normalizados = [];
+        foreach ($pasos as $paso) {
+            if (! is_array($paso) || array_diff(array_keys($paso), ['clave', 'texto', 'destino']) !== []
+                || ! is_string($paso['clave'] ?? null) || ! preg_match('/^[a-z0-9_.]{1,80}$/D', $paso['clave'])
+                || ! is_string($paso['texto'] ?? null) || trim($paso['texto']) === '' || mb_strlen(trim($paso['texto'])) > 240) {
+                return null;
+            }
+
+            $normalizado = ['clave' => $paso['clave'], 'texto' => trim($paso['texto'])];
+            if (array_key_exists('destino', $paso)) {
+                if (! is_int($paso['destino']) || $paso['destino'] < 1 || $paso['destino'] > self::MAX_IMPORT_HISTORY_ID) {
+                    return null;
+                }
+                $normalizado['destino'] = $paso['destino'];
+            }
+            $normalizados[] = $normalizado;
+        }
+        return $normalizados;
+    }
+
     public static function tiene_invitacion(string $texto): bool
     {
         $lineas = preg_split('/\R/u', trim($texto));
@@ -101,7 +133,13 @@ class SupportTourService
     public function guion_aceptado(SupportTicket $ticket, SupportMessage $entrante): ?array
     {
         $invitacion = $this->invitacion_aceptada($ticket, $entrante);
-        return $invitacion === null ? null : self::guion($invitacion->erp_auto_reply['tour_invitation']);
+        return self::guion($invitacion->erp_auto_reply['tour_invitation'] ?? null);
+    }
+
+    public function solicitud_aceptada(SupportTicket $ticket, SupportMessage $entrante): ?SupportMessage
+    {
+        $invitacion = $this->invitacion_aceptada($ticket, $entrante);
+        return ($invitacion->erp_auto_reply['tour_requested'] ?? null) === true ? $invitacion : null;
     }
 
     private function invitacion_aceptada(SupportTicket $ticket, SupportMessage $entrante): ?SupportMessage
@@ -136,28 +174,20 @@ class SupportTourService
                 && $invitacion->whatsapp_delivery_status !== 'fallido';
         $guion = self::guion($invitacion->erp_auto_reply['tour_invitation'] ?? null);
         $uuid_usado = $invitacion->erp_auto_reply['tour_acceptance_uuid'] ?? null;
-        if (! $entregada || $guion === null || ($uuid_usado !== null && $uuid_usado !== $entrante->uuid)
+        $solicitud = ($invitacion->erp_auto_reply['tour_requested'] ?? null) === true;
+        if (! $entregada || ($guion === null && ! $solicitud) || ($uuid_usado !== null && $uuid_usado !== $entrante->uuid)
             || ! self::tiene_invitacion((string) $invitacion->body)) {
             return null;
         }
 
         // Una respuesta breve solo es inequívoca si la invitación era la única pregunta.
-        if (preg_match('/^(?:(?:si|dale|ok)[,.! ]+)?(?:preparame|mandame|pasame|enviame|quiero) (?:el|un) (?:tour|recorrido)(?: de robotito)?(?:[,.! ]+(?:por favor|porfa|gracias))*[.!, ]*$/D', $respuesta)) {
+        if (preg_match('/^(?:(?:si|dale|ok)[,.! ]+)?(?:preparame|mandame|pasame|enviame|quiero(?: hacer)?) (?:el|un) (?:tour|recorrido)(?: de robotito)?(?:[,.! ]+(?:por favor|porfa|gracias))*[.!, ]*$/D', $respuesta)) {
             return $invitacion;
         }
 
         $afirmativa = ! preg_match('/[?¿]/u', preg_replace('~https?://\S+~u', '', self::quitar_invitacion((string) $invitacion->body)))
             && preg_match('/^(?:si|dale|de una|de acuerdo|(?:ok|bueno)[,.! ]+dale)(?:[,.! ]+(?:si|dale|quiero|mandamelo|preparamelo|pasamelo|enviamelo|por favor|porfa|por fi|gracias|me (?:sirve|vendria bien|gustaria)|quiero que (?:me )?lo prepares))*[.!, ]*$/D', $respuesta);
         return $afirmativa ? $invitacion : null;
-    }
-
-    /** El agente web puede ubicar una importación únicamente dentro del comercio del ticket. */
-    public function importaciones_candidatas(SupportTicket $ticket, ?int $import_history_id): array
-    {
-        if ($ticket->source !== 'erp') {
-            return [];
-        }
-        return $this->buscar_importaciones($ticket, (int) $ticket->client_user_id, $import_history_id);
     }
 
     public function objetivo_disponible(SupportTicket $ticket, SupportMessage $entrante, int $import_history_id): bool
@@ -170,7 +200,19 @@ class SupportTourService
         return $this->buscar_importaciones($ticket, $persona ?? (int) optional($ticket->client)->user_id, $import_history_id) !== [];
     }
 
-    public function recargos_disponibles(SupportTicket $ticket, SupportMessage $entrante): bool
+    public function catalogo_dinamico(SupportTicket $ticket, SupportMessage $entrante, ?int $id): array
+    {
+        $query = $this->query_persona($ticket, $entrante);
+        if ($query === null) {
+            return [];
+        }
+        if ($id !== null) {
+            $query['import_history_id'] = $id;
+        }
+        return $this->consultar_empresa($ticket, '/catalogo', $query);
+    }
+
+    private function query_persona(SupportTicket $ticket, SupportMessage $entrante): ?array
     {
         if ($ticket->source === 'whatsapp') {
             $persona = $this->destinatario_whatsapp($ticket, $entrante);
@@ -178,14 +220,11 @@ class SupportTourService
             $persona = (int) $ticket->client_user_id;
         }
         if ($persona === false || ($persona !== null && $persona < 1)) {
-            return false;
+            return null;
         }
 
         // Un dueño de WhatsApp ya verificado se resuelve en Empresa, como al enviarle el tour.
-        $query = $persona === null ? [] : ['user_id' => $persona];
-        $respuesta = $this->consultar_empresa($ticket, '/recargos/disponibilidad', $query);
-
-        return ($respuesta['available'] ?? null) === true;
+        return $persona === null ? [] : ['user_id' => $persona];
     }
 
     private function buscar_importaciones(SupportTicket $ticket, int $persona, ?int $import_history_id): array
@@ -251,7 +290,7 @@ class SupportTourService
         if ($invitacion === null) {
             return $this->fallo(409, 'tour_consent_required', 'La persona todavía no aceptó una invitación enviada en este ticket.');
         }
-        $aceptado = self::guion($invitacion->erp_auto_reply['tour_invitation']);
+        $aceptado = self::guion($invitacion->erp_auto_reply['tour_dynamic_plan'] ?? $invitacion->erp_auto_reply['tour_invitation'] ?? null);
         if ($aceptado !== $guion) {
             return $this->fallo(409, 'tour_invitation_mismatch', 'El recorrido no coincide con el que aceptó la persona.');
         }
