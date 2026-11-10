@@ -255,6 +255,7 @@ class ToursDeSoporteTest extends TestCase
             'api.deepseek.com/*' => function ($request) use ($guion, $pregunta) {
                 $datos = json_decode($request['messages'][0]['content'], true);
                 $this->assertSame($pregunta, $datos['pregunta_durante_recorrido']);
+                $this->assertStringContainsString('«Revertir una importación» en el paso 2', $datos['contexto_del_recorrido']);
                 $this->assertNull($datos['respuesta_que_invito']);
                 return Http::response($this->respuesta_deepseek($guion));
             },
@@ -448,6 +449,32 @@ class ToursDeSoporteTest extends TestCase
     public function disponibilidad_catalogo_dinamico(): array
     {
         return ['actualizado' => [true], 'anterior' => [false]];
+    }
+
+    public function test_el_agente_web_responde_por_escrito_la_pregunta_del_tour_si_no_hay_plan(): void
+    {
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
+        $body = $this->mensaje_erp($this->cliente());
+        $body['body'] = '¿Dónde veo las compras de un proveedor?';
+        $body['robotito_followup'] = true;
+        $body['robotito_question'] = $body['body'];
+        $this->postJson(self::INBOUND, $body, ['X-Admin-Api-Key' => 'clave-inbound'])->assertCreated();
+
+        $texto = 'Entrá a Compras y filtrá por el proveedor.';
+        $this->mock(SupportAiSuggestionService::class)->shouldReceive('generate')->once()->andReturn([
+            'suggested_message' => $texto . "\n\n" . SupportTourService::INVITACION,
+            'tour_requested' => true,
+        ]);
+        Http::fake([
+            self::PUENTE . '/catalogo*' => Http::response([], 404),
+            'empresa-tours.test/api/admin-sync/support/messages' => Http::response(['ok' => true]),
+        ]);
+        app()->call([Queue::pushed(SendSupportAiSuggestion::class)->last(), 'handle']);
+
+        Http::assertSentCount(2);
+        $respuesta = $this->respuesta_erp($body);
+        $this->assertSame($texto, $respuesta->body);
+        $this->assertNull($respuesta->erp_auto_reply);
     }
 
     private function respuesta_deepseek(array $guion): array

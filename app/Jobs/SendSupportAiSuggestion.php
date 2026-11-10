@@ -122,16 +122,16 @@ class SendSupportAiSuggestion implements ShouldQueue
         }
 
         $tour_aceptado = null;
-        $solicitud_aceptada = false;
+        $solicitud_aceptada = null;
         if ($ticket->source === 'erp' && ! $ticket->requiere_verificacion_mensajes) {
             $entrante = $ticket->messages()->find($this->erp_message_id);
             if ($entrante !== null) {
                 $tours = app(SupportTourService::class);
-                $solicitud_aceptada = $tours->solicitud_aceptada($ticket, $entrante) !== null;
-                $tour_aceptado = $solicitud_aceptada ? null : $tours->guion_aceptado($ticket, $entrante);
+                $solicitud_aceptada = $tours->solicitud_aceptada($ticket, $entrante);
+                $tour_aceptado = $solicitud_aceptada === null ? $tours->guion_aceptado($ticket, $entrante) : null;
             }
         }
-        if ($solicitud_aceptada) {
+        if ($solicitud_aceptada !== null) {
             try {
                 $preparado = app(SupportDynamicTourService::class)->preparar((int) $ticket->id, $this->erp_message_id, function (SupportTicket $vigente) use ($scheduler) {
                     abort_unless($scheduler->is_schedule_token_current($this->ticket_id, $this->schedule_token)
@@ -148,8 +148,15 @@ class SendSupportAiSuggestion implements ShouldQueue
             if (($preparado['code'] ?? null) === 'tour_planning') {
                 return;
             }
-            $result = ['suggested_message' => $preparado['ok'] ? SupportTourService::AVISO
-                : 'No pude confirmar que Robotito quedara disponible. Podés seguir los pasos que te pasé antes.'];
+            if ($solicitud_aceptada === $entrante && ($preparado['code'] ?? null) === 'tour_plan_unavailable') {
+                event(new SupportAiSuggestionGenerating($ticket->id));
+                $result = $suggestion_service->generate($ticket);
+                $result['suggested_message'] = SupportTourService::quitar_invitacion((string) ($result['suggested_message'] ?? ''));
+                unset($result['tour'], $result['tour_requested']);
+            } else {
+                $result = ['suggested_message' => $preparado['ok'] ? SupportTourService::AVISO
+                    : 'No pude confirmar que Robotito quedara disponible. Podés seguir los pasos que te pasé antes.'];
+            }
         } elseif ($tour_aceptado === null) {
             event(new SupportAiSuggestionGenerating($ticket->id));
             $result = $suggestion_service->generate($ticket);
