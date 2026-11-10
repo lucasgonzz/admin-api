@@ -293,13 +293,16 @@ class SupportAiSuggestionService
                 if (is_string($codigo) && in_array($codigo, $videos, true)) {
                     $result['suggested_message'] .= "\n\nAcá tenés el video del Centro de recursos: " . SupportVideoResource::enlace($codigo);
                 }
-                if ($result['suggested_message'] !== '' && ! $should_close && ! $ticket->requiere_verificacion_mensajes
-                    && ($parsed['invitar_tour'] ?? null) === true) {
+                if ($result['suggested_message'] !== '' && ! $should_close && ! $ticket->requiere_verificacion_mensajes) {
                     $ultimo = SupportMessage::where('support_ticket_id', $ticket->id);
                     SupportMessage::apply_mensaje_real_conditions($ultimo, 'support_messages');
-                    if (SupportTourService::entrante_admite_robotito($ticket, $ultimo->latest('id')->first())) {
+                    $entrante = $ultimo->latest('id')->first();
+                    $invitar = $parsed['invitar_tour'] ?? null;
+                    if (SupportTourService::entrante_admite_robotito($ticket, $entrante)
+                        && ($invitar === true || ($invitar === null
+                            && SupportTourService::respuesta_admite_oferta($entrante, $result['suggested_message'], false)))) {
                         $result['tour_requested'] = true;
-                        $result['suggested_message'] .= "\n\n" . SupportTourService::INVITACION;
+                        $result['suggested_message'] = SupportTourService::con_invitacion($result['suggested_message'], false);
                     }
                 }
             }

@@ -15,6 +15,7 @@ class SupportTourService
 {
     private const PATH = 'api/admin-sync/support/tours';
     public const INVITACION = 'Querés que te prepare un tour con Robotito?';
+    public const ACEPTAR_DESDE_CUENTA_PROPIA = 'Para aceptar, entrá al sistema con tu cuenta propia y respondé en este mismo chat.';
 
     public const AVISO = 'Te mandé a Robotito a tu sistema para que te lo muestre. Tocá su aviso en la barra de navegación para empezar.';
 
@@ -127,7 +128,19 @@ class SupportTourService
 
         $lineas = preg_split('/\R/u', trim($texto));
         array_pop($lineas);
-        return rtrim(implode("\n", $lineas));
+        $texto = rtrim(implode("\n", $lineas));
+        $aviso = "\n\n" . self::ACEPTAR_DESDE_CUENTA_PROPIA;
+        return substr($texto, -strlen($aviso)) === $aviso ? substr($texto, 0, -strlen($aviso)) : $texto;
+    }
+
+    public static function con_invitacion(string $texto, bool $desde_cuenta_propia): string
+    {
+        $texto = self::quitar_invitacion($texto);
+        if ($desde_cuenta_propia) {
+            $texto .= "\n\n" . self::ACEPTAR_DESDE_CUENTA_PROPIA;
+        }
+
+        return $texto . "\n\n" . self::INVITACION;
     }
 
     public function guion_aceptado(SupportTicket $ticket, SupportMessage $entrante): ?array
@@ -156,6 +169,52 @@ class SupportTourService
         // Identidad acreditada y presencia de Robotito son capacidades distintas del ERP.
         return $ticket->source === 'whatsapp' || ($ticket->source === 'erp'
             && ($entrante->erp_auto_reply['inbound_version'] ?? null) === SupportMessage::VERSION_ROBOTITO_ERP);
+    }
+
+    public static function entrante_admite_oferta(SupportTicket $ticket, ?SupportMessage $entrante): bool
+    {
+        // Podemos ofrecer el recorrido por escrito antes de que la persona vuelva a su sesión propia.
+        // Prepararlo sigue exigiendo la capacidad de Robotito en el mensaje que lo acepta.
+        return self::entrante_admite_robotito($ticket, $entrante)
+            || ($ticket->source === 'erp' && $entrante !== null
+                && (int) $entrante->support_ticket_id === (int) $ticket->id
+                && $entrante->sender_type === 'user' && SupportMessage::es_mensaje_real($entrante)
+                && ($entrante->erp_auto_reply[SupportMessage::MARCA_ERP_VERIFICADO_PARA_CODEX] ?? null) === true);
+    }
+
+    public static function respuesta_admite_oferta(SupportMessage $entrante, string $texto, bool $uso_confirmado): bool
+    {
+        $consulta = Str::ascii(mb_strtolower(trim((string) $entrante->body)));
+        // El signo del enlace del Centro de recursos no es una pregunta en la respuesta.
+        $explicacion = trim(preg_replace('~https?://\S+~u', '', self::quitar_invitacion($texto)));
+        if ($explicacion === '' || preg_match('/[?¿]/u', $explicacion)
+            || preg_match('/^no[,.! ]+(?:gracias|hace falta)\b|\b(?:no quiero|no necesito|prefiero no)\b[^.!?]*\b(?:tour|robotito|recorrido)\b/', $consulta)) {
+            return false;
+        }
+        if ($uso_confirmado) {
+            return true;
+        }
+
+        // Respaldo para monitores anteriores: una consulta directa y pasos sobre el mismo tema.
+        $explicacion = Str::ascii(mb_strtolower($explicacion));
+        if (preg_match('/\b(?:escribi|escribime|decime|indicame|confirmame|aclarame|contame|necesito saber)\s+(?:si|que|cual|como|donde|cuando|quien)\b/', $explicacion)) {
+            return false;
+        }
+        if (! preg_match('/(?:^|[!?.;,]\s*)\s*(?:como|donde|en que (?:menu|pantalla|seccion)|que pasos)\s+/', $consulta)
+            || ! preg_match('/\b(?:abri|entra|anda|elegi|toca|busca|selecciona|marca|tilda|activa|revisa|presiona|escribi|ingresa|completa|carga|hace clic|podes|guarda)\b/', $explicacion)) {
+            return false;
+        }
+
+        preg_match_all('/[a-z0-9]{4,}/', $consulta, $palabras_consulta);
+        preg_match_all('/[a-z0-9]{4,}/', $explicacion, $palabras_explicacion);
+        $tema = array_diff($palabras_consulta[0], [
+            'como', 'donde', 'puedo', 'puede', 'podes', 'hacer', 'hago', 'quiero', 'tengo',
+            'desde', 'para', 'pasos', 'pantalla', 'seccion', 'sistema', 'hola', 'buenas',
+        ]);
+        $singular = static function (string $palabra): string {
+            return rtrim($palabra, 's');
+        };
+        return array_intersect(array_map($singular, $tema), array_map($singular, $palabras_explicacion[0])) !== [];
     }
 
     private function invitacion_aceptada(SupportTicket $ticket, SupportMessage $entrante): ?SupportMessage

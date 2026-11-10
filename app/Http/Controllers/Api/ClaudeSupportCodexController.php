@@ -231,6 +231,7 @@ class ClaudeSupportCodexController extends Controller
             'operation_id' => 'required|string|max:120|regex:/^[a-zA-Z0-9_-]+$/',
             'action' => 'required|in:responder,solicitar_confirmacion,cerrar,escalar,pedir_revision',
             'body' => 'required|string|max:3500',
+            'usage_answer' => 'sometimes|boolean|prohibited_unless:action,responder',
             'tour_invitation' => 'sometimes|required|array|prohibited_unless:action,responder',
             'tour_requested' => 'sometimes|boolean|prohibited_unless:action,responder',
             'tour_import_history_id' => 'sometimes|required|integer|min:1|max:' . \App\Services\SupportTourService::MAX_IMPORT_HISTORY_ID,

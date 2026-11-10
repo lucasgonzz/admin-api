@@ -344,6 +344,116 @@ class ToursDeSoporteTest extends TestCase
         Http::assertNothingSent();
     }
 
+    /** @dataProvider sesiones_de_consulta_y_aceptacion */
+    public function test_martin_ofrece_tour_en_la_consulta_de_recargos_aun_sin_campo_del_monitor(
+        ?int $marca_consulta,
+        ?int $marca_aceptacion
+    ): void {
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
+        $body = array_replace($this->mensaje_erp($this->cliente()), [
+            'body' => 'Como indico recargos en una venta?', 'robotito_support_version' => $marca_consulta,
+        ]);
+        SupportCodexSettings::set_enabled(true);
+        $firma = ['X-Admin-Api-Key' => 'clave-inbound'];
+        $consulta = SupportMessage::findOrFail($this->postJson(self::INBOUND, $body, $firma)->assertCreated()->json('model.id'));
+        $ticket = $consulta->ticket;
+        $url = self::CLAUDE . $ticket->id;
+        $headers = $this->reserva($ticket, $consulta);
+        $this->getJson($url, $headers)->assertOk()
+            ->assertJsonPath('ticket.capabilities.support_tour_offer', true)
+            ->assertJsonPath('ticket.capabilities.support_dynamic_tour', $marca_consulta !== null);
+
+        Http::fake(['empresa-tours.test/api/admin-sync/support/messages' => Http::response(['ok' => true])]);
+        $texto = "Buenas tardes! En Vender, abrí Cierre y opciones. En Recargos, tildá el que querés aplicar."
+            . "\n\nAcá tenés el video: https://recursos.comerciocity.com/?v=T11.34";
+        $respuesta = [
+            'lease_token' => $headers['X-Support-Lease-Token'], 'operation_id' => 'ticket-92-' . $consulta->id,
+            'expected_message_id' => $consulta->id, 'action' => 'responder', 'body' => $texto,
+        ];
+        $this->postJson($url . '/reply', $respuesta, $headers)->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->postJson($url . '/reply', $respuesta, $headers)->assertOk()->assertJsonPath('operation.status', 'sent');
+        $invitacion = $this->respuesta_erp($body);
+        $esperado = $texto . ($marca_consulta === null ? "\n\n" . SupportTourService::ACEPTAR_DESDE_CUENTA_PROPIA : '')
+            . "\n\n" . SupportTourService::INVITACION;
+        $this->assertSame($esperado, $invitacion->body);
+        $this->assertSame($texto, SupportTourService::quitar_invitacion($invitacion->body));
+        $this->assertSame(['tour_requested' => true], $invitacion->erp_auto_reply);
+        Http::assertSentCount(1);
+
+        $body = array_replace($body, [
+            'body' => 'Sí, quiero hacer el tour.', 'message_uuid' => (string) Str::uuid(),
+            'robotito_support_version' => $marca_aceptacion,
+        ]);
+        $aceptacion = SupportMessage::findOrFail($this->postJson(self::INBOUND, $body, $firma)->assertCreated()->json('model.id'));
+        $headers = $this->reserva($ticket, $aceptacion);
+        $this->getJson($url, $headers)->assertOk()->assertJsonPath('ticket.accepted_tour_request', $marca_aceptacion !== null);
+        Http::fake([
+            self::PUENTE . '/catalogo*' => Http::response(self::CATALOGO_DINAMICO),
+            'api.deepseek.com/*' => Http::response($this->respuesta_deepseek(self::GUION_DINAMICO)),
+            self::PUENTE => Http::response(['ok' => true, 'uuid' => $aceptacion->uuid]),
+        ]);
+        $preparacion = $this->postJson($url . '/tour/prepare', ['expected_message_id' => $aceptacion->id], $headers);
+        if ($marca_aceptacion === null) {
+            $preparacion->assertStatus(409)->assertJsonPath('code', 'tour_consent_required');
+        } else {
+            $preparacion->assertOk()->assertJsonPath('uuid', $aceptacion->uuid);
+        }
+        Http::assertSentCount($marca_aceptacion === null ? 0 : 3);
+    }
+
+    public function sesiones_de_consulta_y_aceptacion(): array
+    {
+        return [
+            'consulta y aceptación desde cuenta propia' => [1, 1],
+            'consulta delegada y aceptación desde cuenta propia' => [null, 1],
+            'consulta y aceptación delegadas' => [null, null],
+        ];
+    }
+
+    /** @dataProvider respuestas_clasificadas_de_martin */
+    public function test_martin_ofrece_tour_por_tipo_de_respuesta_sin_confundir_aclaraciones_o_rechazos(
+        string $consulta_texto,
+        string $texto,
+        array $clasificacion,
+        bool $ofrece
+    ): void {
+        $body = array_replace($this->mensaje_erp($this->cliente()), [
+            'body' => $consulta_texto, 'robotito_support_version' => null,
+        ]);
+        SupportCodexSettings::set_enabled(true);
+        $firma = ['X-Admin-Api-Key' => 'clave-inbound'];
+        $consulta = SupportMessage::findOrFail($this->postJson(self::INBOUND, $body, $firma)->assertCreated()->json('model.id'));
+        $headers = $this->reserva($consulta->ticket, $consulta);
+        Http::fake(['empresa-tours.test/api/admin-sync/support/messages' => Http::response(['ok' => true])]);
+        $this->postJson(self::CLAUDE . $consulta->support_ticket_id . '/reply', $clasificacion + [
+            'lease_token' => $headers['X-Support-Lease-Token'], 'operation_id' => 'uso-' . $consulta->id,
+            'expected_message_id' => $consulta->id, 'action' => 'responder', 'body' => $texto,
+        ], $headers)->assertOk()->assertJsonPath('operation.status', 'sent');
+        $respuesta = $this->respuesta_erp($body);
+        $this->assertSame($ofrece, SupportTourService::tiene_invitacion($respuesta->body));
+        $this->assertSame($ofrece ? ['tour_requested' => true] : null, $respuesta->erp_auto_reply);
+        Http::assertSentCount(1);
+    }
+
+    public function respuestas_clasificadas_de_martin(): array
+    {
+        return [
+            'consulta indirecta clasificada por Martín' => [
+                'Necesito sumar un porcentaje a una venta.', 'Abrí Vender y elegí un recargo.', ['usage_answer' => true], true,
+            ],
+            'pregunta para aclarar' => [
+                '¿Cómo aplico recargos?', '¿Lo querés aplicar solo a una venta o a todas?', ['usage_answer' => true], false,
+            ],
+            'pedido de dato sin signos' => [
+                '¿Cómo aplico recargos?', 'Escribí si el recargo es de tarjeta o de toda la venta.', [], false,
+            ],
+            'rechazo' => [
+                'No quiero el tour, gracias.', 'Podés seguir los pasos en Vender.', ['usage_answer' => true], false,
+            ],
+            'saludo' => ['¿Cómo estás?', 'Todo bien, gracias.', [], false],
+        ];
+    }
+
     public function test_robotito_no_acredita_una_version_enviada_con_una_llave_compartida(): void
     {
         $body = $this->mensaje_erp($this->cliente()) + ['robotito_followup' => true];
@@ -716,7 +826,8 @@ class ToursDeSoporteTest extends TestCase
         });
     }
 
-    public function test_el_agente_web_agrega_solo_el_video_verificado_por_la_herramienta(): void
+    /** @dataProvider clasificaciones_del_agente_documental */
+    public function test_el_agente_web_agrega_solo_el_video_verificado_por_la_herramienta(array $clasificacion): void
     {
         config(['services.anthropic.api_key' => 'clave-falsa']);
         SupportCodexSettings::set_enabled(false);
@@ -728,9 +839,9 @@ class ToursDeSoporteTest extends TestCase
         $this->mock(RecursosCatalogoService::class)->shouldReceive('catalogo')->once()->andReturn(['videos' => [[
             'codigo' => 'T0.4', 'titulo' => 'Crear un ticket de soporte', 'para_que' => 'Pedir ayuda desde el sistema', 'url' => 'https://cdn.test/video.mp4',
         ]]]);
-        $fin = [
+        $fin = $clasificacion + [
             'suggested_message' => 'Abrí Soporte y tocá Nuevo ticket.', 'tipo_respuesta' => 'afirmacion_del_sistema',
-            'fuentes_kb' => ['manual_sistema/general/soporte-tecnico.md'], 'tour' => self::GUION, 'invitar_tour' => true,
+            'fuentes_kb' => ['manual_sistema/general/soporte-tecnico.md'], 'tour' => self::GUION,
         ];
         Http::fakeSequence('api.anthropic.com/*')->push([
             'stop_reason' => 'tool_use', 'content' => [
@@ -753,6 +864,14 @@ class ToursDeSoporteTest extends TestCase
             return strpos($request['system'][0]['text'], 'buscar_video_de_ayuda') !== false
                 && in_array('buscar_video_de_ayuda', array_column($request['tools'], 'name'), true);
         });
+    }
+
+    public function clasificaciones_del_agente_documental(): array
+    {
+        return [
+            'invita explícitamente' => [['invitar_tour' => true]],
+            'omite el campo en una consulta de uso' => [[]],
+        ];
     }
 
     /** @dataProvider verificacion_destino_dinamico */

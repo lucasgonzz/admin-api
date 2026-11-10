@@ -261,7 +261,8 @@ class SupportCodexService
             'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => true, 'prueba_import_resolver' => true,
                 'soporte_import' => $soporte_activo, 'soporte_import_resolver' => $soporte_activo,
                 'soporte_import_stock_existente' => $soporte_activo,
-                'support_tour_consent' => true, 'support_dynamic_tour' => $robotito_disponible],
+                'support_tour_consent' => true, 'support_dynamic_tour' => $robotito_disponible,
+                'support_tour_offer' => SupportTourService::entrante_admite_oferta($ticket, $last)],
             'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
             'robotito_available' => $robotito_disponible,
@@ -697,6 +698,9 @@ class SupportCodexService
                 $hash_payload[] = ['tour_import_history_id' => $tour_import_history_id];
             }
         }
+        if (! empty($input['usage_answer'])) {
+            $hash_payload[] = ['usage_answer' => true];
+        }
         $hash = hash('sha256', json_encode($hash_payload));
         // La operación se confirma en una transacción ANTES de enviar. Si el proceso cae
         // durante el HTTP, queda sending y requiere conciliación: jamás otro intento ciego.
@@ -843,6 +847,16 @@ class SupportCodexService
             }
             // Una sola pieza: no hay reintentos de partes ni demoras de separación de mensajes.
             $body = preg_replace('/^\s*---\s*$/m', '', $body);
+            $tour_requested = $input['tour_requested'];
+            if (! $tour_requested && $input['action'] === 'responder' && $attachment === null
+                && $proposal === null && ! isset($input['tour_invitation'])) {
+                $entrante = SupportMessage::find($input['expected_message_id']);
+                if (SupportTourService::entrante_admite_oferta($ticket, $entrante)
+                    && SupportTourService::respuesta_admite_oferta($entrante, $body, ! empty($input['usage_answer']))) {
+                    $body = SupportTourService::con_invitacion($body, ! SupportTourService::entrante_admite_robotito($ticket, $entrante));
+                    $tour_requested = true;
+                }
+            }
             $message = SupportMessage::create([
                 'support_ticket_id' => $id,
                 'sender_type' => 'admin',
@@ -851,7 +865,7 @@ class SupportCodexService
                 'body' => $body,
                 'ai_generated_at' => now(),
                 'delivered_at' => now(),
-                'erp_auto_reply' => $input['tour_requested'] ? array_filter([
+                'erp_auto_reply' => $tour_requested ? array_filter([
                     'tour_requested' => true, 'tour_import_history_id' => $input['tour_import_history_id'],
                 ])
                     : (isset($input['tour_invitation']) ? ['tour_invitation' => $input['tour_invitation']] : null),

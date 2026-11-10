@@ -217,6 +217,14 @@ El modo opcional `continue_pending:true` de esa misma ruta recupera una consulta
 
 El contexto incluye `can_query_system`. Un empleado sin ese permiso recibe 403 en diagnostic; no obtiene datos del negocio por haber escrito al soporte. Esta restricción también debe respetarse al consultar producción desde herramientas locales. El diagnóstico técnico interno no autoriza divulgar ventas/caja/clientes a un contacto sin permiso.
 
+### Oferta de Robotito
+
+`capabilities.support_dynamic_tour` indica que el entrante admite Robotito en esa sesión. `capabilities.support_tour_offer` también cubre un entrante autenticado del ERP sin la marca de Robotito. En ese caso, Martín puede ofrecer el tour por escrito y Admin agrega cómo aceptarlo desde una cuenta propia en el mismo chat.
+
+En una respuesta de texto que explica cómo usar el sistema, el monitor puede mandar `usage_answer: true` con `action: responder` cuando `support_tour_offer` está disponible. El cuerpo trae la explicación y el video pertinente si existe. Admin agrega la pregunta de Robotito y registra la solicitud. Si el monitor omite el campo, Admin puede inferir una consulta directa de uso y agregar la misma oferta. Los pedidos de aclaración, rechazos, adjuntos, cierres y borradores con aprobación conservan su flujo.
+
+`tour_requested: true` conserva su contrato anterior. Exige la pregunta canónica en el cuerpo y la capacidad de Robotito en el entrante. En ambos casos, Admin solo prepara y envía el tour si el cliente acepta la invitación entregada en ese ticket desde una sesión apta.
+
 ## Nota en la implementación: `POST tickets/{id}/implementation-note` (desde el 26/10/2026)
 
 `{lease_token, texto (1..1000), etapa? (1..7, default la actual)}`. Martín deja asentado algo de la implementación del SISTEMA en curso del cliente del ticket. Solo agrega a `data.actions[]` de la etapa `{action:"nota", stage, at, canal:"whatsapp", origen:"martin", texto, support_ticket_id}`; no cambia estados ni etapas y no manda nada. Respuesta `{registrada, implementation_id, etapa, at}`: 201 con `registrada:true`; 200 con `registrada:false` si el mismo texto del mismo ticket ya estaba en esa etapa (no se duplica). Errores: 423 reserva inválida, 409 `sin_implementacion_abierta`, 422 validación o `sin_etapa`, 404 ticket inexistente. El cliente y la implementación salen del ticket, nunca del body.
