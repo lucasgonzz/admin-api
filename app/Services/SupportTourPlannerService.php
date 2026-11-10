@@ -16,7 +16,7 @@ class SupportTourPlannerService
         $recalculo = $invitacion->id === $entrante->id;
         $pregunta = $recalculo ? ($entrante->erp_auto_reply['robotito_question'] ?? (string) $entrante->body) : null;
         $ajuste = $pregunta === null ? null : $this->ajuste_de_porcentaje($pregunta);
-        if ($clave === '' && $ajuste === null) {
+        if ($clave === '' && ! $recalculo) {
             return null;
         }
 
@@ -44,8 +44,13 @@ class SupportTourPlannerService
         if ($ajuste !== null && ($pasos['vista.abm']['requiere_destino'] ?? null) === false) {
             return $this->guia_de_porcentaje($ajuste, $pasos);
         }
+        $reintento = $recalculo ? $this->guia_de_indicacion(
+            $pasos,
+            'Reintentar el recorrido',
+            'No pude preparar la guía en este momento. Volvé a escribir tu pregunta en «Preguntale a Robotito» para reintentar.'
+        ) : null;
         if ($clave === '') {
-            return null;
+            return $reintento;
         }
 
         $destinos = $catalogo['destinos']['listado.revertir_importacion'] ?? [];
@@ -87,10 +92,10 @@ class SupportTourPlannerService
             ], 16);
         } catch (\Throwable $e) {
             Log::warning('No se pudo planificar el tour de soporte con DeepSeek.', ['ticket_id' => $ticket->id]);
-            return null;
+            return $reintento;
         }
         if (! $respuesta->successful()) {
-            return null;
+            return $reintento;
         }
 
         $texto = '';
@@ -101,21 +106,17 @@ class SupportTourPlannerService
         }
         $texto = preg_replace('/^\s*```(?:json)?\s*|\s*```\s*$/i', '', $texto);
         $datos = json_decode($texto, true);
-        if ($datos === [] && $recalculo && ($pasos['indicacion']['requiere_destino'] ?? null) === false) {
-            // Una duda todavía imprecisa puede continuar desde el formulario de la nueva tarjeta.
-            return [
-                'tema' => SupportTourService::TEMA_DINAMICO,
-                'titulo' => 'Aclarar el próximo paso',
-                'pasos' => [[
-                    'clave' => 'indicacion',
-                    'texto' => 'Contame qué querés hacer y en qué pantalla. Podés agregar ese detalle en «Preguntale a Robotito».',
-                ]],
-            ];
+        if ($recalculo && preg_match('/^\{\s*\}$/D', trim($texto))) {
+            return $this->guia_de_indicacion(
+                $pasos,
+                'Aclarar el próximo paso',
+                'Contame qué querés hacer y en qué pantalla. Podés agregar ese detalle en «Preguntale a Robotito».'
+            );
         }
 
         $guion = SupportTourService::guion($datos);
         if ($guion === null || $guion['tema'] !== SupportTourService::TEMA_DINAMICO) {
-            return null;
+            return $reintento;
         }
         foreach ($guion['pasos'] as $paso) {
             $habilitado = $pasos[$paso['clave']] ?? null;
@@ -127,6 +128,19 @@ class SupportTourPlannerService
         }
 
         return $guion;
+    }
+
+    private function guia_de_indicacion(array $pasos, string $titulo, string $texto): ?array
+    {
+        if (($pasos['indicacion']['requiere_destino'] ?? null) !== false) {
+            return null;
+        }
+
+        return [
+            'tema' => SupportTourService::TEMA_DINAMICO,
+            'titulo' => $titulo,
+            'pasos' => [['clave' => 'indicacion', 'texto' => $texto]],
+        ];
     }
 
     private function ajuste_de_porcentaje(string $pregunta): ?string

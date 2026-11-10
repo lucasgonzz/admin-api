@@ -357,6 +357,66 @@ class ToursDeSoporteTest extends TestCase
         ];
     }
 
+    /** @dataProvider fallas_al_recalcular */
+    public function test_robotito_ofrece_reintentar_en_una_tarjeta_si_falla_el_planificador(string $falla, bool $indicacion): void
+    {
+        config(['services.deepseek.api_key' => $falla === 'sin_clave' ? '' : 'deepseek-prueba']);
+        $pregunta = '¿Cómo reparto el cobro entre dos medios?';
+        $body = array_replace($this->mensaje_erp($this->cliente()), [
+            'body' => 'Pregunta para Robotito en el paso 2: ' . $pregunta,
+            'robotito_followup' => true,
+            'robotito_question' => $pregunta,
+        ]);
+        SupportCodexSettings::set_enabled(true);
+        $entrante = SupportMessage::findOrFail($this->postJson(self::INBOUND, $body, ['X-Admin-Api-Key' => 'clave-inbound'])
+            ->assertCreated()->json('model.id'));
+        $ticket = $entrante->ticket;
+        $headers = $this->reserva($ticket, $entrante);
+        $catalogo = self::CATALOGO_DINAMICO;
+        if (! $indicacion) {
+            array_pop($catalogo['pasos']);
+        }
+        Http::fake([
+            self::PUENTE . '/catalogo?user_id=17' => Http::response($catalogo),
+            'api.deepseek.com/*' => function () use ($falla) {
+                if ($falla === 'timeout') {
+                    throw new \Illuminate\Http\Client\ConnectionException('cURL error 28: Operation timed out');
+                }
+                return $falla === 'respuesta_invalida' ? Http::response($this->respuesta_deepseek([])) : Http::response([], 503);
+            },
+            self::PUENTE => function ($request) {
+                $this->assertSame('Reintentar el recorrido', $request['titulo']);
+                $this->assertSame([[
+                    'clave' => 'indicacion',
+                    'texto' => 'No pude preparar la guía en este momento. Volvé a escribir tu pregunta en «Preguntale a Robotito» para reintentar.',
+                ]], $request['pasos']);
+                return Http::response(['ok' => true, 'uuid' => $request['uuid']]);
+            },
+        ]);
+
+        $respuesta = $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare', ['expected_message_id' => $entrante->id], $headers);
+        if ($indicacion) {
+            $respuesta->assertOk()->assertExactJson(['ok' => true, 'uuid' => $entrante->uuid]);
+        } else {
+            $respuesta->assertStatus(422)->assertJsonPath('code', 'tour_plan_unavailable');
+            Http::assertNotSent(function ($request) { return $request->url() === self::PUENTE; });
+        }
+        if ($falla === 'sin_clave') {
+            Http::assertNotSent(function ($request) { return strpos($request->url(), 'https://api.deepseek.com/') === 0; });
+        }
+    }
+
+    public function fallas_al_recalcular(): array
+    {
+        return [
+            'sin clave del proveedor' => ['sin_clave', true],
+            'proveedor indisponible' => ['error_http', true],
+            'timeout de proveedor' => ['timeout', true],
+            'respuesta inválida distinta de objeto vacío' => ['respuesta_invalida', true],
+            'catálogo sin indicación' => ['sin_clave', false],
+        ];
+    }
+
     public function test_martin_conserva_atencion_escrita_en_erp_firmado_sin_robotito(): void
     {
         $body = $this->mensaje_erp($this->cliente());
