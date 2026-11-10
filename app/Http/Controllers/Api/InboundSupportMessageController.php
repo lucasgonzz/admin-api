@@ -148,6 +148,14 @@ class InboundSupportMessageController extends Controller
             $marcas = [];
             if ($this->entrada_robotito_valida($request, $client, $ticket)) {
                 $marcas['inbound_version'] = SupportMessage::VERSION_ROBOTITO_ERP;
+                if ($request->input('robotito_followup') === true && $datos['kind'] === 'text'
+                    && $usuario === (int) $ticket->client_user_id) {
+                    $marcas[SupportMessage::MARCA_PREGUNTA_ROBOTITO] = true;
+                    $pregunta = $request->input('robotito_question');
+                    if (is_string($pregunta) && trim($pregunta) !== '' && mb_strlen($pregunta) <= 1500) {
+                        $marcas['robotito_question'] = $pregunta;
+                    }
+                }
             }
             if ($datos['sender_type'] === 'user' && $usuario > 0 && $usuario === (int) $ticket->client_user_id
                 && $usuario === (int) $request->input('sender_user_id')

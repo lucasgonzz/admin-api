@@ -139,7 +139,11 @@ class SupportTourService
     public function solicitud_aceptada(SupportTicket $ticket, SupportMessage $entrante): ?SupportMessage
     {
         $invitacion = $this->invitacion_aceptada($ticket, $entrante);
-        return ($invitacion->erp_auto_reply['tour_requested'] ?? null) === true ? $invitacion : null;
+        if ($invitacion === $entrante || ($invitacion->erp_auto_reply['tour_requested'] ?? null) === true) {
+            return $invitacion;
+        }
+
+        return null;
     }
 
     public static function entrante_admite_robotito(SupportTicket $ticket, ?SupportMessage $entrante): bool
@@ -158,6 +162,14 @@ class SupportTourService
     {
         if (! self::entrante_admite_robotito($ticket, $entrante) || ! $ticket->mensaje_confiable_para_codex($entrante)) {
             return null;
+        }
+
+        // La pregunta del formulario de una guía en curso autoriza recalcularla. La marca
+        // se guarda solo al recibir el mensaje firmado del titular y no se infiere del texto.
+        if ($ticket->source === 'erp' && $ticket->status === 'open' && $entrante->kind === 'text'
+            && ($entrante->erp_auto_reply[SupportMessage::MARCA_ERP_VERIFICADO_PARA_CODEX] ?? null) === true
+            && ($entrante->erp_auto_reply[SupportMessage::MARCA_PREGUNTA_ROBOTITO] ?? null) === true) {
+            return $entrante;
         }
 
         $anteriores = SupportMessage::where('support_ticket_id', $ticket->id)->where('id', '<', $entrante->id);

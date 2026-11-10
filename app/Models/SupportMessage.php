@@ -11,6 +11,7 @@ class SupportMessage extends Model
 
     public const MARCA_ERP_VERIFICADO_PARA_CODEX = 'codex_inbound_verified';
     public const MARCA_TRANSICION_ERP_PARA_CODEX = 'codex_erp_legacy_transition';
+    public const MARCA_PREGUNTA_ROBOTITO = 'robotito_followup';
     public const VERSION_ROBOTITO_ERP = 1;
 
     /**

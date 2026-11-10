@@ -221,6 +221,74 @@ class ToursDeSoporteTest extends TestCase
         Http::assertSentCount(2);
     }
 
+    /** @dataProvider preguntas_durante_recorrido */
+    public function test_robotito_recalcula_solo_por_una_pregunta_acreditada_y_con_un_control_real(array $marcas, int $estado): void
+    {
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
+        $body = $this->mensaje_erp($this->cliente());
+        SupportCodexSettings::set_enabled(true);
+        $firma = ['X-Admin-Api-Key' => 'clave-inbound'];
+        $consulta = SupportMessage::findOrFail($this->postJson(self::INBOUND, $body, $firma)->assertCreated()->json('model.id'));
+        $ticket = $consulta->ticket;
+        $this->invitacion($ticket, self::GUION_DINAMICO, ['erp_auto_reply' => ['tour_requested' => true]]);
+        $pregunta = '¿Cómo uso dos medios de pago en una venta?';
+        $body = array_replace($body, [
+            'body' => 'Pregunta para Robotito sobre «Revertir una importación» en el paso 2: ' . $pregunta,
+            'message_uuid' => (string) Str::uuid(),
+        ], $marcas);
+        $entrante = SupportMessage::findOrFail($this->postJson(self::INBOUND, $body, $firma)->assertCreated()->json('model.id'));
+
+        // Un reenvío del ERP no puede convertir el mismo mensaje en una pregunta firmada del formulario.
+        $this->postJson(self::INBOUND, array_replace($body, ['robotito_followup' => true, 'robotito_question' => $pregunta]), $firma)->assertOk();
+
+        $url = self::CLAUDE . $ticket->id;
+        $headers = $this->reserva($ticket, $entrante);
+        $this->getJson($url, $headers)->assertOk()->assertJsonPath('ticket.accepted_tour_request', $estado !== 409)
+            ->assertJsonPath('ticket.accepted_tour', null);
+
+        $paso = ['clave' => $estado === 422 ? 'indicacion' : 'vender.metodos_pago', 'texto' => 'Elegí los dos medios.'];
+        $guion = ['tema' => 'guia_dinamica', 'titulo' => 'Combinar medios de pago', 'pasos' => [$paso]];
+        $catalogo = self::CATALOGO_DINAMICO;
+        $catalogo['pasos'][] = ['clave' => 'vender.metodos_pago', 'descripcion' => 'Distribuir el cobro entre distintos medios'];
+        Http::fake([
+            self::PUENTE . '/catalogo' => Http::response($catalogo),
+            'api.deepseek.com/*' => function ($request) use ($guion, $pregunta) {
+                $datos = json_decode($request['messages'][0]['content'], true);
+                $this->assertSame($pregunta, $datos['pregunta_durante_recorrido']);
+                $this->assertNull($datos['respuesta_que_invito']);
+                return Http::response($this->respuesta_deepseek($guion));
+            },
+            self::PUENTE => function ($request) use ($entrante, $ticket, $guion) {
+                $this->assertSame($entrante->uuid, $request['uuid']);
+                $this->assertSame($ticket->uuid, $request['ticket_uuid']);
+                $this->assertSame(17, $request['user_id']);
+                $this->assertSame($guion['pasos'], $request['pasos']);
+                return Http::response(['ok' => true, 'uuid' => $request['uuid']]);
+            },
+        ]);
+
+        for ($intento = 0; $intento < 2; $intento++) {
+            $respuesta = $this->postJson($url . '/tour/prepare', ['expected_message_id' => $entrante->id], $headers)->assertStatus($estado);
+            if ($estado === 200) {
+                $respuesta->assertExactJson(['ok' => true, 'uuid' => $entrante->uuid]);
+            } else {
+                $respuesta->assertJsonPath('code', $estado === 422 ? 'tour_plan_unavailable' : 'tour_consent_required');
+            }
+        }
+        Http::assertSentCount([200 => 3, 422 => 2, 409 => 0][$estado]);
+    }
+
+    public function preguntas_durante_recorrido(): array
+    {
+        $formulario = ['robotito_followup' => true, 'robotito_question' => '¿Cómo uso dos medios de pago en una venta?'];
+        return [
+            'pregunta de la guía' => [$formulario, 200],
+            'plan sin un control' => [$formulario, 422],
+            'mismo texto escrito en el chat' => [[], 409],
+            'marca sin sesión apta para Robotito' => [['robotito_support_version' => null] + $formulario, 409],
+        ];
+    }
+
     public function test_martin_conserva_atencion_escrita_en_erp_firmado_sin_robotito(): void
     {
         $body = $this->mensaje_erp($this->cliente());
@@ -273,11 +341,12 @@ class ToursDeSoporteTest extends TestCase
 
     public function test_robotito_no_acredita_una_version_enviada_con_una_llave_compartida(): void
     {
-        $body = $this->mensaje_erp($this->cliente());
+        $body = $this->mensaje_erp($this->cliente()) + ['robotito_followup' => true];
         $this->cliente(['phone' => '+5493419843009']);
         $id = $this->postJson(self::INBOUND, $body, ['X-Admin-Api-Key' => 'clave-inbound'])->assertCreated()->json('model.id');
         $mensaje = SupportMessage::findOrFail($id);
         $this->assertArrayNotHasKey('inbound_version', $mensaje->erp_auto_reply ?? []);
+        $this->assertArrayNotHasKey(SupportMessage::MARCA_PREGUNTA_ROBOTITO, $mensaje->erp_auto_reply ?? []);
         Queue::assertNotPushed(SendSupportAiSuggestion::class);
     }
 
