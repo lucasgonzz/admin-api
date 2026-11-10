@@ -302,7 +302,8 @@ class ToursDeSoporteTest extends TestCase
         $ticket = $consulta->ticket;
         $url = self::CLAUDE . $ticket->id;
         $headers = $this->reserva($ticket, $consulta);
-        $this->getJson($url, $headers)->assertOk()->assertJsonPath('ticket.robotito_available', false);
+        $this->getJson($url, $headers)->assertOk()->assertJsonPath('ticket.robotito_available', false)
+            ->assertJsonPath('ticket.capabilities.support_dynamic_tour', false);
         $texto = "Abrí Listado y buscá Exportación.\nhttps://recursos.comerciocity.com/?v=T0.1";
         $respuesta = [
             'lease_token' => $headers['X-Support-Lease-Token'], 'operation_id' => 'sin-robotito-' . $consulta->id,
@@ -327,12 +328,15 @@ class ToursDeSoporteTest extends TestCase
         $firma = ['X-Admin-Api-Key' => 'clave-inbound'];
         $consulta = SupportMessage::findOrFail($this->postJson(self::INBOUND, $body, $firma)->assertCreated()->json('model.id'));
         $ticket = $consulta->ticket;
+        $url = self::CLAUDE . $ticket->id;
+        $this->getJson($url, ['X-Claude-Task-Key' => 'clave-monitor-tour'])->assertOk()
+            ->assertJsonPath('ticket.capabilities.support_dynamic_tour', true);
         $this->invitacion($ticket, self::GUION, ['erp_auto_reply' => ['tour_requested' => true]]);
         $body = array_replace($body, ['body' => 'Sí, quiero hacer el tour.', 'message_uuid' => (string) Str::uuid(), 'robotito_support_version' => null]);
         $aceptacion = SupportMessage::findOrFail($this->postJson(self::INBOUND, $body, $firma)->assertCreated()->json('model.id'));
-        $url = self::CLAUDE . $ticket->id;
         $headers = $this->reserva($ticket, $aceptacion);
         $this->getJson($url, $headers)->assertOk()->assertJsonPath('ticket.robotito_available', false)
+            ->assertJsonPath('ticket.capabilities.support_dynamic_tour', false)
             ->assertJsonPath('ticket.accepted_tour_request', false)->assertJsonPath('ticket.accepted_tour', null);
         Http::fake();
         $this->postJson($url . '/tour/prepare', ['expected_message_id' => $aceptacion->id], $headers)

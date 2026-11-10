@@ -33,14 +33,21 @@ class InboundAgentesController extends Controller
     public function soporte(Request $request)
     {
         [$client, $user_id, $es_dueno] = $this->identidad($request);
-        $models = $this->tickets($client)->orderByDesc('last_client_message_at')->orderByDesc('id')->get()
-            ->filter(function (SupportTicket $ticket) use ($client, $user_id, $es_dueno) {
-                return SupportAgentesIdentity::puede_ver($ticket, $client, $user_id, $es_dueno);
-            })->map(function (SupportTicket $ticket) {
-                return $this->resumen($ticket);
-            })->values();
+        $numeros = SupportTicket::where('client_id', $client->id)->where('client_user_id', $user_id)
+            ->where('source', 'erp')->whereNull('sistema_exclusivo_at')->pluck('id', 'uuid');
+        $models = [];
+        if (! $request->boolean('solo_referencias_erp')) {
+            $models = $this->tickets($client)->orderByDesc('last_message_at')->orderByDesc('id')->get()
+                ->filter(function (SupportTicket $ticket) use ($client, $user_id, $es_dueno) {
+                    return SupportAgentesIdentity::puede_ver($ticket, $client, $user_id, $es_dueno);
+                })->map(function (SupportTicket $ticket) {
+                    return $this->resumen($ticket);
+                })->values();
+        }
 
-        return response()->json(['models' => $models])->header('Cache-Control', 'private, no-store');
+        // Empresa ya tiene las conversaciones ERP. El mapa solo vincula su UUID al número de Admin.
+        return response()->json(['models' => $models, 'ticket_numbers' => (object) $numeros->all()])
+            ->header('Cache-Control', 'private, no-store');
     }
 
     public function conversacion(Request $request, string $uuid)
@@ -50,13 +57,9 @@ class InboundAgentesController extends Controller
         abort_unless(SupportAgentesIdentity::puede_ver($ticket, $client, $user_id, $es_dueno), 404);
 
         $mensajes = $ticket->messages()->with('attachments');
-        SupportMessage::apply_mensaje_real_conditions($mensajes, 'support_messages');
+        $this->filtrar_mensajes_visibles($mensajes);
         $model = $this->resumen($ticket);
-        $model['messages'] = $mensajes->whereIn('sender_type', ['user', 'admin'])
-            ->where(function ($visibles) {
-                $visibles->where('sender_type', 'user')->orWhereNotNull('whatsapp_message_id')
-                    ->orWhereNotNull('synced_to_client_at');
-            })->get()->map(function (SupportMessage $mensaje) {
+        $model['messages'] = $mensajes->get()->map(function (SupportMessage $mensaje) {
                 return [
                     'uuid' => $mensaje->uuid,
                     'sender_type' => $mensaje->sender_type,
@@ -86,8 +89,21 @@ class InboundAgentesController extends Controller
     private function tickets(Client $client)
     {
         return SupportTicket::where('client_id', $client->id)->with('client_employee')
+            ->withMax(['messages as last_message_at' => function ($messages) {
+                $this->filtrar_mensajes_visibles($messages);
+            }], 'created_at')->withCasts(['last_message_at' => 'datetime'])
             ->where(function ($query) {
                 $query->where('source', 'whatsapp')->orWhereNotNull('sistema_exclusivo_at');
+            });
+    }
+
+    private function filtrar_mensajes_visibles($mensajes): void
+    {
+        SupportMessage::apply_mensaje_real_conditions($mensajes, 'support_messages');
+        $mensajes->whereIn('sender_type', ['user', 'admin'])
+            ->where(function ($visibles) {
+                $visibles->where('sender_type', 'user')->orWhereNotNull('whatsapp_message_id')
+                    ->orWhereNotNull('synced_to_client_at');
             });
     }
 
@@ -95,11 +111,13 @@ class InboundAgentesController extends Controller
     {
         return [
             'uuid' => $ticket->uuid,
+            'admin_ticket_id' => (int) $ticket->id,
             'name' => $ticket->name,
             'status' => $ticket->status,
             'opened_at' => optional($ticket->opened_at)->toIso8601String(),
             'closed_at' => optional($ticket->closed_at)->toIso8601String(),
             'updated_at' => optional($ticket->updated_at)->toIso8601String(),
+            'last_message_at' => optional($ticket->last_message_at)->toIso8601String(),
             'origen' => 'whatsapp',
             'sistema_exclusivo_at' => optional($ticket->sistema_exclusivo_at)->toIso8601String(),
         ];

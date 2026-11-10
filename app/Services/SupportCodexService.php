@@ -227,6 +227,7 @@ class SupportCodexService
         $importador = app(PruebaImportacionService::class);
         $importaciones = $importador->estado_en_ticket($ticket);
         $soporte_activo = $importador->puerta_activo($ticket) === null;
+        $robotito_disponible = SupportTourService::entrante_admite_robotito($ticket, $last);
         return [
             'id' => (int) $ticket->id,
             'status' => $ticket->status,
@@ -259,10 +260,10 @@ class SupportCodexService
             'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => true, 'prueba_import_resolver' => true,
                 'soporte_import' => $soporte_activo, 'soporte_import_resolver' => $soporte_activo,
                 'soporte_import_stock_existente' => $soporte_activo,
-                'support_tour_consent' => true, 'support_dynamic_tour' => true],
+                'support_tour_consent' => true, 'support_dynamic_tour' => $robotito_disponible],
             'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
-            'robotito_available' => SupportTourService::entrante_admite_robotito($ticket, $last),
+            'robotito_available' => $robotito_disponible,
             'accepted_tour' => $last && ! $ticket->requiere_verificacion_mensajes
                 ? app(SupportTourService::class)->guion_aceptado($ticket, $last) : null,
             'accepted_tour_request' => $last && ! $ticket->requiere_verificacion_mensajes

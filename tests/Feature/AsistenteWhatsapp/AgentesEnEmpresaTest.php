@@ -200,6 +200,65 @@ class AgentesEnEmpresaTest extends BaseDelCanal
         $this->assertArrayNotHasKey('whatsapp_phone', $datos);
     }
 
+    public function test_las_referencias_erp_solo_exponen_tickets_de_la_persona_y_el_comercio(): void
+    {
+        $cliente = $this->comercio();
+        $otro = $this->crear_cliente('+5493425202156');
+        $whatsapp = $this->ticket_whatsapp($cliente);
+        $erp = $this->ticket_whatsapp($cliente, ['source' => 'erp', 'client_user_id' => $cliente->user_id]);
+        $this->ticket_whatsapp($cliente, ['source' => 'erp', 'client_user_id' => $cliente->user_id + 1]);
+        $this->ticket_whatsapp($otro, ['source' => 'erp', 'client_user_id' => $cliente->user_id]);
+        $traspasado = $this->ticket_whatsapp($cliente, [
+            'source' => 'erp', 'client_user_id' => $cliente->user_id, 'sistema_exclusivo_at' => now(),
+        ]);
+
+        $ruta = $this->ruta($cliente, 'soporte', ['solo_referencias_erp' => 1]);
+        $this->getJson($ruta)->assertUnauthorized();
+        $this->getJson($ruta, $this->clave($cliente))->assertOk()
+            ->assertExactJson(['models' => [], 'ticket_numbers' => [$erp->uuid => $erp->id]]);
+
+        $this->getJson($this->ruta($cliente, 'soporte'), $this->clave($cliente))->assertOk()
+            ->assertJsonPath('ticket_numbers', [$erp->uuid => $erp->id])
+            ->assertJsonPath('models.0.admin_ticket_id', $traspasado->id)
+            ->assertJsonPath('models.1.admin_ticket_id', $whatsapp->id);
+    }
+
+    public function test_la_fecha_de_la_conversacion_solo_cambia_con_un_mensaje_visible(): void
+    {
+        $cliente = $this->comercio();
+        $primero = $this->ticket_whatsapp($cliente, ['last_client_message_at' => now()]);
+        $segundo = $this->ticket_whatsapp($cliente, ['last_client_message_at' => now()->subHour()]);
+        $antiguo = now()->subMinutes(20)->startOfSecond();
+        $reciente = now()->subMinutes(10)->startOfSecond();
+        $mensaje = $this->mensaje($primero, 'Consulta anterior', ['created_at' => $antiguo]);
+        $this->mensaje($segundo, 'Respuesta entregada', [
+            'sender_type' => 'admin', 'created_at' => $reciente, 'whatsapp_message_id' => 'wamid.respuesta',
+        ]);
+        $this->mensaje($primero, 'Respuesta sin entregar', ['sender_type' => 'admin']);
+        $this->mensaje($primero, 'Borrador privado', [
+            'sender_type' => 'admin', 'is_ai_suggestion_draft' => true, 'synced_to_client_at' => now(),
+        ]);
+
+        $ruta = $this->ruta($cliente, 'soporte');
+        $this->getJson($ruta, $this->clave($cliente))->assertOk()
+            ->assertJsonPath('models.0.uuid', $segundo->uuid)
+            ->assertJsonPath('models.0.last_message_at', $reciente->toIso8601String())
+            ->assertJsonPath('models.1.last_message_at', $antiguo->toIso8601String());
+
+        $mensaje->update(['read_at' => now()]);
+        $primero->update(['status' => 'closed']);
+        $this->getJson($ruta, $this->clave($cliente))->assertOk()
+            ->assertJsonPath('models.0.uuid', $segundo->uuid)
+            ->assertJsonPath('models.1.last_message_at', $antiguo->toIso8601String());
+        $this->getJson($this->ruta($cliente, 'soporte/' . $primero->uuid), $this->clave($cliente))->assertOk()
+            ->assertJsonCount(1, 'model.messages')
+            ->assertJsonPath('model.last_message_at', $antiguo->toIso8601String());
+
+        $this->mensaje($primero, 'Mensaje nuevo', ['sender_type' => 'user']);
+        $this->getJson($ruta, $this->clave($cliente))->assertOk()
+            ->assertJsonPath('models.0.uuid', $primero->uuid);
+    }
+
     public function test_el_traspaso_conserva_el_ticket_y_martin_entrega_solo_en_empresa(): void
     {
         config(['services.claude_task_ingest.key' => 'codex-agentes-test']);
