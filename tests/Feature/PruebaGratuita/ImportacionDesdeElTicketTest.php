@@ -335,6 +335,31 @@ class ImportacionDesdeElTicketTest extends BaseDeLaPrueba
         Http::assertNothingSent();
     }
 
+    /** @test */
+    public function acredita_el_remitente_de_cada_mensaje_sin_exponer_el_telefono(): void
+    {
+        $this->pasar_a_activo();
+        $mensaje_real = SupportMessage::findOrFail($this->adjunto->support_message_id);
+        $sin_evidencia = SupportMessage::create([
+            'support_ticket_id' => $this->ticket->id, 'sender_type' => 'user', 'kind' => 'text',
+            'body' => 'No hay remitente original', 'whatsapp_message_id' => 'wamid.legado',
+        ]);
+        $otro_numero = SupportMessage::create([
+            'support_ticket_id' => $this->ticket->id, 'sender_type' => 'user', 'kind' => 'text',
+            'body' => 'Coincide solo el sufijo', 'whatsapp_message_id' => 'wamid.otro',
+            'whatsapp_remitente_crudo' => '5493511234567',
+        ]);
+        $respuesta = $this->getJson('/api/claude/support-codex/tickets/' . $this->ticket->id, $this->headers_de_claude())
+            ->assertOk()->assertJsonPath('ticket.capabilities.soporte_import', true);
+
+        $mensajes = collect($respuesta->json('ticket.messages'))->keyBy('id');
+        $this->assertTrue($mensajes[$mensaje_real->id]['remitente_dueno_verificado']);
+        $this->assertFalse($mensajes[$sin_evidencia->id]['remitente_dueno_verificado']);
+        $this->assertFalse($mensajes[$otro_numero->id]['remitente_dueno_verificado']);
+        $this->assertStringNotContainsString('whatsapp_remitente_crudo', (string) $respuesta->getContent());
+        $this->assertStringNotContainsString('5493511234567', (string) $respuesta->getContent());
+    }
+
     /**
      * @test
      * @dataProvider confirmaciones_de_soporte
