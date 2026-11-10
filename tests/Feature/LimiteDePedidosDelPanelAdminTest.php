@@ -64,6 +64,31 @@ class LimiteDePedidosDelPanelAdminTest extends TestCase
         }
     }
 
+    /**
+     * Con un token real y sin `Sanctum::actingAs`, que deja al guard resuelto antes del pedido: si
+     * el throttle corriera antes que `auth`, `$request->user()` sería null y caería en la cubeta
+     * general por IP. Por eso se olvidan los guards en cada vuelta.
+     */
+    public function test_con_token_real_el_auth_corre_antes_que_el_limitador()
+    {
+        $admin = Admin::create([
+            'name' => 'Operador con token',
+            'email' => Str::random(15) . '@test.local',
+            'password' => bcrypt(Str::random(32)),
+        ]);
+        $token = $admin->createToken('prueba-limite')->plainTextToken;
+
+        for ($pedido = 1; $pedido <= self::TOPE_GENERAL + 5; $pedido++) {
+            $this->app['auth']->forgetGuards();
+            $this->app['auth']->setDefaultDriver('web');
+
+            $this->withHeaders(['Authorization' => 'Bearer ' . $token])
+                ->getJson('/api/admin/me')
+                ->assertOk()
+                ->assertHeader('X-RateLimit-Limit', '1200');
+        }
+    }
+
     public function test_con_el_tope_agotado_recibe_429_con_retry_after()
     {
         /* Un pedido arriba del general: es el valor más bajo que el `max()` deja configurar. */
