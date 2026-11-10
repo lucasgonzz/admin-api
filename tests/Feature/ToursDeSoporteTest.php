@@ -13,6 +13,7 @@ use App\Models\Admin;
 use App\Models\AdminSetting;
 use App\Models\Client;
 use App\Models\ClientEmployee;
+use App\Models\SupportCodexOperation;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
 use App\Models\TrialInstance;
@@ -344,6 +345,126 @@ class ToursDeSoporteTest extends TestCase
         $this->postJson($url . '/tour/prepare', ['expected_message_id' => $aceptacion->id], $headers)
             ->assertStatus(409)->assertJsonPath('code', 'tour_consent_required');
         Http::assertNothingSent();
+    }
+
+    public function test_martin_conserva_la_oferta_al_recibir_un_si_desde_una_sesion_no_apta(): void
+    {
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
+        $body = $this->mensaje_erp($this->cliente_con_version('4.3.47'));
+        SupportCodexSettings::set_enabled(true);
+        $firma = ['X-Admin-Api-Key' => 'clave-inbound'];
+        $consulta = SupportMessage::findOrFail($this->postJson(self::INBOUND, $body, $firma)->assertCreated()->json('model.id'));
+        $ticket = $consulta->ticket;
+        $oferta = $this->invitacion($ticket, self::GUION, [
+            'erp_auto_reply' => ['tour_requested' => true, 'tour_import_history_id' => 1059],
+        ]);
+        $intento = SupportMessage::findOrFail($this->postJson(self::INBOUND, array_replace($body, [
+            'body' => 'Dale', 'message_uuid' => (string) Str::uuid(), 'robotito_support_version' => null,
+        ]), $firma)->assertCreated()->json('model.id'));
+        $url = self::CLAUDE . $ticket->id;
+        $headers = $this->reserva($ticket, $intento);
+        $this->getJson($url, $headers)->assertOk()->assertJsonPath('ticket.accepted_tour_request', false);
+        Http::fake(['empresa-tours.test/api/admin-sync/support/messages' => Http::response(['ok' => true])]);
+        $this->postJson($url . '/tour/prepare', ['expected_message_id' => $intento->id], $headers)
+            ->assertStatus(409)->assertJsonPath('code', 'tour_consent_required');
+        Http::assertNothingSent();
+        $respuesta = [
+            'lease_token' => $headers['X-Support-Lease-Token'], 'operation_id' => 'recordar-robotito-' . $intento->id,
+            'expected_message_id' => $intento->id, 'action' => 'responder', 'body' => 'Explicación del agente sin la invitación.',
+        ];
+        $operacion = $this->postJson($url . '/reply', $respuesta, $headers)->assertOk()->assertJsonPath('operation.status', 'sent');
+        $recordatorio = SupportMessage::findOrFail($operacion->json('operation.message_id'));
+        $this->assertStringContainsString(SupportTourService::RETOMAR_DESDE_CUENTA_PROPIA, $recordatorio->body);
+        $this->assertTrue(SupportTourService::tiene_invitacion($recordatorio->body));
+        $this->assertSame([
+            'tour_requested' => true, 'tour_import_history_id' => 1059, 'tour_original_offer_id' => $oferta->id,
+        ], $recordatorio->erp_auto_reply);
+        $this->postJson($url . '/reply', $respuesta, $headers)->assertOk()->assertJsonPath('operation.message_id', $recordatorio->id);
+        Http::assertSentCount(1);
+
+        $aceptacion = SupportMessage::findOrFail($this->postJson(self::INBOUND, array_replace($body, [
+            'body' => 'Sí, quiero el tour', 'message_uuid' => (string) Str::uuid(),
+        ]), $firma)->assertCreated()->json('model.id'));
+        $headers = $this->reserva($ticket, $aceptacion);
+        $this->getJson($url, $headers)->assertOk()->assertJsonPath('ticket.accepted_tour_request', true);
+        Http::fake([
+            self::PUENTE . '/catalogo*' => Http::response(self::CATALOGO_DINAMICO),
+            'api.deepseek.com/*' => Http::response($this->respuesta_deepseek(self::GUION_DINAMICO)),
+            self::PUENTE => Http::response(['ok' => true, 'uuid' => $aceptacion->uuid]),
+        ]);
+        $preparar = ['expected_message_id' => $aceptacion->id];
+        $this->postJson($url . '/tour/prepare', $preparar, $headers)->assertOk()->assertJsonPath('uuid', $aceptacion->uuid);
+        $this->postJson($url . '/tour/prepare', $preparar, $headers)->assertOk()->assertJsonPath('uuid', $aceptacion->uuid);
+        $this->assertSame($aceptacion->uuid, $oferta->fresh()->erp_auto_reply['tour_acceptance_uuid']);
+        $this->assertArrayNotHasKey('tour_acceptance_uuid', $recordatorio->fresh()->erp_auto_reply);
+        Http::assertSent(function ($request) {
+            return strpos($request->url(), self::PUENTE . '/catalogo') === 0
+                && strpos($request->url(), 'import_history_id=1059') !== false;
+        });
+        Http::assertSentCount(3);
+    }
+
+    /** @dataProvider reanudaciones_tras_aviso_anterior */
+    public function test_un_aviso_anterior_solo_recupera_la_oferta_con_consentimiento_explicito_y_evidencia_contigua(
+        array $cambios,
+        bool $recupera
+    ): void {
+        $body = $this->mensaje_erp($this->cliente_con_version('4.3.47'));
+        $firma = ['X-Admin-Api-Key' => 'clave-inbound'];
+        $consulta = SupportMessage::findOrFail($this->postJson(self::INBOUND, $body, $firma)->assertCreated()->json('model.id'));
+        $ticket = $consulta->ticket;
+        $oferta = $this->invitacion($ticket, self::GUION, [
+            'erp_auto_reply' => ['tour_requested' => true], 'synced_to_client_at' => ($cambios['entregada'] ?? true) ? now() : null,
+        ]);
+        $intento = SupportMessage::findOrFail($this->postJson(self::INBOUND, array_replace($body, [
+            'body' => $cambios['intento'] ?? 'Dale', 'message_uuid' => (string) Str::uuid(), 'robotito_support_version' => null,
+        ]), $firma)->assertCreated()->json('model.id'));
+        $aviso = SupportMessage::create([
+            'support_ticket_id' => $ticket->id, 'sender_type' => 'admin', 'kind' => 'text',
+            'body' => $cambios['aviso'] ?? 'Para preparar el tour, entrá con tu cuenta propia y volvé al mismo chat.',
+            'ai_generated_at' => now(), 'synced_to_client_at' => now(),
+        ]);
+        SupportCodexOperation::create([
+            'support_ticket_id' => $ticket->id, 'message_id' => $aviso->id,
+            'expected_message_id' => ! empty($cambios['otra_operacion']) ? $consulta->id : $intento->id,
+            'operation_id' => (string) Str::uuid(), 'action' => 'responder', 'status' => $cambios['estado'] ?? 'sent',
+            'request_hash' => str_repeat('a', 64),
+        ]);
+        if (! empty($cambios['intermedio'])) {
+            $this->postJson(self::INBOUND, array_replace($body, [
+                'body' => '¿Cómo cargo un artículo?', 'message_uuid' => (string) Str::uuid(),
+            ]), $firma)->assertCreated();
+        }
+        $aceptacion = SupportMessage::findOrFail($this->postJson(self::INBOUND, array_replace($body, [
+            'body' => $cambios['aceptacion'] ?? 'Sí, quiero el tour', 'message_uuid' => (string) Str::uuid(),
+            'robotito_support_version' => ! empty($cambios['sin_marca']) ? null : 1,
+        ]), ! empty($cambios['sin_firma']) ? [] : $firma)->assertCreated()->json('model.id'));
+
+        $tours = app(SupportTourService::class);
+        $this->assertSame($recupera ? $oferta->id : null, optional($tours->solicitud_aceptada($ticket, $aceptacion))->id);
+        if ($recupera) {
+            $oferta->update(['erp_auto_reply' => $oferta->erp_auto_reply + ['tour_acceptance_uuid' => $aceptacion->uuid]]);
+            $this->assertSame($oferta->id, optional($tours->solicitud_aceptada($ticket, $aceptacion))->id);
+            $aceptacion->uuid = (string) Str::uuid();
+            $this->assertNull($tours->solicitud_aceptada($ticket, $aceptacion));
+        }
+    }
+
+    public function reanudaciones_tras_aviso_anterior(): array
+    {
+        return [
+            'aceptación explícita' => [[], true],
+            'dale al aviso' => [['aceptacion' => 'Dale'], false],
+            'rechazo' => [['aceptacion' => 'No quiero el tour'], false],
+            'otra consulta' => [['intermedio' => true], false],
+            'respuesta anterior de otro tema' => [['aviso' => 'Una explicación de Martín sobre recargos.'], false],
+            'intento previo ambiguo' => [['intento' => '¿Qué es Robotito?'], false],
+            'último entrante sin sesión apta' => [['sin_marca' => true], false],
+            'último entrante sin firma' => [['sin_firma' => true], false],
+            'operación de otro mensaje' => [['otra_operacion' => true], false],
+            'operación sin entrega confirmada' => [['estado' => 'unknown'], false],
+            'oferta original sin entrega' => [['entregada' => false], false],
+        ];
     }
 
     /** @dataProvider umbrales_de_version */

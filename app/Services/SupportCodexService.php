@@ -849,6 +849,7 @@ class SupportCodexService
             // Una sola pieza: no hay reintentos de partes ni demoras de separación de mensajes.
             $body = preg_replace('/^\s*---\s*$/m', '', $body);
             $tour_requested = $input['tour_requested'];
+            $recordatorio = null;
             if ($tour_requested && SupportTourService::version_habilita_oferta($ticket) === false) {
                 $body = SupportTourService::quitar_invitacion($body);
                 $tour_requested = false;
@@ -856,11 +857,16 @@ class SupportCodexService
                 $body = SupportTourService::con_invitacion($body, false, true);
             } elseif (! $tour_requested && $input['action'] === 'responder' && $attachment === null
                 && $proposal === null && ! isset($input['tour_invitation'])) {
-                $oferta = SupportTourService::preparar_oferta($ticket, SupportMessage::find($input['expected_message_id']),
-                    $body, ! empty($input['usage_answer']));
-                if ($oferta !== null) {
-                    $body = $oferta;
-                    $tour_requested = true;
+                $entrante = SupportMessage::find($input['expected_message_id']);
+                $recordatorio = $entrante === null ? null : app(SupportTourService::class)->recordatorio_de_invitacion($ticket, $entrante);
+                if ($recordatorio !== null) {
+                    $body = $recordatorio['body'];
+                } else {
+                    $oferta = SupportTourService::preparar_oferta($ticket, $entrante, $body, ! empty($input['usage_answer']));
+                    if ($oferta !== null) {
+                        $body = $oferta;
+                        $tour_requested = true;
+                    }
                 }
             }
             $message = SupportMessage::create([
@@ -871,10 +877,10 @@ class SupportCodexService
                 'body' => $body,
                 'ai_generated_at' => now(),
                 'delivered_at' => now(),
-                'erp_auto_reply' => $tour_requested ? array_filter([
+                'erp_auto_reply' => $recordatorio['meta'] ?? ($tour_requested ? array_filter([
                     'tour_requested' => true, 'tour_import_history_id' => $input['tour_import_history_id'],
                 ])
-                    : (isset($input['tour_invitation']) ? ['tour_invitation' => $input['tour_invitation']] : null),
+                    : (isset($input['tour_invitation']) ? ['tour_invitation' => $input['tour_invitation']] : null)),
             ]);
             if ($attachment !== null) {
                 try {

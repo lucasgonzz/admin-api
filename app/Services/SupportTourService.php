@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Helpers\WhatsappNormalizer;
 use App\Models\Client;
 use App\Models\ClientEmployee;
+use App\Models\SupportCodexOperation;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
 use App\Models\TrialInstance;
@@ -18,6 +19,7 @@ class SupportTourService
     private const PATH = 'api/admin-sync/support/tours';
     public const INVITACION = 'Querés que te prepare un tour con Robotito?';
     public const ACEPTAR_DESDE_CUENTA_PROPIA = 'Para aceptar, entrá al sistema con tu cuenta propia y respondé en este mismo chat.';
+    public const RETOMAR_DESDE_CUENTA_PROPIA = 'Entrá al sistema con tu cuenta propia, volvé a este mismo chat y respondé «Sí, quiero el tour».';
     public const ACTUALIZAR_PARA_ABRIR = 'Para abrir la guía personalizada, primero necesitás actualizar tu sistema a una versión compatible con Robotito.';
     public const REVISION_ANTES_DE_PREPARAR = 'Si aceptás, Soporte tiene que revisar tu respuesta antes de que se prepare la guía.';
     private const UMBRAL_DE_OFERTA = '3.2.47';
@@ -135,7 +137,7 @@ class SupportTourService
         $lineas = preg_split('/\R/u', trim($texto));
         array_pop($lineas);
         $texto = rtrim(implode("\n", $lineas));
-        foreach ([self::REVISION_ANTES_DE_PREPARAR, self::ACEPTAR_DESDE_CUENTA_PROPIA, self::ACTUALIZAR_PARA_ABRIR] as $leyenda) {
+        foreach ([self::REVISION_ANTES_DE_PREPARAR, self::ACEPTAR_DESDE_CUENTA_PROPIA, self::ACTUALIZAR_PARA_ABRIR, self::RETOMAR_DESDE_CUENTA_PROPIA] as $leyenda) {
             $aviso = "\n\n" . $leyenda;
             if (substr($texto, -strlen($aviso)) === $aviso) {
                 $texto = substr($texto, 0, -strlen($aviso));
@@ -178,6 +180,27 @@ class SupportTourService
         }
 
         return null;
+    }
+
+    public function recordatorio_de_invitacion(SupportTicket $ticket, SupportMessage $entrante): ?array
+    {
+        if (! self::intento_erp_sin_robotito($ticket, $entrante)
+            || $ticket->requiere_verificacion_mensajes
+            || self::version_admite_tour_personalizado($ticket) === false) {
+            return null;
+        }
+
+        $invitacion = $this->invitacion_del_turno($ticket, $entrante);
+        if ($invitacion === null || ($invitacion->erp_auto_reply['tour_requested'] ?? null) !== true) {
+            return null;
+        }
+
+        // El recordatorio conserva el objetivo y señala la misma oferta, que sigue siendo de un solo uso.
+        return [
+            'body' => "La invitación de Robotito sigue disponible.\n\n" . self::RETOMAR_DESDE_CUENTA_PROPIA . "\n\n" . self::INVITACION,
+            'meta' => array_intersect_key($invitacion->erp_auto_reply, ['tour_requested' => true, 'tour_import_history_id' => true])
+                + ['tour_original_offer_id' => (int) $invitacion->id],
+        ];
     }
 
     public static function entrante_admite_robotito(SupportTicket $ticket, ?SupportMessage $entrante): bool
@@ -320,10 +343,16 @@ class SupportTourService
             return $entrante;
         }
 
+        return $this->invitacion_del_turno($ticket, $entrante)
+            ?? $this->invitacion_anterior_al_aviso($ticket, $entrante);
+    }
+
+    private function invitacion_del_turno(SupportTicket $ticket, SupportMessage $entrante): ?SupportMessage
+    {
         $anteriores = SupportMessage::where('support_ticket_id', $ticket->id)->where('id', '<', $entrante->id);
         SupportMessage::apply_mensaje_real_conditions($anteriores, 'support_messages');
         $invitacion = (clone $anteriores)->latest('id')->first();
-        $respuesta = ltrim(Str::ascii(mb_strtolower(trim((string) $entrante->body))), '! ');
+        $respuesta = self::normalizar_respuesta($entrante);
         $cita = $entrante->reply_to_message_id;
         if ($invitacion !== null && $invitacion->sender_type === 'user') {
             if ($cita !== null) {
@@ -334,9 +363,34 @@ class SupportTourService
                 $invitacion = $anteriores->where('id', '<', $invitacion->id)->latest('id')->first();
             }
         }
-        if ($invitacion === null || $invitacion->sender_type !== 'admin'
+        if ($invitacion === null || ($cita !== null && (int) $cita !== (int) $invitacion->id)) {
+            return null;
+        }
+        $texto = $this->texto_de_invitacion($ticket, $entrante, $invitacion);
+        if ($texto === null || ! self::respuesta_acepta_invitacion($texto, $respuesta)) {
+            return null;
+        }
+
+        $original_id = $ticket->source === 'erp' ? ($invitacion->erp_auto_reply['tour_original_offer_id'] ?? null) : null;
+        if ($original_id === null) {
+            return $invitacion;
+        }
+
+        if (! is_int($original_id) || $original_id < 1 || ! self::entrada_erp_verificada($ticket, $entrante)) {
+            return null;
+        }
+
+        $original = (clone $anteriores)->where('id', '<', $invitacion->id)->find($original_id);
+        return $original !== null && ($original->erp_auto_reply['tour_requested'] ?? null) === true
+            && ! isset($original->erp_auto_reply['tour_original_offer_id'])
+            && $this->texto_de_invitacion($ticket, $entrante, $original) !== null ? $original : null;
+    }
+
+    private function texto_de_invitacion(SupportTicket $ticket, SupportMessage $entrante, SupportMessage $invitacion): ?string
+    {
+        if ($invitacion->sender_type !== 'admin'
             || ! $ticket->mensaje_confiable_para_codex($invitacion)
-            || ($cita !== null && (int) $cita !== (int) $invitacion->id)) {
+            || ! SupportMessage::es_mensaje_real($invitacion)) {
             return null;
         }
 
@@ -346,21 +400,82 @@ class SupportTourService
         $guion = self::guion($invitacion->erp_auto_reply['tour_invitation'] ?? null);
         $uuid_usado = $invitacion->erp_auto_reply['tour_acceptance_uuid'] ?? null;
         $solicitud = ($invitacion->erp_auto_reply['tour_requested'] ?? null) === true;
-        $texto_invitacion = $ticket->source === 'whatsapp'
+        $texto = $ticket->source === 'whatsapp'
             ? (string) ($invitacion->ai_body_before_template ?? $invitacion->body) : (string) $invitacion->body;
         if (! $entregada || ($guion === null && ! $solicitud) || ($uuid_usado !== null && $uuid_usado !== $entrante->uuid)
-            || ! self::tiene_invitacion($texto_invitacion)) {
+            || ! self::tiene_invitacion($texto)) {
             return null;
         }
 
+        return $texto;
+    }
+
+    private static function respuesta_acepta_invitacion(string $texto, string $respuesta): bool
+    {
         // Una respuesta breve solo es inequívoca si la invitación era la única pregunta.
-        if (preg_match('/^(?:(?:si|dale|ok)[,.! ]+)?(?:preparame|mandame|pasame|enviame|quiero(?: hacer)?) (?:el|un) (?:tour|recorrido)(?: de robotito)?(?:[,.! ]+(?:por favor|porfa|gracias))*[.!, ]*$/D', $respuesta)) {
-            return $invitacion;
+        if (self::aceptacion_explicita($respuesta)) {
+            return true;
         }
 
-        $afirmativa = ! preg_match('/[?¿]/u', preg_replace('~https?://\S+~u', '', self::quitar_invitacion($texto_invitacion)))
+        return ! preg_match('/[?¿]/u', preg_replace('~https?://\S+~u', '', self::quitar_invitacion($texto)))
             && preg_match('/^(?:si|dale|de una|de acuerdo|(?:ok|bueno)[,.! ]+dale)(?:[,.! ]+(?:si|dale|quiero|mandamelo|preparamelo|pasamelo|enviamelo|por favor|porfa|por fi|gracias|me (?:sirve|vendria bien|gustaria)|quiero que (?:me )?lo prepares))*[.!, ]*$/D', $respuesta);
-        return $afirmativa ? $invitacion : null;
+    }
+
+    private function invitacion_anterior_al_aviso(SupportTicket $ticket, SupportMessage $entrante): ?SupportMessage
+    {
+        if (! self::entrada_erp_verificada($ticket, $entrante) || $entrante->reply_to_message_id !== null
+            || ! self::aceptacion_explicita(self::normalizar_respuesta($entrante))) {
+            return null;
+        }
+
+        // Compatibilidad con el aviso anterior: solo los tres mensajes reales contiguos y la operación exacta.
+        $mensajes = SupportMessage::where('support_ticket_id', $ticket->id)->where('id', '<', $entrante->id);
+        SupportMessage::apply_mensaje_real_conditions($mensajes, 'support_messages');
+        $previos = $mensajes->latest('id')->limit(3)->get();
+        if ($previos->count() !== 3) {
+            return null;
+        }
+        [$aviso, $intento, $oferta] = $previos->all();
+        if ($aviso->sender_type !== 'admin' || $aviso->sender_admin_id !== null || $aviso->ai_generated_at === null
+            || $aviso->synced_to_client_at === null || $aviso->erp_auto_reply !== null
+            || ! Str::containsAll(self::normalizar_respuesta($aviso), ['cuenta propia', 'mismo chat', 'tour'])
+            || ! self::intento_erp_sin_robotito($ticket, $intento)
+            || ($intento->reply_to_message_id !== null && (int) $intento->reply_to_message_id !== (int) $oferta->id)
+            || ($oferta->erp_auto_reply['tour_requested'] ?? null) !== true
+            || isset($oferta->erp_auto_reply['tour_original_offer_id'])) {
+            return null;
+        }
+        $texto = $this->texto_de_invitacion($ticket, $entrante, $oferta);
+        if ($texto === null || ! self::respuesta_acepta_invitacion($texto, self::normalizar_respuesta($intento))) {
+            return null;
+        }
+
+        $operacion = SupportCodexOperation::where('support_ticket_id', $ticket->id)
+            ->where('message_id', $aviso->id)->where('expected_message_id', $intento->id)
+            ->where('action', 'responder')->where('status', 'sent')->exists();
+        return $operacion ? $oferta : null;
+    }
+
+    private static function intento_erp_sin_robotito(SupportTicket $ticket, SupportMessage $entrante): bool
+    {
+        return self::entrada_erp_verificada($ticket, $entrante) && ! self::entrante_admite_robotito($ticket, $entrante);
+    }
+
+    private static function entrada_erp_verificada(SupportTicket $ticket, SupportMessage $entrante): bool
+    {
+        return $ticket->source === 'erp' && $ticket->status === 'open' && $entrante->kind === 'text'
+            && self::es_entrante_del_ticket($ticket, $entrante)
+            && ($entrante->erp_auto_reply[SupportMessage::MARCA_ERP_VERIFICADO_PARA_CODEX] ?? null) === true;
+    }
+
+    private static function normalizar_respuesta(SupportMessage $entrante): string
+    {
+        return ltrim(Str::ascii(mb_strtolower(trim((string) $entrante->body))), '! ');
+    }
+
+    private static function aceptacion_explicita(string $respuesta): bool
+    {
+        return (bool) preg_match('/^(?:(?:si|dale|ok)[,.! ]+)?(?:preparame|mandame|pasame|enviame|quiero(?: hacer)?) (?:el|un) (?:tour|recorrido)(?: de robotito)?(?:[,.! ]+(?:por favor|porfa|gracias))*[.!, ]*$/D', $respuesta);
     }
 
     public function objetivo_disponible(SupportTicket $ticket, SupportMessage $entrante, int $import_history_id): bool
