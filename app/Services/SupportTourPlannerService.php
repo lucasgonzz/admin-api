@@ -117,8 +117,12 @@ class SupportTourPlannerService
     private function id_importacion(array $historial): ?int
     {
         $ids = [];
-        foreach ($historial as $mensaje) {
-            if ($mensaje['autor'] === 'cliente' && preg_match_all('/\b(?:importaci[oó]n|historial)\s+(?:#\s*|(?:id|n[úu]mero)\s*:?\s*#?\s*)([1-9][0-9]{0,15})(?![0-9]|[.\/:-][0-9])/iu', $mensaje['texto'], $coincidencias)) {
+        foreach (array_reverse($historial) as $mensaje) {
+            // La referencia textual tiene que pertenecer al turno que motivó la invitación.
+            if ($mensaje['autor'] !== 'cliente') {
+                break;
+            }
+            if (preg_match_all('/\b(?:importaci[oó]n|historial)\s+(?:#\s*|(?:id|n[úu]mero)\s*:?\s*#?\s*)([1-9][0-9]{0,15})(?![0-9]|[.\/:-][0-9])/iu', $mensaje['texto'], $coincidencias)) {
                 foreach ($coincidencias[1] as $id) {
                     if ((int) $id <= SupportTourService::MAX_IMPORT_HISTORY_ID) {
                         $ids[] = (int) $id;
