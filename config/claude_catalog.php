@@ -221,6 +221,50 @@ return [
                 ['nombre' => 'resumen', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|max:600', 'que_es' => 'Qué pasó, qué se hizo y cómo quedó. Ausente o null: no se toca.'],
             ],
         ],
+        /* La auditoría de Martín (misión cruzada auditoria-de-martin, 11/11/2026): lo que el monitor registra al ejecutar
+           cada comando de Martín y el plan de cada atención. Reglas en App\Services\MartinActivity\MartinActivityService;
+           el panel lo lee por GET admin/support-ticket/{id}/martin-activity (Sanctum, fuera de este catálogo). */
+        'POST api/claude/support-codex/activity' => [
+            'para_que'     => 'El monitor registra en tanda lo que Martín hizo con las herramientas del soporte (consultó la base, leyó el log, escribió la ficha, respondió al cliente...), para la auditoría del panel. Cada item: {support_ticket_id | implementation_followup_id, run_id, kind (lectura | escritura = lo que escribe en el SISTEMA DEL CLIENTE: importaciones, imágenes, reparar configuración, confirmar actualización | registro = lo interno del admin: ficha, título, notas de implementación, pasos, misiones, pausas del seguimiento, tour | envio | consulta | plan | error), command (el subcomando: sql, logs, ficha, responder...), summary (castellano, sin secretos ni datos crudos), detail? (chico), ok, occurred_at}. El client_id sale del ticket o del seguimiento. Responde 200 {guardados, repetidos}. Los contadores del ticket en la bandeja (martin_activity_count: todas las acciones de las atenciones que tocaron el ticket; martin_writes_count: solo las escritura con ok, los registro no) y el panel cuentan una atención entera si al menos una de sus acciones trae el support_ticket_id.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Sin reserva del ticket, a propósito: la auditoría tiene que quedar aunque la reserva ya se haya usado. Solo AGREGA filas a la auditoría: no toca el ticket ni manda nada a nadie.',
+                'Idempotente por (run_id, command, occurred_at, summary): un item que ya estaba (o repetido en la misma tanda) cuenta en repetidos y no se vuelve a guardar. occurred_at se compara normalizado a UTC.',
+                'Al guardar, toda corrida de 15 a 22 dígitos (con o sin espacios o guiones) en summary y en los textos de detail queda como [número oculto] (defensa en profundidad: el monitor no debería mandarlos).',
+                'Tanda de 1 a 50 items; summary ≤ 300; command ≤ 40; run_id ≤ 64 (letras, números, . _ : -); detail ≤ 2 KB en JSON. Si un item no cumple, o su ticket o seguimiento no existe, 422 {error: "parámetros inválidos", errores} y no se guarda NADA de la tanda (no conviene reintentarla igual).',
+            ],
+            'parametros'   => [
+                ['nombre' => 'items', 'obligatorio' => true, 'validacion' => 'required|array|min:1|max:50', 'que_es' => 'Las acciones registradas.'],
+                ['nombre' => 'items[].support_ticket_id', 'obligatorio' => false, 'validacion' => 'nullable|integer|required_without:implementation_followup_id', 'que_es' => 'El ticket de la atención (tiene que existir).'],
+                ['nombre' => 'items[].implementation_followup_id', 'obligatorio' => false, 'validacion' => 'nullable|integer|required_without:support_ticket_id', 'que_es' => 'El seguimiento proactivo, si la acción es de un seguimiento (tiene que existir). Con los dos, manda el ticket.'],
+                ['nombre' => 'items[].run_id', 'obligatorio' => true, 'validacion' => 'required|string|max:64|regex:[A-Za-z0-9._:-]', 'que_es' => 'La ejecución de Martín (agrupa las acciones de una atención).'],
+                ['nombre' => 'items[].kind', 'obligatorio' => true, 'validacion' => 'required|in:lectura,escritura,registro,envio,consulta,plan,error', 'que_es' => 'El tipo de acción: escritura solo para el sistema del cliente; lo interno del admin es registro.'],
+                ['nombre' => 'items[].command', 'obligatorio' => true, 'validacion' => 'required|string|max:40', 'que_es' => 'El subcomando del monitor.'],
+                ['nombre' => 'items[].summary', 'obligatorio' => true, 'validacion' => 'required|string|max:300', 'que_es' => 'Qué hizo, en castellano, sin secretos ni datos crudos (de sql: la SELECT; nunca las filas).'],
+                ['nombre' => 'items[].detail', 'obligatorio' => false, 'validacion' => 'nullable|array, ≤ 2 KB en JSON', 'que_es' => 'Detalle chico: {filas, truncado}, {lineas}, {estado}...'],
+                ['nombre' => 'items[].ok', 'obligatorio' => true, 'validacion' => 'required|boolean', 'que_es' => 'Si el comando salió bien (un rechazo o error: false, con el código en el summary).'],
+                ['nombre' => 'items[].occurred_at', 'obligatorio' => true, 'validacion' => 'required|date (ISO 8601)', 'que_es' => 'Cuándo ocurrió. Sin huso se toma la hora de Argentina.'],
+            ],
+        ],
+        'PUT api/claude/support-codex/plans/{run_id}' => [
+            'para_que'     => 'El plan que Martín declara en una atención (subcomando plan del monitor): objetivo y pasos con su estado, que el panel muestra como la tarjeta «Recorrido de Martín». Reemplaza entero el plan de esa ejecución (upsert por run_id). Responde 200 {ok: true}.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Sin reserva del ticket, como la actividad. Solo guarda el plan de la auditoría: no toca el ticket ni manda nada.',
+                'Upsert por run_id: el último PUT gana; no hay historial de versiones del plan.',
+                'Corridas de 15 a 22 dígitos en el objetivo o los pasos quedan como [número oculto].',
+                'Hasta 15 pasos de ≤ 200, objetivo ≤ 300; el ticket o el seguimiento tienen que existir (422 {error: "parámetros inválidos", errores}).',
+            ],
+            'parametros'   => [
+                ['nombre' => 'run_id', 'obligatorio' => true, 'validacion' => 'en la ruta, [A-Za-z0-9._:-]{1,64}', 'que_es' => 'La ejecución de Martín.'],
+                ['nombre' => 'support_ticket_id', 'obligatorio' => false, 'validacion' => 'nullable|integer|required_without:implementation_followup_id', 'que_es' => 'El ticket de la atención.'],
+                ['nombre' => 'implementation_followup_id', 'obligatorio' => false, 'validacion' => 'nullable|integer|required_without:support_ticket_id', 'que_es' => 'El seguimiento, si la atención es de un seguimiento.'],
+                ['nombre' => 'objetivo', 'obligatorio' => false, 'validacion' => 'nullable|string|max:300', 'que_es' => 'Para qué es la atención, en una línea.'],
+                ['nombre' => 'pasos', 'obligatorio' => true, 'validacion' => 'present|array|max:15', 'que_es' => 'Los pasos: [{texto ≤ 200, estado: pendiente|en_curso|hecho|descartado}].'],
+            ],
+        ],
         'POST api/claude/support-codex/tickets/{id}/implementation-note' => [
             'para_que' => 'Martín deja asentada una nota en la implementación del SISTEMA en curso del cliente del ticket («mandó la lista de precios», «queda en mandar las fotos el lunes»): solo AGREGA a data.actions[] de la etapa {action:"nota", stage, at, canal:"whatsapp", origen:"martin", texto, support_ticket_id}. No cambia estados ni etapas ni manda nada. Responde {registrada, implementation_id, etapa, at}: 201 con registrada=true, o 200 con registrada=false si ya estaba.',
             'escribe' => true, 'peligrosidad' => 'baja',

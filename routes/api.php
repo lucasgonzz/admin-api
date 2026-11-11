@@ -414,6 +414,12 @@ Route::middleware('claude.task.key')
             ->whereNumber('id');
         Route::get('support-codex/implementation-followups/{id}/history-search', 'Api\ClaudeClientMemoryController@buscar_desde_el_seguimiento')
             ->whereNumber('id');
+        /* La auditoría de Martín (misión cruzada auditoria-de-martin, 11/11/2026): el monitor registra cada comando que
+           corre Martín y el plan de cada atención. SIN reserva: la auditoría tiene que quedar aunque la reserva ya se
+           haya usado. Reglas en App\Services\MartinActivity\MartinActivityService. */
+        Route::post('support-codex/activity', 'Api\SupportCodexActivityController@registrar');
+        Route::put('support-codex/plans/{run_id}', 'Api\SupportCodexActivityController@plan')
+            ->where('run_id', '[A-Za-z0-9._:-]{1,64}');
         Route::get('support-codex/tickets/{id}/upgrade-window', 'Api\ClaudeSupportCodexController@upgrade_window')
             ->whereNumber('id');
         Route::post('support-codex/tickets/{id}/upgrade-proposal', 'Api\ClaudeSupportCodexController@upgrade_proposal')
@@ -1620,6 +1626,8 @@ Route::prefix('admin')->group(function () {
         Route::get('support-ticket/contact-search', [\App\Http\Controllers\Api\SupportTicketController::class, 'contact_search']);
         Route::get('support-ticket/{id}', [\App\Http\Controllers\Api\SupportTicketController::class, 'show']);
         Route::get('support-ticket/{id}/tours', [\App\Http\Controllers\Api\SupportTourController::class, 'seguimiento'])->whereNumber('id');
+        /* Lo que hizo Martín en el ticket, por atención, con su plan (misión cruzada auditoria-de-martin, 11/11/2026). */
+        Route::get('support-ticket/{id}/martin-activity', [\App\Http\Controllers\Api\SupportCodexActivityController::class, 'del_ticket'])->whereNumber('id');
         Route::get('support-ticket/{id}/whatsapp-window', [\App\Http\Controllers\Api\SupportTicketController::class, 'whatsapp_window']);
         Route::post('support-ticket', [\App\Http\Controllers\Api\SupportTicketController::class, 'store']);
         Route::put('support-ticket/{id}', [\App\Http\Controllers\Api\SupportTicketController::class, 'update']);
