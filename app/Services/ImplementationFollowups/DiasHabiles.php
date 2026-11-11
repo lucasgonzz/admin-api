@@ -77,4 +77,21 @@ class DiasHabiles
             && (int) $local->hour >= self::HORA_DE_VENCIMIENTO
             && (int) $local->hour < self::HORA_DE_CIERRE;
     }
+
+    /**
+     * Si el instante cae en el horario en que un seguimiento todavía se puede MANDAR: lunes a viernes de 09:30 a
+     * 19:00 de Argentina. Es más ancho que el de `pending` (10–18) a propósito: una conversación reservada a las
+     * 17:59 tiene que poder terminar, pero un envío que se demoró hasta la noche no sale.
+     *
+     * @param Carbon $instante El instante.
+     *
+     * @return bool
+     */
+    public static function en_horario_de_envio(Carbon $instante)
+    {
+        $local   = $instante->copy()->setTimezone(self::ZONA_HORARIA);
+        $minutos = (int) $local->hour * 60 + (int) $local->minute;
+
+        return ! $local->isWeekend() && $minutos >= 9 * 60 + 30 && $minutos < 19 * 60;
+    }
 }

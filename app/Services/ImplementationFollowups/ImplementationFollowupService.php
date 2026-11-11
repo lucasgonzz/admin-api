@@ -10,6 +10,8 @@ use App\Models\ImplementationFollowup;
 use App\Models\ImplementationFollowupEvent;
 use App\Models\ImplementationStage;
 use App\Models\SupportCodexCase;
+use App\Models\SupportCodexOperation;
+use App\Models\SupportMessage;
 use App\Models\SupportTicket;
 use App\Services\AdminPushNotificationService;
 use App\Services\ImplementationSupportWhatsappService;
@@ -72,6 +74,28 @@ class ImplementationFollowupService
 
     /** Minutos que se corre un seguimiento cuyo envío falló (Kapso, Meta), para que no se reofrezca en la misma vuelta. */
     const MINUTOS_TRAS_UN_FALLO = 60;
+
+    /** Fallas seguidas (envío `failed` o `release` con error) a partir de las cuales el seguimiento se corre +2 hábiles y se avisa. */
+    const TOPE_DE_FALLAS = 2;
+
+    /** Omisiones seguidas (sin enviado ni contacto del cliente en el medio) a partir de las cuales, al vencer, se frena. */
+    const TOPE_DE_OMISIONES = 2;
+
+    /** `pause_reason` de un seguimiento pausado porque la implementación está pausada en el admin. */
+    const MOTIVO_IMPLEMENTACION_PAUSADA = 'implementación pausada en el admin';
+
+    /**
+     * Lo que se le dice a Lucas por cada causa estructural que frena el seguimiento.
+     *
+     * @var array<string, string>
+     */
+    const TEXTOS_ESTRUCTURALES = [
+        'cliente_inactivo'   => 'el cliente está dado de baja.',
+        'sin_implementacion' => 'no tiene una implementación de sistema donde registrar el envío.',
+        'sin_etapa'          => 'la implementación no tiene cargada la etapa actual.',
+        'sin_contacto'       => 'el dueño no tiene un teléfono válido en la ficha.',
+        'respuesta_al_hilo'  => 'la respuesta del cliente no caería en el ticket (implementación en modo automático).',
+    ];
 
     /**
      * Los hitos de uso OBLIGATORIOS para dar por terminada la puesta en marcha (las claves que mide el monitor con
@@ -175,18 +199,30 @@ class ImplementationFollowupService
                 continue;
             }
 
-            $creado = DB::transaction(function () use ($client, $implementation) {
+            $avisos = [];
+            $creado = DB::transaction(function () use ($client, $implementation, &$avisos) {
                 if (ImplementationFollowup::where('client_id', $client->id)->lockForUpdate()->exists()) {
-                    return false;
+                    return null;
                 }
 
-                $this->crear($client, (int) $implementation->id, ImplementationFollowupEvent::SOURCE_SISTEMA, 'Alta automática: implementación del sistema en curso.');
+                $followup = $this->crear($client, (int) $implementation->id, ImplementationFollowupEvent::SOURCE_SISTEMA, 'Alta automática: implementación del sistema en curso.');
 
-                return true;
+                /* Si nace con una causa que el texto no arregla (sin teléfono, implementación automática...), nace
+                   frenado y Lucas se entera ya, no a los dos días. */
+                $motivo = $this->motivo_estructural($followup);
+                if ($motivo !== null) {
+                    $this->frenar($followup, $motivo,
+                        'Frenado al nacer: el seguimiento no se puede mandar (' . $motivo . ').',
+                        'El seguimiento no se puede mandar: ' . self::TEXTOS_ESTRUCTURALES[$motivo],
+                        $avisos, true);
+                }
+
+                return $followup;
             });
 
-            if ($creado) {
+            if ($creado !== null) {
                 $creados++;
+                $this->mandar_avisos((int) $creado->id, $avisos);
             }
         }
 
@@ -230,7 +266,8 @@ class ImplementationFollowupService
     }
 
     /**
-     * Las reglas 2 a 5 sobre un seguimiento, con la fila bloqueada. Los avisos a Lucas salen DESPUÉS del commit.
+     * Las reglas sobre un seguimiento en una corrida del scheduler, con la fila bloqueada. Los avisos a Lucas salen
+     * DESPUÉS del commit.
      *
      * @param int $id El seguimiento.
      *
@@ -247,60 +284,348 @@ class ImplementationFollowupService
                 return [];
             }
 
-            $hecho = [];
-            $ahora = $this->ahora();
-
-            /* Regla 2: el cliente escribió. */
-            if ($this->aplicar_contacto($followup)) {
-                $hecho[] = 'contactos';
-            }
-
-            /* Regla 3: se cumplió la pausa. */
-            if ($followup->status === ImplementationFollowup::STATUS_PAUSADO && $followup->paused_until !== null
-                && $followup->paused_until->copy()->startOfDay()->lt($ahora->copy()->startOfDay())) {
-                $followup->status = ImplementationFollowup::STATUS_ACTIVO;
-                $followup->save();
-                $this->evento($followup, ImplementationFollowupEvent::KIND_REANUDADO, ImplementationFollowupEvent::SOURCE_SISTEMA,
-                    'Se cumplió la pausa (hasta el ' . $followup->paused_until->format('d/m/Y') . ').');
-                $hecho[] = 'reanudados';
-            }
-
-            /* Regla 5: la implementación cerró y el negocio opera. Antes que el frenado: un seguimiento terminado no se frena. */
-            $implementation = $this->implementacion_de($followup);
-            if ($implementation !== null && $implementation->status === 'completed'
-                && count($this->obligatorios_pendientes($followup)) === 0) {
-                $followup->status = ImplementationFollowup::STATUS_TERMINADO;
-                $followup->save();
-                $this->evento($followup, ImplementationFollowupEvent::KIND_TERMINADO, ImplementationFollowupEvent::SOURCE_SISTEMA,
-                    'Implementación completada y todos los hitos obligatorios cumplidos o marcados «no aplica».');
-                $avisos[] = ['terminado', 'La puesta en marcha terminó: implementación completada y hitos obligatorios cumplidos.'];
-                $hecho[] = 'terminados';
-
-                return $hecho;
-            }
-
-            /* Regla 4: vencido y ya sin respuesta las veces del tope. */
-            if ($followup->status === ImplementationFollowup::STATUS_ACTIVO && $followup->next_due_at !== null
-                && $followup->next_due_at->lte($ahora) && (int) $followup->unanswered_count >= (int) $followup->max_unanswered) {
-                $followup->status = ImplementationFollowup::STATUS_FRENADO;
-                $followup->save();
-                $this->evento($followup, ImplementationFollowupEvent::KIND_FRENADO, ImplementationFollowupEvent::SOURCE_SISTEMA,
-                    'Frenado: ' . (int) $followup->unanswered_count . ' seguimientos sin respuesta. No se le escribe más hasta que conteste o Lucas lo reactive.');
-                $avisos[] = ['frenado', (int) $followup->unanswered_count . ' seguimientos sin respuesta: Martín frenó y no le escribe más hasta que conteste.'];
-                $hecho[] = 'frenados';
-            }
-
-            return $hecho;
+            return $this->ordenar($followup, $avisos);
         });
 
-        foreach ($avisos as $aviso) {
-            $followup = ImplementationFollowup::find($id);
-            if ($followup !== null) {
-                $this->avisar_a_lucas($followup, $aviso[0], $aviso[1]);
-            }
+        $this->mandar_avisos($id, $avisos);
+
+        return $hecho;
+    }
+
+    /**
+     * Aplica, en orden, todas las reglas que no dependen del monitor sobre una fila bloqueada y sin reserva vigente.
+     * La usan el scheduler, `pending` (antes de ofrecer) y el claim nuevo: los tres deciden con la misma cuenta.
+     *
+     *  1. Regla 2: el cliente escribió (contador en 0, sale de `frenado`, reloj desde el contacto).
+     *  2. La implementación pausada en el admin pausa el seguimiento, y al volver a `in_progress` lo reanuda.
+     *  3. Regla 3: se cumplió la pausa.
+     *  4. El reloj ve al equipo: si alguien del equipo (Martín incluido) le escribió al cliente hace menos de
+     *     `interval_business_days` días hábiles, el vencimiento se corre.
+     *  5. Regla 5: terminado.
+     *  6. Vencido y activo: regla 4 (tope sin respuesta), tope de omisiones y las causas estructurales que el
+     *     texto no arregla (sin contacto, respuesta a otro hilo, cliente inactivo, sin etapa, sin implementación)
+     *     → `frenado` con `data.motivo` y aviso a Lucas.
+     *
+     * @param ImplementationFollowup                           $followup La fila (bloqueada por el llamador).
+     * @param array<int, array{0: string, 1: string, 2: mixed}> $avisos   Los avisos a mandar después del commit.
+     *
+     * @return array<int, string> Las claves de `procesar()` a sumar.
+     */
+    protected function ordenar(ImplementationFollowup $followup, array &$avisos)
+    {
+        $hecho = [];
+        $ahora = $this->ahora();
+
+        if ($this->aplicar_contacto($followup)) {
+            $hecho[] = 'contactos';
+        }
+
+        $implementation = $this->implementacion_de($followup);
+
+        /* La implementación pausada en el admin. */
+        if ($implementation !== null && $implementation->status === 'paused'
+            && in_array($followup->status, [ImplementationFollowup::STATUS_ACTIVO, ImplementationFollowup::STATUS_FRENADO], true)) {
+            $followup->status       = ImplementationFollowup::STATUS_PAUSADO;
+            $followup->paused_until = null;
+            $followup->pause_reason = self::MOTIVO_IMPLEMENTACION_PAUSADA;
+            $followup->save();
+            $this->evento($followup, ImplementationFollowupEvent::KIND_PAUSADO, ImplementationFollowupEvent::SOURCE_SISTEMA,
+                'La implementación está pausada en el admin: no se le escribe hasta que se retome.', ['motivo' => 'implementacion_pausada']);
+        } elseif ($implementation !== null && $implementation->status === 'in_progress'
+            && $followup->status === ImplementationFollowup::STATUS_PAUSADO && $followup->paused_until === null
+            && $followup->pause_reason === self::MOTIVO_IMPLEMENTACION_PAUSADA) {
+            $followup->status       = ImplementationFollowup::STATUS_ACTIVO;
+            $followup->pause_reason = null;
+            $followup->next_due_at  = DiasHabiles::sumar($ahora, (int) $followup->interval_business_days);
+            $followup->save();
+            $this->evento($followup, ImplementationFollowupEvent::KIND_REANUDADO, ImplementationFollowupEvent::SOURCE_SISTEMA,
+                'La implementación se retomó en el admin: el seguimiento sigue.', ['proximo_at' => $followup->next_due_at->toIso8601String()]);
+            $hecho[] = 'reanudados';
+        }
+
+        /* Regla 3: se cumplió la pausa. */
+        if ($followup->status === ImplementationFollowup::STATUS_PAUSADO && $followup->paused_until !== null
+            && $followup->paused_until->copy()->startOfDay()->lt($ahora->copy()->startOfDay())) {
+            $followup->status = ImplementationFollowup::STATUS_ACTIVO;
+            $followup->save();
+            $this->evento($followup, ImplementationFollowupEvent::KIND_REANUDADO, ImplementationFollowupEvent::SOURCE_SISTEMA,
+                'Se cumplió la pausa (hasta el ' . $followup->paused_until->format('d/m/Y') . ').');
+            $hecho[] = 'reanudados';
+        }
+
+        $this->aplicar_equipo($followup);
+
+        /* Regla 5: la implementación cerró y el negocio opera. Antes que el frenado: un seguimiento terminado no se frena. */
+        if ($implementation !== null && $implementation->status === 'completed'
+            && count($this->obligatorios_pendientes($followup)) === 0) {
+            $followup->status = ImplementationFollowup::STATUS_TERMINADO;
+            $followup->save();
+            $evento = $this->evento($followup, ImplementationFollowupEvent::KIND_TERMINADO, ImplementationFollowupEvent::SOURCE_SISTEMA,
+                'Implementación completada y todos los hitos obligatorios cumplidos o marcados «no aplica».');
+            $avisos[] = ['terminado', 'La puesta en marcha terminó: implementación completada y hitos obligatorios cumplidos.', $evento];
+            $hecho[] = 'terminados';
+
+            return $hecho;
+        }
+
+        if ($followup->status !== ImplementationFollowup::STATUS_ACTIVO || $followup->next_due_at === null || $followup->next_due_at->greaterThan($ahora)) {
+            return $hecho;
+        }
+
+        /* Regla 4: vencido y ya sin respuesta las veces del tope. */
+        if ((int) $followup->unanswered_count >= (int) $followup->max_unanswered) {
+            $this->frenar($followup, 'sin_respuesta',
+                'Frenado: ' . (int) $followup->unanswered_count . ' seguimientos sin respuesta. No se le escribe más hasta que conteste o Lucas lo reactive.',
+                (int) $followup->unanswered_count . ' seguimientos sin respuesta: Martín frenó y no le escribe más hasta que conteste.',
+                $avisos, false);
+            $hecho[] = 'frenados';
+
+            return $hecho;
+        }
+
+        /* Tope de omisiones: dos seguidas sin enviado ni contacto del cliente en el medio. */
+        $omisiones = $this->omisiones_seguidas($followup);
+        if (count($omisiones) >= self::TOPE_DE_OMISIONES) {
+            $this->frenar($followup, 'omisiones',
+                'Frenado: ' . count($omisiones) . ' seguimientos seguidos omitidos.',
+                count($omisiones) . ' seguimientos seguidos omitidos por Martín (lo que sigue es del equipo). Motivos: ' . implode(' | ', $omisiones),
+                $avisos, false);
+            $hecho[] = 'frenados';
+
+            return $hecho;
+        }
+
+        /* Causas estructurales: el envío fallaría por algo que el texto no arregla. */
+        $motivo = $this->motivo_estructural($followup);
+        if ($motivo !== null) {
+            $this->frenar($followup, $motivo,
+                'Frenado: el seguimiento no se puede mandar (' . $motivo . ').',
+                'El seguimiento no se puede mandar: ' . self::TEXTOS_ESTRUCTURALES[$motivo],
+                $avisos, true);
+            $hecho[] = 'frenados';
         }
 
         return $hecho;
+    }
+
+    /**
+     * Frena un seguimiento (fila bloqueada): `frenado`, evento `frenado` con `data.motivo` y UN aviso a Lucas. Con
+     * `$sin_repetir`, si el último frenado ya fue por el mismo motivo no se vuelve a avisar (un seguimiento que el
+     * cliente reactiva al escribir y vuelve a caer por la misma causa estructural).
+     *
+     * @param ImplementationFollowup                           $followup   La fila.
+     * @param string                                           $motivo     El código.
+     * @param string                                           $detalle    El texto del evento.
+     * @param string                                           $aviso      El cuerpo del push.
+     * @param array<int, array{0: string, 1: string, 2: mixed}> $avisos     Los avisos a mandar después del commit.
+     * @param bool                                             $sin_repetir true = no repetir el aviso por el mismo motivo.
+     *
+     * @return void
+     */
+    protected function frenar(ImplementationFollowup $followup, $motivo, $detalle, $aviso, array &$avisos, $sin_repetir)
+    {
+        $previo = ImplementationFollowupEvent::where('implementation_followup_id', $followup->id)
+            ->where('kind', ImplementationFollowupEvent::KIND_FRENADO)->orderByDesc('id')->first();
+        $repetido = $sin_repetir && $previo !== null && is_array($previo->data)
+            && isset($previo->data['motivo']) && $previo->data['motivo'] === $motivo;
+
+        $followup->status = ImplementationFollowup::STATUS_FRENADO;
+        $followup->save();
+        $evento = $this->evento($followup, ImplementationFollowupEvent::KIND_FRENADO, ImplementationFollowupEvent::SOURCE_SISTEMA, $detalle, [
+            'motivo' => (string) $motivo,
+        ]);
+
+        if (! $repetido) {
+            $avisos[] = ['frenado', $aviso, $evento];
+        }
+    }
+
+    /**
+     * La causa por la que el envío de este seguimiento fallaría sin importar el texto, o null.
+     *
+     * `respuesta_al_hilo` (la respuesta del cliente no caería en el ticket: implementación en modo automático) solo
+     * se mira con el soporte de Codex prendido: apagado, no caería en el ticket ninguna, y eso no es del seguimiento.
+     *
+     * @param ImplementationFollowup $followup El seguimiento.
+     *
+     * @return string|null `cliente_inactivo`, `sin_implementacion`, `sin_etapa`, `sin_contacto` o `respuesta_al_hilo`.
+     */
+    public function motivo_estructural(ImplementationFollowup $followup)
+    {
+        $client = Client::find((int) $followup->client_id);
+        if ($client === null || ! $client->is_active) {
+            return 'cliente_inactivo';
+        }
+
+        $implementation = $this->implementacion_de($followup);
+        if ($implementation === null) {
+            return 'sin_implementacion';
+        }
+
+        if ($this->etapa_del_envio($implementation) === null) {
+            return 'sin_etapa';
+        }
+
+        $whatsapp = app(ImplementationSupportWhatsappService::class);
+        if ($whatsapp->resolver_contacto($client, null)['contacto'] === null) {
+            return 'sin_contacto';
+        }
+
+        if (SupportCodexSettings::enabled() && $whatsapp->adonde_iria_la_respuesta($client, null) !== 'ticket') {
+            return 'respuesta_al_hilo';
+        }
+
+        return null;
+    }
+
+    /**
+     * El reloj ve al equipo (fila bloqueada): si alguien del equipo le escribió al cliente (un mensaje `admin` real y
+     * no rechazado, en cualquier ticket suyo, Martín incluido), el seguimiento no vence antes de
+     * `interval_business_days` días hábiles desde ese mensaje. Solo corre el vencimiento hacia adelante: el envío del
+     * propio seguimiento ya deja +2, y acá da lo mismo. No toca `unanswered_count`.
+     *
+     * @param ImplementationFollowup $followup La fila.
+     *
+     * @return bool true = corrió el vencimiento.
+     */
+    protected function aplicar_equipo(ImplementationFollowup $followup)
+    {
+        if (! in_array($followup->status, [ImplementationFollowup::STATUS_ACTIVO, ImplementationFollowup::STATUS_PAUSADO], true)) {
+            return false;
+        }
+
+        $ultimo = $this->ultimo_mensaje_del_equipo((int) $followup->client_id);
+        if ($ultimo === null) {
+            return false;
+        }
+
+        $minimo = DiasHabiles::sumar($ultimo, (int) $followup->interval_business_days);
+        if ($followup->next_due_at !== null && ! $minimo->greaterThan($followup->next_due_at)) {
+            return false;
+        }
+
+        $followup->next_due_at = $minimo;
+        $followup->save();
+
+        return true;
+    }
+
+    /**
+     * El último mensaje real del equipo (`sender_type = admin`, sin borradores de la IA ni los que no le llegaron) en
+     * cualquier ticket del cliente.
+     *
+     * @param int $client_id El cliente.
+     *
+     * @return Carbon|null
+     */
+    public function ultimo_mensaje_del_equipo($client_id)
+    {
+        $consulta = SupportMessage::query()
+            ->join('support_tickets', 'support_tickets.id', '=', 'support_messages.support_ticket_id')
+            ->where('support_tickets.client_id', (int) $client_id)
+            ->where('support_messages.sender_type', 'admin')
+            ->where(function ($entregado) {
+                $entregado->whereNull('support_messages.remote_delivery_status')
+                    ->orWhere('support_messages.remote_delivery_status', '!=', 'not_received');
+            });
+        SupportMessage::apply_mensaje_real_conditions($consulta, 'support_messages');
+
+        $valor = $consulta->max('support_messages.created_at');
+
+        return $valor === null ? null : Carbon::parse($valor, config('app.timezone'))->setTimezone(DiasHabiles::ZONA_HORARIA);
+    }
+
+    /**
+     * Las omisiones seguidas más recientes (sus motivos): eventos `omitido` sin un `enviado`, un `frenado` o un
+     * `reanudado` en el medio, y posteriores al último contacto del cliente. Los demás eventos no cortan.
+     *
+     * @param ImplementationFollowup $followup El seguimiento.
+     *
+     * @return array<int, string>
+     */
+    protected function omisiones_seguidas(ImplementationFollowup $followup)
+    {
+        $motivos = [];
+
+        foreach ($this->eventos_desde_el_contacto($followup) as $evento) {
+            if ($evento->kind === ImplementationFollowupEvent::KIND_OMITIDO) {
+                $motivos[] = (string) $evento->detail;
+            } elseif (in_array($evento->kind, [ImplementationFollowupEvent::KIND_ENVIADO, ImplementationFollowupEvent::KIND_FRENADO, ImplementationFollowupEvent::KIND_REANUDADO], true)) {
+                break;
+            }
+        }
+
+        return $motivos;
+    }
+
+    /**
+     * Cuántas fallas seguidas tiene el seguimiento: eventos `fallido` (un envío `failed` o un `release` con error)
+     * sin un `enviado`, `pospuesto`, `pausado`, `omitido`, `reanudado` o `frenado` en el medio, y posteriores al último
+     * contacto del cliente. `hitos`, `editado` y `creado` no cortan.
+     *
+     * @param ImplementationFollowup $followup El seguimiento.
+     *
+     * @return int
+     */
+    protected function fallas_seguidas(ImplementationFollowup $followup)
+    {
+        $fallas  = 0;
+        $cortan  = [
+            ImplementationFollowupEvent::KIND_ENVIADO, ImplementationFollowupEvent::KIND_POSPUESTO, ImplementationFollowupEvent::KIND_PAUSADO,
+            ImplementationFollowupEvent::KIND_OMITIDO, ImplementationFollowupEvent::KIND_REANUDADO, ImplementationFollowupEvent::KIND_FRENADO,
+        ];
+
+        foreach ($this->eventos_desde_el_contacto($followup) as $evento) {
+            if ($evento->kind === ImplementationFollowupEvent::KIND_FALLIDO) {
+                $fallas++;
+            } elseif (in_array($evento->kind, $cortan, true)) {
+                break;
+            }
+        }
+
+        return $fallas;
+    }
+
+    /**
+     * Los eventos del seguimiento posteriores al último contacto del cliente, el más nuevo primero (tope 50).
+     *
+     * @param ImplementationFollowup $followup El seguimiento.
+     *
+     * @return \Illuminate\Support\Collection
+     */
+    protected function eventos_desde_el_contacto(ImplementationFollowup $followup)
+    {
+        $consulta = ImplementationFollowupEvent::where('implementation_followup_id', $followup->id)->orderByDesc('id')->limit(50);
+
+        if ($followup->last_client_contact_at !== null) {
+            $consulta->where('created_at', '>', $followup->last_client_contact_at);
+        }
+
+        return $consulta->get();
+    }
+
+    /**
+     * Manda los avisos acumulados después del commit, cada uno anotado en su evento.
+     *
+     * @param int                                              $id     El seguimiento.
+     * @param array<int, array{0: string, 1: string, 2: mixed}> $avisos Los avisos.
+     *
+     * @return void
+     */
+    protected function mandar_avisos($id, array $avisos)
+    {
+        if (count($avisos) === 0) {
+            return;
+        }
+
+        $followup = ImplementationFollowup::find($id);
+        if ($followup === null) {
+            return;
+        }
+
+        foreach ($avisos as $aviso) {
+            $this->avisar_a_lucas($followup, $aviso[0], $aviso[1], isset($aviso[2]) ? $aviso[2] : null);
+        }
     }
 
     /**
@@ -374,13 +699,15 @@ class ImplementationFollowupService
      * Los seguimientos que el monitor tiene que atender ahora (tope 10): `activo`, vencidos, debajo del tope sin
      * respuesta, sin reserva vigente, solo en horario (lun–vie 10–18 de Argentina) y con Codex prendido.
      *
-     * Excluye al cliente que tenga un ticket con reserva vigente de Martín o algo esperándolo (un `inbound` que
-     * Martín va a atender por ahí; también `follow_up`/`mission_completed`, que harían que el envío diera 423), y al
-     * que ya no corresponde escribirle por acá (dado de baja, en prueba, o con la respuesta yendo a otro hilo que no
-     * es el ticket: el envío daría `respuesta_al_hilo`).
+     * Antes de decidir aplica a cada candidato las mismas reglas que el scheduler (`ordenar()`): si el cliente o el
+     * equipo escribieron desde la última corrida ya no está vencido, y si el envío fallaría por una causa que el
+     * texto no arregla (sin contacto, respuesta a otro hilo, cliente inactivo, sin etapa, sin implementación) o por
+     * los topes (sin respuesta, omisiones) queda `frenado` con aviso a Lucas y no se ofrece.
      *
-     * Antes de decidir aplica la regla 2 a cada candidato: si el cliente escribió desde la última corrida del
-     * scheduler, ya no está vencido.
+     * Excluye además, sin cambiarle el estado (es transitorio), al cliente que esté en prueba y al que tenga un
+     * ticket abierto que atiende otro: Martín con la reserva o con algo esperándolo (`inbound`, `follow_up`,
+     * `mission_completed`), o Lucas (respuesta automática apagada, caso en `manual_review` u operación sin terminar,
+     * lo mismo con lo que se calla Martín).
      *
      * @return array<string, mixed> `{enabled, en_horario, followups, server_time}`.
      */
@@ -404,14 +731,16 @@ class ImplementationFollowupService
                 ->get();
 
             foreach ($candidatos as $candidato) {
-                $followup = DB::transaction(function () use ($candidato) {
+                $avisos   = [];
+                $followup = DB::transaction(function () use ($candidato, &$avisos) {
                     $fila = ImplementationFollowup::where('id', $candidato->id)->lockForUpdate()->first();
-                    if ($fila !== null && ! $fila->reserva_vigente()) {
-                        $this->aplicar_contacto($fila);
+                    if ($fila !== null && ! $fila->reserva_vigente() && $fila->status !== ImplementationFollowup::STATUS_TERMINADO) {
+                        $this->ordenar($fila, $avisos);
                     }
 
                     return $fila;
                 });
+                $this->mandar_avisos((int) $candidato->id, $avisos);
 
                 if ($followup === null || ! $this->corresponde_ofrecer($followup, $ahora)) {
                     continue;
@@ -463,22 +792,20 @@ class ImplementationFollowupService
             return false;
         }
 
-        if ($this->martin_esta_con_el_cliente((int) $client->id)) {
-            return false;
-        }
-
-        /* El contacto del seguimiento es el dueño (`resolver_contacto` sin teléfono): empleado null. */
-        return app(ImplementationSupportWhatsappService::class)->adonde_iria_la_respuesta($client, null) === 'ticket';
+        return $this->quien_atiende_al_cliente((int) $client->id) === null;
     }
 
     /**
-     * Si algún ticket abierto del cliente tiene una reserva vigente de Martín o algo esperándolo.
+     * Si algún ticket abierto del cliente lo está atendiendo otro, y quién: `martin` (reserva vigente de su caso, o
+     * algo esperándolo: `inbound`, `follow_up`, `mission_completed`) o `lucas` (respuesta automática apagada, caso en
+     * `manual_review` u operación de Codex sin terminar: lo mismo con lo que se calla Martín, réplica de
+     * `SupportCodexService::callado_para_codex()`, que es privado). null = nadie.
      *
      * @param int $client_id El cliente.
      *
-     * @return bool
+     * @return string|null
      */
-    protected function martin_esta_con_el_cliente($client_id)
+    protected function quien_atiende_al_cliente($client_id)
     {
         $codex   = app(SupportCodexService::class);
         $tickets = SupportTicket::where('client_id', (int) $client_id)->where('status', 'open')->get();
@@ -486,16 +813,22 @@ class ImplementationFollowupService
         foreach ($tickets as $ticket) {
             $caso = SupportCodexCase::where('support_ticket_id', $ticket->id)->first();
 
+            if (! $ticket->claude_auto_reply || ($caso !== null && $caso->state === 'manual_review')
+                || SupportCodexOperation::where('support_ticket_id', $ticket->id)
+                    ->whereNotIn('status', ['sent', 'reconciled_sent', 'reconciled_not_sent', 'cancelled'])->exists()) {
+                return 'lucas';
+            }
+
             if ($caso !== null && $caso->lease_expires_at !== null && $caso->lease_expires_at->isFuture()) {
-                return true;
+                return 'martin';
             }
 
             if ($codex->motivo_pendiente($ticket, $caso) !== null) {
-                return true;
+                return 'martin';
             }
         }
 
-        return false;
+        return null;
     }
 
     /* ==============================================================================================
@@ -510,12 +843,16 @@ class ImplementationFollowupService
      * regla 2 antes de mirar—, o se está fuera de horario). Con el token vigente: renueva 15 minutos (mismo token,
      * mismo `run_id`). Un token que no es el vigente: 409 `reservado`.
      *
-     * @param int         $id          El seguimiento.
-     * @param string|null $lease_token El token, para renovar.
+     * Con el token y `sin_contexto: true` (renovación liviana) devuelve solo `{lease_token, lease_expires_at, run_id}`,
+     * sin armar el contexto.
+     *
+     * @param int         $id           El seguimiento.
+     * @param string|null $lease_token  El token, para renovar.
+     * @param bool        $sin_contexto true = renovación sin contexto (solo con token).
      *
      * @return array<string, mixed> `{lease_token, lease_expires_at, run_id, context}`.
      */
-    public function reservar($id, $lease_token)
+    public function reservar($id, $lease_token, $sin_contexto = false)
     {
         if (! self::enabled()) {
             throw new SeguimientoException(409, 'deshabilitado', 'El seguimiento de implementaciones está apagado (implementation_followups_enabled = 0).');
@@ -523,15 +860,18 @@ class ImplementationFollowupService
 
         $token = trim((string) $lease_token);
 
-        /* La regla 2 primero, en su propia transacción: si el cliente escribió recién, el seguimiento ya no está
-           vencido, y eso tiene que quedar guardado aunque la reserva se rechace con 409. */
+        /* Las reglas del scheduler primero, en su propia transacción: si el cliente o el equipo escribieron recién
+           el seguimiento ya no está vencido, y si cayó en un tope o una causa estructural queda frenado; eso tiene
+           que quedar guardado (y avisado) aunque la reserva se rechace con 409. */
         if ($token === '') {
-            DB::transaction(function () use ($id) {
+            $avisos = [];
+            DB::transaction(function () use ($id, &$avisos) {
                 $fila = $this->buscar_bloqueado($id);
-                if (! $fila->reserva_vigente()) {
-                    $this->aplicar_contacto($fila);
+                if (! $fila->reserva_vigente() && $fila->status !== ImplementationFollowup::STATUS_TERMINADO) {
+                    $this->ordenar($fila, $avisos);
                 }
             });
+            $this->mandar_avisos((int) $id, $avisos);
         }
 
         $reserva = DB::transaction(function () use ($id, $token) {
@@ -564,6 +904,14 @@ class ImplementationFollowupService
                 ]);
             }
 
+            $quien = $this->quien_atiende_al_cliente((int) $followup->client_id);
+            if ($quien !== null) {
+                throw new SeguimientoException(409, 'no_vencido', 'Ahora no: ' . ($quien === 'lucas' ? 'Lucas' : 'Martín') . ' está atendiendo un ticket de este cliente.', [
+                    'razon'       => $quien === 'lucas' ? 'lucas_atendiendo' : 'martin_atendiendo',
+                    'seguimiento' => $this->bloque_del_seguimiento($followup, false),
+                ]);
+            }
+
             $token = Str::random(64);
             $followup->lease_token      = hash('sha256', $token);
             $followup->lease_expires_at = $ahora->copy()->addMinutes(self::LEASE_MINUTES);
@@ -575,14 +923,20 @@ class ImplementationFollowupService
         });
 
         /** @var ImplementationFollowup $followup */
-        $followup = $reserva['followup'];
-
-        return [
+        $followup  = $reserva['followup'];
+        $respuesta = [
             'lease_token'      => $reserva['token'],
             'lease_expires_at' => $followup->lease_expires_at->toIso8601String(),
             'run_id'           => (string) $followup->run_id,
-            'context'          => $this->contexto($followup),
         ];
+
+        if ($sin_contexto && $token !== '') {
+            return $respuesta;
+        }
+
+        $respuesta['context'] = $this->contexto($followup);
+
+        return $respuesta;
     }
 
     /**
@@ -832,8 +1186,11 @@ class ImplementationFollowupService
             $followup = $this->buscar_bloqueado($id);
             $this->exigir_reserva($followup, $lease_token);
 
-            $nuevo  = $this->normalizar_hitos($hitos);
+            /* Se fusiona por clave: una medición que no trae una clave (una consulta que falló a medias, un monitor
+               más viejo) no borra lo que ya estaba guardado de esa clave. */
             $previo = is_array($followup->hitos) ? $followup->hitos : [];
+            $nuevo  = array_merge($previo, $this->normalizar_hitos($hitos));
+            ksort($nuevo);
 
             $nuevos = [];
             foreach ($nuevo as $clave => $hito) {
@@ -935,14 +1292,23 @@ class ImplementationFollowupService
      * `fallido` y lo corre una hora. `unknown` deja un `fallido` incierto, lo corre +2 hábiles (no se reintenta) y le
      * avisa a Lucas que mire el ticket. En los tres casos se suelta la reserva.
      *
-     * @param int    $id           El seguimiento.
-     * @param string $lease_token  La reserva.
-     * @param string $operation_id uuid.
-     * @param string $body         El texto (1..550).
+     * Fuera de lun–vie 09:30–19:00 de Argentina: 409 `fuera_de_horario` sin mandar ni soltar la reserva (la suelta
+     * el monitor). Con `aviso_a_lucas`, después de asentar el resultado (cualquiera) le llega a Lucas ese texto con el
+     * cliente: Martín le escribe al cliente y a la vez le pasa algo pendiente del equipo.
+     *
+     * Dos fallas seguidas (este `failed` después de otro `fallido`, de un envío o de un `release` con error, sin un
+     * enviado, una pausa, una omisión o un contacto del cliente en el medio): el seguimiento se corre +2 hábiles y
+     * se le avisa a Lucas una vez.
+     *
+     * @param int         $id            El seguimiento.
+     * @param string      $lease_token   La reserva.
+     * @param string      $operation_id  uuid.
+     * @param string      $body          El texto (1..550).
+     * @param string|null $aviso_a_lucas Lo que Martín le pasa a Lucas (1..500), o null.
      *
      * @return array<string, mixed>
      */
-    public function enviar($id, $lease_token, $operation_id, $body)
+    public function enviar($id, $lease_token, $operation_id, $body, $aviso_a_lucas = null)
     {
         $body     = trim((string) $body);
         $followup = ImplementationFollowup::find((int) $id);
@@ -965,6 +1331,10 @@ class ImplementationFollowupService
 
         if (! self::enabled()) {
             throw new SeguimientoException(409, 'deshabilitado', 'El seguimiento de implementaciones está apagado. No se mandó nada.');
+        }
+
+        if (! DiasHabiles::en_horario_de_envio($this->ahora())) {
+            throw new SeguimientoException(409, 'fuera_de_horario', 'Un seguimiento solo sale de lunes a viernes de 09:30 a 19:00 (Argentina). No se mandó nada y la reserva sigue: soltala.');
         }
 
         /* --- 2 y 3. La reserva, el estado y el cliente que escribió. El 409 `cliente_escribio` se tira DESPUÉS del
@@ -1059,15 +1429,20 @@ class ImplementationFollowupService
         $resultado['avisos']          = $plan['avisos'];
         $operacion = $servicio->registrar($implementation, $etapa, $operation_id, self::ACCION, $body, $telefono, $resultado);
 
-        $avisar = DB::transaction(function () use ($id, $operacion, $operation_id, $body) {
+        $asentado = DB::transaction(function () use ($id, $operacion, $operation_id, $body) {
             $fila = $this->buscar_bloqueado($id);
 
             return $this->asentar_el_envio($fila, $operacion, $operation_id, $body);
         });
 
         $followup = ImplementationFollowup::find((int) $id);
-        if ($avisar !== null) {
-            $this->avisar_a_lucas($followup, 'envio_incierto', $avisar);
+        if ($asentado['aviso'] !== null) {
+            $this->avisar_a_lucas($followup, $asentado['aviso'][0], $asentado['aviso'][1], $asentado['evento']);
+        }
+
+        $aviso_a_lucas = trim((string) $aviso_a_lucas);
+        if ($aviso_a_lucas !== '') {
+            $this->avisar_a_lucas($followup, 'pedido_de_martin', $aviso_a_lucas, $asentado['evento']);
         }
 
         return array_merge($this->respuesta_del_envio($operacion, $operation_id, false), [
@@ -1083,7 +1458,8 @@ class ImplementationFollowupService
      * @param string                 $operation_id La clave.
      * @param string                 $body         El texto.
      *
-     * @return string|null El aviso para Lucas, si hace falta (envío incierto).
+     * @return array{evento: ImplementationFollowupEvent, aviso: array{0: string, 1: string}|null} El evento que dejó y,
+     *         si hace falta, el aviso para Lucas (envío incierto o segunda falla seguida).
      */
     protected function asentar_el_envio(ImplementationFollowup $followup, array $operacion, $operation_id, $body)
     {
@@ -1103,25 +1479,62 @@ class ImplementationFollowupService
             $followup->unanswered_count = (int) $followup->unanswered_count + 1;
             $followup->last_sent_at     = $ahora->copy();
             $followup->next_due_at      = DiasHabiles::sumar($ahora, (int) $followup->interval_business_days);
-            $this->evento($followup, ImplementationFollowupEvent::KIND_ENVIADO, ImplementationFollowupEvent::SOURCE_MARTIN, $body, $datos, $ticket_id);
+            $evento = $this->evento($followup, ImplementationFollowupEvent::KIND_ENVIADO, ImplementationFollowupEvent::SOURCE_MARTIN, $body, $datos, $ticket_id);
         } elseif ($estado === ImplementationSupportWhatsappService::ESTADO_INCIERTO) {
             $followup->next_due_at = DiasHabiles::sumar($ahora, (int) $followup->interval_business_days);
-            $this->evento($followup, ImplementationFollowupEvent::KIND_FALLIDO, ImplementationFollowupEvent::SOURCE_MARTIN,
+            $evento = $this->evento($followup, ImplementationFollowupEvent::KIND_FALLIDO, ImplementationFollowupEvent::SOURCE_MARTIN,
                 'Envío incierto (no se sabe si salió; no se reintenta): ' . $body, $datos, $ticket_id);
-            $aviso = 'El seguimiento quedó con el envío incierto (no se sabe si le llegó). Mirá el ticket del cliente antes de volver a escribirle.';
+            $aviso = ['envio_incierto', 'El seguimiento quedó con el envío incierto (no se sabe si le llegó). Mirá el ticket del cliente antes de volver a escribirle. '
+                . 'El monitor deja este seguimiento bloqueado localmente hasta 3 días hábiles (_soporte-codex\\seguimientos\\inciertos\\' . (int) $followup->id . '.json).'];
         } else {
-            $error = isset($operacion['error']) ? (string) $operacion['error'] : '';
-            $minimo = $ahora->copy()->addMinutes(self::MINUTOS_TRAS_UN_FALLO);
-            if ($followup->next_due_at === null || $followup->next_due_at->lt($minimo)) {
-                $followup->next_due_at = $minimo;
-            }
-            $this->evento($followup, ImplementationFollowupEvent::KIND_FALLIDO, ImplementationFollowupEvent::SOURCE_MARTIN,
+            $error  = isset($operacion['error']) ? (string) $operacion['error'] : '';
+            $previas = $this->fallas_seguidas($followup);
+            $evento = $this->evento($followup, ImplementationFollowupEvent::KIND_FALLIDO, ImplementationFollowupEvent::SOURCE_MARTIN,
                 'El envío no salió' . ($error !== '' ? ': ' . $error : '.'), $datos, $ticket_id);
+            $aviso  = $this->correr_por_fallas($followup, $previas + 1, 'El envío no salió' . ($error !== '' ? ' (' . $error . ')' : ''));
         }
 
         $this->soltar($followup);
 
-        return $aviso;
+        return ['evento' => $evento, 'aviso' => $aviso];
+    }
+
+    /**
+     * Corre el seguimiento después de una falla (fila bloqueada). Desde la segunda seguida, +2 hábiles, y en la
+     * segunda justo, un aviso a Lucas. Con la primera, una hora si `$correr_la_primera` (un envío `failed`, para que no
+     * se reofrezca en la misma vuelta); un `release` con error, la primera vez, no cambia nada.
+     *
+     * @param ImplementationFollowup $followup          La fila.
+     * @param int                    $fallas            Cuántas fallas seguidas hay, contando esta.
+     * @param string                 $motivo            Lo que falló.
+     * @param bool                   $correr_la_primera true = la primera falla corre una hora.
+     *
+     * @return array{0: string, 1: string}|null El aviso, si corresponde.
+     */
+    protected function correr_por_fallas(ImplementationFollowup $followup, $fallas, $motivo, $correr_la_primera = true)
+    {
+        $ahora = $this->ahora();
+
+        if ($fallas >= self::TOPE_DE_FALLAS) {
+            $followup->next_due_at = DiasHabiles::sumar($ahora, (int) $followup->interval_business_days);
+            $followup->save();
+
+            return $fallas === self::TOPE_DE_FALLAS
+                ? ['fallas', $fallas . ' fallas seguidas del seguimiento; se corre 2 días hábiles. Última: ' . $motivo . '.']
+                : null;
+        }
+
+        if (! $correr_la_primera) {
+            return null;
+        }
+
+        $minimo = $ahora->copy()->addMinutes(self::MINUTOS_TRAS_UN_FALLO);
+        if ($followup->next_due_at === null || $followup->next_due_at->lt($minimo)) {
+            $followup->next_due_at = $minimo;
+            $followup->save();
+        }
+
+        return null;
     }
 
     /**
@@ -1264,22 +1677,25 @@ class ImplementationFollowupService
             $this->sumar_no_aplican($fila, isset($input['no_aplican']) && is_array($input['no_aplican']) ? $input['no_aplican'] : []);
 
             if ($tipo === 'pausa') {
-                $this->pausar($fila, (string) $input['hasta'], $motivo, ImplementationFollowupEvent::SOURCE_MARTIN, null);
+                $evento = $this->pausar($fila, (string) $input['hasta'], $motivo, ImplementationFollowupEvent::SOURCE_MARTIN, null);
             } else {
                 $fila->next_due_at = DiasHabiles::sumar($this->ahora(), (int) $fila->interval_business_days);
                 $fila->save();
-                $this->evento($fila, ImplementationFollowupEvent::KIND_OMITIDO, ImplementationFollowupEvent::SOURCE_MARTIN, $motivo, [
+                $evento = $this->evento($fila, ImplementationFollowupEvent::KIND_OMITIDO, ImplementationFollowupEvent::SOURCE_MARTIN, $motivo, [
                     'proximo_at' => $fila->next_due_at->toIso8601String(),
                 ]);
             }
 
             $this->soltar($fila);
 
-            return $fila;
+            return ['fila' => $fila, 'evento' => $evento];
         });
 
+        $evento   = $followup['evento'];
+        $followup = $followup['fila'];
+
         if (! empty($input['avisar_a_lucas'])) {
-            $this->avisar_a_lucas($followup, $tipo === 'pausa' ? 'pausa' : 'omitido', $motivo);
+            $this->avisar_a_lucas($followup, $tipo === 'pausa' ? 'pausa' : 'omitido', $motivo, $evento);
         }
 
         return ['ok' => true, 'seguimiento' => $this->bloque_del_seguimiento($followup->refresh(), false)];
@@ -1296,19 +1712,33 @@ class ImplementationFollowupService
      */
     public function soltar_reserva($id, $lease_token, $error)
     {
-        return DB::transaction(function () use ($id, $lease_token, $error) {
+        $aviso = null;
+
+        $respuesta = DB::transaction(function () use ($id, $lease_token, $error, &$aviso) {
             $fila = $this->buscar_bloqueado($id);
             $this->exigir_reserva($fila, $lease_token);
 
             $error = trim((string) $error);
             if ($error !== '') {
-                $this->evento($fila, ImplementationFollowupEvent::KIND_FALLIDO, ImplementationFollowupEvent::SOURCE_MARTIN, $error);
+                /* Un release con error entra en la racha de fallas: a la segunda seguida, +2 hábiles y aviso. */
+                $previas = $this->fallas_seguidas($fila);
+                $evento  = $this->evento($fila, ImplementationFollowupEvent::KIND_FALLIDO, ImplementationFollowupEvent::SOURCE_MARTIN, $error);
+                $correr  = $this->correr_por_fallas($fila, $previas + 1, $error, false);
+                if ($correr !== null) {
+                    $aviso = [$correr[0], $correr[1], $evento];
+                }
             }
 
             $this->soltar($fila);
 
             return ['released' => true];
         });
+
+        if ($aviso !== null) {
+            $this->mandar_avisos((int) $id, [$aviso]);
+        }
+
+        return $respuesta;
     }
 
     /* ==============================================================================================
@@ -1567,7 +1997,7 @@ class ImplementationFollowupService
         $fila->next_due_at  = DiasHabiles::primero_despues_de($fecha);
         $fila->save();
 
-        $this->evento($fila, ImplementationFollowupEvent::KIND_PAUSADO, $source, $motivo, [
+        return $this->evento($fila, ImplementationFollowupEvent::KIND_PAUSADO, $source, $motivo, [
             'hasta'      => $fecha->format('Y-m-d'),
             'proximo_at' => $fila->next_due_at->toIso8601String(),
         ], $ticket_id);
@@ -1716,13 +2146,14 @@ class ImplementationFollowupService
      * escalaciones). Nunca lanza: un push que falla queda en el log y el seguimiento sigue. Deja el resultado en un
      * evento del tipo del aviso (`data.aviso_a_lucas`).
      *
-     * @param ImplementationFollowup $followup El seguimiento.
-     * @param string                 $motivo   frenado | terminado | pausa | omitido | envio_incierto.
-     * @param string                 $texto    El cuerpo del push.
+     * @param ImplementationFollowup           $followup El seguimiento.
+     * @param string                           $motivo   frenado | terminado | pausa | omitido | envio_incierto | fallas | pedido_de_martin.
+     * @param string                           $texto    El cuerpo del push.
+     * @param ImplementationFollowupEvent|null $evento   El evento donde se anota el resultado (null = no se anota).
      *
      * @return array<string, mixed> `{admin_ids, aceptados}`.
      */
-    public function avisar_a_lucas(ImplementationFollowup $followup, $motivo, $texto)
+    public function avisar_a_lucas(ImplementationFollowup $followup, $motivo, $texto, ImplementationFollowupEvent $evento = null)
     {
         $resultado = ['motivo' => (string) $motivo, 'admin_ids' => [], 'aceptados' => 0];
 
@@ -1756,12 +2187,20 @@ class ImplementationFollowupService
             $resultado['error'] = $e->getMessage();
         }
 
-        $ultimo = ImplementationFollowupEvent::where('implementation_followup_id', $followup->id)->orderByDesc('id')->first();
-        if ($ultimo !== null) {
-            $datos = is_array($ultimo->data) ? $ultimo->data : [];
+        if ($evento !== null) {
+            $evento = ImplementationFollowupEvent::find($evento->id);
+        }
+        if ($evento !== null) {
+            $datos = is_array($evento->data) ? $evento->data : [];
+            /* Un evento puede llevar más de un aviso (el incierto y el pedido de Martín): se guardan todos. */
+            if (isset($datos['aviso_a_lucas'])) {
+                $previos = isset($datos['avisos_a_lucas']) && is_array($datos['avisos_a_lucas']) ? $datos['avisos_a_lucas'] : [$datos['aviso_a_lucas']];
+                $previos[] = $resultado;
+                $datos['avisos_a_lucas'] = $previos;
+            }
             $datos['aviso_a_lucas'] = $resultado;
-            $ultimo->data = $datos;
-            $ultimo->save();
+            $evento->data = $datos;
+            $evento->save();
         }
 
         return $resultado;

@@ -110,20 +110,23 @@ class ClaudeImplementationFollowupController extends Controller
     /**
      * 2. `POST claude/support-codex/implementation-followups/{id}/claim`.
      *
-     * @param Request    $request Body: lease_token?.
+     * @param Request    $request Body: lease_token?, sin_contexto? (renovación liviana, solo con token).
      * @param int|string $id      El seguimiento.
      *
      * @return \Illuminate\Http\JsonResponse
      */
     public function claim(Request $request, $id)
     {
-        $invalido = $this->validar_o_422($request, ['lease_token' => 'sometimes|nullable|string|max:128']);
+        $invalido = $this->validar_o_422($request, [
+            'lease_token'  => 'sometimes|nullable|string|max:128',
+            'sin_contexto' => 'sometimes|boolean',
+        ]);
         if ($invalido !== null) {
             return $invalido;
         }
 
         return $this->responder(function () use ($request, $id) {
-            return $this->servicio->reservar((int) $id, $request->input('lease_token'));
+            return $this->servicio->reservar((int) $id, $request->input('lease_token'), $request->boolean('sin_contexto'));
         });
     }
 
@@ -165,7 +168,7 @@ class ClaudeImplementationFollowupController extends Controller
     /**
      * 4. `POST claude/support-codex/implementation-followups/{id}/send`.
      *
-     * @param Request    $request Body: lease_token, operation_id (uuid), body (1..550).
+     * @param Request    $request Body: lease_token, operation_id (uuid), body (1..550), aviso_a_lucas? (1..500).
      * @param int|string $id      El seguimiento.
      *
      * @return \Illuminate\Http\JsonResponse
@@ -175,7 +178,8 @@ class ClaudeImplementationFollowupController extends Controller
         $invalido = $this->validar_o_422($request, [
             'lease_token'  => 'required|string|max:128',
             'operation_id' => 'required|uuid',
-            'body'         => 'required|string|min:1|max:' . ImplementationFollowupService::LARGO_MAXIMO,
+            'body'          => 'required|string|min:1|max:' . ImplementationFollowupService::LARGO_MAXIMO,
+            'aviso_a_lucas' => 'sometimes|nullable|string|min:1|max:500',
         ]);
         if ($invalido !== null) {
             return $invalido;
@@ -186,7 +190,7 @@ class ClaudeImplementationFollowupController extends Controller
         }
 
         return $this->responder(function () use ($request, $id) {
-            return $this->servicio->enviar((int) $id, (string) $request->input('lease_token'), (string) $request->input('operation_id'), (string) $request->input('body'));
+            return $this->servicio->enviar((int) $id, (string) $request->input('lease_token'), (string) $request->input('operation_id'), (string) $request->input('body'), $request->input('aviso_a_lucas'));
         });
     }
 
