@@ -321,6 +321,9 @@ class SupportTicketController extends BaseController
             ->where('id', $id)
             ->withAll()
             ->withUnreadMessagesCount()
+            /* `es_prueba` también acá: la bandeja trae por este GET el ticket nuevo que avisó Pusher, y sin la marca
+               un ticket de prueba caería en «Clientes». */
+            ->withEsPrueba()
             ->firstOrFail();
         return response()->json(['model' => $model], 200);
     }

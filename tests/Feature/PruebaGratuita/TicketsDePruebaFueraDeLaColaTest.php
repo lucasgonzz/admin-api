@@ -90,20 +90,24 @@ class TicketsDePruebaFueraDeLaColaTest extends BaseDeLaPrueba
         $this->assertSame([(int) $comun->id], array_values(array_map('intval', array_column($filas, 'id'))));
     }
 
-    /** @test */
-    public function la_alerta_de_demora_no_salta_para_un_ticket_de_prueba(): void
+    /**
+     * Las alertas de demora siguen igual para los tickets de prueba (decisión del coordinador, 10/11/2026): el
+     * respaldo no contesta adrede pedidos comerciales ni pruebas vencidas, y esos tienen que avisar.
+     *
+     * @test
+     */
+    public function la_alerta_de_demora_sigue_saltando_para_los_tickets_de_prueba(): void
     {
         Event::fake([SupportTicketAlert::class]);
         [$comun, $prueba, $vencida] = $this->escenario();
 
         Artisan::call('support:check-response-alerts');
 
-        Event::assertDispatched(SupportTicketAlert::class, function ($evento) use ($comun) {
-            return (int) $evento->ticket_id === (int) $comun->id;
-        });
-        Event::assertNotDispatched(SupportTicketAlert::class, function ($evento) use ($prueba, $vencida) {
-            return in_array((int) $evento->ticket_id, [(int) $prueba->id, (int) $vencida->id], true);
-        });
+        foreach ([$comun, $prueba, $vencida] as $ticket) {
+            Event::assertDispatched(SupportTicketAlert::class, function ($evento) use ($ticket) {
+                return (int) $evento->ticket_id === (int) $ticket->id;
+            });
+        }
     }
 
     /** @test */

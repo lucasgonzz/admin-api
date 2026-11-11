@@ -43,9 +43,6 @@ class CheckSupportResponseAlerts extends Command
 
         $tickets = SupportTicket::query()
             ->where('status', 'open')
-            /* Los tickets de prueba gratuita no alertan por demora (misión prueba-ayuda-unificada-en-soporte,
-               10/11/2026): los atiende Martín y, si está caído, el respaldo automático de la prueba. */
-            ->sinPrueba()
             ->whereNotNull('last_client_message_at')
             ->where('last_client_message_at', '<=', $deadline)
             ->where(function ($query) {
