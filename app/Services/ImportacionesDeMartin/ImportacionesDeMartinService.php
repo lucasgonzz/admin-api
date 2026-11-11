@@ -346,7 +346,9 @@ class ImportacionesDeMartinService
     }
 
     /**
-     * Deshace una corrida de clientes o proveedores del ticket, a pedido del dueño.
+     * Pide deshacer una corrida de clientes o proveedores del ticket, a pedido del dueño. Empresa contesta 202 con la
+     * corrida en `revirtiendo` (se sigue con `estado()` hasta `revertida`), 200 si ya estaba revertida y 409
+     * `no_revertible` (sale `rechazado` con `motivo_instancia`).
      *
      * @param SupportTicket $ticket
      * @param string        $modelo
@@ -362,8 +364,9 @@ class ImportacionesDeMartinService
 
         $resultado = $this->resultado_de_corrida($respuesta, $modelo, 'No pude revertir la importación.');
         if ($resultado['estado'] === 'aceptado') {
-            Log::channel('daily')->info('ImportacionesDeMartin: corrida revertida.', [
+            Log::channel('daily')->info('ImportacionesDeMartin: reversión pedida.', [
                 'ticket_id' => (int) $ticket->id, 'client_id' => (int) $ticket->client_id, 'corrida_id' => $corrida_id, 'modelo' => $modelo,
+                'estado_corrida' => $resultado['estado_corrida'],
             ]);
         }
 
@@ -403,7 +406,11 @@ class ImportacionesDeMartinService
             'http' => $status,
             'modelo' => isset($corrida['modelo']) ? (string) $corrida['modelo'] : $modelo,
             'corrida_id' => (string) $corrida['corrida_id'],
+            // analizar | confirmacion | requiere_correccion (motivo filas_ambiguas, sin código) | importar | terminada |
+            // cancelada | revirtiendo | revertida | error.
             'estado_corrida' => isset($corrida['estado']) ? (string) $corrida['estado'] : null,
+            'motivo' => $corrida['motivo'] ?? null,
+            'tandas' => isset($corrida['tandas']) && is_array($corrida['tandas']) ? $corrida['tandas'] : null,
             'resumen' => isset($corrida['resumen']) && is_array($corrida['resumen']) ? $corrida['resumen'] : null,
             'codigo_requerido' => ($corrida['codigo_requerido'] ?? false) === true,
             'codigo' => $this->codigo_de($corrida),
@@ -413,6 +420,9 @@ class ImportacionesDeMartinService
             'revertible' => ($corrida['revertible'] ?? false) === true,
             'corrida_existente' => ($cuerpo['corrida_existente'] ?? false) === true,
             'automatizar_soporte' => true,
+            // La corrida entera, tal cual la devolvió empresa (claves nuevas incluidas: resumen.filas_ambiguas,
+            // resumen.sin_cambios, resultado.reversion...).
+            'corrida' => $corrida,
         ];
     }
 

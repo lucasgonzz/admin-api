@@ -328,12 +328,13 @@ class PruebaImportacionService
 
     /**
      * Las corridas de clientes o proveedores abiertas del ticket que informa empresa en `prueba-pendientes` (misión
-     * cruzada importaciones-de-martin, 11/11/2026), solo con las claves del contrato. Una instancia anterior no manda
-     * la clave: lista vacía.
+     * cruzada importaciones-de-martin, 11/11/2026: analizar, confirmacion, importar o revirtiendo), tal cual llegan
+     * (`motivo`, `tandas` y lo que sume empresa), menos el código de confirmación, que el contexto no lleva. Una
+     * instancia anterior no manda la clave: lista vacía.
      *
      * @param mixed $entrada
      *
-     * @return array<int, array{corrida_id: string, modelo: string, estado: string, revision: int, codigo_requerido: bool}>
+     * @return array<int, array<string, mixed>> Al menos `{corrida_id, modelo, estado, revision, codigo_requerido}`.
      */
     private static function contactos_abiertos($entrada): array
     {
@@ -346,13 +347,14 @@ class PruebaImportacionService
             if (!is_array($corrida) || !isset($corrida['corrida_id'], $corrida['modelo']) || !is_string($corrida['corrida_id'])) {
                 continue;
             }
+            unset($corrida['codigo_confirmacion'], $corrida['texto_confirmacion']);
             $corridas[] = [
                 'corrida_id' => $corrida['corrida_id'],
                 'modelo' => (string) $corrida['modelo'],
                 'estado' => isset($corrida['estado']) ? (string) $corrida['estado'] : '',
                 'revision' => (int) ($corrida['revision'] ?? 0),
                 'codigo_requerido' => ($corrida['codigo_requerido'] ?? false) === true,
-            ];
+            ] + $corrida;
         }
 
         return $corridas;
