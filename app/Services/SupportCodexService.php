@@ -126,6 +126,23 @@ class SupportCodexService
                 && $case->dispatch_execution_id !== $input['execution_id']) {
                 $this->fail(409, 'operation_conflict', 'La renovación pertenece a otra ejecución.');
             }
+            /* Rotación del hilo (misión cruzada ficha-del-cliente, 11/11/2026): el monitor abre una conversación nueva
+             * cuando la vieja pasa los ~380.000 tokens. Solo con la reserva VIGENTE de esta misma ejecución (mismo
+             * token y worker, y el execution_id que quedó en el caso al tomarlo); sin el flag, bind_thread() sigue
+             * rechazando otro hilo con 409 thread_conflict. */
+            $rotate_thread = ! empty($input['rotate_thread']);
+            if ($rotate_thread) {
+                if (! $renewing || $case->lease_expires_at === null || ! $case->lease_expires_at->isFuture()) {
+                    $this->fail(423, 'invalid_lease', 'Rotar el hilo exige la reserva vigente de esta misma atención.');
+                }
+                if (empty($input['execution_id']) || $case->dispatch_execution_id === null
+                    || $case->dispatch_execution_id !== $input['execution_id']) {
+                    $this->fail(409, 'operation_conflict', 'La rotación del hilo pertenece a otra ejecución.');
+                }
+                if (empty($input['thread_id'])) {
+                    $this->fail(422, 'thread_required', 'Para rotar el hilo hace falta el thread_id de la conversación nueva.');
+                }
+            }
             if (! $renewing && $case->lease_expires_at !== null && $case->lease_expires_at->isFuture()) {
                 $this->fail(423, 'lease_busy', 'Otro proceso está atendiendo este ticket.');
             }
@@ -174,7 +191,11 @@ class SupportCodexService
             $case->lease_expires_at = now()->addMinutes(self::LEASE_MINUTES);
             $case->expected_message_id = (int) $last->id;
             if (! empty($input['thread_id'])) {
-                $this->bind_thread($case, $input['thread_id']);
+                if ($rotate_thread) {
+                    $this->rotate_thread($case, $input['thread_id']);
+                } else {
+                    $this->bind_thread($case, $input['thread_id']);
+                }
             }
             $case->save();
             // Invalida borradores ya encolados del proveedor anterior.
@@ -313,7 +334,9 @@ class SupportCodexService
                 'soporte_import_stock_existente' => $soporte_activo,
                 'support_tour_consent' => true, 'support_dynamic_tour' => $robotito_disponible
                     && SupportTourService::version_admite_tour_personalizado($ticket) !== false,
-                'support_tour_offer' => SupportTourService::entrante_admite_oferta($ticket, $last)],
+                'support_tour_offer' => SupportTourService::entrante_admite_oferta($ticket, $last),
+                // Claim con rotate_thread + thread_id nuevo (misión cruzada ficha-del-cliente, 11/11/2026).
+                'thread_rotation' => true],
             'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
             'robotito_available' => $robotito_disponible,
@@ -2018,6 +2041,29 @@ class SupportCodexService
             $this->fail(409, 'thread_conflict', 'El ticket ya está vinculado a otra conversación de Codex.');
         }
         $case->thread_id = $thread;
+    }
+
+    /**
+     * Reemplaza el hilo de Codex del caso por uno nuevo (claim con `rotate_thread`, ya validada la reserva de la
+     * ejecución) y deja el rastro: el caso no tiene bitácora de cambios, así que el hilo anterior queda en
+     * `previous_thread_id` y la hora en `thread_rotated_at`, más una línea en el log. El mismo hilo, o un caso sin
+     * hilo todavía, es un vínculo común.
+     */
+    private function rotate_thread(SupportCodexCase $case, string $thread): void
+    {
+        if ($case->thread_id === null || $case->thread_id === $thread) {
+            $case->thread_id = $thread;
+            return;
+        }
+        $case->previous_thread_id = $case->thread_id;
+        $case->thread_rotated_at = now();
+        $case->thread_id = $thread;
+        \Illuminate\Support\Facades\Log::channel('daily')->info('Soporte Codex: rotación del hilo del ticket.', [
+            'support_ticket_id' => (int) $case->support_ticket_id,
+            'previous_thread_id' => $case->previous_thread_id,
+            'thread_id' => $thread,
+            'execution_id' => $case->dispatch_execution_id,
+        ]);
     }
 
     private function assert_confirmation(SupportTicket $ticket, SupportCodexCase $case, array $input, bool $allow_thanks_only = true): void

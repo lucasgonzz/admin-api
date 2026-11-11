@@ -263,7 +263,9 @@ return [
                 ['nombre' => 'worker_id', 'obligatorio' => true, 'validacion' => 'required|string|max:150', 'que_es' => 'Identidad del monitor local.'],
                 ['nombre' => 'expected_message_id', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'Último mensaje real esperado.'],
                 ['nombre' => 'lease_token', 'obligatorio' => false, 'validacion' => 'sometimes|string|min:32|max:128', 'que_es' => 'Token anterior, solo para renovar.'],
-                ['nombre' => 'thread_id', 'obligatorio' => false, 'validacion' => 'sometimes|string|max:150', 'que_es' => 'Conversación persistente en Codex.'],
+                ['nombre' => 'thread_id', 'obligatorio' => false, 'validacion' => 'sometimes|string|max:150', 'que_es' => 'Conversación persistente en Codex. Otro hilo sobre un caso ya vinculado: 409 thread_conflict, salvo con rotate_thread.'],
+                ['nombre' => 'rotate_thread', 'obligatorio' => false, 'validacion' => 'sometimes|boolean', 'que_es' => 'Rotación del hilo (misión ficha-del-cliente, 11/11/2026; el contexto anuncia capabilities.thread_rotation): true + el thread_id NUEVO reemplaza el hilo del caso y deja el anterior en previous_thread_id (con thread_rotated_at). Solo con la reserva vigente de la misma ejecución: mismo lease_token y worker_id (si no, 423 invalid_lease) y el execution_id del caso (si no, 409 operation_conflict); sin thread_id, 422 thread_required.'],
+                ['nombre' => 'execution_id', 'obligatorio' => false, 'validacion' => 'required_if:dispatch_recovery,true|uuid', 'que_es' => 'La ejecución del monitor; obligatoria para rotate_thread y dispatch_recovery.'],
             ],
         ],
         'POST api/claude/support-codex/tickets/{id}/reply' => [

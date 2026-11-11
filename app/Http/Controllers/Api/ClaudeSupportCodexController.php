@@ -101,6 +101,8 @@ class ClaudeSupportCodexController extends Controller
             'execution_id' => 'required_if:dispatch_recovery,true|uuid',
             'supports_upgrade_agreement' => 'sometimes|boolean',
             'supports_trial_import_quiet' => 'sometimes|boolean',
+            // Rotación del hilo de Codex (misión cruzada ficha-del-cliente, 11/11/2026): con thread_id nuevo y execution_id.
+            'rotate_thread' => 'sometimes|boolean',
         ]);
         return response()->json($service->claim((int) $id, $data));
     }
