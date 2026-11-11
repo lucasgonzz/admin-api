@@ -70,6 +70,10 @@ abstract class BaseDeSeguimientos extends BaseDeImplementaciones
         AdminSetting::where('key', ImplementationFollowupService::SETTING_ENABLED)->delete();
         AdminSetting::flush_memo();
 
+        /* Los avisos van al dueño del soporte y a los que reciben escalaciones: la base del slot puede traer admins
+           con esas marcas, y el test necesita que el único destinatario sea el suyo (se revierte con la transacción). */
+        Admin::query()->update(['is_default_support_owner' => false, 'notify_support_escalation_whatsapp' => false]);
+
         $this->admin = $this->crear_admin();
         $this->admin->is_default_support_owner = true;
         $this->admin->save();
