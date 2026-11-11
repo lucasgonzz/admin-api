@@ -335,6 +335,9 @@ class SupportCodexService
             /* La implementación del sistema y de la tienda (abierta, o cerrada hace ≤ 30 días), para que
              * Martín siga la conversación de la implementación donde la dejó Lucas. null = no tiene. */
             'implementation' => app(SupportImplementationContextService::class)->bloque_para_el_ticket($ticket),
+            /* El seguimiento proactivo de la implementación del cliente (misión cruzada seguimiento-de-implementaciones,
+             * 11/11/2026): estado, próximo, pausa, sin respuesta e hitos de uso, sin eventos. null = no tiene. Nunca lanza. */
+            'seguimiento_implementacion' => app(\App\Services\ImplementationFollowups\ImplementationFollowupService::class)->bloque_para_el_ticket($ticket),
             /* Los tickets anteriores del cliente, resumidos (hasta 5, sin el actual; de un empleado, solo los
              * suyos), para que Martín sepa que existen y los pida con GET .../history si le hacen falta. */
             'previous_tickets' => $this->previous_tickets($ticket),

@@ -235,11 +235,13 @@ class ClaudeImplementationOpsController extends Controller
      * (`presentacion`, `form_link`, `progreso`, `pedir_archivos` y `entrega`; las que lee el checklist de
      * la SPA); `acceso`, `imagenes`, `categorias`, `descripciones` y `listo` son los hitos de la
      * migración y la entrega que el panel no tiene; `nota` es una anotación libre. `user_setup` y
-     * `crear_instalacion` NO están a propósito: las escriben sus propios endpoints.
+     * `crear_instalacion` NO están a propósito: las escriben sus propios endpoints. `seguimiento` es el
+     * mensaje proactivo de Martín (misión cruzada `seguimiento-de-implementaciones`, 11/11/2026): lo registra
+     * el envío de `support-codex/implementation-followups/{id}/send` en `data.actions[]` de la etapa.
      *
      * @var array<int, string>
      */
-    const ACCIONES = ['presentacion', 'form_link', 'progreso', 'pedir_archivos', 'entrega', 'acceso', 'imagenes', 'categorias', 'descripciones', 'listo', 'nota'];
+    const ACCIONES = ['presentacion', 'form_link', 'progreso', 'pedir_archivos', 'entrega', 'acceso', 'imagenes', 'categorias', 'descripciones', 'listo', 'nota', 'seguimiento'];
 
     /**
      * Por dónde se hizo lo que se registra. `whatsapp_web` es el único que además crea el saliente del
