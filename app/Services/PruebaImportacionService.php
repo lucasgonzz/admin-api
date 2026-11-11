@@ -567,8 +567,27 @@ class PruebaImportacionService
 
     private function automatizacion_disponible(SupportTicket $ticket): bool
     {
-        return $ticket->source === 'whatsapp' && $ticket->client_employee_id === null
+        return ($ticket->source === 'whatsapp' || $this->es_soporte_del_sistema_del_dueno($ticket))
+            && $ticket->client_employee_id === null
             && $this->puerta($ticket) === null && ! $this->pruebas->datos($ticket->client)['vencida'];
+    }
+
+    /**
+     * Si el ticket es la conversación de Soporte DEL SISTEMA del dueño (misión prueba-e2e-campana-imperio,
+     * 11/11/2026): el negocio en prueba manda su Excel desde Agentes, Soporte, y la importación automática tiene
+     * que andar igual que por WhatsApp. Mismo criterio que `PruebaRespaldoSoporteService`: canal sistema y el
+     * usuario del ticket es el dueño (`clients.user_id`).
+     *
+     * @param SupportTicket $ticket
+     *
+     * @return bool
+     */
+    public function es_soporte_del_sistema_del_dueno(SupportTicket $ticket): bool
+    {
+        $ticket->loadMissing('client');
+
+        return $ticket->source === 'erp' && $ticket->client !== null && $ticket->client_employee_id === null
+            && (int) $ticket->client_user_id > 0 && (int) $ticket->client_user_id === (int) $ticket->client->user_id;
     }
 
     private function contexto_del_ticket(SupportTicket $ticket, bool $soporte_activo = false): array

@@ -599,6 +599,18 @@ class PruebaWhatsappService
      */
     public function mandar_texto_por_ticket(Client $client, string $texto, ?int $ticket_id = null): array
     {
+        /* El aviso vuelve por el MISMO canal por el que llegó el archivo (misión prueba-e2e-campana-imperio,
+         * 11/11/2026): si el ticket es la conversación de Soporte del sistema del dueño de una prueba, el mensaje
+         * se sincroniza a su sistema y no sale por WhatsApp. */
+        if ($ticket_id !== null) {
+            $del_sistema = SupportTicket::whereKey($ticket_id)->where('client_id', $client->id)
+                ->whereNull('client_employee_id')->where('source', 'erp')->where('status', SupportTicket::STATUS_ABIERTO)->first();
+
+            if ($del_sistema !== null) {
+                return $this->mandar_texto_al_sistema($client, $del_sistema, $texto);
+            }
+        }
+
         $ticket = null;
         if ($ticket_id !== null) {
             $ticket = SupportTicket::whereKey($ticket_id)->where('client_id', $client->id)
@@ -663,6 +675,62 @@ class PruebaWhatsappService
             'whatsapp_message_id' => $wamid,
             'support_ticket_id'   => (int) $ticket->id,
         ];
+    }
+
+    /**
+     * Deja un aviso del equipo en la conversación de Soporte DEL SISTEMA del dueño de un negocio en prueba y lo
+     * sincroniza a su sistema (`admin-sync/support/messages`, el mismo camino que las respuestas de Martín). El
+     * mensaje lleva `is_trial_import_notice`: queda en el hilo sin tapar el entrante que espera respuesta.
+     *
+     * Si el sistema del negocio no lo confirma, el mensaje se borra (no llenar el hilo con copias en cada
+     * reintento) y se informa como no enviado.
+     *
+     * @param Client        $client
+     * @param SupportTicket $ticket Ticket abierto del canal sistema, sin empleado.
+     * @param string        $texto
+     *
+     * @return array{enviado: bool, motivo: string|null, whatsapp_message_id: string|null, support_ticket_id: int|null}
+     */
+    protected function mandar_texto_al_sistema(Client $client, SupportTicket $ticket, string $texto): array
+    {
+        $no = ['enviado' => false, 'motivo' => 'ticket_no_disponible', 'whatsapp_message_id' => null, 'support_ticket_id' => null];
+
+        if (! $this->pruebas->es_cliente_en_prueba($client) || (int) $client->user_id < 1
+            || (int) $ticket->client_user_id !== (int) $client->user_id) {
+            return $no;
+        }
+
+        $admin   = $this->remitente();
+        $mensaje = SupportMessage::create([
+            'support_ticket_id'      => (int) $ticket->id,
+            'sender_type'            => 'admin',
+            'sender_admin_id'        => $admin !== null ? (int) $admin->id : null,
+            'kind'                   => 'text',
+            'body'                   => $texto,
+            'delivered_at'           => now(),
+            'is_trial_import_notice' => true,
+        ]);
+
+        $sincronizado = false;
+        try {
+            $sincronizado = app(SupportClientSyncService::class)->sync_message_to_client($mensaje);
+        } catch (\Throwable $e) {
+            Log::channel('daily')->warning('PruebaWhatsapp: no se pudo sincronizar el aviso al sistema del negocio.', ['message_id' => $mensaje->id, 'error' => $e->getMessage()]);
+        }
+
+        if (! $sincronizado) {
+            $mensaje->delete();
+
+            return ['enviado' => false, 'motivo' => 'El sistema del negocio no confirmó el mensaje.', 'whatsapp_message_id' => null, 'support_ticket_id' => (int) $ticket->id];
+        }
+
+        try {
+            event(new SupportMessageReceived((int) $mensaje->id));
+        } catch (\Throwable $e) {
+            Log::channel('daily')->warning('PruebaWhatsapp: no se pudo emitir el evento del mensaje.', ['message_id' => $mensaje->id, 'error' => $e->getMessage()]);
+        }
+
+        return ['enviado' => true, 'motivo' => null, 'whatsapp_message_id' => null, 'support_ticket_id' => (int) $ticket->id];
     }
 
     /* ------------------------------------------------------------------------------------------

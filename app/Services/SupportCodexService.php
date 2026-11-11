@@ -400,7 +400,7 @@ class SupportCodexService
                             'mime' => $attachment->mime,
                             'size' => $attachment->size,
                             'download_path' => '/api/claude/support-codex/tickets/' . $ticket->id . '/attachments/' . $attachment->id,
-                        ];
+                        ] + ($attachment->original_name !== null ? ['filename' => (string) $attachment->original_name] : []);
                     })->all(),
                 ];
             })->all(),

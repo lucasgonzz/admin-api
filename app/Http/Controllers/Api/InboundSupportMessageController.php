@@ -26,6 +26,21 @@ use Illuminate\Support\Str;
 class InboundSupportMessageController extends Controller
 {
     /**
+     * Documentos que el negocio puede mandar por Soporte de su sistema además de audio e imagen (misión cruzada
+     * prueba-e2e-campana-imperio, 11/11/2026): extensión → mime con el que se guardan, el mismo con el que llegan
+     * por WhatsApp. Es lo que después mira la importación del ticket (`PruebaImportacionService`) y lo que lee
+     * Martín en `messages[].attachments[].mime`.
+     *
+     * @var array<string, string>
+     */
+    const DOCUMENTOS = [
+        'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'xls'  => 'application/vnd.ms-excel',
+        'csv'  => 'text/csv',
+        'pdf'  => 'application/pdf',
+    ];
+
+    /**
      * Recibe mensaje desde empresa-api y lo persiste en admin-api.
      *
      * Si el ticket es nuevo nace SIN operador (`assigned_admin_id = null`): desde el 26/10/2026 los
@@ -192,13 +207,27 @@ class InboundSupportMessageController extends Controller
         $has_uploaded_files = is_array($attachments_files) && count($attachments_files) > 0;
 
         if ($has_uploaded_files) {
-            foreach ($attachments_files as $uploaded_file) {
-                $stored_path = $uploaded_file->store('support_messages/' . $message->support_ticket_id, 'public');
+            /* La metadata que acompaña a cada binario, en el mismo orden (trae `original_name`, opcional). */
+            $metadata = array_values($this->parse_attachments_input($request->input('attachments', [])));
+
+            foreach (array_values($attachments_files) as $indice => $uploaded_file) {
+                $declarado = isset($metadata[$indice]) && is_array($metadata[$indice]) ? $metadata[$indice] : [];
+                $nombre    = $this->nombre_original($uploaded_file, $declarado);
+                $documento = $this->documento_reconocido($uploaded_file, $declarado, $nombre);
+                $carpeta   = 'support_messages/' . $message->support_ticket_id;
+
+                /* Un documento se guarda con SU extensión y su mime: la detección del servidor suele ver un .xlsx
+                 * como un zip (y `store()` lo dejaría como `.zip`), y entonces la importación no lo reconoce. */
+                $stored_path = $documento !== null
+                    ? $uploaded_file->storeAs($carpeta, Str::random(40) . '.' . $documento, 'public')
+                    : $uploaded_file->store($carpeta, 'public');
+
                 SupportMessageAttachment::create([
                     'support_message_id' => $message->id,
                     'disk' => 'public',
                     'path' => $stored_path,
-                    'mime' => $uploaded_file->getMimeType(),
+                    'original_name' => $nombre,
+                    'mime' => $documento !== null ? self::DOCUMENTOS[$documento] : $uploaded_file->getMimeType(),
                     'size' => $uploaded_file->getSize(),
                 ]);
             }
@@ -212,11 +241,106 @@ class InboundSupportMessageController extends Controller
                     'support_message_id' => $message->id,
                     'disk' => $attachment['disk'] ?? 'public',
                     'path' => $attachment['path'] ?? '',
+                    'original_name' => $this->nombre_saneado($attachment['original_name'] ?? null),
                     'mime' => $attachment['mime'] ?? null,
                     'size' => $attachment['size'] ?? null,
                 ]);
             }
         }
+    }
+
+    /**
+     * El nombre con el que el negocio subió el archivo: el `original_name` de la metadata si viene, o el del
+     * multipart. Sin rutas, hasta 191 caracteres.
+     *
+     * @param \Illuminate\Http\UploadedFile $archivo
+     * @param array<string, mixed>          $declarado
+     *
+     * @return string|null
+     */
+    private function nombre_original($archivo, array $declarado): ?string
+    {
+        $nombre = $this->nombre_saneado($declarado['original_name'] ?? null);
+
+        return $nombre !== null ? $nombre : $this->nombre_saneado($archivo->getClientOriginalName());
+    }
+
+    /**
+     * @param mixed $nombre
+     *
+     * @return string|null
+     */
+    private function nombre_saneado($nombre): ?string
+    {
+        if (! is_string($nombre)) {
+            return null;
+        }
+
+        $nombre = trim((string) preg_replace('/[\x00-\x1F\x7F]/', '', basename(str_replace('\\', '/', $nombre))));
+
+        return $nombre === '' ? null : mb_substr($nombre, 0, 191);
+    }
+
+    /**
+     * Si el archivo es uno de los {@see self::DOCUMENTOS}, su extensión. Se decide por el nombre original, por
+     * el nombre del multipart o por el mime declarado, y se confirma contra los primeros bytes: un archivo que
+     * dice ser un Excel y no lo es se guarda como hasta ahora (con lo que detecte el servidor).
+     *
+     * @param \Illuminate\Http\UploadedFile $archivo
+     * @param array<string, mixed>          $declarado Metadata del adjunto (`mime`, `original_name`).
+     * @param string|null                   $nombre
+     *
+     * @return string|null
+     */
+    private function documento_reconocido($archivo, array $declarado, ?string $nombre): ?string
+    {
+        $candidatas = [
+            strtolower((string) pathinfo((string) $nombre, PATHINFO_EXTENSION)),
+            strtolower((string) pathinfo((string) $archivo->getClientOriginalName(), PATHINFO_EXTENSION)),
+        ];
+        foreach ([$declarado['mime'] ?? null, $archivo->getClientMimeType()] as $mime) {
+            $por_mime = array_search(strtolower(trim((string) strtok((string) $mime, ';'))), self::DOCUMENTOS, true);
+            if ($por_mime !== false) {
+                $candidatas[] = $por_mime;
+            }
+        }
+
+        $inicio = (string) @file_get_contents((string) $archivo->getRealPath(), false, null, 0, 1024);
+
+        foreach ($candidatas as $extension) {
+            if (isset(self::DOCUMENTOS[$extension]) && self::firma_coincide($extension, $inicio)) {
+                return $extension;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Si los primeros bytes son los del tipo que dice la extensión.
+     *
+     * @param string $extension
+     * @param string $inicio    Hasta 1 KB del principio del archivo.
+     *
+     * @return bool
+     */
+    private static function firma_coincide(string $extension, string $inicio): bool
+    {
+        if ($inicio === '') {
+            return false;
+        }
+        if ($extension === 'xlsx') {
+            return strncmp($inicio, "PK\x03\x04", 4) === 0;
+        }
+        if ($extension === 'xls') {
+            return strncmp($inicio, "\xD0\xCF\x11\xE0", 4) === 0;
+        }
+        if ($extension === 'pdf') {
+            return strpos(substr($inicio, 0, 16), '%PDF') !== false;
+        }
+
+        /* csv: texto plano, sin bytes nulos. */
+        return strpos($inicio, "\0") === false;
     }
 
     private function entrada_robotito_valida(Request $request, Client $client, SupportTicket $ticket): bool
