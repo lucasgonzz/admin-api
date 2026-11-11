@@ -176,8 +176,12 @@ class SupportCodexHealthService
      * Lo usa el respaldo automático de la prueba gratuita (misión prueba-ayuda-unificada-en-soporte, 10/11/2026)
      * para no inventar otra definición de «caído».
      *
-     * Solo lee: no toma el candado de la fila ni manda nada. Con el proveedor apagado a mano (pausa humana), sin
-     * pulso armado, o antes de las 07:00 (la vigilancia no mide de noche), da false.
+     * Solo lee: no toma el candado de la fila ni manda nada. Con el proveedor apagado a mano (pausa humana) o sin
+     * pulso armado da false.
+     *
+     * 🔴 A diferencia del correo, mide TAMBIÉN de noche. El correo calla antes de las 07:00 para no despertar a
+     * Lucas, pero el respaldo existe justamente para la noche: un lead que se anota a las 2 de la mañana con la PC
+     * de Martín apagada tiene que recibir respuesta. Por eso evalúa sin la hora de reanudar.
      *
      * @return bool
      */
@@ -187,31 +191,33 @@ class SupportCodexHealthService
             return false;
         }
         $state = json_decode((string) AdminSetting::where('key', self::KEY)->value('value'), true);
-        $evaluacion = $this->evaluar(is_array($state) ? $state : []);
+        $evaluacion = $this->evaluar(is_array($state) ? $state : [], false);
 
         return $evaluacion !== null && $evaluacion['unhealthy'];
     }
 
     /**
      * El diagnóstico de salud que comparten el correo y el respaldo de la prueba. null = no se evalúa (sin
-     * pulso armado ni incidente, o antes de la hora de reanudar).
+     * pulso armado ni incidente, o, con horario, antes de la hora de reanudar).
      *
      * @param array<string, mixed> $state
+     * @param bool $con_horario true para el correo (no mide antes de las 07:00 y cuenta desde esa hora); false para
+     *                          el respaldo de la prueba, que mide a cualquier hora.
      *
      * @return array{now: int, resume_at: int, unhealthy: bool, reason: string, incident: array|null}|null
      */
-    private function evaluar(array $state): ?array
+    private function evaluar(array $state, bool $con_horario = true): ?array
     {
         if (empty($state['armed_at']) && empty($state['supervisor_incident'])) {
             return null;
         }
         $local = now(self::TIMEZONE);
         $resume = $local->copy()->setTime(self::RESUME_HOUR, 0);
-        if ($local->lt($resume)) {
+        if ($con_horario && $local->lt($resume)) {
             return null;
         }
         $now = $local->getTimestamp();
-        $resumeAt = $resume->getTimestamp();
+        $resumeAt = $con_horario ? $resume->getTimestamp() : 0;
         $silent = $now - max($resumeAt, (int) ($state['last_seen_at'] ?? 0)) >= self::TIMEOUT_SECONDS;
         $failing = ! empty($state['first_error_at'])
             && $now - max($resumeAt, (int) $state['first_error_at']) >= self::TIMEOUT_SECONDS;

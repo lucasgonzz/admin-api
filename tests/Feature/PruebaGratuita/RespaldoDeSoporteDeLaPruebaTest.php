@@ -17,7 +17,9 @@ use App\Services\Prueba\PruebaVideoCatalogoService;
 use App\Services\SupportCodexHealthService;
 use App\Services\SupportCodexSettings;
 use Carbon\Carbon;
+use App\Mail\SupportCodexHealthMail;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 
@@ -176,7 +178,7 @@ class RespaldoDeSoporteDeLaPruebaTest extends BaseDeLaPrueba
     }
 
     /** @test */
-    public function con_el_proveedor_apagado_o_de_noche_no_responde(): void
+    public function con_el_proveedor_apagado_no_responde(): void
     {
         $this->martin_caido();
         $this->red();
@@ -184,11 +186,49 @@ class RespaldoDeSoporteDeLaPruebaTest extends BaseDeLaPrueba
 
         AdminSetting::set(SupportCodexSettings::KEY_ENABLED, '0');
         $this->assertSame('martin_sano', $this->responder($ticket, $entrante)['estado'], 'Apagado a mano es una pausa, no una caída.');
-
-        AdminSetting::set(SupportCodexSettings::KEY_ENABLED, '1');
-        Carbon::setTestNow(Carbon::parse('2026-11-10 05:00:00', 'America/Argentina/Buenos_Aires'));
-        $this->assertSame('martin_sano', $this->responder($ticket, $entrante)['estado'], 'Antes de las 07:00 la vigilancia no mide.');
         $this->assertSame([], $this->espia->textos);
+    }
+
+    /**
+     * De noche: el respaldo mide (Martín sin pulso = caído) y contesta, pero el correo de vigilancia sigue callado
+     * hasta las 07:00. Cambio del coordinador del 10/11/2026: el respaldo existe justamente para la noche.
+     *
+     * @test
+     */
+    public function de_noche_sin_pulso_esta_en_falla_y_responde_pero_el_correo_no_sale(): void
+    {
+        Mail::fake();
+        Carbon::setTestNow(Carbon::parse('2026-11-10 02:00:00', 'America/Argentina/Buenos_Aires'));
+        $this->martin_caido();
+        $this->red();
+        [$ticket, $entrante] = $this->ticket_con_pregunta();
+
+        $this->assertTrue(app(SupportCodexHealthService::class)->en_falla());
+        $this->artisan('support:check-codex-health')->assertExitCode(0);
+        Mail::assertNothingSent();
+
+        $this->assertSame('enviado', $this->responder($ticket, $entrante)['estado']);
+        $this->assertCount(1, $this->espia->textos);
+    }
+
+    /** @test */
+    public function de_dia_sin_pulso_esta_en_falla_y_el_correo_sale_como_antes(): void
+    {
+        Mail::fake();
+        $this->martin_caido();
+
+        $this->assertTrue(app(SupportCodexHealthService::class)->en_falla());
+        $this->artisan('support:check-codex-health')->assertExitCode(0);
+        Mail::assertSent(SupportCodexHealthMail::class, function ($mail) {
+            return $mail->kind === 'failure' && $mail->health['reason'] === 'sin_pulso';
+        });
+
+        /* Con pulso fresco, de día o de noche, no está en falla. */
+        $this->martin_sano();
+        $this->assertFalse(app(SupportCodexHealthService::class)->en_falla());
+        Carbon::setTestNow(Carbon::parse('2026-11-10 03:00:00', 'America/Argentina/Buenos_Aires'));
+        $this->martin_sano();
+        $this->assertFalse(app(SupportCodexHealthService::class)->en_falla());
     }
 
     /** @test */
