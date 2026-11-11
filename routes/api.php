@@ -480,6 +480,24 @@ Route::middleware('claude.task.key')
             ->whereNumber('id');
         Route::post('support-codex/tickets/{id}/import-images', 'Api\ClaudeSupportCodexController@import_images')
             ->whereNumber('id');
+        /* Importaciones de Martín para clientes ACTIVOS y en implementación (misión cruzada importaciones-de-martin,
+           11/11/2026): el permiso delegado de 24 h de una tarea nativa (alcance pdf|web), el catálogo del dueño y las
+           fotos de la web del proveedor (con la reserva del ticket o el permiso de la tarea), y el estado, la
+           confirmación y la reversión de un Excel de clientes o proveedores. `import-excel` acepta además `model`
+           client|provider y la planilla derivada de un PDF del dueño. Reglas en
+           App\Services\ImportacionesDeMartin\ImportacionesDeMartinService. */
+        Route::post('support-codex/tickets/{id}/task-grant', 'Api\ClaudeImportacionesDeMartinController@task_grant')
+            ->whereNumber('id');
+        Route::get('support-codex/tickets/{id}/catalogo-articulos', 'Api\ClaudeImportacionesDeMartinController@catalogo_articulos')
+            ->whereNumber('id');
+        Route::post('support-codex/tickets/{id}/import-images-proveedor', 'Api\ClaudeImportacionesDeMartinController@import_images_proveedor')
+            ->whereNumber('id');
+        Route::get('support-codex/tickets/{id}/import-status', 'Api\ClaudeImportacionesDeMartinController@import_status')
+            ->whereNumber('id');
+        Route::post('support-codex/tickets/{id}/import-confirm', 'Api\ClaudeImportacionesDeMartinController@import_confirm')
+            ->whereNumber('id');
+        Route::post('support-codex/tickets/{id}/import-revert', 'Api\ClaudeImportacionesDeMartinController@import_revert')
+            ->whereNumber('id');
         Route::get('admins', 'Api\ClaudeTaskIngestController@admins_json');
         Route::post('task', 'Api\ClaudeTaskIngestController@store_json');
         Route::get('draft-version', 'Api\ClaudeVersionItemsIngestController@draft_version_json');

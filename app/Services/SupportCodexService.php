@@ -334,6 +334,11 @@ class SupportCodexService
             'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => true, 'prueba_import_resolver' => true,
                 'soporte_import' => $soporte_activo, 'soporte_import_resolver' => $soporte_activo,
                 'soporte_import_stock_existente' => $soporte_activo,
+                // Misión cruzada importaciones-de-martin (11/11/2026): la planilla derivada del PDF del dueño, el Excel
+                // de clientes y proveedores con código y deshacer, y las imágenes de la web del proveedor con el
+                // permiso delegado de la tarea. La versión de la instancia se confirma con su 404 (version_vieja).
+                'soporte_import_pdf' => $soporte_activo, 'soporte_import_clientes' => $soporte_activo,
+                'soporte_import_web' => $soporte_activo,
                 'support_tour_consent' => true, 'support_dynamic_tour' => $robotito_disponible
                     && SupportTourService::version_admite_tour_personalizado($ticket) !== false,
                 'support_tour_offer' => SupportTourService::entrante_admite_oferta($ticket, $last),

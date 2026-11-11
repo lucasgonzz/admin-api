@@ -539,7 +539,7 @@ return [
             'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => ['Reserva vigente y cliente/URL resueltos exclusivamente del ticket.'],
         ],
         'POST api/claude/support-codex/tickets/{id}/import-excel' => [
-            'para_que' => 'Importación desde el ticket de un negocio en PRUEBA GRATUITA (misión prueba-martin-importacion, 3/11/2026, C4): el admin reenvía un Excel del ticket (attachment_id, que ya tiene en su disco: no baja a la PC de Lucas) o uno en base64 (file, el Excel normalizado que arma la tarea del PDF) a POST admin-sync/ai-excel-import/analyze del sistema del cliente, con la clave del cliente, en segundo plano (segundo_plano=1) y con aviso por WhatsApp al terminar (avisar_por_whatsapp=1). Contesta 200 {estado: aceptado (con analysis_uuid) | analizado_sin_corrida (empresa viejo: analizó en el momento, sin corrida) | rechazado, http, cuerpo (lo que contestó la instancia, sin la clave)}; 404 no_es_prueba; 409 ticket_cerrado/sin_api_key/sin_url; 422 sin_fuente/archivo_invalido; 502 no_responde.',
+            'para_que' => 'Importación desde el ticket de un negocio en PRUEBA GRATUITA (misión prueba-martin-importacion, 3/11/2026, C4): el admin reenvía un Excel del ticket (attachment_id, que ya tiene en su disco: no baja a la PC de Lucas) o uno en base64 (file, el Excel normalizado que arma la tarea del PDF) a POST admin-sync/ai-excel-import/analyze del sistema del cliente, con la clave del cliente, en segundo plano (segundo_plano=1) y con aviso por WhatsApp al terminar (avisar_por_whatsapp=1). Contesta 200 {estado: aceptado (con analysis_uuid) | analizado_sin_corrida (empresa viejo: analizó en el momento, sin corrida) | rechazado, http, cuerpo (lo que contestó la instancia, sin la clave)}; 404 no_es_prueba; 409 ticket_cerrado/sin_api_key/sin_url; 422 sin_fuente/archivo_invalido; 502 no_responde. Con automatizar_soporte=1 (cliente ACTIVO, con la reserva; misión importaciones-de-martin, 11/11/2026) acepta además model client|provider con el Excel adjunto del dueño (va a POST admin-sync/importacion-soporte/{modelo}/iniciar y devuelve {estado: aceptado, modelo, corrida_id, estado_corrida, resumen, codigo_requerido, revertible} o version_vieja) y la planilla de artículos derivada de un PDF (file + pdf_attachment_id, con el PDF entrante del dueño verificado; clave sha256(pdf:ID), origen pdf).',
             'escribe' => true, 'peligrosidad' => 'media',
             'frenos' => ['Solo con el ticket ABIERTO y el cliente en prueba (clients.estado = prueba): a cualquier otro cliente es 404 y no se le pega a nadie.', 'El adjunto tiene que ser de ESTE ticket y ser un Excel (.xlsx/.xls, hasta 10 MiB); en base64 solo .xlsx/.xls con nombre de archivo válido.', 'No reintenta: un POST a analyze crea una corrida del otro lado.', 'La clave del cliente viaja en el header y se tapa en la respuesta y en el log.'],
             'parametros' => [
@@ -550,6 +550,7 @@ return [
                 ['nombre' => 'model', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|in:article,client,provider', 'que_es' => 'Modelo del importador (default article).'],
                 ['nombre' => 'provider_id', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|integer|min:1', 'que_es' => 'Id del proveedor en el sistema del cliente, si se sabe.'],
                 ['nombre' => 'origen', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|max:40', 'que_es' => 'martin (Excel del ticket) o pdf (tarea del PDF); va al payload de la corrida.'],
+                ['nombre' => 'pdf_attachment_id', 'obligatorio' => false, 'validacion' => 'sometimes|integer|min:1', 'que_es' => 'El PDF original del ticket del que deriva file (en un activo, entrante del dueño verificado).'],
             ],
         ],
         'POST api/claude/support-codex/tickets/{id}/import-images' => [
@@ -562,6 +563,62 @@ return [
                 ['nombre' => 'imagenes.*.content_base64', 'obligatorio' => true, 'validacion' => 'required|string|max:5600000', 'que_es' => 'Contenido en base64, hasta 4 MiB decodificado.'],
                 ['nombre' => 'provider_id', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|integer|min:1', 'que_es' => 'Proveedor para buscar también por su provider_code.'],
                 ['nombre' => 'reemplazar', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|boolean', 'que_es' => 'true pisa la foto de un artículo que ya tiene.'],
+            ],
+        ],
+        /* Importaciones de Martín para clientes ACTIVOS y en implementación (misión cruzada importaciones-de-martin,
+           11/11/2026). Reglas en App\Services\ImportacionesDeMartin\ImportacionesDeMartinService; los frenos salen con
+           {error, motivo, message}. Un 404 de la instancia es estado version_vieja (su versión no tiene la ruta). */
+        'POST api/claude/support-codex/tickets/{id}/task-grant' => [
+            'para_que' => 'El permiso delegado de una tarea nativa de Martín: con la reserva del ticket, el admin emite un token de 24 h acotado a ESE ticket y a un alcance (pdf: solo catalogo-articulos; web: catalogo-articulos e import-images-proveedor), que la tarea usa en lugar de la reserva. Se guarda solo el sha256; el token sale una sola vez. Responde 201 {tarea_token, ticket_id, alcance, vence_at}.',
+            'escribe' => true, 'peligrosidad' => 'baja',
+            'frenos' => ['Reserva vigente del ticket (lease_token): si no, 423 invalid_lease.', 'Ticket abierto y atendido por Codex (409) del dueño verificado de un negocio activo (403 contacto_no_habilitado).', 'El permiso vence a las 24 h y no abre import-excel ni ninguna otra ruta.'],
+            'parametros' => [
+                ['nombre' => 'lease_token', 'obligatorio' => true, 'validacion' => 'required|string|min:32|max:128', 'que_es' => 'La reserva vigente del ticket.'],
+                ['nombre' => 'alcance', 'obligatorio' => true, 'validacion' => 'required|in:pdf,web', 'que_es' => 'pdf (tarea del catálogo PDF) o web (fotos de la web del proveedor).'],
+            ],
+        ],
+        'GET api/claude/support-codex/tickets/{id}/catalogo-articulos' => [
+            'para_que' => 'Los artículos del dueño del ticket por cursor de id (?despues_de=&limite= hasta 1000), puente a GET admin-sync/catalogo/articulos de su sistema; con ?con_imagenes=1 cada artículo trae además tiene_imagen, codigos_pivot y a_revisar. Acepta la reserva del ticket o el permiso de la tarea (X-Support-Lease-Token / X-Support-Task-Token o lease_token / tarea_token). Responde 200 {estado: aceptado, http, cuerpo: {articulos, siguiente, total}} o {estado: version_vieja} (404, o una versión que no informa las imágenes).',
+            'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => [],
+        ],
+        'POST api/claude/support-codex/tickets/{id}/import-images-proveedor' => [
+            'para_que' => 'Una tanda de hasta 25 fotos de la web de un proveedor para los artículos del dueño del ticket: el admin las reenvía en multipart a POST admin-sync/catalogo/imagenes/proveedor de su sistema. exacto se asigna solo si el artículo no tiene foto; dudosa queda para que el dueño la apruebe en Alertas → Catálogo → Imágenes. Responde 200 {estado: aceptado | rechazado | version_vieja, http, cuerpo: {run_id, asignadas, a_revisar, salteadas}, enviadas, rechazadas_antes_de_enviar}.',
+            'escribe' => true, 'peligrosidad' => 'media',
+            'frenos' => ['Reserva del ticket o permiso de la tarea de alcance web (403 alcance_no_permitido, tarea_vencida, tarea_de_otro_ticket, tarea_invalida).', 'Dueño verificado de un negocio activo y ticket abierto.', 'Hasta 25 items, cada imagen JPEG/PNG/WebP por sus bytes y hasta 4 MiB; un artículo repetido en la tanda se descarta.', 'El cliente sale del ticket; la clave del cliente no sale en la respuesta ni en el log.'],
+            'parametros' => [
+                ['nombre' => 'fuente', 'obligatorio' => true, 'validacion' => 'required|string|max:190|regex:dominio', 'que_es' => 'El dominio del sitio del proveedor (o pdf-<adjunto> para las fotos de un PDF).'],
+                ['nombre' => 'items', 'obligatorio' => true, 'validacion' => 'required|array|min:1|max:25', 'que_es' => 'Lista de {article_id, tipo, content_base64, url_origen?, codigo_web?}.'],
+                ['nombre' => 'items.*.article_id', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'El id del artículo en el sistema del dueño.'],
+                ['nombre' => 'items.*.tipo', 'obligatorio' => true, 'validacion' => 'required|in:exacto,dudosa', 'que_es' => 'exacto (código de barras o de proveedor único) o dudosa (para el dueño).'],
+                ['nombre' => 'items.*.content_base64', 'obligatorio' => true, 'validacion' => 'required|string|max:5600000', 'que_es' => 'La foto en base64, hasta 4 MiB decodificada.'],
+                ['nombre' => 'items.*.url_origen', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|max:2000', 'que_es' => 'La URL http(s) de donde salió la foto.'],
+                ['nombre' => 'items.*.codigo_web', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|max:120', 'que_es' => 'El código con el que el sitio publica el producto.'],
+                ['nombre' => 'lease_token | tarea_token', 'obligatorio' => true, 'validacion' => 'uno de los dos', 'que_es' => 'La reserva del ticket o el permiso de la tarea (también por header).'],
+            ],
+        ],
+        'GET api/claude/support-codex/tickets/{id}/import-status' => [
+            'para_que' => 'El estado y el resumen de una corrida de clientes o proveedores del ticket (?modelo=client|provider&corrida_id=N), puente a GET admin-sync/importacion-soporte/{corrida} de su sistema, con la reserva del ticket. Responde 200 {estado: aceptado, modelo, corrida_id, estado_corrida, resumen: {crear, actualizar, saldos}, codigo_requerido, revertible} o {estado: version_vieja}.',
+            'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => [],
+        ],
+        'POST api/claude/support-codex/tickets/{id}/import-confirm' => [
+            'para_que' => 'Confirma una corrida de clientes o proveedores cuando el mensaje de la reserva es el CONFIRMAR <código> del dueño: puente a POST admin-sync/importacion-soporte/{corrida}/confirmar con el código vigente. Responde 200 {estado: aceptado, ...corrida} | version_vieja; 409 confirmacion_invalida.',
+            'escribe' => true, 'peligrosidad' => 'alta',
+            'frenos' => ['Reserva vigente y mensaje actual (assert_current): 423 invalid_lease, 409 stale_message.', 'El mensaje tiene que ser texto entrante del dueño verificado, decir exactamente CONFIRMAR <código vigente de la corrida> y llegar después del aviso enviado por el ticket con ese texto (409 confirmacion_invalida).', 'Dueño verificado de un negocio activo.'],
+            'parametros' => [
+                ['nombre' => 'lease_token', 'obligatorio' => true, 'validacion' => 'required|string|min:32|max:128', 'que_es' => 'La reserva vigente del ticket.'],
+                ['nombre' => 'expected_message_id', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'El mensaje de la reserva: el CONFIRMAR del dueño.'],
+                ['nombre' => 'modelo', 'obligatorio' => true, 'validacion' => 'required|in:client,provider', 'que_es' => 'El modelo de la corrida.'],
+                ['nombre' => 'corrida_id', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'La corrida que devolvió import-excel.'],
+            ],
+        ],
+        'POST api/claude/support-codex/tickets/{id}/import-revert' => [
+            'para_que' => 'Deshace una corrida de clientes o proveedores a pedido del dueño: puente a POST admin-sync/importacion-soporte/{corrida}/revertir de su sistema (los creados se borran si no tienen movimientos, los actualizados vuelven a sus valores y los ajustes de saldo se anulan). Responde 200 {estado: aceptado, ...corrida} | rechazado | version_vieja.',
+            'escribe' => true, 'peligrosidad' => 'alta',
+            'frenos' => ['Reserva vigente del ticket (423 invalid_lease).', 'Ticket abierto y atendido por Codex, del dueño verificado de un negocio activo.', 'El cliente sale del ticket; empresa verifica que la corrida sea de ese dueño y de ese ticket.'],
+            'parametros' => [
+                ['nombre' => 'lease_token', 'obligatorio' => true, 'validacion' => 'required|string|min:32|max:128', 'que_es' => 'La reserva vigente del ticket.'],
+                ['nombre' => 'modelo', 'obligatorio' => true, 'validacion' => 'required|in:client,provider', 'que_es' => 'El modelo de la corrida.'],
+                ['nombre' => 'corrida_id', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'La corrida a revertir.'],
             ],
         ],
 

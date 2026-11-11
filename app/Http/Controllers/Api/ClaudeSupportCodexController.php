@@ -401,8 +401,10 @@ class ClaudeSupportCodexController extends Controller
 
                 abort_unless(isset($data['lease_token'], $data['expected_message_id']), 422, 'Hace falta la reserva del turno.');
                 $soporte->assert_current($ticket, $data + ['action' => 'responder']);
-                $mensaje = SupportMessage::find($data['expected_message_id']);
-                if (!$service->es_entrante_del_dueno($ticket, $mensaje)) {
+                // La planilla derivada de un PDF (misión importaciones-de-martin) la sube Martín en una atención
+                // posterior: lo que acredita al dueño es el PDF, que el servicio exige entrante del dueño.
+                $mensaje = isset($data['pdf_attachment_id']) ? null : SupportMessage::find($data['expected_message_id']);
+                if (!isset($data['pdf_attachment_id']) && !$service->es_entrante_del_dueno($ticket, $mensaje)) {
                     return ['estado' => 'archivo_sin_remitente_verificado',
                         'mensaje' => 'Reenviá el Excel desde el WhatsApp registrado del dueño para poder usarlo.'];
                 }

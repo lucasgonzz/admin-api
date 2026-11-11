@@ -106,9 +106,15 @@ class PruebaImportacionService
             return $puerta;
         }
 
-        if ($soporte_activo && (!isset($input['attachment_id']) || isset($input['file']) || isset($input['pdf_attachment_id'])
-            || ($input['model'] ?? 'article') !== 'article')) {
-            return ['estado' => 'archivo_invalido', 'mensaje' => 'Adjuntá al ticket el Excel de artículos del negocio.'];
+        // Modo soporte (misión cruzada importaciones-de-martin, 11/11/2026): el Excel adjunto del dueño (artículos,
+        // clientes o proveedores) o la planilla de artículos derivada de un PDF adjunto del dueño (`file` +
+        // `pdf_attachment_id`). El alcance de stock sigue siendo solo para el Excel de artículos.
+        $modelo_pedido = isset($input['model']) ? (string) $input['model'] : 'article';
+        if ($soporte_activo && (isset($input['pdf_attachment_id'])
+                ? (!isset($input['file']) || isset($input['attachment_id']) || $modelo_pedido !== 'article' || $alcance !== null)
+                : (!isset($input['attachment_id']) || isset($input['file']) || !in_array($modelo_pedido, self::MODELOS, true)
+                    || ($alcance !== null && $modelo_pedido !== 'article')))) {
+            return ['estado' => 'archivo_invalido', 'mensaje' => 'Adjuntá al ticket el Excel del negocio (artículos, clientes o proveedores), o mandá la planilla de artículos derivada del PDF que mandó el dueño.'];
         }
 
         $archivo = $this->archivo_excel($ticket, $input, $soporte_activo);
@@ -130,9 +136,21 @@ class PruebaImportacionService
             if ($pdf === null || ($pdf->mime !== 'application/pdf' && self::extension_del_adjunto($pdf) !== 'pdf')) {
                 return ['estado' => 'sin_fuente', 'mensaje' => 'El PDF original tiene que ser un adjunto del cliente en este ticket.'];
             }
+            if ($soporte_activo && !$this->es_entrante_del_dueno($ticket, $pdf->message)) {
+                return ['estado' => 'archivo_sin_remitente_verificado', 'mensaje' => 'El PDF tiene que haber llegado desde el WhatsApp registrado del dueño.'];
+            }
 
             // El XLSX derivado puede cambiar sus metadatos al regenerarse para el mismo PDF.
             $clave = hash('sha256', 'pdf:' . $pdf->id);
+            if ($soporte_activo) {
+                $origen = 'pdf';
+            }
+        }
+
+        if ($soporte_activo && $modelo !== 'article') {
+            // Clientes y proveedores van al servicio de soporte nuevo de empresa (con resumen, código y deshacer):
+            // una instancia sin esa ruta contesta 404 y es `version_vieja`, sin que nadie lea el archivo.
+            return app(\App\Services\ImportacionesDeMartin\ImportacionesDeMartinService::class)->iniciar($ticket, $modelo, $archivo, $clave);
         }
 
         $campos = [
@@ -645,7 +663,7 @@ class PruebaImportacionService
      *
      * @return array<string, mixed>
      */
-    protected function reenviar(Client $client, string $ruta, array $campos, array $archivos, int $timeout, string $metodo = 'POST'): array
+    public function reenviar(Client $client, string $ruta, array $campos, array $archivos, int $timeout, string $metodo = 'POST'): array
     {
         $clave = trim((string) $client->api_key);
         if ($clave === '') {
