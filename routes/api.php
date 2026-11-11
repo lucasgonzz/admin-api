@@ -396,7 +396,23 @@ Route::middleware('claude.task.key')
         /* Los tickets ANTERIORES del mismo cliente (hasta 5, cualquier estado, sin el actual), para que Martín
            sepa dónde quedó una conversación ya cerrada. Solo lectura, sin reserva (misión
            hitos-de-implementacion-por-soporte, 26/10/2026). */
-        Route::get('support-codex/tickets/{id}/history', 'Api\ClaudeSupportCodexController@history')
+        /* Misión cruzada ficha-del-cliente (11/11/2026): `history` pasa a ClaudeClientMemoryController@historial, que
+           suma el parámetro opcional `ticket_id` (un ticket puntual del cliente con sus últimos 60 mensajes) y sin él
+           devuelve exactamente lo de siempre (el mismo SupportCodexService::history()). */
+        Route::get('support-codex/tickets/{id}/history', 'Api\ClaudeClientMemoryController@historial')
+            ->whereNumber('id');
+        /* La ficha del cliente de Martín, el título/resumen del ticket y la búsqueda en TODO el historial del cliente
+           (misión cruzada ficha-del-cliente, 11/11/2026). Las escrituras, con la reserva del ticket o del seguimiento.
+           Reglas en App\Services\ClientMemory\ClientSupportMemoryService. */
+        Route::post('support-codex/tickets/{id}/client-memory', 'Api\ClaudeClientMemoryController@desde_el_ticket')
+            ->whereNumber('id');
+        Route::get('support-codex/tickets/{id}/history-search', 'Api\ClaudeClientMemoryController@buscar_desde_el_ticket')
+            ->whereNumber('id');
+        Route::post('support-codex/tickets/{id}/title', 'Api\ClaudeClientMemoryController@titular')
+            ->whereNumber('id');
+        Route::post('support-codex/implementation-followups/{id}/client-memory', 'Api\ClaudeClientMemoryController@desde_el_seguimiento')
+            ->whereNumber('id');
+        Route::get('support-codex/implementation-followups/{id}/history-search', 'Api\ClaudeClientMemoryController@buscar_desde_el_seguimiento')
             ->whereNumber('id');
         Route::get('support-codex/tickets/{id}/upgrade-window', 'Api\ClaudeSupportCodexController@upgrade_window')
             ->whereNumber('id');
@@ -862,6 +878,11 @@ Route::middleware('claude.task.key')
         Route::get('client-context', 'Api\ClaudeClientContextController@index_json');
         Route::post('client-context', 'Api\ClaudeClientContextController@store_json');
 
+        /* La ficha del cliente de Martín, para Lucas (misión cruzada ficha-del-cliente, 11/11/2026): leerla (con o sin
+           las reemplazadas y archivadas) y escribirla con las mismas operaciones que el monitor, con source lucas. */
+        Route::get('client-memory', 'Api\ClaudeClientMemoryController@index');
+        Route::post('client-memory', 'Api\ClaudeClientMemoryController@store');
+
         /* Multimedia de la demo: el mismo GET/PUT que la pantalla /multimedia-demo del admin,
            pero para la sesion de Claude que produce los clips. Es el ultimo paso del pipeline de
            `/filmar` — sin esto, un clip publicado en R2 queda invisible para el lead porque nadie
@@ -1096,6 +1117,16 @@ Route::prefix('admin')->group(function () {
         Route::put('client/{clientId}/horarios', [ClientScheduleController::class, 'update_json']);
         /* Botón "Reintentar sincronización" de la pestaña Horarios: encola el push al empresa-api. */
         Route::post('client/{clientId}/horarios/sync', [ClientScheduleController::class, 'sync_json']);
+
+        /* «Ficha de soporte» del cliente (misión cruzada ficha-del-cliente, 11/11/2026): la memoria que Martín escribe
+           de cada cliente, que Lucas ve y corrige desde la ficha del cliente. Editar = reemplazar, dar de baja =
+           archivar con motivo; la ficha operativa (prosa de Lucas) aparte. Las rutas fijas antes que {entry}. */
+        Route::get('client/{clientId}/support-memory', [\App\Http\Controllers\ClientSupportMemoryController::class, 'index']);
+        Route::post('client/{clientId}/support-memory', [\App\Http\Controllers\ClientSupportMemoryController::class, 'store']);
+        Route::get('client/{clientId}/support-memory/ficha-operativa', [\App\Http\Controllers\ClientSupportMemoryController::class, 'ficha_operativa']);
+        Route::put('client/{clientId}/support-memory/ficha-operativa', [\App\Http\Controllers\ClientSupportMemoryController::class, 'guardar_ficha_operativa']);
+        Route::put('client/{clientId}/support-memory/{entry}', [\App\Http\Controllers\ClientSupportMemoryController::class, 'update'])->whereNumber('entry');
+        Route::post('client/{clientId}/support-memory/{entry}/archive', [\App\Http\Controllers\ClientSupportMemoryController::class, 'archive'])->whereNumber('entry');
 
         /* Candado de sesión por pestaña (misión candado-sesion-por-pestana, 19/9/2026): el PUT
            guarda el interruptor y encola el push al empresa-api del cliente, mismo patrón que

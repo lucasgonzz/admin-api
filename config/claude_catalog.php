@@ -146,8 +146,80 @@ return [
             'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => [],
         ],
         'GET api/claude/support-codex/tickets/{id}/history' => [
-            'para_que' => 'Los tickets ANTERIORES del cliente del ticket (id menor que el actual; hasta 5, el más nuevo primero, en cualquier estado) con su contacto y sus últimos 30 mensajes reales (orden cronológico, sin borradores) y adjuntos, para saber dónde quedó una conversación ya cerrada. Si el contacto del ticket es un empleado, solo los tickets de ese empleado; si es el dueño, todos. El download_path de cada adjunto apunta a la ruta de adjuntos de SU ticket. En los mensajes del equipo (sender_type admin) lo que sigue a «contraseña»/«clave» llega como [oculta]. Solo lectura, sin reserva; el cliente sale del ticket, nunca de un parámetro.',
+            'para_que' => 'Los tickets ANTERIORES del cliente del ticket (id menor que el actual; hasta 5, el más nuevo primero, en cualquier estado) con su contacto y sus últimos 30 mensajes reales (orden cronológico, sin borradores) y adjuntos, para saber dónde quedó una conversación ya cerrada. Si el contacto del ticket es un empleado, solo los tickets de ese empleado; si es el dueño, todos. El download_path de cada adjunto apunta a la ruta de adjuntos de SU ticket. En los mensajes del equipo (sender_type admin) lo que sigue a «contraseña»/«clave» llega como [oculta]. Con ?ticket_id=N (misión ficha-del-cliente, 11/11/2026) devuelve SOLO ese ticket del cliente (visible para el contacto, con la misma regla de empleados) con sus últimos 60 mensajes reales y además titulo y resumen; uno de otro cliente, inexistente o no visible: 404 ticket_ajeno; el actual: 422 es_el_ticket_actual; ticket_id no entero: 422. Solo lectura, sin reserva; el cliente sale del ticket, nunca de un parámetro.',
             'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => [],
+        ],
+        /* La ficha del cliente de Martín, el título/resumen del ticket y la búsqueda en todo el historial (misión
+           cruzada ficha-del-cliente, 11/11/2026). Reglas en App\Services\ClientMemory\ClientSupportMemoryService; los
+           frenos salen con {error, motivo, message}. */
+        'POST api/claude/support-codex/tickets/{id}/client-memory' => [
+            'para_que'     => 'Martín escribe en la FICHA DEL CLIENTE del ticket (la memoria del equipo con ese cliente, que viaja en ficha_cliente del contexto de todos sus tickets): agregar, reemplazar o archivar entradas (decision, preferencia, problema, compromiso, negocio, implementacion, otro). Responde {ok: true, resultados: [{accion, id, replaces_id?, ya_estaba?}], ficha_cliente}.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Reserva vigente del ticket (lease_token, la misma validación que implementation-note): si no, 423 invalid_lease. El cliente sale del ticket; ticket sin cliente: 409 sin_cliente.',
+                'Todas las operaciones o ninguna (transacción).',
+                'id de otro cliente o inexistente: 422 entrada_ajena. Entrada ya reemplazada o archivada: 422 entrada_no_vigente.',
+                'Tope de 60 entradas vigentes por cliente: 422 ficha_llena (consolidar).',
+                'Texto con lo que el historial oculta como secreto (lo que sigue a «contraseña»/«clave»): 422 dato_sensible.',
+                'Reintentos inofensivos: el mismo agregar (categoría + texto), el mismo reemplazo o archivar una archivada devuelven la entrada con ya_estaba=true.',
+                'Nunca edita en el lugar: reemplazar crea una entrada nueva con replaces_id y deja la vieja reemplazada. No manda nada a nadie.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'lease_token', 'obligatorio' => true, 'validacion' => 'required|string|min:32|max:128', 'que_es' => 'Reserva vigente de este ticket.'],
+                ['nombre' => 'operaciones', 'obligatorio' => true, 'validacion' => 'required|array|min:1|max:10', 'que_es' => 'Las operaciones, todas o ninguna: {accion: agregar, categoria, texto, vigente_hasta?} | {accion: reemplazar, id, texto, categoria?, vigente_hasta?} | {accion: archivar, id, motivo}.'],
+                ['nombre' => 'operaciones[].categoria', 'obligatorio' => false, 'validacion' => 'required_if accion=agregar|in:decision,preferencia,problema,compromiso,negocio,implementacion,otro', 'que_es' => 'La categoría de la entrada.'],
+                ['nombre' => 'operaciones[].texto', 'obligatorio' => false, 'validacion' => 'required salvo archivar|string|max:600', 'que_es' => 'Una idea, en tercera persona, con fecha si aporta.'],
+                ['nombre' => 'operaciones[].id', 'obligatorio' => false, 'validacion' => 'required en reemplazar y archivar|integer', 'que_es' => 'La entrada de la ficha de ESTE cliente.'],
+                ['nombre' => 'operaciones[].motivo', 'obligatorio' => false, 'validacion' => 'required_if accion=archivar|string|max:300', 'que_es' => 'Por qué deja de valer.'],
+                ['nombre' => 'operaciones[].vigente_hasta', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|date_format:Y-m-d', 'que_es' => 'Hasta cuándo vale (compromisos y pausas). En reemplazar, ausente = la de la vieja.'],
+            ],
+        ],
+        'POST api/claude/support-codex/implementation-followups/{id}/client-memory' => [
+            'para_que'     => 'Lo mismo que tickets/{id}/client-memory, desde el seguimiento proactivo: escribe en la ficha del cliente del seguimiento. Responde {ok, resultados, ficha_cliente}.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Reserva vigente del SEGUIMIENTO (lease_token del claim, validación por hash): si no, 423 invalid_lease. Seguimiento inexistente: 404 sin_seguimiento.',
+                'Todas las operaciones o ninguna (transacción).',
+                'id de otro cliente o inexistente: 422 entrada_ajena. Entrada ya reemplazada o archivada: 422 entrada_no_vigente.',
+                'Tope de 60 entradas vigentes por cliente: 422 ficha_llena (consolidar).',
+                'Texto con lo que el historial oculta como secreto (lo que sigue a «contraseña»/«clave»): 422 dato_sensible.',
+                'Reintentos inofensivos: el mismo agregar (categoría + texto), el mismo reemplazo o archivar una archivada devuelven la entrada con ya_estaba=true.',
+                'Nunca edita en el lugar: reemplazar crea una entrada nueva con replaces_id y deja la vieja reemplazada. No manda nada a nadie.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'lease_token', 'obligatorio' => true, 'validacion' => 'required|string|max:128', 'que_es' => 'La reserva del claim del seguimiento.'],
+                ['nombre' => 'operaciones', 'obligatorio' => true, 'validacion' => 'required|array|min:1|max:10', 'que_es' => 'Las operaciones, todas o ninguna: {accion: agregar, categoria, texto, vigente_hasta?} | {accion: reemplazar, id, texto, categoria?, vigente_hasta?} | {accion: archivar, id, motivo}.'],
+                ['nombre' => 'operaciones[].categoria', 'obligatorio' => false, 'validacion' => 'required_if accion=agregar|in:decision,preferencia,problema,compromiso,negocio,implementacion,otro', 'que_es' => 'La categoría de la entrada.'],
+                ['nombre' => 'operaciones[].texto', 'obligatorio' => false, 'validacion' => 'required salvo archivar|string|max:600', 'que_es' => 'Una idea, en tercera persona, con fecha si aporta.'],
+                ['nombre' => 'operaciones[].id', 'obligatorio' => false, 'validacion' => 'required en reemplazar y archivar|integer', 'que_es' => 'La entrada de la ficha de ESTE cliente.'],
+                ['nombre' => 'operaciones[].motivo', 'obligatorio' => false, 'validacion' => 'required_if accion=archivar|string|max:300', 'que_es' => 'Por qué deja de valer.'],
+                ['nombre' => 'operaciones[].vigente_hasta', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|date_format:Y-m-d', 'que_es' => 'Hasta cuándo vale (compromisos y pausas). En reemplazar, ausente = la de la vieja.'],
+            ],
+        ],
+        'GET api/claude/support-codex/tickets/{id}/history-search' => [
+            'para_que'     => 'Busca q (2..100 caracteres; limite opcional ≤ 40, por defecto 20) en los mensajes REALES de TODOS los tickets del cliente del ticket visibles para el contacto (un empleado, solo los suyos), con un LIKE en SQL acotado a esos tickets. Responde {q, coincidencias: [{ticket_id, message_id, created_at, sender_type, fragmento (±200 caracteres, con lo que sigue a «contraseña»/«clave» de los mensajes del equipo como [oculta])}], tickets: [{id, titulo, status, opened_at, closed_at, mensajes, primer_mensaje (≤150 del primer mensaje del cliente)}] (TODOS, el más nuevo primero), total_tickets}. Solo lectura, sin reserva.',
+            'escribe'      => false, 'peligrosidad' => 'lectura', 'frenos' => [],
+        ],
+        'GET api/claude/support-codex/implementation-followups/{id}/history-search' => [
+            'para_que'     => 'La misma búsqueda de tickets/{id}/history-search para el cliente del seguimiento (como el dueño: todos sus tickets). Pide la reserva vigente del seguimiento en la query (lease_token): si no, 423 invalid_lease; seguimiento inexistente: 404 sin_seguimiento.',
+            'escribe'      => false, 'peligrosidad' => 'lectura', 'frenos' => [],
+        ],
+        'POST api/claude/support-codex/tickets/{id}/title' => [
+            'para_que'     => 'Martín pone el TÍTULO (support_tickets.name, lo que muestra la bandeja) y el RESUMEN del ticket (qué pasó, qué se hizo, cómo quedó). Responde {ok: true, titulo_conservado, titulo, resumen}. Si Lucas ya le puso nombre a mano (name_source = lucas) el título no se pisa: titulo_conservado=true y se guarda solo el resumen. Lo que escribe Martín queda con name_source = martin.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Reserva vigente del ticket (lease_token): si no, 423 invalid_lease.',
+                'Título 3..80 y resumen ≤ 600 (422). Con lo que el historial oculta como secreto: 422 dato_sensible.',
+                'No pisa un título puesto por Lucas desde el panel. No manda nada al cliente.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'lease_token', 'obligatorio' => true, 'validacion' => 'required|string|min:32|max:128', 'que_es' => 'Reserva vigente de este ticket.'],
+                ['nombre' => 'titulo', 'obligatorio' => true, 'validacion' => 'required|string|min:3|max:80', 'que_es' => 'Título corto, de comerciante.'],
+                ['nombre' => 'resumen', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|max:600', 'que_es' => 'Qué pasó, qué se hizo y cómo quedó. Ausente o null: no se toca.'],
+            ],
         ],
         'POST api/claude/support-codex/tickets/{id}/implementation-note' => [
             'para_que' => 'Martín deja asentada una nota en la implementación del SISTEMA en curso del cliente del ticket («mandó la lista de precios», «queda en mandar las fotos el lunes»): solo AGREGA a data.actions[] de la etapa {action:"nota", stage, at, canal:"whatsapp", origen:"martin", texto, support_ticket_id}. No cambia estados ni etapas ni manda nada. Responde {registrada, implementation_id, etapa, at}: 201 con registrada=true, o 200 con registrada=false si ya estaba.',
@@ -712,6 +784,35 @@ return [
             'escribe'      => false,
             'peligrosidad' => 'lectura',
             'frenos'       => [],
+        ],
+        'GET api/claude/client-memory' => [
+            'para_que'     => 'La ficha del cliente de Martín para Lucas (misión ficha-del-cliente, 11/11/2026): client_id obligatorio; incluir_historial=1 suma las reemplazadas y archivadas. Responde {client_id, categorias, tope_vigentes, total_vigentes, ficha_operativa, entradas: [{id, categoria, texto, vigente_hasta, vencida, source, support_ticket_id, updated_at, status, replaces_id, reemplazada_por, admin_id, admin_name, archived_reason, created_at}], ficha_cliente (el bloque tal como lo lee Martín)}.',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+        ],
+        'POST api/claude/client-memory' => [
+            'para_que'     => 'Lucas escribe en la ficha del cliente con las mismas operaciones que el monitor (agregar, reemplazar, archivar), con source lucas. Responde {ok, resultados, ficha_cliente}.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'client_id tiene que existir (422).',
+                'Todas las operaciones o ninguna (transacción).',
+                'id de otro cliente o inexistente: 422 entrada_ajena. Entrada ya reemplazada o archivada: 422 entrada_no_vigente.',
+                'Tope de 60 entradas vigentes por cliente: 422 ficha_llena (consolidar).',
+                'Texto con lo que el historial oculta como secreto (lo que sigue a «contraseña»/«clave»): 422 dato_sensible.',
+                'Reintentos inofensivos: el mismo agregar (categoría + texto), el mismo reemplazo o archivar una archivada devuelven la entrada con ya_estaba=true.',
+                'Nunca edita en el lugar: reemplazar crea una entrada nueva con replaces_id y deja la vieja reemplazada. No manda nada a nadie.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'client_id', 'obligatorio' => true, 'validacion' => 'required|integer|exists:clients,id', 'que_es' => 'El cliente de la ficha.'],
+                ['nombre' => 'operaciones', 'obligatorio' => true, 'validacion' => 'required|array|min:1|max:10', 'que_es' => 'Las operaciones, todas o ninguna: {accion: agregar, categoria, texto, vigente_hasta?} | {accion: reemplazar, id, texto, categoria?, vigente_hasta?} | {accion: archivar, id, motivo}.'],
+                ['nombre' => 'operaciones[].categoria', 'obligatorio' => false, 'validacion' => 'required_if accion=agregar|in:decision,preferencia,problema,compromiso,negocio,implementacion,otro', 'que_es' => 'La categoría de la entrada.'],
+                ['nombre' => 'operaciones[].texto', 'obligatorio' => false, 'validacion' => 'required salvo archivar|string|max:600', 'que_es' => 'Una idea, en tercera persona, con fecha si aporta.'],
+                ['nombre' => 'operaciones[].id', 'obligatorio' => false, 'validacion' => 'required en reemplazar y archivar|integer', 'que_es' => 'La entrada de la ficha de ESTE cliente.'],
+                ['nombre' => 'operaciones[].motivo', 'obligatorio' => false, 'validacion' => 'required_if accion=archivar|string|max:300', 'que_es' => 'Por qué deja de valer.'],
+                ['nombre' => 'operaciones[].vigente_hasta', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|date_format:Y-m-d', 'que_es' => 'Hasta cuándo vale (compromisos y pausas). En reemplazar, ausente = la de la vieja.'],
+            ],
         ],
         'POST api/claude/client-context' => [
             'para_que'     => 'Carga de las fichas de contexto por cliente. `ficha_operativa` se inyecta en el prompt del agente de soporte en cada consulta sobre ese cliente; `notas_internas` NO se inyecta nunca y es para el operador humano. 🔴 Nada calculable va acá (tickets abiertos, antigüedad, versión que corre, mensajes, escalados): eso lo lee SupportClientContextService de la base al armar el prompt, así que guardarlo sería garantizar que quede viejo. Si tu ficha trae un encabezado con esos datos, sacalo antes de subirla.',
