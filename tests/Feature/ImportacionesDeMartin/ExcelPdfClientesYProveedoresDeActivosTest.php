@@ -412,6 +412,76 @@ class ExcelPdfClientesYProveedoresDeActivosTest extends BaseDeImportacionesDeMar
     }
 
     /** @test */
+    public function revertir_queda_en_revirtiendo_con_un_202_y_un_409_no_revertible_es_rechazado(): void
+    {
+        $revirtiendo = $this->corrida('revirtiendo');
+        $revirtiendo['corrida']['tandas'] = ['total' => 3, 'hechas' => 3, 'revertidas' => 1];
+        $this->fakear_http([
+            '*/admin-sync/importacion-soporte/' . self::CORRIDA . '/revertir' => Http::response($revirtiendo, 202),
+            '*/admin-sync/importacion-soporte/' . self::OTRA_CORRIDA . '/revertir' => Http::response(
+                ['message' => 'Solo se puede deshacer una importación terminada.', 'motivo' => 'no_revertible'] + $this->corrida('importar'), 409),
+        ]);
+        $reserva = $this->reservar();
+        $revertir = function (string $corrida) use ($reserva) {
+            return $this->postJson($this->ruta('import-revert'), ['lease_token' => $reserva['lease_token'], 'modelo' => 'client', 'corrida_id' => $corrida],
+                $this->headers_de_claude());
+        };
+
+        $revertir(self::CORRIDA)->assertOk()->assertJsonPath('estado', 'aceptado')->assertJsonPath('http', 202)
+            ->assertJsonPath('estado_corrida', 'revirtiendo')->assertJsonPath('tandas.revertidas', 1)
+            ->assertJsonPath('corrida.tandas.total', 3);
+        $revertir(self::OTRA_CORRIDA)->assertOk()->assertJsonPath('estado', 'rechazado')->assertJsonPath('http', 409)
+            ->assertJsonPath('motivo_instancia', 'no_revertible');
+    }
+
+    /** @test */
+    public function el_estado_pasa_tal_cual_una_corrida_que_requiere_correccion(): void
+    {
+        $corrida = $this->corrida('requiere_correccion');
+        $corrida['corrida']['motivo'] = 'filas_ambiguas';
+        $corrida['corrida']['resumen']['filas_ambiguas'] = [['fila' => 4, 'nombre' => 'Juan', 'motivo' => 'dos_coincidencias']];
+        $corrida['corrida']['resumen']['sin_cambios'] = 2;
+        $corrida['corrida']['resumen']['saldos_no_cargados'] = 1;
+        $corrida['corrida']['tandas'] = ['total' => 0, 'hechas' => 0, 'revertidas' => 0];
+        $corrida['corrida']['resultado'] = ['reversion' => ['saldos_anulados_de_conservados' => 0]];
+        $this->fakear_http(['*/admin-sync/importacion-soporte/' . self::CORRIDA . '?*' => Http::response($corrida, 200)]);
+        $reserva = $this->reservar();
+
+        $this->getJson($this->ruta('import-status') . '?modelo=client&corrida_id=' . self::CORRIDA,
+            $this->headers_de_claude() + ['X-Support-Lease-Token' => $reserva['lease_token']])
+            ->assertOk()->assertJsonPath('estado', 'aceptado')->assertJsonPath('estado_corrida', 'requiere_correccion')
+            ->assertJsonPath('motivo', 'filas_ambiguas')->assertJsonPath('codigo_requerido', false)->assertJsonPath('codigo', null)
+            ->assertJsonPath('resumen.filas_ambiguas.0.fila', 4)->assertJsonPath('resumen.sin_cambios', 2)
+            ->assertJsonPath('resumen.saldos_no_cargados', 1)->assertJsonPath('tandas.total', 0)
+            ->assertJsonPath('resultado.reversion.saldos_anulados_de_conservados', 0);
+    }
+
+    /** @test */
+    public function una_corrida_revirtiendo_sigue_en_el_contexto_y_no_deja_cerrar_el_ticket(): void
+    {
+        $this->ticket->update(['importacion_soporte_iniciada_at' => now()]);
+        $revirtiendo = ['corrida_id' => self::CORRIDA, 'modelo' => 'client', 'estado' => 'revirtiendo', 'revision' => 1,
+            'codigo_requerido' => false, 'motivo' => null, 'tandas' => ['total' => 2, 'hechas' => 2, 'revertidas' => 0]];
+        $this->fakear_http([
+            '*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response([
+                'automatizar_soporte' => true, 'pendientes' => [], 'en_proceso' => true, 'importaciones_de_contactos' => [$revirtiendo],
+            ], 200),
+        ]);
+        $gracias = $this->entrante($this->ticket, 'Gracias');
+        $reserva = $this->postJson($this->ruta('claim'), ['worker_id' => 'martin', 'expected_message_id' => (int) $gracias->id], $this->headers_de_claude())
+            ->assertOk()->assertJsonPath('ticket.importaciones_de_contactos.0.estado', 'revirtiendo')
+            ->assertJsonPath('ticket.importaciones_de_contactos.0.tandas.hechas', 2)
+            ->assertJsonPath('ticket.importaciones_soporte_en_proceso', true);
+
+        $this->postJson($this->ruta('reply'), [
+            'lease_token' => $reserva->json('lease_token'), 'expected_message_id' => (int) $gracias->id,
+            'operation_id' => 'cerrar-revirtiendo', 'action' => 'cerrar', 'body' => 'De nada.',
+        ], $this->headers_de_claude())->assertStatus(409)
+            ->assertJsonPath('message', 'trial_import_pending: Hay una importación en curso en este ticket. Dejá abierta la conversación.');
+        $this->assertSame('open', $this->ticket->fresh()->status);
+    }
+
+    /** @test */
     public function el_estado_de_la_corrida_se_lee_con_la_reserva(): void
     {
         $this->fakear_la_corrida();
