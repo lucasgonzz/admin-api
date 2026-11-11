@@ -134,7 +134,7 @@ class AuditoriaDeMartinTest extends TestCase
 
         $this->actividad([
             $this->item($ticket, ['client_id' => 999999]),
-            $this->item($ticket, ['kind' => 'escritura', 'command' => 'ficha', 'summary' => 'Ficha: agregó 1 entrada (decision)', 'detail' => null, 'occurred_at' => '2026-11-11T15:05:30Z']),
+            $this->item($ticket, ['kind' => 'registro', 'command' => 'ficha', 'summary' => 'Ficha: agregó 1 entrada (decision)', 'detail' => null, 'occurred_at' => '2026-11-11T15:05:30Z']),
             ['implementation_followup_id' => $followup->id, 'run_id' => 'run-seg', 'kind' => 'envio', 'command' => 'seguimiento-enviar',
                 'summary' => 'Respondió al cliente (estado sent)', 'ok' => false, 'occurred_at' => '2026-11-11 12:30:00'],
         ])->assertOk()->assertExactJson(['guardados' => 3, 'repetidos' => 0]);
@@ -316,7 +316,7 @@ class AuditoriaDeMartinTest extends TestCase
             $this->item($ticket, ['run_id' => 'nueva', 'command' => 'contexto', 'kind' => 'consulta', 'summary' => 'Leyó el contexto del ticket', 'detail' => null, 'occurred_at' => '2026-11-11T11:00:00-03:00']),
             $this->item($ticket, ['run_id' => 'nueva', 'occurred_at' => '2026-11-11T11:01:00-03:00']),
             $this->item($ticket, ['run_id' => 'nueva', 'command' => 'logs', 'summary' => 'Leyó el log de la API del sistema (300 líneas)', 'detail' => ['lineas' => 300], 'occurred_at' => '2026-11-11T11:02:00-03:00']),
-            $this->item($ticket, ['run_id' => 'nueva', 'command' => 'ficha', 'kind' => 'escritura', 'summary' => 'Ficha: agregó 1 entrada (decision)', 'detail' => null, 'occurred_at' => '2026-11-11T11:03:00-03:00']),
+            $this->item($ticket, ['run_id' => 'nueva', 'command' => 'ficha', 'kind' => 'registro', 'summary' => 'Ficha: agregó 1 entrada (decision)', 'detail' => null, 'occurred_at' => '2026-11-11T11:03:00-03:00']),
             $this->item($ticket, ['run_id' => 'nueva', 'command' => 'reparar-config', 'kind' => 'escritura', 'summary' => 'Reparar la variable MAIL_HOST: rechazado (sin_permiso)', 'ok' => false, 'detail' => null, 'occurred_at' => '2026-11-11T11:04:00-03:00']),
             $this->item($ticket, ['run_id' => 'nueva', 'command' => 'plan', 'kind' => 'plan', 'summary' => 'Declaró el plan (3 pasos)', 'detail' => null, 'occurred_at' => '2026-11-11T11:00:30-03:00']),
             /* Otro ticket: no aparece. */
@@ -342,7 +342,8 @@ class AuditoriaDeMartinTest extends TestCase
         $this->assertSame([], $solo['acciones']);
         $this->assertSame('Recién empieza', $solo['objetivo']);
         $this->assertSame([['texto' => 'Leer el contexto', 'estado' => 'en_curso']], $solo['pasos']);
-        $this->assertSame(['lecturas' => 0, 'escrituras' => 0, 'envios' => 0, 'consultas' => 0, 'errores' => 0], $solo['resumen']);
+        $this->assertSame(['lecturas' => 0, 'escrituras' => 0, 'registros' => 0, 'envios' => 0, 'consultas' => 0, 'errores' => 0], $solo['resumen']);
+        $this->assertSame('ticket', $solo['origen']);
 
         $nueva = $respuesta->json('atenciones.1');
         $this->assertSame('Ver por qué no sale la factura', $nueva['objetivo']);
@@ -350,7 +351,8 @@ class AuditoriaDeMartinTest extends TestCase
         $this->assertSame(['contexto', 'plan', 'sql', 'logs', 'ficha', 'reparar-config'], array_column($nueva['acciones'], 'command'));
         $this->assertSame('2026-11-11T11:00:00-03:00', $nueva['desde']);
         $this->assertSame('2026-11-11T11:04:00-03:00', $nueva['hasta']);
-        $this->assertSame(['lecturas' => 2, 'escrituras' => 1, 'envios' => 0, 'consultas' => 1, 'errores' => 1], $nueva['resumen']);
+        $this->assertSame(['lecturas' => 2, 'escrituras' => 0, 'registros' => 1, 'envios' => 0, 'consultas' => 1, 'errores' => 1], $nueva['resumen']);
+        $this->assertSame('ticket', $nueva['origen']);
         $this->assertSame(['kind', 'command', 'summary', 'detail', 'ok', 'occurred_at'], array_keys($nueva['acciones'][2]));
         $this->assertSame(['filas' => 5, 'truncado' => false], $nueva['acciones'][2]['detail']);
         $this->assertFalse($nueva['acciones'][5]['ok']);
@@ -359,10 +361,10 @@ class AuditoriaDeMartinTest extends TestCase
         $this->assertNull($vieja['objetivo']);
         $this->assertSame([], $vieja['pasos']);
         $this->assertSame(['contexto', 'responder'], array_column($vieja['acciones'], 'command'));
-        $this->assertSame(['lecturas' => 0, 'escrituras' => 0, 'envios' => 1, 'consultas' => 1, 'errores' => 0], $vieja['resumen']);
+        $this->assertSame(['lecturas' => 0, 'escrituras' => 0, 'registros' => 0, 'envios' => 1, 'consultas' => 1, 'errores' => 0], $vieja['resumen']);
         $this->assertSame(['estado' => 'sent'], $vieja['acciones'][1]['detail']);
 
-        $this->assertSame(['run_id', 'desde', 'hasta', 'objetivo', 'pasos', 'acciones', 'resumen'], array_keys($nueva));
+        $this->assertSame(['run_id', 'origen', 'desde', 'hasta', 'objetivo', 'pasos', 'acciones', 'resumen'], array_keys($nueva));
 
         $vacio = $this->ticket($client);
         $this->actingAs($admin, 'sanctum')->getJson('/api/admin/support-ticket/' . $vacio->id . '/martin-activity')
@@ -374,7 +376,7 @@ class AuditoriaDeMartinTest extends TestCase
 
     /**
      * El listado y el show del ticket suman martin_activity_count (todas las acciones) y martin_writes_count (las
-     * escrituras que salieron bien), sin una consulta aparte por ticket; un ticket sin actividad trae 0 y 0.
+     * escrituras en el sistema del cliente que salieron bien; los registro no), sin una consulta aparte por ticket; un ticket sin actividad trae 0 y 0.
      *
      * @return void
      */
@@ -386,8 +388,8 @@ class AuditoriaDeMartinTest extends TestCase
 
         $this->actividad([
             $this->item($con),
-            $this->item($con, ['command' => 'ficha', 'kind' => 'escritura', 'summary' => 'Ficha: agregó 1 entrada']),
-            $this->item($con, ['command' => 'titular', 'kind' => 'escritura', 'summary' => 'Tituló el ticket']),
+            $this->item($con, ['command' => 'ficha', 'kind' => 'registro', 'summary' => 'Ficha: agregó 1 entrada']),
+            $this->item($con, ['command' => 'importar-excel', 'kind' => 'escritura', 'summary' => 'Importó la lista de precios (120 filas)']),
             $this->item($con, ['command' => 'reparar-config', 'kind' => 'escritura', 'summary' => 'Rechazado', 'ok' => false]),
         ])->assertOk()->assertJsonPath('guardados', 4);
 
@@ -401,7 +403,7 @@ class AuditoriaDeMartinTest extends TestCase
 
         $por_id = collect($listado->json('models'))->keyBy('id');
         $this->assertSame(4, $por_id[$con->id]['martin_activity_count']);
-        $this->assertSame(2, $por_id[$con->id]['martin_writes_count']);
+        $this->assertSame(1, $por_id[$con->id]['martin_writes_count']);
         $this->assertSame(0, $por_id[$sin->id]['martin_activity_count']);
         $this->assertSame(0, $por_id[$sin->id]['martin_writes_count']);
 
@@ -413,12 +415,112 @@ class AuditoriaDeMartinTest extends TestCase
 
         $show = $this->actingAs($admin, 'sanctum')->getJson('/api/admin/support-ticket/' . $con->id)->assertOk();
         $this->assertSame(4, $show->json('model.martin_activity_count'));
-        $this->assertSame(2, $show->json('model.martin_writes_count'));
+        $this->assertSame(1, $show->json('model.martin_writes_count'));
         $this->assertSame((int) $con->id, $show->json('model.id'));
         $this->assertNotNull($show->json('model.client_id'), 'El select sigue trayendo las columnas del ticket.');
 
         $this->actingAs($admin, 'sanctum')->getJson('/api/admin/support-ticket/' . $sin->id)->assertOk()
             ->assertJsonPath('model.martin_activity_count', 0)->assertJsonPath('model.martin_writes_count', 0);
+    }
+
+    /**
+     * `registro` (lo interno del admin) se acepta, suma en `resumen.registros` y NO cuenta como escritura en
+     * `martin_writes_count`; `escritura` queda para lo que se escribe en el sistema del cliente.
+     *
+     * @return void
+     */
+    public function test_kind_registro(): void
+    {
+        $ticket = $this->ticket($this->cliente());
+
+        $this->actividad([
+            $this->item($ticket, ['run_id' => 'reg', 'command' => 'ficha', 'kind' => 'registro', 'summary' => 'Ficha: agregó 2 entradas']),
+            $this->item($ticket, ['run_id' => 'reg', 'command' => 'titular', 'kind' => 'registro', 'summary' => 'Tituló el ticket']),
+            $this->item($ticket, ['run_id' => 'reg', 'command' => 'paso', 'kind' => 'registro', 'summary' => 'Preparó un paso', 'ok' => false]),
+            $this->item($ticket, ['run_id' => 'reg', 'command' => 'importar-imagenes', 'kind' => 'escritura', 'summary' => 'Importó 30 imágenes']),
+        ])->assertOk()->assertJsonPath('guardados', 4);
+        $this->actividad([$this->item($ticket, ['kind' => 'interno'])])->assertStatus(422)->assertJsonStructure(['errores' => ['items.0.kind']]);
+
+        $admin = $this->admin();
+        $vista = $this->actingAs($admin, 'sanctum')->getJson('/api/admin/support-ticket/' . $ticket->id . '/martin-activity')->assertOk();
+        $this->assertSame(['lecturas' => 0, 'escrituras' => 1, 'registros' => 2, 'envios' => 0, 'consultas' => 0, 'errores' => 1], $vista->json('atenciones.0.resumen'));
+
+        $this->actingAs($admin, 'sanctum')->getJson('/api/admin/support-ticket/' . $ticket->id)->assertOk()
+            ->assertJsonPath('model.martin_activity_count', 4)
+            ->assertJsonPath('model.martin_writes_count', 1);
+    }
+
+    /**
+     * Una atención del seguimiento proactivo cuyo envío cayó en el ticket aparece ENTERA en el panel del ticket (con
+     * las acciones que solo traen implementation_followup_id y su plan), marcada `origen: "seguimiento"`; los contadores
+     * del ticket cuentan lo mismo que `total_acciones`. Otra atención del mismo seguimiento que no tocó el ticket no
+     * aparece.
+     *
+     * @return void
+     */
+    public function test_la_atencion_del_seguimiento_aparece_entera_en_el_ticket(): void
+    {
+        $client   = $this->cliente();
+        $ticket   = $this->ticket($client);
+        $followup = $this->seguimiento($client);
+        $base     = ['implementation_followup_id' => $followup->id, 'run_id' => 'seg-1', 'detail' => null, 'ok' => true];
+
+        $this->actividad([
+            $this->item($ticket, ['run_id' => 'tic-1', 'occurred_at' => '2026-11-11T09:00:00-03:00']),
+            array_merge($base, ['kind' => 'consulta', 'command' => 'seguimiento-contexto', 'summary' => 'Leyó el contexto del seguimiento', 'occurred_at' => '2026-11-11T10:00:00-03:00']),
+            array_merge($base, ['kind' => 'registro', 'command' => 'nota-implementacion', 'summary' => 'Dejó una nota en la implementación', 'occurred_at' => '2026-11-11T10:01:00-03:00']),
+            array_merge($base, ['support_ticket_id' => $ticket->id, 'kind' => 'envio', 'command' => 'seguimiento-enviar', 'summary' => 'Le escribió al cliente (estado sent)', 'occurred_at' => '2026-11-11T10:02:00-03:00']),
+            /* Otra atención del seguimiento, que no tocó el ticket. */
+            array_merge($base, ['run_id' => 'seg-2', 'kind' => 'consulta', 'command' => 'seguimiento-contexto', 'summary' => 'Leyó el contexto del seguimiento', 'occurred_at' => '2026-11-11T11:00:00-03:00']),
+        ])->assertOk()->assertJsonPath('guardados', 5);
+        $this->plan('seg-1', ['implementation_followup_id' => $followup->id, 'objetivo' => 'Retomar la carga de artículos', 'pasos' => [['texto' => 'Escribirle', 'estado' => 'hecho']]])->assertOk();
+
+        $admin = $this->admin();
+        $vista = $this->actingAs($admin, 'sanctum')->getJson('/api/admin/support-ticket/' . $ticket->id . '/martin-activity')->assertOk();
+
+        $this->assertSame(['seg-1', 'tic-1'], array_column($vista->json('atenciones'), 'run_id'));
+        $this->assertSame(['seguimiento', 'ticket'], array_column($vista->json('atenciones'), 'origen'));
+        $this->assertSame(['seguimiento-contexto', 'nota-implementacion', 'seguimiento-enviar'], array_column($vista->json('atenciones.0.acciones'), 'command'));
+        $this->assertSame('Retomar la carga de artículos', $vista->json('atenciones.0.objetivo'));
+        $this->assertSame(['lecturas' => 0, 'escrituras' => 0, 'registros' => 1, 'envios' => 1, 'consultas' => 1, 'errores' => 0], $vista->json('atenciones.0.resumen'));
+        $this->assertSame(4, $vista->json('total_acciones'));
+
+        $this->actingAs($admin, 'sanctum')->getJson('/api/admin/support-ticket/' . $ticket->id)->assertOk()
+            ->assertJsonPath('model.martin_activity_count', 4)
+            ->assertJsonPath('model.martin_writes_count', 0);
+        $fila = collect($this->actingAs($admin, 'sanctum')->getJson('/api/admin/support-ticket')->assertOk()->json('models'))->firstWhere('id', $ticket->id);
+        $this->assertSame(4, $fila['martin_activity_count']);
+    }
+
+    /**
+     * Defensa en profundidad: corridas de 15 a 22 dígitos (con o sin espacios o guiones) quedan como `[número oculto]`
+     * en el summary, en los textos del detail (a cualquier profundidad) y en el plan; 14 dígitos o un número que no es
+     * texto, no. Dos summaries que solo difieren en el número oculto son la misma acción.
+     *
+     * @return void
+     */
+    public function test_enmascara_los_numeros_largos(): void
+    {
+        $ticket = $this->ticket($this->cliente());
+
+        $this->actividad([$this->item($ticket, [
+            'run_id' => 'mask', 'summary' => 'Consultó la base: SELECT * FROM cards WHERE n = 4509 9535 6623 3704 OR cbu = \'0170099220000067797370\' OR ean = 77912345678901',
+            'detail' => ['filas' => 1234567890123456, 'nota' => 'tarjeta 4509-9535-6623-3704', 'dentro' => ['otra' => 'cbu 0170099220000067797370']],
+        ])])->assertOk()->assertJsonPath('guardados', 1);
+
+        $fila = SupportCodexActivity::where('run_id', 'mask')->first();
+        $this->assertSame('Consultó la base: SELECT * FROM cards WHERE n = [número oculto] OR cbu = \'[número oculto]\' OR ean = 77912345678901', $fila->summary);
+        /* assertEquals: la columna json de MySQL reordena las claves. */
+        $this->assertEquals(['filas' => 1234567890123456, 'nota' => 'tarjeta [número oculto]', 'dentro' => ['otra' => 'cbu [número oculto]']], $fila->detail);
+
+        $this->actividad([$this->item($ticket, [
+            'run_id' => 'mask', 'summary' => 'Consultó la base: SELECT * FROM cards WHERE n = 5555 5555 5555 4444 OR cbu = \'0000000000000000000000\' OR ean = 77912345678901',
+        ])])->assertOk()->assertExactJson(['guardados' => 0, 'repetidos' => 1]);
+
+        $this->plan('mask', ['support_ticket_id' => $ticket->id, 'objetivo' => 'Ver el pago de la tarjeta 4509953566233704', 'pasos' => [['texto' => 'Buscar el CBU 0170099220000067797370', 'estado' => 'hecho']]])->assertOk();
+        $plan = SupportCodexPlan::where('run_id', 'mask')->first();
+        $this->assertSame('Ver el pago de la tarjeta [número oculto]', $plan->objetivo);
+        $this->assertSame('Buscar el CBU [número oculto]', $plan->pasos[0]['texto']);
     }
 
     // ── catálogo ────────────────────────────────────────────────────────────────────────────────
