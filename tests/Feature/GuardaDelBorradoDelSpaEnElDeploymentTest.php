@@ -7,6 +7,7 @@ use App\Models\ClientApi;
 use App\Models\ClientSshCredential;
 use App\Models\ClientVersionUpgrade;
 use App\Models\Version;
+use App\Models\TrialInstance;
 use App\Services\ClientApiPathResolver;
 use App\Services\DeploymentService;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
@@ -169,6 +170,41 @@ class GuardaDelBorradoDelSpaEnElDeploymentTest extends TestCase
                 . str_replace('/api', '/spa', $shared->target_client_api->path),
             (string) $this->invocar(new DeploymentService($shared), 'get_spa_hosting_dir')
         );
+    }
+
+    /** El respaldo y la subida consumen el mismo docroot físico, nunca el alias público. */
+    public function test_alias_de_prueba_comparte_docroot_en_respaldo_y_subida_sin_ssh()
+    {
+        config(['services.hostinger.domain' => 'comerciocity.com']);
+        $upgrade = $this->crear_upgrade('vps');
+        $api = $upgrade->target_client_api;
+        $api->vps_path = 'prueba-96';
+        $api->spa_url = 'https://alias-guarda.comerciocity.com';
+        $api->save();
+        TrialInstance::create([
+            'nombre' => 'prueba-96', 'estado' => TrialInstance::ESTADO_ASIGNADA,
+            'client_id' => $api->client_id, 'erp_vps_path' => 'prueba-96',
+            'ecommerce_vps_path' => 'tienda-prueba-96', 'alias_slug' => 'alias-guarda',
+        ]);
+        $service = new DeploymentService($upgrade->fresh());
+        $dir = '/home/prueba-96/htdocs/prueba-96.comerciocity.com';
+        $this->assertSame($dir, $this->invocar($service, 'get_spa_path'));
+        $this->assertSame($dir, $this->invocar($service, 'get_spa_hosting_dir'));
+        $shell = (string) $this->invocar($service, 'build_spa_hosting_deploy_shell');
+        $this->assertStringContainsString($dir, $shell);
+        $this->assertStringNotContainsString('/htdocs/alias-guarda.comerciocity.com', $shell);
+        $this->assertStringContainsString('find . -mindepth 1 -delete', $shell);
+
+        // El backup abre SSH: se fija su consumo de la misma costura sin ejecutar el pipeline remoto.
+        $reflexion = new \ReflectionMethod(DeploymentService::class, 'step_backup_in_place');
+        $fuente = implode('', array_slice(file($reflexion->getFileName()), $reflexion->getStartLine() - 1,
+            $reflexion->getEndLine() - $reflexion->getStartLine() + 1));
+        $this->assertStringContainsString('$spa_dir  = $this->get_spa_hosting_dir();', $fuente);
+        $this->assertStringContainsString('$this->tar_remoto($spa_dir, $parcial . \'/spa.tar.gz\'', $fuente);
+        $reflexion = new \ReflectionMethod(DeploymentService::class, 'step_upload_spa');
+        $fuente = implode('', array_slice(file($reflexion->getFileName()), $reflexion->getStartLine() - 1,
+            $reflexion->getEndLine() - $reflexion->getStartLine() + 1));
+        $this->assertStringContainsString('$this->get_spa_hosting_dir() . \'/dist.zip\'', $fuente);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

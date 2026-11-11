@@ -3,6 +3,8 @@
 namespace App\Services;
 
 use App\Models\ClientApi;
+use App\Models\TrialInstance;
+use App\Services\Prueba\PruebaNombres;
 
 /**
  * Resuelve el directorio raíz de la API de un cliente en su servidor, según el hosting_type.
@@ -80,7 +82,8 @@ class ClientApiPathResolver
      *   anteponerle el prefijo: eso es spa_hosting_dir().
      * - vps: path ABSOLUTO /home/{vps_path}/htdocs/{dominio_del_spa}. El dominio sale de spa_url y
      *   no del vps_path porque el sitio de CloudPanel se creó con ese nombre exacto (§F2 del
-     *   informe de migración del 26/8/2026).
+     *   informe de migración del 26/8/2026). Las instancias del pool conservan el docroot del pool,
+     *   aunque spa_url sea el alias comercial; su identidad se valida contra TrialInstance.
      *
      * @param  ClientApi  $client_api
      * @return string
@@ -98,6 +101,11 @@ class ClientApiPathResolver
                     . 'ahí sale el directorio del SPA. Completá el campo vps_path antes de instalar '
                     . 'o de actualizar a este cliente.'
                 );
+            }
+
+            $docroot_prueba = $this->docroot_de_prueba($client_api);
+            if ($docroot_prueba !== null) {
+                return $docroot_prueba;
             }
 
             $spa_url    = trim((string) ($client_api->spa_url ?? ''));
@@ -192,6 +200,12 @@ class ClientApiPathResolver
      */
     public function assert_directorio_de_spa_borrable(ClientApi $client_api, string $dir): void
     {
+        // El usuario del pool no alcanza: bajo su htdocs puede haber otro sitio o el alias equivocado.
+        $docroot_prueba = $this->docroot_de_prueba($client_api);
+        if ($docroot_prueba !== null && $dir !== $docroot_prueba) {
+            throw new \RuntimeException('El directorio del SPA no coincide con el docroot de la instancia de prueba de esta ClientApi.');
+        }
+
         GuardaDeBorradoDeSpa::assert(
             $dir,
             $this->identificador_de_cliente($client_api),
@@ -201,11 +215,73 @@ class ClientApiPathResolver
     }
 
     /**
-     * Lo que identifica al cliente adentro de la ruta de su SPA.
+     * Docroot del pool sólo cuando los metadatos existentes prueban la pertenencia.
      *
      * @param  ClientApi  $client_api
-     * @return string  '' si no hay ninguno cargado.
+     * @return string|null Null únicamente cuando corresponde la convención VPS legada.
      */
+    private function docroot_de_prueba(ClientApi $client_api): ?string
+    {
+        $vps_path = trim((string) ($client_api->vps_path ?? ''));
+        if (($client_api->hosting_type ?? 'shared_hosting') !== 'vps' || ! PruebaNombres::es_nombre_valido($vps_path)) {
+            return null;
+        }
+
+        // La gramática sólo evita consultas para VPS normales; la pertenencia la demuestra la instancia.
+        // Buscar por cliente ocultaría un path ajeno y dejaría pasar el fallback legado.
+        $instancias = TrialInstance::query()
+            ->select(['id', 'nombre', 'estado', 'client_id', 'erp_vps_path', 'alias_slug'])
+            ->where('erp_vps_path', $vps_path)
+            ->where('estado', '!=', TrialInstance::ESTADO_BORRADA)
+            ->limit(2)->get();
+
+        if ($instancias->isEmpty()) {
+            if (TrialInstance::where('erp_vps_path', $vps_path)->exists()) {
+                throw new \RuntimeException('La instancia de prueba de este vps_path está borrada: no se puede resolver su SPA.');
+            }
+
+            // Un VPS legado puede llamarse prueba-NN sin haber pertenecido nunca al pool.
+            return null;
+        }
+        if ($instancias->count() !== 1) {
+            throw new \RuntimeException('Hay más de una instancia de prueba vigente para este vps_path.');
+        }
+
+        $instancia = $instancias->first();
+        if ((int) $client_api->client_id <= 0 || (int) $instancia->client_id !== (int) $client_api->client_id) {
+            throw new \RuntimeException('La instancia de prueba de este vps_path no pertenece al cliente de esta ClientApi.');
+        }
+        if (! PruebaNombres::es_nombre_valido($instancia->nombre)
+            || $instancia->nombre !== $vps_path || $instancia->erp_vps_path !== $vps_path) {
+            throw new \RuntimeException('El nombre y el vps_path de la instancia de prueba no coinciden.');
+        }
+
+        $dominio = PruebaNombres::dominio();
+        if (filter_var($dominio, FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME) === false
+            || strpos($dominio, '.') === false) {
+            throw new \RuntimeException('El dominio configurado para las instancias de prueba no es válido.');
+        }
+
+        $hosts = [$instancia->hosts_del_pool()['erp_spa']];
+        if (trim((string) $instancia->alias_slug) !== '') {
+            $hosts[] = $instancia->hosts_del_slug()['erp_spa'];
+        }
+        $spa_url = trim((string) $client_api->spa_url);
+        $url = parse_url($spa_url);
+        if (! is_array($url) || ! isset($url['scheme'], $url['host'])
+            || ! in_array(strtolower($url['scheme']), ['http', 'https'], true)
+            || isset($url['user']) || isset($url['pass']) || isset($url['port'])
+            || strpos($spa_url, '?') !== false || strpos($spa_url, '#') !== false
+            || (isset($url['path']) && $url['path'] !== '' && $url['path'] !== '/')
+            || ! in_array(strtolower($url['host']), array_map('strtolower', $hosts), true)) {
+            throw new \RuntimeException('La spa_url no coincide con el host del pool o el alias de esta instancia de prueba y su dominio configurado.');
+        }
+
+        // Asignar un alias sólo agrega server_name al vhost: nunca renombra su docroot del pool.
+        return $instancia->docroot_spa_erp();
+    }
+
+    /** Lo que identifica al cliente dentro de la ruta de su SPA; vacío si no está cargado. */
     private function identificador_de_cliente(ClientApi $client_api): string
     {
         if (($client_api->hosting_type ?? 'shared_hosting') === 'vps') {
