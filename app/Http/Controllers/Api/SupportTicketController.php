@@ -1144,7 +1144,15 @@ class SupportTicketController extends BaseController
         }
         // Actualiza nombre del caso.
         if ($request->has('name')) {
-            $ticket->name = $request->input('name');
+            /* Quién puso el título (misión cruzada ficha-del-cliente, 11/11/2026): un nombre que cambia desde el panel
+               es de Lucas, y Martín no lo pisa con POST claude/support-codex/tickets/{id}/title. Solo si CAMBIÓ: la
+               SPA puede reenviar el nombre de siempre al cambiar otra cosa, y eso no lo vuelve de Lucas. Vaciarlo le
+               devuelve el título a Martín. */
+            $nombre_nuevo = $request->input('name');
+            if (trim((string) $nombre_nuevo) !== trim((string) $ticket->name)) {
+                $ticket->name_source = trim((string) $nombre_nuevo) === '' ? null : 'lucas';
+            }
+            $ticket->name = $nombre_nuevo;
         }
         // Cambia estado operativo del ticket.
         if ($request->has('status')) {

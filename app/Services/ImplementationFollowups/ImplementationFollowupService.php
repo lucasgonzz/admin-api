@@ -958,10 +958,13 @@ class ImplementationFollowupService
                 'contacto'       => $this->contacto_vacio('sin_cliente'),
                 'historial'      => [],
                 'martin_ocupado' => false,
+                'ficha_cliente'  => null,
+                'indice_tickets' => null,
             ];
         }
 
         $contacto = $this->bloque_del_contacto($client);
+        $memoria  = app(\App\Services\ClientMemory\ClientSupportMemoryService::class);
 
         return [
             'seguimiento'    => $this->bloque_del_seguimiento($followup, true),
@@ -977,6 +980,10 @@ class ImplementationFollowupService
             'contacto'       => $contacto['bloque'],
             'historial'      => $this->historial($client),
             'martin_ocupado' => $contacto['martin_ocupado'],
+            /* La ficha del cliente y el índice de TODOS sus tickets (misión cruzada ficha-del-cliente, 11/11/2026): los
+               mismos bloques que el contexto de un ticket, armados para el dueño (que ve todos). Nunca lanzan. */
+            'ficha_cliente'  => $memoria->bloque_para_el_cliente((int) $client->id),
+            'indice_tickets' => $memoria->indice_de_tickets($memoria->ticket_del_dueno($client)),
         ];
     }
 
@@ -2051,6 +2058,21 @@ class ImplementationFollowupService
     protected function token_vigente(ImplementationFollowup $fila, $token)
     {
         return $fila->reserva_vigente() && trim((string) $token) !== '' && hash_equals((string) $fila->lease_token, hash('sha256', (string) $token));
+    }
+
+    /**
+     * Si el token es el de la reserva vigente del seguimiento: la misma validación por hash de `token_vigente()`,
+     * expuesta para las rutas de la ficha del cliente desde el seguimiento (misión cruzada `ficha-del-cliente`,
+     * 11/11/2026), que no tienen por qué copiarla.
+     *
+     * @param ImplementationFollowup $fila  La fila.
+     * @param string                 $token El token en claro.
+     *
+     * @return bool
+     */
+    public function reserva_valida(ImplementationFollowup $fila, $token)
+    {
+        return $this->token_vigente($fila, $token);
     }
 
     /**

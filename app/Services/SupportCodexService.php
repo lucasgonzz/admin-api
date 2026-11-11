@@ -40,6 +40,9 @@ class SupportCodexService
     /** Cuántos mensajes reales (los últimos) de cada ticket anterior devuelve `history`. */
     const MENSAJES_POR_TICKET_ANTERIOR = 30;
 
+    /** Cuántos mensajes reales (los últimos) devuelve `history?ticket_id=N` del ticket puntual (misión `ficha-del-cliente`). */
+    const MENSAJES_DEL_TICKET_PUNTUAL = 60;
+
     /** `tipo` de `implementation-note` por defecto: la implementación del SISTEMA (el comportamiento de siempre). */
     const NOTE_TYPE_SISTEMA = 'sistema';
 
@@ -341,6 +344,13 @@ class SupportCodexService
             /* Los tickets anteriores del cliente, resumidos (hasta 5, sin el actual; de un empleado, solo los
              * suyos), para que Martín sepa que existen y los pida con GET .../history si le hacen falta. */
             'previous_tickets' => $this->previous_tickets($ticket),
+            /* Misión cruzada ficha-del-cliente (11/11/2026). El resumen del ticket que escribe Martín con
+             * POST .../title (el título es `name`); la ficha del cliente (la memoria del equipo con este cliente:
+             * entradas vigentes + ficha_operativa, viaja aunque el contacto sea un empleado) y el índice de TODOS
+             * los tickets del cliente visibles para el contacto, con el actual marcado. Las dos nunca lanzan. */
+            'summary' => $ticket->es_erp_sin_identidad_verificada() ? null : $ticket->summary,
+            'ficha_cliente' => app(\App\Services\ClientMemory\ClientSupportMemoryService::class)->bloque_para_el_ticket($ticket),
+            'indice_tickets' => app(\App\Services\ClientMemory\ClientSupportMemoryService::class)->indice_de_tickets($ticket),
             'messages' => $messages->map(function ($message) use ($ticket, $remitentes_verificados) {
                 return [
                     'id' => (int) $message->id,
@@ -409,28 +419,48 @@ class SupportCodexService
      *
      * Es solo lectura y no pide reserva: no cambia nada del caso ni del ticket.
      *
-     * @param SupportTicket $ticket El ticket que se está atendiendo.
+     * Con `$ticket_id` (misión cruzada `ficha-del-cliente`, 11/11/2026: `GET .../history?ticket_id=N`) devuelve
+     * SOLO ese ticket, con sus últimos 60 mensajes reales y además `titulo` y `resumen`. Tiene que ser del mismo
+     * cliente y visible para el contacto (la regla de empleados de abajo); si no, 404 `ticket_ajeno`. El actual, 422
+     * `es_el_ticket_actual` (sus mensajes ya vienen en el contexto).
+     *
+     * @param SupportTicket $ticket    El ticket que se está atendiendo.
+     * @param int|null      $ticket_id Un ticket puntual del cliente, o null (los 5 anteriores, como siempre).
      *
      * @return array<string, mixed> `{ticket_id, client_id, contact_role, tickets:[...]}`.
      */
-    public function history(SupportTicket $ticket): array
+    public function history(SupportTicket $ticket, ?int $ticket_id = null): array
     {
-        $consulta = $this->consulta_de_tickets_anteriores($ticket);
-        $tickets = $consulta === null ? collect() : $consulta->with('client', 'client_employee')->get();
+        $limite = self::MENSAJES_POR_TICKET_ANTERIOR;
+        if ($ticket_id !== null) {
+            if ($ticket->id !== null && $ticket_id === (int) $ticket->id) {
+                $this->fail(422, 'es_el_ticket_actual', 'Ese es el ticket que estás atendiendo: sus mensajes ya vienen en el contexto.');
+            }
+            $visibles = $this->consulta_de_tickets_visibles($ticket);
+            $puntual = $visibles === null ? null : $visibles->with('client', 'client_employee')->where('id', $ticket_id)->first();
+            if ($puntual === null) {
+                $this->fail(404, 'ticket_ajeno', 'Ese ticket no existe, es de otro cliente o no es visible para este contacto.');
+            }
+            $tickets = collect([$puntual]);
+            $limite = self::MENSAJES_DEL_TICKET_PUNTUAL;
+        } else {
+            $consulta = $this->consulta_de_tickets_anteriores($ticket);
+            $tickets = $consulta === null ? collect() : $consulta->with('client', 'client_employee')->get();
+        }
 
         return [
             'ticket_id' => (int) $ticket->id,
             'client_id' => $ticket->client_id ? (int) $ticket->client_id : null,
             'contact_role' => $ticket->es_contacto_empleado() ? 'employee' : 'owner',
-            'tickets' => $tickets->map(function (SupportTicket $anterior) {
+            'tickets' => $tickets->map(function (SupportTicket $anterior) use ($limite, $ticket_id) {
                 $mensajes = SupportMessage::where('support_ticket_id', $anterior->id);
                 SupportMessage::apply_mensaje_real_conditions($mensajes, 'support_messages');
                 $mensajes = $mensajes->with('attachments')->orderByDesc('id')
-                    ->limit(self::MENSAJES_POR_TICKET_ANTERIOR)->get()->filter(function (SupportMessage $mensaje) use ($anterior) {
+                    ->limit($limite)->get()->filter(function (SupportMessage $mensaje) use ($anterior) {
                         return $anterior->mensaje_confiable_para_codex($mensaje);
                     })->reverse()->values();
 
-                return [
+                $fila = [
                     'id' => (int) $anterior->id,
                     'status' => $anterior->status,
                     'opened_at' => $anterior->opened_at ? $anterior->opened_at->toIso8601String() : null,
@@ -455,6 +485,13 @@ class SupportCodexService
                         ];
                     })->all(),
                 ];
+                if ($ticket_id !== null) {
+                    $nombre = trim((string) $anterior->name);
+                    $fila['titulo'] = $anterior->es_erp_sin_identidad_verificada() || $nombre === '' ? null : $nombre;
+                    $fila['resumen'] = $anterior->es_erp_sin_identidad_verificada() ? null : $anterior->summary;
+                }
+
+                return $fila;
             })->values()->all(),
         ];
     }
@@ -478,11 +515,34 @@ class SupportCodexService
      */
     private function consulta_de_tickets_anteriores(SupportTicket $ticket)
     {
+        $consulta = $this->consulta_de_tickets_visibles($ticket);
+        if ($consulta === null) {
+            return null;
+        }
+
+        return $consulta->where('id', '<', (int) $ticket->id)->orderByDesc('id')->limit(self::TICKETS_ANTERIORES);
+    }
+
+    /**
+     * TODOS los tickets del cliente del ticket que el contacto puede ver, sin orden ni tope y sin excluir el actual:
+     * la regla de visibilidad de `previous_tickets` / `history` sola (misión cruzada `ficha-del-cliente`, 11/11/2026:
+     * la usan el índice de tickets, la búsqueda en todo el historial y `history?ticket_id=`, para que haya una sola
+     * definición de qué ve un empleado).
+     *
+     * 🔴 EMPLEADOS: si el contacto es un empleado, solo los tickets de ESE empleado; el dueño, todos. Un ticket sin
+     * cliente, o uno del sistema sin identidad verificada, no ve ninguno (null).
+     *
+     * @param SupportTicket $ticket El ticket actual (puede ser uno en memoria, del dueño).
+     *
+     * @return \Illuminate\Database\Eloquent\Builder|null
+     */
+    public function consulta_de_tickets_visibles(SupportTicket $ticket)
+    {
         if (empty($ticket->client_id) || $ticket->es_erp_sin_identidad_verificada()) {
             return null;
         }
 
-        $consulta = SupportTicket::where('client_id', (int) $ticket->client_id)->where('id', '<', (int) $ticket->id);
+        $consulta = SupportTicket::where('client_id', (int) $ticket->client_id);
 
         if ($ticket->client_employee_id) {
             $consulta->where('client_employee_id', (int) $ticket->client_employee_id);
@@ -490,7 +550,7 @@ class SupportCodexService
             $consulta->where('source', 'erp')->where('client_user_id', (int) $ticket->client_user_id);
         }
 
-        return $consulta->orderByDesc('id')->limit(self::TICKETS_ANTERIORES);
+        return $consulta;
     }
 
     /**
