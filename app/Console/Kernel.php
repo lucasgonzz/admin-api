@@ -222,6 +222,14 @@ class Kernel extends ConsoleKernel
             ->withoutOverlapping(10)
             ->runInBackground();
 
+        /* El reloj del seguimiento proactivo de las implementaciones (misión cruzada seguimiento-de-implementaciones,
+         * 11/11/2026): altas, contacto del cliente, fin de pausa, frenado (con aviso a Lucas) y terminado. No manda
+         * nada: los mensajes los escribe Martín por el monitor. Idempotente. `withoutOverlapping(10)` con el número
+         * a mano: el default son 24 horas y una corrida que muera sin soltar el candado lo frenaría un día entero. */
+        $schedule->command('implementaciones:seguimientos')
+            ->everyFifteenMinutes()
+            ->withoutOverlapping(10);
+
         // Sincroniza desde GitHub identidad, system prompt y protocolo de WhatsApp a la BD.
         // Red de seguridad por si Lucas olvida apretar el botón manual del admin.
         $schedule->command('agent-prompts:sync')->everyTenMinutes();

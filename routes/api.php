@@ -412,6 +412,23 @@ Route::middleware('claude.task.key')
            de la etapa, con reserva vigente (misión hitos-de-implementacion-por-soporte, 26/10/2026). */
         Route::post('support-codex/tickets/{id}/implementation-note', 'Api\ClaudeSupportCodexController@implementation_note')
             ->whereNumber('id');
+        /* Seguimiento proactivo de las implementaciones (misión cruzada seguimiento-de-implementaciones, 11/11/2026):
+           el monitor pide los vencidos, reserva uno con su contexto, guarda los hitos de uso que midió y manda (o
+           pospone) el mensaje que redactó Martín. Desde un ticket normal, Martín pausa o reanuda el seguimiento del
+           cliente con la reserva del ticket. Reglas en App\Services\ImplementationFollowups\ImplementationFollowupService. */
+        Route::get('support-codex/implementation-followups/pending', 'Api\ClaudeImplementationFollowupController@pending');
+        Route::post('support-codex/implementation-followups/{id}/claim', 'Api\ClaudeImplementationFollowupController@claim')
+            ->whereNumber('id');
+        Route::post('support-codex/implementation-followups/{id}/milestones', 'Api\ClaudeImplementationFollowupController@milestones')
+            ->whereNumber('id');
+        Route::post('support-codex/implementation-followups/{id}/send', 'Api\ClaudeImplementationFollowupController@send')
+            ->whereNumber('id');
+        Route::post('support-codex/implementation-followups/{id}/postpone', 'Api\ClaudeImplementationFollowupController@postpone')
+            ->whereNumber('id');
+        Route::post('support-codex/implementation-followups/{id}/release', 'Api\ClaudeImplementationFollowupController@release')
+            ->whereNumber('id');
+        Route::post('support-codex/tickets/{id}/implementation-followup', 'Api\ClaudeImplementationFollowupController@desde_el_ticket')
+            ->whereNumber('id');
         Route::post('support-codex/tickets/{id}/reply', 'Api\ClaudeSupportCodexController@reply');
         Route::post('support-codex/tickets/{id}/tour', 'Api\SupportTourController@ofrecer')->whereNumber('id');
         Route::post('support-codex/tickets/{id}/tour/prepare', 'Api\SupportTourController@preparar')->whereNumber('id');
@@ -945,6 +962,13 @@ Route::middleware('claude.task.key')
            operation_id idempotente (409 con otro contenido), 422 con texto largo y ventana cerrada, 423 si
            Martín tiene la reserva del ticket. Lógica en ImplementationSupportWhatsappService. */
         Route::post('implementations/{id}/whatsapp', 'Api\ClaudeImplementationOpsController@whatsapp_json')
+            ->whereNumber('id');
+
+        /* Gestión de Lucas del seguimiento proactivo de las implementaciones (misión cruzada
+           seguimiento-de-implementaciones, 11/11/2026): listar, alta manual y cambios (con evento source lucas). */
+        Route::get('implementation-followups', 'Api\ClaudeImplementationFollowupController@index');
+        Route::post('implementation-followups', 'Api\ClaudeImplementationFollowupController@store');
+        Route::patch('implementation-followups/{id}', 'Api\ClaudeImplementationFollowupController@update')
             ->whereNumber('id');
 
         /* Implementaciones de AGENTES DE IA (misión `implementacion-agentes-ia`, 28/10/2026): conectar el número de
