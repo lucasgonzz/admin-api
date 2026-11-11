@@ -599,7 +599,7 @@ return [
             ],
         ],
         'GET api/claude/support-codex/tickets/{id}/import-status' => [
-            'para_que' => 'El estado y el resumen de una corrida de clientes o proveedores del ticket (?modelo=client|provider&corrida_id=UUID), puente a GET admin-sync/importacion-soporte/{corrida} de su sistema, con la reserva del ticket (X-Support-Lease-Token o lease_token). Responde 200 {estado: aceptado, modelo, corrida_id, estado_corrida (analizar…confirmacion, importar, terminada, cancelada, revertida, error), resumen: {crear, actualizar, saldos…}, codigo_requerido (bool), codigo, texto_confirmacion, resultado, error_corrida, revertible, corrida_existente} | {estado: rechazado, motivo_instancia} | {estado: version_vieja} (solo un 404 SIN motivo).',
+            'para_que' => 'El estado y el resumen de una corrida de clientes o proveedores del ticket (?modelo=client|provider&corrida_id=UUID), puente a GET admin-sync/importacion-soporte/{corrida} de su sistema, con la reserva del ticket (X-Support-Lease-Token o lease_token). Responde 200 {estado: aceptado, modelo, corrida_id, estado_corrida (analizar, confirmacion, requiere_correccion, importar, terminada, cancelada, revirtiendo, revertida, error), motivo (filas_ambiguas en requiere_correccion), tandas {total, hechas, revertidas}, resumen: {crear, actualizar, saldos, sin_cambios, saldos_no_cargados, filas_ambiguas…}, codigo_requerido (bool), codigo, texto_confirmacion, resultado, error_corrida, revertible, corrida_existente, corrida (el payload entero de empresa)} | {estado: rechazado, motivo_instancia} | {estado: version_vieja} (solo un 404 SIN motivo).',
             'escribe' => false, 'peligrosidad' => 'lectura', 'frenos' => [],
         ],
         'POST api/claude/support-codex/tickets/{id}/import-confirm' => [
@@ -615,7 +615,7 @@ return [
             ],
         ],
         'POST api/claude/support-codex/tickets/{id}/import-revert' => [
-            'para_que' => 'Deshace una corrida de clientes o proveedores a pedido del dueño: puente a POST admin-sync/importacion-soporte/{corrida}/revertir de su sistema (los creados se borran si no tienen movimientos, los actualizados vuelven a sus valores y los ajustes de saldo se anulan). Responde 200 {estado: aceptado, ...corrida} | rechazado | version_vieja.',
+            'para_que' => 'Deshace una corrida de clientes o proveedores a pedido del dueño: puente a POST admin-sync/importacion-soporte/{corrida}/revertir de su sistema (los creados se borran si no tienen movimientos, los actualizados vuelven a sus valores y los ajustes de saldo se anulan). Empresa la hace en segundo plano: responde 200 {estado: aceptado, http: 202, estado_corrida: revirtiendo, tandas, corrida} y se sigue con import-status hasta revertida (http 200 si ya estaba revertida); rechazado con motivo_instancia no_revertible; version_vieja.',
             'escribe' => true, 'peligrosidad' => 'alta',
             'frenos' => ['Reserva vigente del ticket (423 invalid_lease).', 'Ticket abierto y atendido por Codex, del dueño verificado de un negocio activo.', 'El cliente sale del ticket; empresa verifica que la corrida sea de ese dueño y de ese ticket.'],
             'parametros' => [
