@@ -15,14 +15,17 @@ use Illuminate\Database\Eloquent\Model;
 class SupportCodexActivity extends Model
 {
     const KIND_LECTURA = 'lectura';
+    /** Lo que Martín escribe en el SISTEMA DEL CLIENTE: importaciones, imágenes, reparar configuración, confirmar actualización. */
     const KIND_ESCRITURA = 'escritura';
+    /** Lo que Martín deja asentado en el ADMIN (interno): ficha, título, notas de implementación, pasos, misiones, pausas, tour. */
+    const KIND_REGISTRO = 'registro';
     const KIND_ENVIO = 'envio';
     const KIND_CONSULTA = 'consulta';
     const KIND_PLAN = 'plan';
     const KIND_ERROR = 'error';
 
     /** Los tipos válidos, en el orden del contrato. */
-    const KINDS = [self::KIND_LECTURA, self::KIND_ESCRITURA, self::KIND_ENVIO, self::KIND_CONSULTA, self::KIND_PLAN, self::KIND_ERROR];
+    const KINDS = [self::KIND_LECTURA, self::KIND_ESCRITURA, self::KIND_REGISTRO, self::KIND_ENVIO, self::KIND_CONSULTA, self::KIND_PLAN, self::KIND_ERROR];
 
     /** @var string */
     protected $table = 'support_codex_activities';

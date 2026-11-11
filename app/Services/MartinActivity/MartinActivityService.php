@@ -24,6 +24,9 @@ use Illuminate\Support\Facades\DB;
  * - Tamaños: `summary` ≤ 300, `detail` ≤ 2 KB en JSON, hasta 50 items por tanda; el plan, objetivo ≤ 300 y hasta 15
  *   pasos de ≤ 200.
  * - Nada de esto exige la reserva del ticket: la auditoría tiene que quedar aunque la reserva ya se haya usado.
+ * - Defensa en profundidad: al guardar, toda corrida de 15 a 22 dígitos (con o sin espacios o guiones entre medio: una
+ *   tarjeta, un CBU) se reemplaza por `[número oculto]` en `summary`, en los textos de `detail` y en el plan. El monitor
+ *   ya no debería mandarlos; esto es por si se le escapa.
  */
 class MartinActivityService
 {
@@ -35,6 +38,12 @@ class MartinActivityService
 
     /** El formato de un `run_id` (un UUID, o algo parecido que arme el monitor): sin barras ni espacios. */
     const PATRON_RUN_ID = '/^[A-Za-z0-9._:-]{1,64}$/';
+
+    /** De 15 a 22 dígitos seguidos, con a lo sumo un espacio o guion entre dos dígitos, y sin otro dígito pegado. */
+    const PATRON_NUMERO_LARGO = '/(?<!\d)\d(?:[ \-]?\d){14,21}(?!\d)/';
+
+    /** Lo que queda en lugar del número. */
+    const NUMERO_OCULTO = '[número oculto]';
 
     /**
      * Las reglas de `POST claude/support-codex/activity`.
@@ -132,7 +141,8 @@ class MartinActivityService
             $cuando  = Carbon::parse((string) $item['occurred_at'])->setTimezone(config('app.timezone'));
             $run_id  = (string) $item['run_id'];
             $command = (string) $item['command'];
-            $summary = (string) $item['summary'];
+            /* El hash va sobre el texto YA enmascarado: así no queda en la base ni un hash del número. */
+            $summary = self::enmascarar((string) $item['summary']);
             $hash    = self::hash_de($run_id, $command, $cuando, $summary);
 
             if (isset($filas[$hash])) {
@@ -147,7 +157,7 @@ class MartinActivityService
                 'kind'                       => (string) $item['kind'],
                 'command'                    => $command,
                 'summary'                    => $summary,
-                'detail'                     => isset($item['detail']) ? json_encode($item['detail'], JSON_UNESCAPED_UNICODE) : null,
+                'detail'                     => isset($item['detail']) ? json_encode(self::enmascarar_en($item['detail']), JSON_UNESCAPED_UNICODE) : null,
                 'ok'                         => (bool) filter_var($item['ok'], FILTER_VALIDATE_BOOLEAN),
                 'occurred_at'                => $cuando->format('Y-m-d H:i:s'),
                 'dedupe_hash'                => $hash,
@@ -212,10 +222,10 @@ class MartinActivityService
     {
         $pasos = [];
         foreach ((array) $datos['pasos'] as $paso) {
-            $pasos[] = ['texto' => (string) $paso['texto'], 'estado' => (string) $paso['estado']];
+            $pasos[] = ['texto' => self::enmascarar((string) $paso['texto']), 'estado' => (string) $paso['estado']];
         }
 
-        $objetivo = isset($datos['objetivo']) ? trim((string) $datos['objetivo']) : '';
+        $objetivo = isset($datos['objetivo']) ? self::enmascarar(trim((string) $datos['objetivo'])) : '';
         $valores  = [
             'support_ticket_id'          => $this->entero($datos, 'support_ticket_id'),
             'implementation_followup_id' => $this->entero($datos, 'implementation_followup_id'),
@@ -239,8 +249,14 @@ class MartinActivityService
     }
 
     /**
-     * Lo que lee el panel de un ticket: una atención por `run_id` (la más nueva primero), cada una con su plan, sus
+     * Lo que lee el panel de un ticket: una atención por `run_id`, la más nueva primero, cada una con su plan, sus
      * acciones en orden de ocurrencia y su resumen.
+     *
+     * Qué atenciones entran: TODAS las de cualquier `run_id` que tenga al menos una acción con este
+     * `support_ticket_id`, completas (con las acciones que solo llevan `implementation_followup_id`). Así una atención
+     * del seguimiento proactivo cuyo envío cayó en este ticket aparece entera. Esas llevan `origen: "seguimiento"` (la
+     * atención tiene alguna acción, o su plan, con `implementation_followup_id`); las demás, `origen: "ticket"`. Entra
+     * también un plan del ticket sin acciones todavía.
      *
      * `resumen`: `errores` cuenta toda acción con `ok: false` y las de `kind: error`; las demás claves cuentan las
      * acciones que salieron bien de su tipo (una escritura rechazada cuenta como error, no como escritura). Las de
@@ -252,14 +268,22 @@ class MartinActivityService
      */
     public function del_ticket($ticket_id)
     {
-        $acciones = SupportCodexActivity::query()
+        $run_ids = SupportCodexActivity::query()
             ->where('support_ticket_id', $ticket_id)
-            ->orderBy('occurred_at')
-            ->orderBy('id')
-            ->get(['id', 'run_id', 'kind', 'command', 'summary', 'detail', 'ok', 'occurred_at']);
+            ->distinct()
+            ->pluck('run_id')
+            ->all();
 
-        $run_ids = $acciones->pluck('run_id')->unique()->values()->all();
-        $planes  = SupportCodexPlan::query()
+        $acciones = collect();
+        if ($run_ids !== []) {
+            $acciones = SupportCodexActivity::query()
+                ->whereIn('run_id', $run_ids)
+                ->orderBy('occurred_at')
+                ->orderBy('id')
+                ->get(['id', 'implementation_followup_id', 'run_id', 'kind', 'command', 'summary', 'detail', 'ok', 'occurred_at']);
+        }
+
+        $planes = SupportCodexPlan::query()
             ->where(function ($query) use ($ticket_id, $run_ids) {
                 $query->where('support_ticket_id', $ticket_id);
                 if ($run_ids !== []) {
@@ -279,6 +303,9 @@ class MartinActivityService
             $cuando = $accion->occurred_at->toIso8601String();
             if ($atenciones[$run_id]['desde'] === null) {
                 $atenciones[$run_id]['desde'] = $cuando;
+            }
+            if ($accion->implementation_followup_id !== null) {
+                $atenciones[$run_id]['origen'] = 'seguimiento';
             }
             $atenciones[$run_id]['hasta']      = $cuando;
             $atenciones[$run_id]['acciones'][] = [
@@ -301,6 +328,9 @@ class MartinActivityService
                 $atenciones[$run_id]['desde'] = $plan->created_at->toIso8601String();
                 $atenciones[$run_id]['hasta'] = $plan->updated_at->toIso8601String();
             }
+            if ($plan->implementation_followup_id !== null) {
+                $atenciones[$run_id]['origen'] = 'seguimiento';
+            }
 
             $atenciones[$run_id]['objetivo'] = $plan->objetivo;
             $atenciones[$run_id]['pasos']    = array_values((array) $plan->pasos);
@@ -317,10 +347,13 @@ class MartinActivityService
     }
 
     /**
-     * Suma a una consulta de tickets los dos contadores del puntito de la bandeja, como subconsultas correlacionadas
-     * que resuelve el índice `sca_ticket_kind_ok_idx` sin leer la tabla (nada de N+1):
-     * - `martin_activity_count`: todas las acciones registradas en el ticket (= `total_acciones` del panel).
-     * - `martin_writes_count`: las escrituras que salieron bien (= `resumen.escrituras` sumado de todas las atenciones).
+     * Suma a una consulta de tickets los dos contadores del puntito de la bandeja, con el MISMO criterio que la vista del
+     * panel (las acciones de toda atención con al menos una acción en el ticket), como subconsultas correlacionadas que
+     * resuelven los índices `sca_ticket_run_idx` (qué run_ids tocaron el ticket) y `sca_run_kind_ok_idx` (cuántas
+     * acciones tiene cada uno), sin leer la tabla y sin una consulta por ticket:
+     * - `martin_activity_count`: = `total_acciones` del panel.
+     * - `martin_writes_count`: las `escritura` que salieron bien (= `resumen.escrituras` sumado de todas las atenciones).
+     *   Los `registro` (lo interno del admin) no cuentan.
      *
      * @param \Illuminate\Database\Eloquent\Builder $query La consulta de `SupportTicket`.
      *
@@ -333,19 +366,61 @@ class MartinActivityService
             $query->select('support_tickets.*');
         }
 
+        /* Los run_id que tocaron el ticket de la fila. */
+        $runs_del_ticket = function ($sub) {
+            $sub->select('sca_t.run_id')
+                ->from('support_codex_activities as sca_t')
+                ->whereColumn('sca_t.support_ticket_id', 'support_tickets.id');
+        };
+
         $total = SupportCodexActivity::query()
             ->selectRaw('COUNT(*)')
-            ->whereColumn('support_codex_activities.support_ticket_id', 'support_tickets.id');
+            ->whereIn('support_codex_activities.run_id', $runs_del_ticket);
 
         $escrituras = SupportCodexActivity::query()
             ->selectRaw('COUNT(*)')
-            ->whereColumn('support_codex_activities.support_ticket_id', 'support_tickets.id')
+            ->whereIn('support_codex_activities.run_id', $runs_del_ticket)
             ->where('support_codex_activities.kind', SupportCodexActivity::KIND_ESCRITURA)
             ->where('support_codex_activities.ok', true);
 
         return $query
             ->addSelect(['martin_activity_count' => $total, 'martin_writes_count' => $escrituras])
             ->withCasts(['martin_activity_count' => 'integer', 'martin_writes_count' => 'integer']);
+    }
+
+    /**
+     * Reemplaza las corridas de 15 a 22 dígitos por `[número oculto]`.
+     *
+     * @param string $texto El texto.
+     *
+     * @return string
+     */
+    public static function enmascarar($texto)
+    {
+        return (string) preg_replace(self::PATRON_NUMERO_LARGO, self::NUMERO_OCULTO, (string) $texto);
+    }
+
+    /**
+     * `enmascarar()` sobre todos los textos de un `detail` (a cualquier profundidad). Las claves y lo que no es texto
+     * quedan como están.
+     *
+     * @param mixed $valor El detail o una parte.
+     *
+     * @return mixed
+     */
+    public static function enmascarar_en($valor)
+    {
+        if (is_string($valor)) {
+            return self::enmascarar($valor);
+        }
+
+        if (is_array($valor)) {
+            foreach ($valor as $clave => $interno) {
+                $valor[$clave] = self::enmascarar_en($interno);
+            }
+        }
+
+        return $valor;
     }
 
     /**
@@ -357,12 +432,13 @@ class MartinActivityService
     {
         return [
             'run_id'   => $run_id,
+            'origen'   => 'ticket',
             'desde'    => null,
             'hasta'    => null,
             'objetivo' => null,
             'pasos'    => [],
             'acciones' => [],
-            'resumen'  => ['lecturas' => 0, 'escrituras' => 0, 'envios' => 0, 'consultas' => 0, 'errores' => 0],
+            'resumen'  => ['lecturas' => 0, 'escrituras' => 0, 'registros' => 0, 'envios' => 0, 'consultas' => 0, 'errores' => 0],
         ];
     }
 
@@ -384,6 +460,7 @@ class MartinActivityService
         $claves = [
             SupportCodexActivity::KIND_LECTURA   => 'lecturas',
             SupportCodexActivity::KIND_ESCRITURA => 'escrituras',
+            SupportCodexActivity::KIND_REGISTRO  => 'registros',
             SupportCodexActivity::KIND_ENVIO     => 'envios',
             SupportCodexActivity::KIND_CONSULTA  => 'consultas',
         ];
