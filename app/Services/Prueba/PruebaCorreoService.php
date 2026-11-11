@@ -22,6 +22,86 @@ class PruebaCorreoService
     /** `clave` del correo «tu prueba está por terminar». */
     const CORREO_DIA_5 = 'dia_5';
 
+    /**
+     * El correo de cada paso de la prueba: asunto, título y el texto del paso (misión prueba-e2e-campana-imperio,
+     * 11/11/2026). La clave es el hito de `PruebaDelClienteService::HITOS`.
+     *
+     * @var array<string, array{asunto: string, titulo: string, texto: string}>
+     */
+    const PASOS = [
+        'ingreso' => [
+            'asunto' => 'Tu sistema de prueba te está esperando',
+            'titulo' => 'Entrá a tu sistema de prueba',
+            'texto'  => 'Tu sistema ya está armado con datos de ejemplo y todavía no entraste. Entrá cuando puedas: en unos minutos ves cómo trabaja.',
+        ],
+        'importo' => [
+            'asunto' => 'Te cargamos tu catálogo sin costo',
+            'titulo' => 'Probá el sistema con tus artículos',
+            'texto'  => 'Para que la prueba sea con lo tuyo, te cargamos tus artículos sin costo. Mandame el Excel de tu lista o el catálogo de tu proveedor en PDF desde Agentes, Soporte, en tu sistema, o por WhatsApp, y lo dejamos listo.',
+        ],
+        'articulo_creado' => [
+            'asunto' => 'Un paso corto: cargá un artículo',
+            'titulo' => 'Cargá tu primer artículo',
+            'texto'  => 'Desde Artículos, con el botón Nuevo, cargás un artículo tuyo en un minuto. Después lo vendés desde Vender.',
+        ],
+        'articulo_actualizado' => [
+            'asunto' => 'Probá cambiar un precio',
+            'titulo' => 'Revisá y cambiá un precio',
+            'texto'  => 'Entrá a Artículos, abrí uno, revisá el costo y el margen, y guardá. El precio de venta se actualiza al instante.',
+        ],
+        'venta' => [
+            'asunto' => 'Hacé tu primera venta de prueba',
+            'titulo' => 'Hacé tu primera venta',
+            'texto'  => 'Desde Vender buscás el artículo, elegís cómo te pagan y guardás. Así ves cómo queda el ticket y cómo baja el stock.',
+        ],
+        'cliente_creado' => [
+            'asunto' => 'Cargá un cliente para probar la cuenta corriente',
+            'titulo' => 'Cargá un cliente',
+            'texto'  => 'Desde Clientes cargás un cliente tuyo. Después le vendés en cuenta corriente y ves el saldo al instante.',
+        ],
+        'venta_cc' => [
+            'asunto' => 'Probá una venta en cuenta corriente',
+            'titulo' => 'Vendé en cuenta corriente',
+            'texto'  => 'En Vender elegís al cliente que cargaste, sumás los artículos y guardás como cuenta corriente. Después ves el saldo en su ficha.',
+        ],
+        'pago_cc' => [
+            'asunto' => 'Registrá un pago de cuenta corriente',
+            'titulo' => 'Cobrá una cuenta corriente',
+            'texto'  => 'Desde la ficha del cliente registrás un pago. Así ves cómo baja el saldo y queda el comprobante.',
+        ],
+        'compra' => [
+            'asunto' => 'Cargá una compra a un proveedor',
+            'titulo' => 'Cargá una compra',
+            'texto'  => 'Desde Compras cargás una compra a un proveedor: el stock sube solo y el costo queda actualizado. También podés cargarla con una foto de la factura.',
+        ],
+        'gasto' => [
+            'asunto' => 'Cargá un gasto y mirá la caja del día',
+            'titulo' => 'Cargá un gasto',
+            'texto'  => 'Desde Gastos cargás un gasto en un minuto y ves el resultado real del día.',
+        ],
+        'tienda_pedido' => [
+            'asunto' => 'Tu prueba incluye una tienda online',
+            'titulo' => 'Probá tu tienda online',
+            'texto'  => 'Tu prueba incluye una tienda online conectada a tu sistema. Entrá desde el sistema, hacé un pedido de prueba y mirá cómo te llega.',
+        ],
+        'agente' => [
+            'asunto' => 'Probá tu asistente personal',
+            'titulo' => 'Hablá con tu asistente personal',
+            'texto'  => 'En tu sistema, en Agentes, preguntale a tu Asistente personal cuánto vendiste hoy o pedile que cargue un gasto.',
+        ],
+    ];
+
+    /** El video del catálogo de la prueba (04 a 09) que acompaña a cada paso, cuando lo hay. */
+    const VIDEO_DEL_PASO = [
+        'ingreso'              => '04',
+        'importo'              => '05',
+        'articulo_creado'      => '06',
+        'articulo_actualizado' => '06',
+        'compra'               => '07',
+        'venta'                => '08',
+        'agente'               => '09',
+    ];
+
     /** Cuántas veces se intenta un mismo correo si el servidor lo rechaza. */
     const MAX_INTENTOS = 3;
 
@@ -34,6 +114,8 @@ class PruebaCorreoService
         }
 
         $hosts = PruebaNombres::hosts_del_slug((string) $instancia->alias_slug);
+        /* El video de bienvenida y recorrido (04), si está configurado, va en el mismo correo. */
+        $video = self::video_del_paso('ingreso');
         $mail = new ComercioCityMail(new ComercioCityMailPayload([
             'subject' => 'Tu prueba de ComercioCity ya está lista',
             'title' => 'Tu prueba de siete días ya está lista',
@@ -42,7 +124,10 @@ class PruebaCorreoService
                 'Tu asistente personal te atiende por WhatsApp en el ' . $asistente['numero'] . '. ' . PruebaAsistenteService::USO,
             ],
             'cta' => ['text' => 'Entrar a mi sistema', 'url' => 'https://' . $hosts['erp_spa']],
-            'links' => [['text' => 'Escribirle a mi asistente personal por WhatsApp', 'url' => $asistente['url']]],
+            'links' => array_merge(
+                [['text' => 'Escribirle a mi asistente personal por WhatsApp', 'url' => $asistente['url']]],
+                $video !== null ? [['text' => 'Ver el video: «' . $video['titulo'] . '»', 'url' => $video['url']]] : []
+            ),
             'closing' => 'Equipo de ComercioCity',
         ]));
 
@@ -139,6 +224,60 @@ class PruebaCorreoService
         } finally {
             $reserva->release();
         }
+    }
+
+    /**
+     * El correo de un paso de la prueba, con su video si el catálogo lo tiene. Uno por paso y por cliente.
+     *
+     * @param Client    $client
+     * @param Lead|null $lead
+     * @param string    $hito
+     *
+     * @return array{estado: string, detalle: string|null} `sin_texto` si el hito no tiene correo.
+     */
+    public function enviar_paso(Client $client, ?Lead $lead, string $hito): array
+    {
+        if (! isset(self::PASOS[$hito])) {
+            return ['estado' => 'sin_texto', 'detalle' => null];
+        }
+
+        $paso  = self::PASOS[$hito];
+        $video = self::video_del_paso($hito);
+
+        $parrafos = [self::saludo($client, $lead) . ', soy Martín, del equipo de ComercioCity.', $paso['texto']];
+        if ($video !== null) {
+            $parrafos[] = 'Te dejo un video corto que lo muestra paso a paso.';
+        }
+
+        $payload = new ComercioCityMailPayload([
+            'subject'    => $paso['asunto'],
+            'title'      => $paso['titulo'],
+            'paragraphs' => $parrafos,
+            'links'      => $video !== null ? [['text' => 'Ver el video: «' . $video['titulo'] . '»', 'url' => $video['url']]] : [],
+            'cta'        => self::boton_del_sistema($client),
+            'closing'    => 'Cualquier duda, escribime desde Agentes, Soporte, en tu sistema. Equipo de ComercioCity',
+        ]);
+
+        return $this->enviar_registrado($client, $lead, 'paso_' . $hito, $payload, $hito);
+    }
+
+    /**
+     * El video del catálogo aprobado que acompaña a un paso, o null si no hay (o no está configurado).
+     *
+     * @param string $hito
+     *
+     * @return array<string, mixed>|null Fila de `PruebaVideoCatalogoService::videos()`.
+     */
+    public static function video_del_paso(string $hito): ?array
+    {
+        if (! isset(self::VIDEO_DEL_PASO[$hito])) {
+            return null;
+        }
+
+        $catalogo = app(PruebaVideoCatalogoService::class)->videos();
+        $clave    = 'prueba:' . self::VIDEO_DEL_PASO[$hito];
+
+        return isset($catalogo[$clave]) ? $catalogo[$clave] : null;
     }
 
     /**

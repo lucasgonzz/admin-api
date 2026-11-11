@@ -499,7 +499,9 @@ class PruebaWhatsappService
             return ['estado' => 'vencida', 'detalle' => 'La instancia dice que la prueba venció: no se empuja más.'];
         }
 
-        $proximo = PruebaDelClienteService::proximo_hito_faltante($hitos['hitos']);
+        /* Los hitos que la instancia no informa (un sistema anterior a ese hito) no se piden: nunca figurarían
+         * como hechos y el empujón quedaría trabado ahí todos los días. */
+        $proximo = PruebaDelClienteService::proximo_hito_faltante($hitos['hitos'], isset($hitos['sin_soporte']) ? $hitos['sin_soporte'] : []);
 
         if ($proximo === null) {
             return ['estado' => 'sin_hito_faltante', 'detalle' => 'Pasó por todos los hitos.'];
@@ -509,12 +511,42 @@ class PruebaWhatsappService
         $estado    = $this->plantillas->estado_para_enviar($plantilla);
 
         if ($estado['motivo'] !== null) {
+            /* Sin la plantilla aprobada no hay WhatsApp, pero el paso le llega igual por correo (una vez). */
+            $this->correo_del_paso($client, $lead, $proximo);
+
             return ['estado' => 'plantilla_no_disponible', 'detalle' => $plantilla . ': ' . $estado['motivo']];
         }
 
         $envio = $this->enviar_plantilla_por_ticket($client, $lead, $plantilla, $proximo, false);
 
+        if ($envio['estado'] === 'enviado') {
+            $this->correo_del_paso($client, $lead, $proximo);
+        }
+
         return ['estado' => $envio['estado'] === 'enviado' ? 'enviado' : $envio['estado'], 'detalle' => $envio['detalle'] !== null ? $envio['detalle'] : $plantilla];
+    }
+
+    /**
+     * El correo que acompaña al empujón de un paso, con el video que corresponde (misión
+     * prueba-e2e-campana-imperio, 11/11/2026). Uno por paso y por cliente; nunca cambia el resultado del empujón.
+     *
+     * @param Client    $client
+     * @param Lead|null $lead
+     * @param string    $hito
+     *
+     * @return void
+     */
+    protected function correo_del_paso(Client $client, ?Lead $lead, string $hito): void
+    {
+        try {
+            app(Prueba\PruebaCorreoService::class)->enviar_paso($client, $lead, $hito);
+        } catch (\Throwable $e) {
+            Log::channel('daily')->warning('PruebaWhatsapp: no salió el correo del paso.', [
+                'client_id' => (int) $client->id,
+                'hito'      => $hito,
+                'error'     => $e->getMessage(),
+            ]);
+        }
     }
 
     /**

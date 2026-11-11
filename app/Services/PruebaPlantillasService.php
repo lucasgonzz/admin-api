@@ -94,6 +94,10 @@ class PruebaPlantillasService
             'body' => 'Hola {{1}}, un paso corto para probar el sistema: cargá un artículo tuyo desde Artículos con el botón Nuevo. Lleva un minuto y después lo vendés desde Vender. Si querés te paso un video de cómo se hace.',
             'uso'  => 'Prueba gratuita: el negocio no creó ningún artículo.',
         ],
+        'cc_prueba_paso_articulo_actualizado' => [
+            'body' => 'Hola {{1}}, probá cambiarle el precio a un artículo: entrá a Artículos, abrí uno, revisá el costo y el margen, y guardá. Así ves cómo se actualiza el precio de venta al instante. Si querés te paso un video de cómo se hace.',
+            'uso'  => 'Prueba gratuita: el negocio no actualizó ningún artículo.',
+        ],
         'cc_prueba_paso_venta' => [
             'body' => 'Hola {{1}}, probá hacer una venta desde Vender: buscás el artículo, elegís cómo te pagan y guardás. Así ves cómo queda el ticket y cómo baja el stock. Si algo no te cierra, escribime por acá.',
             'uso'  => 'Prueba gratuita: el negocio no hizo ninguna venta.',
@@ -101,6 +105,10 @@ class PruebaPlantillasService
         'cc_prueba_paso_cliente_creado' => [
             'body' => 'Hola {{1}}, cargá un cliente tuyo desde Clientes para probar la cuenta corriente: después le vendés en cuenta corriente y ves el saldo al instante. Te paso un video si lo necesitás.',
             'uso'  => 'Prueba gratuita: el negocio no cargó ningún cliente.',
+        ],
+        'cc_prueba_paso_venta_cc' => [
+            'body' => 'Hola {{1}}, probá hacerle una venta en cuenta corriente al cliente que cargaste: en Vender elegís al cliente, sumás los artículos y guardás como cuenta corriente. Después ves el saldo en su ficha. Si algo no te cierra, escribime por acá.',
+            'uso'  => 'Prueba gratuita: el negocio no hizo ninguna venta en cuenta corriente.',
         ],
         'cc_prueba_paso_pago_cc' => [
             'body' => 'Hola {{1}}, para cerrar el circuito de la cuenta corriente registrá un pago desde la ficha del cliente. Así ves cómo baja el saldo y queda el comprobante. Avisame si querés que te lo muestre.',

@@ -59,8 +59,10 @@ class PruebaDelClienteService
         'ingreso'         => 'Entró al sistema',
         'importo'         => 'Importó su información',
         'articulo_creado' => 'Creó un artículo',
+        'articulo_actualizado' => 'Actualizó un artículo',
         'venta'           => 'Hizo una venta',
         'cliente_creado'  => 'Cargó un cliente',
+        'venta_cc'        => 'Vendió en cuenta corriente',
         'pago_cc'         => 'Registró un pago de cuenta corriente',
         'compra'          => 'Cargó una compra',
         'gasto'           => 'Cargó un gasto',
@@ -358,7 +360,10 @@ class PruebaDelClienteService
      * @param Lead|null $lead
      * @param bool      $consultar_instancia false = solo locales (para no pegarle al cliente, p. ej. en un listado).
      *
-     * @return array{fuente: string, hitos: array<string, string|null>, semilla_presente: bool|null, vence_at: string|null, vencida: bool|null, imagenes: array|null, cupo_imagenes_estado: string|null}
+     * `sin_soporte` son los hitos del catálogo que la instancia NO informa (una versión del sistema anterior a
+     * ese hito no trae su clave): no se le pueden pedir al negocio porque nunca figurarían como hechos.
+     *
+     * @return array{fuente: string, hitos: array<string, string|null>, sin_soporte: array<int, string>, semilla_presente: bool|null, vence_at: string|null, vencida: bool|null, imagenes: array|null, cupo_imagenes_estado: string|null}
      */
     public function hitos(Client $client, ?Lead $lead, bool $consultar_instancia = true): array
     {
@@ -375,6 +380,7 @@ class PruebaDelClienteService
             return [
                 'fuente'           => 'instancia',
                 'hitos'            => $base,
+                'sin_soporte'      => array_values(array_diff(array_keys(self::HITOS), array_keys($remoto['hitos']))),
                 'semilla_presente' => $remoto['semilla_presente'],
                 'vence_at'         => $remoto['vence_at'],
                 'vencida'          => $remoto['vencida'],
@@ -386,6 +392,7 @@ class PruebaDelClienteService
         return [
             'fuente'           => 'admin',
             'hitos'            => $base,
+            'sin_soporte'      => [],
             'semilla_presente' => null,
             'vence_at'         => null,
             'vencida'          => null,
@@ -398,12 +405,16 @@ class PruebaDelClienteService
      * El primer hito del catálogo que todavía no pasó, o null si pasaron todos.
      *
      * @param array<string, string|null> $hitos
+     * @param array<int, string>         $omitir Hitos que no se ofrecen (los que la instancia no informa).
      *
      * @return string|null
      */
-    public static function proximo_hito_faltante(array $hitos): ?string
+    public static function proximo_hito_faltante(array $hitos, array $omitir = []): ?string
     {
         foreach (array_keys(self::HITOS) as $tipo) {
+            if (in_array($tipo, $omitir, true)) {
+                continue;
+            }
             if (! isset($hitos[$tipo]) || $hitos[$tipo] === null) {
                 return $tipo;
             }
@@ -449,7 +460,7 @@ class PruebaDelClienteService
         /* La instancia sabe mejor si venció (C3): si contesta, manda ella. */
         $vencida = $hitos['vencida'] !== null ? (bool) $hitos['vencida'] : (bool) $datos['vencida'];
 
-        $proximo = self::proximo_hito_faltante($hitos['hitos']);
+        $proximo = self::proximo_hito_faltante($hitos['hitos'], $hitos['sin_soporte']);
 
         $lista = [];
         foreach ($hitos['hitos'] as $tipo => $momento) {

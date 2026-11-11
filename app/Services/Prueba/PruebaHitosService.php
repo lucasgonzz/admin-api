@@ -36,8 +36,13 @@ class PruebaHitosService
         'prueba.ingreso'          => ['ingreso',  'Entró a su sistema'],
         'prueba.importo'          => ['importo',  'Importó su información'],
         'prueba.articulo_creado'  => ['articulo', 'Creó un artículo'],
+        /* Misión prueba-e2e-campana-imperio (11/11/2026). Los dos `clip_id` son los MISMOS que este canal ya le
+           daba a un tipo desconocido (los primeros 10 caracteres): un evento que llegó antes de este deploy y uno
+           que llega después caen en el mismo hito, sin duplicarlo. */
+        'prueba.articulo_actualizado' => ['articulo_a', 'Actualizó un artículo'],
         'prueba.venta'            => ['venta',    'Hizo una venta'],
         'prueba.cliente_creado'   => ['cliente',  'Creó un cliente'],
+        'prueba.venta_cc'         => ['venta_cc', 'Vendió en cuenta corriente'],
         'prueba.pago_cc'          => ['pago_cc',  'Cobró una cuenta corriente'],
         'prueba.compra'           => ['compra',   'Registró una compra'],
         'prueba.gasto'            => ['gasto',    'Registró un gasto'],
