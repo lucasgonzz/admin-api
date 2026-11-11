@@ -201,7 +201,7 @@ class PruebaWhatsappService
                             app(Prueba\PruebaCorreoService::class)->enviar($client, $instancia, $asistente);
                         }
                         if ($falta_whatsapp) {
-                            return $this->enviar_plantilla_por_ticket($client, $lead, $plantilla, null, true, $asistente['numero']);
+                            return $this->con_video_de_bienvenida($client, $this->enviar_plantilla_por_ticket($client, $lead, $plantilla, null, true, $asistente['numero']));
                         }
                     }
                 }
@@ -211,10 +211,39 @@ class PruebaWhatsappService
                 return ['estado' => 'ya_enviada', 'detalle' => null];
             }
 
-            return $this->enviar_plantilla_por_ticket($client, $lead, PruebaPlantillasService::BIENVENIDA, null, true);
+            return $this->con_video_de_bienvenida($client, $this->enviar_plantilla_por_ticket($client, $lead, PruebaPlantillasService::BIENVENIDA, null, true));
         } finally {
             $reserva->release();
         }
+    }
+
+    /**
+     * Después de una bienvenida que salió, el video 04 por el mismo ticket si la ventana de 24 h ya está abierta
+     * (misión prueba-ayuda-unificada-en-soporte, 10/11/2026). Con la ventana cerrada no sale nada: lo manda el
+     * primer entrante del lead (`Prueba\PruebaVideoSoporteService`). Nunca cambia el resultado de la bienvenida
+     * ni la tumba: un error del video queda en el log.
+     *
+     * @param Client               $client
+     * @param array<string, mixed> $resultado Lo que devolvió `enviar_plantilla_por_ticket()`.
+     *
+     * @return array<string, mixed> El mismo `$resultado`.
+     */
+    protected function con_video_de_bienvenida(Client $client, array $resultado): array
+    {
+        if (($resultado['estado'] ?? null) !== 'enviado' || empty($resultado['support_ticket_id'])) {
+            return $resultado;
+        }
+
+        try {
+            app(Prueba\PruebaVideoSoporteService::class)->entregar_bienvenida($client, (int) $resultado['support_ticket_id']);
+        } catch (\Throwable $e) {
+            Log::channel('daily')->warning('PruebaWhatsapp: no se pudo mandar el video de bienvenida.', [
+                'client_id' => (int) $client->id,
+                'error'     => $e->getMessage(),
+            ]);
+        }
+
+        return $resultado;
     }
 
     /** Retoma el alta por los dos canales sin disparar los recordatorios diarios. */

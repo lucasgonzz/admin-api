@@ -5,7 +5,11 @@ namespace App\Services\Prueba;
 use App\Models\Client;
 use App\Models\Lead;
 use App\Models\PruebaWhatsappEnvio;
+use App\Models\SupportTicket;
 use App\Models\TrialInstance;
+use App\Services\PruebaDelClienteService;
+use App\Services\PruebaWhatsappService;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -53,6 +57,9 @@ class PruebaVideoSoporteService
         '08' => 'venta',
         '09' => 'agente',
     ];
+
+    /** El video que pone el admin sin Codex. */
+    const CODIGO_BIENVENIDA = '04';
 
     /** Prefijo de `prueba_whatsapp_envios.plantilla` para los videos entregados por el ticket. */
     const PLANTILLA_PREFIJO = 'video_';
@@ -146,5 +153,135 @@ class PruebaVideoSoporteService
         }
 
         return $videos;
+    }
+
+    /**
+     * El texto del video de bienvenida: una línea con el título, la URL y una invitación a preguntar.
+     *
+     * @param array<string, mixed> $video Fila de `PruebaVideoCatalogoService::videos()`.
+     *
+     * @return string
+     */
+    public function texto_del_video(array $video): string
+    {
+        return 'Te dejo el primer video de tu prueba, «' . $video['titulo'] . '»: ' . $video['url']
+            . "\nCualquier duda de cómo se usa algo, preguntanos por acá.";
+    }
+
+    /**
+     * Manda el video 04 por el ticket «Prueba gratuita» del dueño, una sola vez. Lo llaman la bienvenida (si la
+     * ventana ya está abierta), el webhook al recibir un entrante y `claim()` antes de entregarle el ticket a Martín.
+     *
+     * @param Client   $client
+     * @param int|null $ticket_id El ticket de WhatsApp del dueño; null = el abierto del dueño, si hay.
+     *
+     * @return array{estado: string, detalle: string|null}
+     *   `estado`: `enviado`, `ya_entregado`, `en_curso` (otro proceso lo está mandando), `ventana_cerrada`,
+     *   `sin_video`, `sin_ticket`, `no_es_prueba` o `fallido`.
+     */
+    public function entregar_bienvenida(Client $client, ?int $ticket_id = null): array
+    {
+        if (! app(PruebaDelClienteService::class)->es_cliente_en_prueba($client)
+            || (string) $client->estado !== PruebaCicloService::CLIENTE_PRUEBA) {
+            return ['estado' => 'no_es_prueba', 'detalle' => null];
+        }
+
+        if ($this->ya_resuelto($client)) {
+            return ['estado' => 'ya_entregado', 'detalle' => null];
+        }
+
+        $catalogo = app(PruebaVideoCatalogoService::class)->videos();
+        $clave    = 'prueba:' . self::CODIGO_BIENVENIDA;
+        if (! isset($catalogo[$clave])) {
+            return ['estado' => 'sin_video', 'detalle' => 'El video 04 no está configurado con la URL aprobada.'];
+        }
+
+        $ticket = $this->ticket_del_dueno($client, $ticket_id);
+        if ($ticket === null) {
+            return ['estado' => 'sin_ticket', 'detalle' => 'No hay un ticket de WhatsApp abierto del dueño.'];
+        }
+
+        $reserva = Cache::lock('prueba-video-04-' . $client->id, 60);
+        if (! $reserva->get()) {
+            return ['estado' => 'en_curso', 'detalle' => null];
+        }
+
+        try {
+            /* Adentro del candado otra vez: el otro proceso pudo terminar entre la primera mirada y la reserva. */
+            if ($this->ya_resuelto($client)) {
+                return ['estado' => 'ya_entregado', 'detalle' => null];
+            }
+
+            $envio = app(PruebaWhatsappService::class)->mandar_texto_por_ticket($client, $this->texto_del_video($catalogo[$clave]), (int) $ticket->id);
+
+            if ($envio['motivo'] === 'ventana_cerrada') {
+                return ['estado' => 'ventana_cerrada', 'detalle' => null];
+            }
+            if ($envio['support_ticket_id'] === null) {
+                /* No se creó ningún mensaje (sin contacto, ticket que ya no sirve): se reintenta en el próximo entrante. */
+                return ['estado' => 'sin_ticket', 'detalle' => $envio['motivo']];
+            }
+
+            $mensaje_id = \App\Models\SupportMessage::where('support_ticket_id', (int) $envio['support_ticket_id'])
+                ->where('sender_type', 'admin')->where('is_trial_import_notice', true)->orderByDesc('id')->value('id');
+
+            /* Un fallido también corta los reintentos: el mensaje ya quedó en el hilo (sin entregar) y Martín ve
+             * `entregado_at` en null y lo manda él. Reintentar en cada entrante llenaría el hilo de copias. */
+            PruebaWhatsappEnvio::create([
+                'client_id'           => (int) $client->id,
+                'lead_id'             => optional(app(PruebaDelClienteService::class)->lead_del_cliente($client))->id,
+                'plantilla'           => self::plantilla(self::CODIGO_BIENVENIDA),
+                'hito'                => self::HITOS[self::CODIGO_BIENVENIDA],
+                'estado'              => $envio['enviado'] ? PruebaWhatsappEnvio::ESTADO_ENVIADO : PruebaWhatsappEnvio::ESTADO_FALLIDO,
+                'support_ticket_id'   => (int) $envio['support_ticket_id'],
+                'support_message_id'  => $mensaje_id !== null ? (int) $mensaje_id : null,
+                'whatsapp_message_id' => $envio['whatsapp_message_id'],
+                'detalle'             => $envio['enviado'] ? null : mb_substr((string) $envio['motivo'], 0, 1000),
+                'dia'                 => PruebaWhatsappService::hoy(),
+                'enviado_at'          => $envio['enviado'] ? now() : null,
+            ]);
+
+            return ['estado' => $envio['enviado'] ? 'enviado' : 'fallido', 'detalle' => $envio['motivo']];
+        } finally {
+            $reserva->release();
+        }
+    }
+
+    /**
+     * Si el video 04 ya salió (o ya se intentó y falló) para este cliente.
+     *
+     * @param Client $client
+     *
+     * @return bool
+     */
+    protected function ya_resuelto(Client $client): bool
+    {
+        return PruebaWhatsappEnvio::query()
+            ->where('client_id', (int) $client->id)
+            ->where('plantilla', self::plantilla(self::CODIGO_BIENVENIDA))
+            ->whereIn('estado', [PruebaWhatsappEnvio::ESTADO_ENVIADO, PruebaWhatsappEnvio::ESTADO_FALLIDO])
+            ->exists();
+    }
+
+    /**
+     * El ticket de WhatsApp abierto del DUEÑO (sin empleado) donde va el video.
+     *
+     * @param Client   $client
+     * @param int|null $ticket_id
+     *
+     * @return SupportTicket|null
+     */
+    protected function ticket_del_dueno(Client $client, ?int $ticket_id): ?SupportTicket
+    {
+        $query = SupportTicket::where('client_id', (int) $client->id)
+            ->where('source', 'whatsapp')
+            ->whereNull('client_employee_id')
+            ->where('status', SupportTicket::STATUS_ABIERTO);
+
+        if ($ticket_id !== null) {
+            $query->whereKey($ticket_id);
+        }
+
+        return $query->orderByDesc('id')->first();
     }
 }

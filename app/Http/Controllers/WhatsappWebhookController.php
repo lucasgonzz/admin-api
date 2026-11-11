@@ -1942,8 +1942,40 @@ class WhatsappWebhookController extends Controller
             event(new SupportMessageReceived($inbound_message_id));
         }
 
+        if ($ticket_for_ai_dispatch !== null && $inbound_message_id !== null) {
+            $this->al_recibir_entrante_de_prueba($client, $ticket_for_ai_dispatch, $inbound_message_id);
+        }
+
         if ($ticket_for_ai_dispatch !== null) {
             $this->dispatch_ai_suggestion_if_enabled($ticket_for_ai_dispatch);
+        }
+    }
+
+    /**
+     * Lo que dispara el entrante de un negocio en PRUEBA GRATUITA (misión prueba-ayuda-unificada-en-soporte,
+     * 10/11/2026): el video 04 por el ticket si todavía no salió (la ventana recién se abrió con este entrante, y
+     * va antes de que Martín tome el ticket). Para cualquier otro cliente no hace nada. Nunca tumba el webhook.
+     *
+     * @param Client        $client
+     * @param SupportTicket $ticket
+     * @param int           $message_id El entrante recién guardado.
+     *
+     * @return void
+     */
+    private function al_recibir_entrante_de_prueba(Client $client, SupportTicket $ticket, int $message_id): void
+    {
+        if (! \App\Services\Prueba\PruebaCicloService::esta_en_prueba($client) || $ticket->client_employee_id !== null) {
+            return;
+        }
+
+        try {
+            app(\App\Services\Prueba\PruebaVideoSoporteService::class)->entregar_bienvenida($client, (int) $ticket->id);
+        } catch (\Throwable $e) {
+            Log::channel('daily')->warning('WhatsApp webhook: no se pudo mandar el video de bienvenida de la prueba.', [
+                'client_id' => (int) $client->id,
+                'ticket_id' => (int) $ticket->id,
+                'error'     => $e->getMessage(),
+            ]);
         }
     }
 

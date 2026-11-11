@@ -136,6 +136,9 @@ class SupportCodexService
             if ($last === null || (int) $last->id !== (int) $input['expected_message_id']) {
                 $this->fail(409, 'stale_message', 'La conversación cambió; volvé a leerla.');
             }
+            if (! $renewing && $reason === 'inbound' && $ticket->source === 'whatsapp' && $ticket->client_employee_id === null) {
+                $this->entregar_video_de_prueba_antes_de_martin($ticket);
+            }
             $cortesia_de_prueba = ! $renewing && ! $recover_dispatch && $reason === 'inbound'
                 && ! empty($input['supports_trial_import_quiet']) && $this->es_cortesia_aislada($case, $last);
             $token = $renewing ? $token : Str::random(64);
@@ -183,6 +186,43 @@ class SupportCodexService
                 'ticket' => $context,
             ];
         });
+    }
+
+    /**
+     * El video 04 de la prueba gratuita, ANTES de entregarle el ticket a Martín (misión
+     * prueba-ayuda-unificada-en-soporte, 10/11/2026). Lo normal es que ya lo haya mandado el webhook al recibir el
+     * entrante; esto cubre la carrera en que Martín toma el ticket en el medio. Así el mensaje ya está en el
+     * historial y `prueba.videos[04].entregado_at` en el contexto que se devuelve, y Martín no lo repite.
+     *
+     * Si otro proceso lo está mandando justo ahora, la toma se rechaza con `lease_busy` (Martín reintenta): sin
+     * eso Martín leería un contexto sin el video y podría mandarlo él también. Cualquier otro resultado (ventana
+     * cerrada, sin video configurado, ya entregado) sigue de largo, y un error nunca frena la toma.
+     *
+     * @param SupportTicket $ticket
+     *
+     * @return void
+     */
+    private function entregar_video_de_prueba_antes_de_martin(SupportTicket $ticket): void
+    {
+        $ticket->loadMissing('client');
+        if ($ticket->client === null || ! app(PruebaDelClienteService::class)->es_cliente_en_prueba($ticket->client)) {
+            return;
+        }
+
+        try {
+            $resultado = app(\App\Services\Prueba\PruebaVideoSoporteService::class)->entregar_bienvenida($ticket->client, (int) $ticket->id);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::channel('daily')->warning('SupportCodex: no se pudo mandar el video de bienvenida de la prueba antes de la toma.', [
+                'ticket_id' => (int) $ticket->id,
+                'error'     => $e->getMessage(),
+            ]);
+
+            return;
+        }
+
+        if ($resultado['estado'] === 'en_curso') {
+            $this->fail(423, 'lease_busy', 'Se está mandando el video de bienvenida de la prueba; volvé a intentar.');
+        }
     }
 
     private function es_cortesia_aislada(SupportCodexCase $case, SupportMessage $last): bool
