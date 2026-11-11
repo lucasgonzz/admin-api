@@ -13,6 +13,8 @@ use Illuminate\Support\Facades\Schema;
  *
  * - `support_codex_activities`: una fila = una acción. `dedupe_hash` (sha256 de run_id|command|occurred_at|summary) es
  *   lo que hace idempotente la ingesta: el monitor reintenta lo que no pudo mandar y no se duplica.
+ * - `kind`: `escritura` es SOLO lo que se escribe en el sistema del cliente; lo interno del admin (ficha, título, notas,
+ *   pasos, misiones, pausas, tour) va como `registro`.
  * - `support_codex_plans`: un plan por ejecución (`run_id` único), que el monitor reemplaza entero (upsert).
  *
  * Aditiva y reversible: dos tablas nuevas, nada existente se toca.
@@ -31,7 +33,7 @@ class CreateSupportCodexActivitiesAndPlansTables extends Migration
             /* Derivado del ticket o del seguimiento al guardar, nunca del pedido. */
             $table->unsignedBigInteger('client_id')->nullable();
             $table->string('run_id', 64);
-            /* lectura | escritura | envio | consulta | plan | error */
+            /* lectura | escritura (sistema del cliente) | registro (interno del admin) | envio | consulta | plan | error */
             $table->string('kind', 20);
             /* El subcomando del monitor: sql, logs, diagnostico, ficha, responder, paso, mision... */
             $table->string('command', 40);
@@ -43,11 +45,12 @@ class CreateSupportCodexActivitiesAndPlansTables extends Migration
             $table->char('dedupe_hash', 64);
             $table->timestamps();
 
-            /* Cubre el listado de la bandeja (los dos contadores por ticket, sin tocar la tabla) y el panel. */
-            $table->index(['support_ticket_id', 'kind', 'ok'], 'sca_ticket_kind_ok_idx');
+            /* Los dos contadores de la bandeja, sin leer la tabla: qué run_id tocaron el ticket (sca_ticket_run_idx) y
+               cuántas acciones y escrituras tiene cada uno (sca_run_kind_ok_idx). También los usa el panel. */
+            $table->index(['support_ticket_id', 'run_id'], 'sca_ticket_run_idx');
+            $table->index(['run_id', 'kind', 'ok'], 'sca_run_kind_ok_idx');
             $table->index('implementation_followup_id', 'sca_followup_idx');
             $table->index('client_id', 'sca_client_idx');
-            $table->index('run_id', 'sca_run_idx');
             $table->unique('dedupe_hash', 'sca_dedupe_unique');
         });
 
