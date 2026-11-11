@@ -69,11 +69,13 @@ class DemoChatAiService
      * soporte. Lanza si el modelo falla o no tiene respaldo: quien llama no manda nada.
      *
      * @param array<int, array{rol: string, contenido: string}> $turnos Los últimos mensajes del ticket (`lead` o `soporte`).
+     * @param string $canal `whatsapp` (el ticket de WhatsApp) o `sistema` (la conversación de Soporte del sistema).
      *
      * @return array{contenido: string, videos: array<int, string>}
      */
-    public function responder_soporte_de_prueba(array $turnos): array
+    public function responder_soporte_de_prueba(array $turnos, string $canal = 'whatsapp'): array
     {
+        $por_donde = $canal === 'sistema' ? 'en el chat de Soporte dentro del sistema' : 'por WhatsApp';
         $clave = trim((string) config('services.deepseek.api_key'));
         if ($clave === '') {
             throw new \RuntimeException('El respaldo de soporte necesita DEEPSEEK_API_KEY configurada.');
@@ -89,7 +91,7 @@ class DemoChatAiService
             return ['clave' => $video['clave'], 'titulo' => $video['titulo'], 'descripcion' => $video['descripcion']];
         }, $permitidos));
         $system = 'Sos la respuesta automática del soporte de ComercioCity para un negocio en prueba gratuita, mientras el equipo no está disponible. '
-            . 'Respondé por WhatsApp en español rioplatense, en dos a cuatro frases, la duda de uso del sistema que hizo la persona. '
+            . 'Respondé ' . $por_donde . ' en español rioplatense, en dos a cuatro frases, la duda de uso del sistema que hizo la persona. '
             . 'Para explicar una operación, usá leer_manual y limitate a lo documentado, con los pasos concretos. '
             . 'Si la pregunta no se responde con el manual, decí que el equipo de soporte la va a ver apenas vuelva. '
             . 'No prometas plazos, precios, planes, contrataciones ni cambios en el negocio; no digas que revisaste su sistema ni que ejecutaste nada. '

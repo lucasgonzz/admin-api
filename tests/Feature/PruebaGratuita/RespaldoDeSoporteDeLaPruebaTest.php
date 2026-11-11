@@ -43,6 +43,8 @@ class RespaldoDeSoporteDeLaPruebaTest extends BaseDeLaPrueba
         /* 12:00 de Argentina: la vigilancia mide (después de las 07:00). */
         Carbon::setTestNow(Carbon::parse('2026-11-10 12:00:00', 'America/Argentina/Buenos_Aires'));
         AdminSetting::set(SupportCodexSettings::KEY_ENABLED, '1');
+        AdminSetting::set(SupportCodexSettings::KEY_ACTIVATED_AT, now()->subHour()->toDateTimeString());
+        AdminSetting::set(SupportCodexSettings::KEY_ACTIVATED_AFTER_ID, 0);
         AdminSetting::where('key', SupportCodexHealthService::KEY)->delete();
         foreach (array_keys(PruebaVideoCatalogoService::PIEZAS) as $codigo) {
             AdminSetting::where('key', PruebaVideoCatalogoService::key($codigo))->delete();
@@ -121,6 +123,8 @@ class RespaldoDeSoporteDeLaPruebaTest extends BaseDeLaPrueba
             'support_ticket_id' => $ticket->id, 'sender_type' => 'user', 'kind' => 'text', 'body' => $texto,
             'delivered_at' => now(), 'whatsapp_message_id' => 'wamid.entrante.' . Str::random(6),
         ]);
+        $ticket->last_client_message_at = now();
+        $ticket->save();
 
         return [$ticket, $entrante];
     }
@@ -185,7 +189,9 @@ class RespaldoDeSoporteDeLaPruebaTest extends BaseDeLaPrueba
         [$ticket, $entrante] = $this->ticket_con_pregunta();
 
         AdminSetting::set(SupportCodexSettings::KEY_ENABLED, '0');
-        $this->assertSame('martin_sano', $this->responder($ticket, $entrante)['estado'], 'Apagado a mano es una pausa, no una caída.');
+        /* Apagado a mano es una pausa, no una caída: el ticket sale del circuito de Codex y el respaldo se calla. */
+        $this->assertSame('no_gestionado', $this->responder($ticket, $entrante)['estado']);
+        $this->assertFalse(app(SupportCodexHealthService::class)->en_falla());
         $this->assertSame([], $this->espia->textos);
     }
 
@@ -199,6 +205,7 @@ class RespaldoDeSoporteDeLaPruebaTest extends BaseDeLaPrueba
     {
         Mail::fake();
         Carbon::setTestNow(Carbon::parse('2026-11-10 02:00:00', 'America/Argentina/Buenos_Aires'));
+        AdminSetting::set(SupportCodexSettings::KEY_ACTIVATED_AT, now()->subHour()->toDateTimeString());
         $this->martin_caido();
         $this->red();
         [$ticket, $entrante] = $this->ticket_con_pregunta();
@@ -277,6 +284,11 @@ class RespaldoDeSoporteDeLaPruebaTest extends BaseDeLaPrueba
         $this->assertSame(PruebaWhatsappEnvio::ESTADO_ENVIADO,
             PruebaWhatsappEnvio::where('plantilla', PruebaRespaldoSoporteService::PLANTILLA)->sole()->estado);
         $this->assertSame('ya_respondido', $this->responder($ticket, $entrante)['estado']);
+        Http::assertSent(function ($request) {
+            return strpos($request->url(), 'deepseek') !== false
+                && strpos((string) $request['system'], 'en el chat de Soporte dentro del sistema') !== false
+                && strpos((string) $request['system'], 'por WhatsApp') === false;
+        });
     }
 
     /** @test */
@@ -420,7 +432,7 @@ class RespaldoDeSoporteDeLaPruebaTest extends BaseDeLaPrueba
     }
 
     /** @test */
-    public function si_ya_contestaron_o_martin_tiene_el_ticket_no_responde(): void
+    public function con_martin_atendiendo_el_ticket_no_responde(): void
     {
         $this->martin_caido();
         $this->red();
@@ -430,11 +442,91 @@ class RespaldoDeSoporteDeLaPruebaTest extends BaseDeLaPrueba
         $caso->lease_expires_at = now()->addMinutes(5);
         $caso->save();
         $this->assertSame('martin_atendiendo', $this->responder($ticket, $entrante)['estado']);
+        $this->assertSame([], $this->espia->textos);
+    }
 
-        $caso->lease_expires_at = null;
-        $caso->save();
+    /** @test */
+    public function si_ya_contestaron_no_responde(): void
+    {
+        $this->martin_caido();
+        $this->red();
+        [$ticket, $entrante] = $this->ticket_con_pregunta();
+
         SupportMessage::create(['support_ticket_id' => $ticket->id, 'sender_type' => 'admin', 'kind' => 'text', 'body' => 'Te ayudo yo']);
         $this->assertSame('ya_respondido', $this->responder($ticket, $entrante)['estado']);
+        $this->assertSame([], $this->espia->textos);
+    }
+
+    /** @test */
+    public function si_contestan_mientras_el_modelo_piensa_se_descarta_la_respuesta(): void
+    {
+        $this->martin_caido();
+        [$ticket, $entrante] = $this->ticket_con_pregunta();
+        AdminSetting::set(PruebaVideoCatalogoService::key('06'), PruebaVideoCatalogoService::URLS_APROBADAS['06']);
+        $this->fakear_http([
+            '*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response(['pendientes' => [], 'en_proceso' => false], 200),
+            'api.deepseek.com/*' => function () use ($ticket) {
+                /* Mientras el modelo responde, una persona contesta en el ticket. */
+                SupportMessage::create(['support_ticket_id' => $ticket->id, 'sender_type' => 'admin', 'kind' => 'text', 'body' => 'Ya te respondo yo']);
+
+                return Http::response(['content' => [['type' => 'text', 'text' => json_encode([
+                    'contenido' => 'Entrá a Artículos y tocá Nuevo.', 'fuentes' => ['prueba'], 'videos' => [],
+                ])]]], 200);
+            },
+        ]);
+
+        $this->assertSame('ya_respondido', $this->responder($ticket, $entrante)['estado']);
+        $this->assertSame([], $this->espia->textos);
+        $this->assertSame(0, PruebaWhatsappEnvio::where('plantilla', PruebaRespaldoSoporteService::PLANTILLA)->count());
+    }
+
+    /** @test */
+    public function donde_martin_se_calla_el_respaldo_tambien(): void
+    {
+        $this->martin_caido();
+        $this->red();
+
+        [$apagado, $a] = $this->ticket_con_pregunta();
+        SupportTicket::whereKey($apagado->id)->update(['claude_auto_reply' => false]);
+        $this->assertSame('respuesta_automatica_apagada', $this->responder($apagado, $a)['estado']);
+
+        [$revision, $b] = $this->ticket_con_pregunta();
+        SupportCodexCase::create(['support_ticket_id' => $revision->id, 'state' => 'manual_review', 'review_reason' => 'Lucas retomó la atención desde el admin.']);
+        $this->assertSame('revision_humana', $this->responder($revision, $b)['estado']);
+
+        [$mision, $c] = $this->ticket_con_pregunta();
+        SupportCodexCase::create(['support_ticket_id' => $mision->id, 'state' => 'mission_pending', 'mission' => 'Arreglar el reporte de ventas']);
+        $this->assertSame('mision_en_curso', $this->responder($mision, $c)['estado']);
+
+        [$operacion, $d] = $this->ticket_con_pregunta();
+        \App\Models\SupportCodexOperation::create([
+            'support_ticket_id' => $operacion->id, 'expected_message_id' => $d->id, 'operation_id' => 'codex-' . $d->id,
+            'request_hash' => str_repeat('a', 64), 'status' => 'pending', 'action' => 'responder',
+        ]);
+        $this->assertSame('operacion_en_curso', $this->responder($operacion, $d)['estado']);
+
+        AdminSetting::set(SupportCodexSettings::KEY_ACTIVATED_AT, now()->addHour()->toDateTimeString());
+        [$fuera, $e] = $this->ticket_con_pregunta();
+        $this->assertSame('no_gestionado', $this->responder($fuera, $e)['estado']);
+
+        $this->assertSame([], $this->espia->textos);
+    }
+
+    /** @test */
+    public function el_tope_diario_cuenta_tambien_los_intentos_fallidos(): void
+    {
+        $this->martin_caido();
+        $this->red();
+        [$ticket, $entrante] = $this->ticket_con_pregunta();
+        foreach ([PruebaWhatsappEnvio::ESTADO_FALLIDO, PruebaWhatsappEnvio::ESTADO_FALLIDO, PruebaWhatsappEnvio::ESTADO_ENVIADO] as $n => $estado) {
+            PruebaWhatsappEnvio::create([
+                'client_id' => $ticket->client_id, 'plantilla' => PruebaRespaldoSoporteService::PLANTILLA,
+                'estado' => $estado, 'support_ticket_id' => $ticket->id,
+                'detalle' => 'entrante:' . ($entrante->id - $n - 1), 'dia' => \App\Services\PruebaWhatsappService::hoy(),
+            ]);
+        }
+
+        $this->assertSame('tope_diario', $this->responder($ticket, $entrante)['estado']);
         $this->assertSame([], $this->espia->textos);
     }
 

@@ -12,6 +12,7 @@ use App\Services\DemoChatAiService;
 use App\Services\PruebaImportacionService;
 use App\Services\PruebaWhatsappService;
 use App\Services\SupportClientSyncService;
+use App\Services\SupportCodexService;
 use App\Services\SupportCodexHealthService;
 use App\Services\WhatsappSessionWindowService;
 use Illuminate\Support\Facades\Cache;
@@ -31,7 +32,9 @@ use Illuminate\Support\Facades\Log;
  *  - el ticket sigue abierto, de WhatsApp, del dueño, y el cliente sigue en prueba;
  *  - el entrante sigue siendo el último mensaje real del ticket (nadie contestó y no llegó otro, que tiene su
  *    propio job) y Martín no tiene el ticket tomado;
- *  - Martín está caído (si está sano, contesta él);
+ *  - Martín está caído (si está sano, contesta él), y el ticket no está donde Martín también se calla
+ *    (`SupportCodexService::motivo_de_silencio_para_respaldo()`: respuesta automática apagada, revisión humana,
+ *    misión u operación en curso, fuera del circuito de Codex);
  *  - como mucho {@see self::TOPE_DIARIO} respuestas automáticas por ticket por día (hora de Argentina);
  *  - la ventana de 24 h abierta (nunca texto libre con la ventana cerrada), solo en WhatsApp;
  *  - sin importación en curso o por revisar en el ticket, sin adjuntos ni mensajes que no sean texto en el turno
@@ -146,7 +149,7 @@ class PruebaRespaldoSoporteService
             }
 
             try {
-                $respuesta = app(DemoChatAiService::class)->responder_soporte_de_prueba($this->historial($ticket));
+                $respuesta = app(DemoChatAiService::class)->responder_soporte_de_prueba($this->historial($ticket), $ticket->source === 'erp' ? 'sistema' : 'whatsapp');
             } catch (\Throwable $e) {
                 Log::channel('daily')->warning('PruebaRespaldoSoporte: el modelo no respondió; no se manda nada.', [
                     'ticket_id' => (int) $ticket->id,
@@ -195,6 +198,13 @@ class PruebaRespaldoSoporteService
             return 'ya_respondido';
         }
 
+        /* Donde Martín se calla, el respaldo también: respuesta automática apagada por Lucas, revisión humana,
+         * misión u operación en curso, ticket fuera del circuito de Codex. La decisión es la de SupportCodexService. */
+        $silencio = app(SupportCodexService::class)->motivo_de_silencio_para_respaldo($ticket);
+        if ($silencio !== null) {
+            return $silencio;
+        }
+
         $caso = SupportCodexCase::where('support_ticket_id', (int) $ticket->id)->first();
         if ($caso !== null && $caso->lease_expires_at !== null && $caso->lease_expires_at->isFuture()) {
             return 'martin_atendiendo';
@@ -204,8 +214,10 @@ class PruebaRespaldoSoporteService
             return 'martin_sano';
         }
 
+        /* Cuentan TODOS los intentos del día, también los fallidos: una sincronización que falla igual deja la
+         * «Respuesta automática:» en el hilo, y sin esto no habría tope. */
         $hoy = PruebaWhatsappEnvio::where('support_ticket_id', (int) $ticket->id)->where('plantilla', self::PLANTILLA)
-            ->where('estado', PruebaWhatsappEnvio::ESTADO_ENVIADO)->where('dia', PruebaWhatsappService::hoy())->count();
+            ->where('dia', PruebaWhatsappService::hoy())->count();
         if ($hoy >= self::TOPE_DIARIO) {
             return 'tope_diario';
         }

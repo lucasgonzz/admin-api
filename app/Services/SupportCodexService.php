@@ -1822,10 +1822,59 @@ class SupportCodexService
             && $this->pending_reason_for($ticket, $case, $mensaje) === 'inbound';
     }
 
+    /**
+     * Por qué el RESPALDO automático de la prueba gratuita no puede contestar este ticket aunque Martín esté caído
+     * (misión prueba-ayuda-unificada-en-soporte, 10/11/2026), o null si puede. Reusa la misma decisión con la que
+     * Martín se calla ({@see self::callado_para_codex()}, la primera guarda de `pending_reason_for()`) y suma lo que
+     * en Martín es una conversación a leer pero en una respuesta automática es una persona a cargo: la revisión
+     * humana pedida y una misión en curso.
+     *
+     * @param SupportTicket $ticket
+     *
+     * @return string|null `no_gestionado`, `respuesta_automatica_apagada`, `cerrado`, `operacion_en_curso`,
+     *                     `revision_humana` o `mision_en_curso`.
+     */
+    public function motivo_de_silencio_para_respaldo(SupportTicket $ticket): ?string
+    {
+        if (! SupportCodexSettings::manages($ticket)) {
+            return 'no_gestionado';
+        }
+        $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->first();
+        if ($this->callado_para_codex($ticket, $case)) {
+            if (! $ticket->claude_auto_reply) {
+                return 'respuesta_automatica_apagada';
+            }
+
+            return $this->has_unfinished_operation($ticket->id) ? 'operacion_en_curso' : 'cerrado';
+        }
+        if ($case !== null && $case->state === 'manual_review') {
+            return 'revision_humana';
+        }
+        if ($case !== null && ($case->state === 'mission_pending' || trim((string) $case->mission) !== '')) {
+            return 'mision_en_curso';
+        }
+
+        return null;
+    }
+
+    /**
+     * La guarda con la que Martín no atiende un ticket: cerrado, caso cerrado, respuesta automática apagada u
+     * operación sin terminar. Extraída tal cual de `pending_reason_for()`.
+     *
+     * @param SupportTicket          $ticket
+     * @param SupportCodexCase|null  $case
+     *
+     * @return bool
+     */
+    private function callado_para_codex(SupportTicket $ticket, ?SupportCodexCase $case): bool
+    {
+        return $ticket->status !== 'open' || ($case !== null && $case->state === 'closed')
+            || ! $ticket->claude_auto_reply || $this->has_unfinished_operation($ticket->id);
+    }
+
     private function pending_reason_for(SupportTicket $ticket, ?SupportCodexCase $case, SupportMessage $last, bool $supports_upgrade_agreement = false): ?string
     {
-        if ($ticket->status !== 'open' || ($case !== null && $case->state === 'closed')
-            || ! $ticket->claude_auto_reply || $this->has_unfinished_operation($ticket->id)) {
+        if ($this->callado_para_codex($ticket, $case)) {
             return null;
         }
         if ($case !== null && $case->state === 'manual_review') {
