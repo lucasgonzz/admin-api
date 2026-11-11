@@ -2415,6 +2415,7 @@ return [
             ],
             'parametros'   => [
                 ['nombre' => 'lease_token', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|max:128', 'que_es' => 'El token vigente, para renovar. Sin él, reserva nueva.'],
+                ['nombre' => 'sin_contexto', 'obligatorio' => false, 'validacion' => 'sometimes|boolean', 'que_es' => 'Con lease_token: renovación liviana, devuelve {lease_token, lease_expires_at, run_id} sin armar el contexto.'],
             ],
         ],
         'POST api/claude/support-codex/implementation-followups/{id}/milestones' => [
@@ -2440,12 +2441,14 @@ return [
                 'Reserva vigente del seguimiento: si no, 409 reservado. Seguimiento que ya no está activo: 409 no_vencido. Kill switch apagado: 409 deshabilitado.',
                 '409 cliente_escribio: el cliente escribió después del claim (se suelta la reserva y se reinicia el reloj; el monitor descarta y no reintenta).',
                 '423 martin_ocupado: Martín tiene reservado el ticket destino o hay un mensaje del cliente esperándolo. 422: cliente_inactivo, sin_implementacion, sin_etapa, sin_contacto, sin_admin, respuesta_al_hilo, texto_largo_para_plantilla, y validación (body 1..550).',
-                'unknown no se reintenta: el seguimiento se corre +2 hábiles y se le avisa a Lucas que mire el ticket. failed se corre una hora.',
+                'unknown no se reintenta: el seguimiento se corre +2 hábiles y se le avisa a Lucas que mire el ticket (el monitor lo bloquea localmente hasta 3 días hábiles). failed suelta la reserva y se corre una hora; la segunda falla seguida (failed o release con error, sin enviado, pausa, omisión ni contacto del cliente en el medio) lo corre +2 hábiles con un aviso a Lucas.',
+                'Fuera de lun–vie 09:30–19:00 de Argentina: 409 fuera_de_horario sin mandar ni soltar la reserva.',
             ],
             'parametros'   => [
                 ['nombre' => 'lease_token', 'obligatorio' => true, 'validacion' => 'required|string|max:128', 'que_es' => 'La reserva del claim.'],
                 ['nombre' => 'operation_id', 'obligatorio' => true, 'validacion' => 'required|uuid', 'que_es' => 'Clave idempotente del envío (la fija el monitor).'],
                 ['nombre' => 'body', 'obligatorio' => true, 'validacion' => 'required|string|min:1|max:550 (no vacío)', 'que_es' => 'El mensaje, un solo párrafo.'],
+                ['nombre' => 'aviso_a_lucas', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|min:1|max:500', 'que_es' => 'Algo pendiente del equipo que Martín le pasa a Lucas: después de asentar el resultado (cualquiera) le llega un push con este texto y el cliente.'],
             ],
         ],
         'POST api/claude/support-codex/implementation-followups/{id}/postpone' => [
