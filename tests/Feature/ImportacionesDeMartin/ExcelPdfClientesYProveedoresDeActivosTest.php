@@ -371,6 +371,46 @@ class ExcelPdfClientesYProveedoresDeActivosTest extends BaseDeImportacionesDeMar
         $this->assertDatabaseMissing('support_codex_operations', ['operation_id' => 'cerrar-con-contactos']);
     }
 
+    /**
+     * @test
+     * @dataProvider contactos_en_el_contexto
+     */
+    public function el_contexto_trae_las_corridas_de_contactos_abiertas_y_vacio_con_una_instancia_vieja(array $cuerpo, array $esperadas): void
+    {
+        $this->ticket->update(['importacion_soporte_iniciada_at' => now()]);
+        $this->fakear_http(['*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response($cuerpo + ['automatizar_soporte' => true], 200)]);
+
+        $this->getJson($this->ruta(''), $this->headers_de_claude())->assertOk()
+            ->assertJsonPath('ticket.importaciones_de_contactos', $esperadas);
+    }
+
+    public function contactos_en_el_contexto(): array
+    {
+        $abierta = ['corrida_id' => self::CORRIDA, 'modelo' => 'provider', 'estado' => 'confirmacion', 'revision' => 2, 'codigo_requerido' => true];
+
+        return [
+            'con la clave' => [
+                ['pendientes' => [], 'en_proceso' => true, 'importaciones_de_contactos' => [$abierta + ['codigo_confirmacion' => 'ABCD1234']]],
+                [$abierta],
+            ],
+            'instancia vieja sin la clave' => [['pendientes' => [], 'en_proceso' => false], []],
+        ];
+    }
+
+    /** @test */
+    public function el_contexto_no_trae_corridas_de_contactos_si_el_negocio_no_es_activo(): void
+    {
+        $this->client->estado = PruebaCicloService::CLIENTE_PRUEBA;
+        $this->client->save();
+        $this->ticket->update(['importacion_soporte_iniciada_at' => now()]);
+        $this->fakear_http(['*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response([
+            'automatizar_soporte' => true, 'pendientes' => [], 'en_proceso' => true,
+            'importaciones_de_contactos' => [['corrida_id' => self::CORRIDA, 'modelo' => 'client', 'estado' => 'analizar', 'revision' => 0, 'codigo_requerido' => false]],
+        ], 200)]);
+
+        $this->getJson($this->ruta(''), $this->headers_de_claude())->assertOk()->assertJsonPath('ticket.importaciones_de_contactos', []);
+    }
+
     /** @test */
     public function el_estado_de_la_corrida_se_lee_con_la_reserva(): void
     {

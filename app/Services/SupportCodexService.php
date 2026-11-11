@@ -365,6 +365,9 @@ class SupportCodexService
             'importaciones_prueba_en_proceso' => $soporte_activo ? false : $importaciones['en_proceso'],
             'importaciones_soporte_pendientes' => $soporte_activo ? $importaciones['pendientes'] : [],
             'importaciones_soporte_en_proceso' => $soporte_activo ? $importaciones['en_proceso'] : false,
+            // Las corridas de clientes o proveedores abiertas del ticket (misión importaciones-de-martin, 11/11/2026):
+            // [{corrida_id, modelo, estado, revision, codigo_requerido}]; vacía con una instancia anterior.
+            'importaciones_de_contactos' => $soporte_activo ? ($importaciones['importaciones_de_contactos'] ?? []) : [],
             /* La implementación del sistema y de la tienda (abierta, o cerrada hace ≤ 30 días), para que
              * Martín siga la conversación de la implementación donde la dejó Lucas. null = no tiene. */
             'implementation' => app(SupportImplementationContextService::class)->bloque_para_el_ticket($ticket),
