@@ -359,6 +359,8 @@ class SupportTicketController extends BaseController
             // El campo `assigned_admin_id` del request, si un SPA viejo todavía lo manda, se ignora.
             'assigned_admin_id' => null,
             'name' => $request->input('name'),
+            // Título escrito por Lucas en el alta (misión ficha-del-cliente): Martín no lo pisa.
+            'name_source' => trim((string) $request->input('name')) !== '' ? 'lucas' : null,
             'status' => 'open',
             'opened_at' => now(),
         ]);
@@ -1153,6 +1155,21 @@ class SupportTicketController extends BaseController
                 $ticket->name_source = trim((string) $nombre_nuevo) === '' ? null : 'lucas';
             }
             $ticket->name = $nombre_nuevo;
+        }
+        /* El resumen del ticket (misión cruzada ficha-del-cliente, 11/11/2026): lo escribe Martín con
+           POST claude/support-codex/tickets/{id}/title y Lucas lo corrige desde la bandeja (sin el detector de datos
+           sensibles: lo escribe él). Vacío = sin resumen. */
+        if ($request->has('summary')) {
+            $resumen = trim((string) $request->input('summary'));
+            if (mb_strlen($resumen) > 600) {
+                return response()->json(['message' => 'El resumen supera los 600 caracteres.', 'errors' => ['summary' => ['El resumen supera los 600 caracteres.']]], 422);
+            }
+            $resumen = $resumen === '' ? null : $resumen;
+            // Solo si cambió: la SPA puede reenviar el de siempre al cambiar otra cosa.
+            if ($resumen !== $ticket->summary) {
+                $ticket->summary = $resumen;
+                $ticket->summary_updated_at = now();
+            }
         }
         // Cambia estado operativo del ticket.
         if ($request->has('status')) {

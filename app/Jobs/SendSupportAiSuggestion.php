@@ -280,6 +280,8 @@ class SendSupportAiSuggestion implements ShouldQueue
         $suggested_title = trim((string) ($result['suggested_title'] ?? ''));
         if ($suggested_title !== '' && trim((string) ($ticket->name ?? '')) === '') {
             $ticket->name = $suggested_title;
+            // Título automático (misión ficha-del-cliente): Martín lo puede reemplazar.
+            $ticket->name_source = 'sistema';
             $ticket->save();
         }
 

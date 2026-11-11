@@ -457,7 +457,7 @@ class PruebaWhatsappService
 
         $primer_nombre = $this->primer_nombre($client, $lead, (string) $contacto['label']);
 
-        $resuelto = $this->opener->resolve_or_create_ticket($client, (string) $contacto['phone'], $admin, 'Prueba gratuita');
+        $resuelto = $this->opener->resolve_or_create_ticket($client, (string) $contacto['phone'], $admin, 'Prueba gratuita', 'sistema');
         $ticket   = $resuelto['ticket'];
 
         /* @var FollowupTemplate $fila */
@@ -572,7 +572,7 @@ class PruebaWhatsappService
         }
 
         if ($ticket === null) {
-            $ticket = $this->opener->resolve_or_create_ticket($client, (string) $contacto['phone'], $admin, 'Prueba gratuita')['ticket'];
+            $ticket = $this->opener->resolve_or_create_ticket($client, (string) $contacto['phone'], $admin, 'Prueba gratuita', 'sistema')['ticket'];
         }
 
         $mensaje = SupportMessage::create([

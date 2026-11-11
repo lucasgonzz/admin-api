@@ -304,6 +304,8 @@ class SupportCodexService
             'id' => (int) $ticket->id,
             'status' => $ticket->status,
             'name' => $ticket->es_erp_sin_identidad_verificada() ? null : $ticket->name,
+            // Quién puso el título (misión ficha-del-cliente): null | martin | sistema (Martín lo puede reemplazar) | lucas | cliente.
+            'name_source' => $ticket->es_erp_sin_identidad_verificada() ? null : $ticket->name_source,
             'source' => $ticket->source,
             'canal' => $ticket->source === 'erp' ? 'sistema' : 'whatsapp',
             'client' => [

@@ -100,12 +100,14 @@ class SupportWhatsappOpenerService
      * @param string $operator_text  Texto que escribió el operador.
      * @param Admin  $admin          Operador que abre la conversación.
      * @param string $ticket_name    Título opcional del ticket.
+     * @param string|null $name_source Quién puso el título (misión ficha-del-cliente): `lucas` por defecto si hay
+     *                                 título (lo escribió el operador); `sistema` para un título automático.
      *
      * @return array{ticket: SupportTicket, message: SupportMessage, reused: bool, whatsapp: array<string, mixed>}
      *
      * @throws \InvalidArgumentException Si el teléfono no pertenece al cliente.
      */
-    public function open(Client $client, string $phone, string $operator_text, Admin $admin, string $ticket_name = ''): array
+    public function open(Client $client, string $phone, string $operator_text, Admin $admin, string $ticket_name = '', ?string $name_source = null): array
     {
         // Se persiste el texto CRUDO del operador. El body solo pasa a ser el texto completo
         // de la plantilla cuando el envío se confirma: si se guardara envuelto de entrada, un
@@ -124,6 +126,7 @@ class SupportWhatsappOpenerService
             $client,
             $phone,
             $ticket_name,
+            $name_source,
             $admin,
             $operator_text,
             &$ticket,
@@ -132,7 +135,7 @@ class SupportWhatsappOpenerService
             &$normalized_phone,
             &$contact_name
         ) {
-            $resuelto = $this->resolve_or_create_ticket($client, $phone, $admin, $ticket_name);
+            $resuelto = $this->resolve_or_create_ticket($client, $phone, $admin, $ticket_name, $name_source);
 
             $ticket = $resuelto['ticket'];
             $reused = $resuelto['reused'];
@@ -212,13 +215,16 @@ class SupportWhatsappOpenerService
      * @param string $phone       Teléfono elegido por el operador, en cualquier formato.
      * @param Admin  $admin       Operador que abre la conversación.
      * @param string $ticket_name Título opcional del ticket.
+     * @param string|null $name_source Quién puso el título: `lucas` por defecto si hay título; `sistema` si es
+     *                                 automático (misión ficha-del-cliente, 11/11/2026: Martín no pisa uno de Lucas).
      *
      * @return array{ticket: SupportTicket, reused: bool, contact_name: string, phone: string, client_employee_id: int|null}
      *
      * @throws \InvalidArgumentException Si el teléfono no pertenece al cliente.
      */
-    public function resolve_or_create_ticket(Client $client, string $phone, Admin $admin, string $ticket_name = ''): array
+    public function resolve_or_create_ticket(Client $client, string $phone, Admin $admin, string $ticket_name = '', ?string $name_source = null): array
     {
+        $name_source = trim($ticket_name) === '' ? null : ($name_source === null ? 'lucas' : $name_source);
         $contact = $this->phone_directory->resolve_for_client($client, $phone);
         if ($contact === null) {
             throw new \InvalidArgumentException(
@@ -247,6 +253,7 @@ class SupportWhatsappOpenerService
             $client_employee_id,
             $contact_name,
             $ticket_name,
+            $name_source,
             $admin,
             &$ticket,
             &$reused
@@ -268,6 +275,7 @@ class SupportWhatsappOpenerService
                     // `sender_admin_id` del primer mensaje que sale.
                     'assigned_admin_id'  => null,
                     'name'               => trim($ticket_name) !== '' ? trim($ticket_name) : null,
+                    'name_source'        => $name_source,
                     'status'             => 'open',
                     'source'             => 'whatsapp',
                     'whatsapp_phone'     => $normalized_phone,
@@ -275,6 +283,7 @@ class SupportWhatsappOpenerService
                 ]);
             } elseif (trim($ticket_name) !== '' && empty($ticket->name)) {
                 $ticket->name = trim($ticket_name);
+                $ticket->name_source = $name_source;
                 $ticket->save();
             }
         });

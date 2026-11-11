@@ -106,6 +106,8 @@ class InboundSupportMessageController extends Controller
                     'client_user_id' => (int) $request->input('client_user_id'),
                     'assigned_admin_id' => null,
                     'name' => $request->input('ticket_name'),
+                    // El asunto que escribió el cliente en su sistema (misión ficha-del-cliente): Martín no lo pisa.
+                    'name_source' => trim((string) $request->input('ticket_name')) !== '' ? 'cliente' : null,
                     'status' => $request->input('ticket_status', 'open'),
                     'source' => 'erp',
                     'opened_at' => now(),
