@@ -481,6 +481,89 @@ class ExcelPdfClientesYProveedoresDeActivosTest extends BaseDeImportacionesDeMar
         $this->assertSame('open', $this->ticket->fresh()->status);
     }
 
+    /** La corrida en un estado dado, con o sin `confirmada_at`, como la devuelve el GET de empresa. */
+    private function fakear_la_corrida_en(string $estado, bool $confirmada): void
+    {
+        $corrida = $this->corrida($estado);
+        $corrida['corrida']['confirmada_at'] = $confirmada ? '2026-11-11T18:00:00-03:00' : null;
+        $this->fakear_http([
+            '*/admin-sync/importacion-soporte/' . self::CORRIDA . '/confirmar' => Http::response($this->corrida('importar'), 202),
+            '*/admin-sync/importacion-soporte/' . self::CORRIDA . '?*' => Http::response($corrida, 200),
+        ]);
+    }
+
+    /**
+     * @test
+     * @dataProvider corridas_ya_resueltas
+     */
+    public function repetir_la_respuesta_del_dueno_sobre_una_corrida_ya_resuelta_es_idempotente(string $estado, string $body, string $decision): void
+    {
+        $this->fakear_la_corrida_en($estado, $decision === 'confirmar');
+        $this->aviso_con_codigo();
+        $this->entrante($this->ticket, $body);
+        $reserva = $this->reservar();
+
+        $this->confirmar($reserva + ['decision' => $decision])->assertOk()->assertJsonPath('estado', 'aceptado')
+            ->assertJsonPath('estado_corrida', $estado)->assertJsonPath('idempotente', true);
+        $this->no_confirmo();
+    }
+
+    public function corridas_ya_resueltas(): array
+    {
+        return [
+            'importando' => ['importar', 'CONFIRMAR ABCD1234', 'confirmar'],
+            'terminada' => ['terminada', 'confirmar abcd1234', 'confirmar'],
+            'revirtiendo' => ['revirtiendo', 'CONFIRMAR ABCD1234', 'confirmar'],
+            'revertida' => ['revertida', 'CONFIRMAR ABCD1234', 'confirmar'],
+            'cancelada' => ['cancelada', 'CANCELAR ABCD1234', 'cancelar'],
+        ];
+    }
+
+    /**
+     * @test
+     * @dataProvider corridas_resueltas_que_no_cuadran
+     */
+    public function no_es_idempotente_si_la_respuesta_no_es_la_del_aviso_o_no_cuadra_con_lo_resuelto(string $estado, bool $confirmada, string $body, string $decision, bool $hay_aviso): void
+    {
+        $this->fakear_la_corrida_en($estado, $confirmada);
+        if ($hay_aviso) {
+            $this->aviso_con_codigo();
+        }
+        $this->entrante($this->ticket, $body);
+        $reserva = $this->reservar();
+
+        $this->confirmar($reserva + ['decision' => $decision])->assertStatus(409)->assertJsonPath('estado', 'confirmacion_invalida');
+        $this->no_confirmo();
+    }
+
+    public function corridas_resueltas_que_no_cuadran(): array
+    {
+        return [
+            'confirmar una cancelada' => ['cancelada', false, 'CONFIRMAR ABCD1234', 'confirmar', true],
+            'cancelar una que importa' => ['importar', true, 'CANCELAR ABCD1234', 'cancelar', true],
+            'importar sin confirmada_at' => ['importar', false, 'CONFIRMAR ABCD1234', 'confirmar', true],
+            'otro código' => ['terminada', true, 'CONFIRMAR ZZZZ9999', 'confirmar', true],
+            'sin aviso' => ['terminada', true, 'CONFIRMAR ABCD1234', 'confirmar', false],
+        ];
+    }
+
+    /** @test */
+    public function una_respuesta_que_no_es_json_es_rechazada_con_respuesta_invalida(): void
+    {
+        $this->fakear_http([
+            '*/admin-sync/importacion-soporte/' . self::CORRIDA . '/revertir' => Http::response('<br /><b>Warning</b>: algo {"corrida":', 202),
+            '*/admin-sync/importacion-soporte/' . self::OTRA_CORRIDA . '/revertir' => Http::response('<html>Not Found</html>', 404),
+        ]);
+        $reserva = $this->reservar();
+
+        foreach ([self::CORRIDA, self::OTRA_CORRIDA] as $corrida) {
+            $respuesta = $this->postJson($this->ruta('import-revert'), ['lease_token' => $reserva['lease_token'], 'modelo' => 'client', 'corrida_id' => $corrida],
+                $this->headers_de_claude())->assertOk()->assertJsonPath('estado', 'rechazado')->assertJsonPath('motivo', 'respuesta_invalida');
+            $this->assertArrayNotHasKey('cuerpo', $respuesta->json());
+            $this->assertStringNotContainsString('Warning', $respuesta->getContent());
+        }
+    }
+
     /** @test */
     public function el_estado_de_la_corrida_se_lee_con_la_reserva(): void
     {

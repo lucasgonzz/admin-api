@@ -354,6 +354,47 @@ class PermisoDelegadoEImagenesDelProveedorTest extends BaseDeImportacionesDeMart
     }
 
     /** @test */
+    public function la_tanda_es_de_hasta_20_fotos_porque_php_corta_el_multipart_en_max_file_uploads(): void
+    {
+        $this->fakear_empresa();
+        $reserva = $this->reservar();
+        $items = function (int $cuantos) {
+            $lista = [];
+            for ($i = 1; $i <= $cuantos; $i++) {
+                $lista[] = ['article_id' => $i, 'tipo' => 'exacto', 'content_base64' => base64_encode($this->png('foto-' . $i))];
+            }
+
+            return $lista;
+        };
+
+        $this->subir(['fuente' => 'proveedor.com', 'items' => $items(21), 'lease_token' => $reserva['lease_token']])
+            ->assertStatus(422)->assertJsonPath('error', 'parámetros inválidos');
+        $this->subir(['fuente' => 'proveedor.com', 'items' => $items(20), 'lease_token' => $reserva['lease_token']])
+            ->assertOk()->assertJsonPath('estado', 'aceptado')->assertJsonPath('enviadas', 20);
+
+        $pedidos = Http::recorded(function ($request) {
+            return strpos($request->url(), '/catalogo/imagenes/proveedor') !== false;
+        });
+        $this->assertCount(1, $pedidos);
+        $archivos = array_filter($pedidos[0][0]->data(), function ($parte) {
+            return is_array($parte) && isset($parte['filename']);
+        });
+        $this->assertCount(20, $archivos);
+    }
+
+    /** @test */
+    public function una_respuesta_de_empresa_que_no_es_json_es_rechazada_con_respuesta_invalida(): void
+    {
+        $this->fakear_http(['*/admin-sync/catalogo/imagenes/proveedor' => Http::response("<br />\n<b>Warning</b>: max_file_uploads {\"run_id\": 5}", 200)]);
+        $reserva = $this->reservar();
+
+        $respuesta = $this->subir($this->tanda(['lease_token' => $reserva['lease_token']]))->assertOk()
+            ->assertJsonPath('estado', 'rechazado')->assertJsonPath('motivo', 'respuesta_invalida')->assertJsonPath('http', 200);
+        $this->assertArrayNotHasKey('cuerpo', $respuesta->json());
+        $this->assertStringNotContainsString('Warning', $respuesta->getContent());
+    }
+
+    /** @test */
     public function valida_la_tanda_antes_de_mandar_nada(): void
     {
         $this->fakear_empresa();
