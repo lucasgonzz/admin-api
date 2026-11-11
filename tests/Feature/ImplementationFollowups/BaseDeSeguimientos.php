@@ -112,8 +112,15 @@ abstract class BaseDeSeguimientos extends BaseDeImplementaciones
             /** @var bool */
             public $confirma = true;
 
+            /** @var bool true: el envío tira una excepción (no se sabe si salió: `unknown`). */
+            public $explota = false;
+
             public function send_text(string $to, string $body, ?string $context = null, bool $skip_failure_notification = false): ?string
             {
+                if ($this->explota) {
+                    throw new \RuntimeException('Kapso no contestó (simulado en el test).');
+                }
+
                 $this->textos[] = ['to' => $to, 'body' => $body];
 
                 if (! $this->confirma) {
@@ -127,7 +134,11 @@ abstract class BaseDeSeguimientos extends BaseDeImplementaciones
 
             public function send_template(string $to, string $template_name, array $variables = [], string $language_code = 'es_AR', ?string $context = null): ?string
             {
-                $this->plantillas[] = ['to' => $to, 'template_name' => $template_name, 'variables' => $variables];
+                if ($this->explota) {
+                    throw new \RuntimeException('Kapso no contestó (simulado en el test).');
+                }
+
+                $this->plantillas[] =['to' => $to, 'template_name' => $template_name, 'variables' => $variables];
 
                 if (! $this->confirma) {
                     $this->last_send_error = 'La plantilla no salió (simulado en el test).';
