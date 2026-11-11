@@ -38,6 +38,9 @@ class PruebaPlantillasService
     /** El pedido de la encuesta de fin de prueba (misión prueba-e2e-campana-imperio, 11/11/2026). `{{2}}` = el enlace. */
     const FIN_ENCUESTA = 'cc_prueba_fin_encuesta';
 
+    /** El aviso al negocio de que la prueba está por terminar (día 5 en adelante). `{{2}}` = «2 días», «1 día»… */
+    const DIA_5 = 'cc_prueba_dia_5';
+
     /** Prefijo de los empujones: `cc_prueba_paso_<hito>` (los hitos son los de PruebaDelClienteService::HITOS). */
     const PASO_PREFIJO = 'cc_prueba_paso_';
 
@@ -107,6 +110,11 @@ class PruebaPlantillasService
         'cc_prueba_paso_agente' => [
             'body' => 'Hola {{1}}, probá tu agente personal desde el sistema: preguntale cuánto vendiste hoy o pedile que cargue un gasto. Si no lo encontrás, escribime por acá y te guío.',
             'uso'  => 'Prueba gratuita: el negocio no habló con su agente personal.',
+        ],
+        self::DIA_5 => [
+            'body' => 'Hola {{1}}, soy Martín, de ComercioCity. Te aviso que tu prueba gratuita termina en {{2}}. Si te quedó algo por probar o querés que te muestre cómo se hace, escribime por acá y lo vemos juntos. Y si ya sabés que querés seguir con el sistema, avisame y te cuento cómo.',
+            'uso'  => 'Prueba gratuita: aviso al negocio de que la prueba está por terminar (desde el día 5, una sola vez). {{2}} es lo que falta («2 días»).',
+            'ejemplo_2' => '2 días',
         ],
         self::FIN_ENCUESTA => [
             'body' => 'Hola {{1}}, soy Martín, de ComercioCity. Quiero saber cómo te fue con la prueba del sistema. ¿Me contás en esta encuesta? Te lleva un minuto: {{2}} Tu opinión nos ayuda mucho a mejorar.',

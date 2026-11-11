@@ -19,6 +19,9 @@ class PruebaCorreoService
     /** Prefijo de `prueba_whatsapp_envios.plantilla` para los correos (`canal = correo`). */
     const PREFIJO = 'correo_';
 
+    /** `clave` del correo «tu prueba está por terminar». */
+    const CORREO_DIA_5 = 'dia_5';
+
     /** Cuántas veces se intenta un mismo correo si el servidor lo rechaza. */
     const MAX_INTENTOS = 3;
 
@@ -136,6 +139,33 @@ class PruebaCorreoService
         } finally {
             $reserva->release();
         }
+    }
+
+    /**
+     * El correo «tu prueba termina en 2 días» (desde el día 5, una sola vez por cliente).
+     *
+     * @param Client    $client
+     * @param Lead|null $lead
+     * @param string    $falta «2 días», «1 día» o «menos de un día».
+     *
+     * @return array{estado: string, detalle: string|null}
+     */
+    public function enviar_por_terminar(Client $client, ?Lead $lead, string $falta): array
+    {
+        $payload = new ComercioCityMailPayload([
+            'subject'    => 'Tu prueba de ComercioCity termina en ' . $falta,
+            'title'      => 'Tu prueba termina en ' . $falta,
+            'paragraphs' => [
+                self::saludo($client, $lead) . ', soy Martín, del equipo de ComercioCity.',
+                'Te aviso con tiempo: tu prueba gratuita termina en ' . $falta . '.',
+                'Si te quedó algo por probar, entrá a tu sistema y abrí Agentes, Soporte: ahí te contesto, te paso los videos y te muestro cómo se hace en tu pantalla.',
+                'Y si ya sabés que querés seguir, respondé este correo o escribime por WhatsApp y te cuento cómo. Todo lo que cargaste queda como está.',
+            ],
+            'cta'     => self::boton_del_sistema($client),
+            'closing' => 'Equipo de ComercioCity',
+        ]);
+
+        return $this->enviar_registrado($client, $lead, self::CORREO_DIA_5, $payload, 'dia_5');
     }
 
     /**

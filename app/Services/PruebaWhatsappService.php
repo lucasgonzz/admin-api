@@ -338,6 +338,12 @@ class PruebaWhatsappService
             return ['estado' => 'bienvenida_' . $bienvenida['estado'], 'detalle' => $bienvenida['detalle']];
         }
 
+        /* Desde el día 5, el mensaje del día es el aviso de que la prueba está por terminar (una sola vez). */
+        $por_terminar = $this->avisar_al_negocio_que_esta_por_terminar($client, $lead, $datos);
+        if ($por_terminar !== null) {
+            return $por_terminar;
+        }
+
         if ($this->ya_se_le_mando_hoy($client)) {
             return ['estado' => 'ya_hoy', 'detalle' => 'Ya salió un mensaje de la prueba hoy.'];
         }
@@ -371,6 +377,53 @@ class PruebaWhatsappService
         $envio = $this->enviar_plantilla_por_ticket($client, $lead, $plantilla, $proximo, false);
 
         return ['estado' => $envio['estado'] === 'enviado' ? 'enviado' : $envio['estado'], 'detalle' => $envio['detalle'] !== null ? $envio['detalle'] : $plantilla];
+    }
+
+    /**
+     * Desde el día 5 de la prueba, le avisa AL NEGOCIO que está por terminar (misión prueba-e2e-campana-imperio,
+     * 11/11/2026): un correo y el WhatsApp `cc_prueba_dia_5`, cada uno una sola vez. El WhatsApp ocupa el lugar
+     * del empujón de ese día (sigue siendo uno por día) y sale aunque el negocio haya escrito hace poco: no es un
+     * empujón, es un aviso de fecha. El correo no depende del WhatsApp. El aviso a Tomás no cambia.
+     *
+     * @param Client               $client
+     * @param Lead|null            $lead
+     * @param array<string, mixed> $datos
+     *
+     * @return array{estado: string, detalle: string|null}|null null = no salió ningún WhatsApp acá: sigue el empujón normal.
+     */
+    public function avisar_al_negocio_que_esta_por_terminar(Client $client, ?Lead $lead, array $datos): ?array
+    {
+        if ($datos['dia_actual'] === null || $datos['vencida'] === true
+            || (int) $datos['dia_actual'] < PruebaDelClienteService::DIA_DEL_AVISO_A_TOMAS) {
+            return null;
+        }
+
+        $restan = (int) $datos['dias'] - (int) $datos['dia_actual'];
+        $falta  = $restan <= 0 ? 'menos de un día' : ($restan === 1 ? '1 día' : $restan . ' días');
+
+        try {
+            app(Prueba\PruebaCorreoService::class)->enviar_por_terminar($client, $lead, $falta);
+        } catch (\Throwable $e) {
+            Log::channel('daily')->warning('PruebaWhatsapp: no salió el correo de que la prueba está por terminar.', [
+                'client_id' => (int) $client->id,
+                'error'     => $e->getMessage(),
+            ]);
+        }
+
+        $resuelto = PruebaWhatsappEnvio::query()
+            ->where('client_id', (int) $client->id)
+            ->where('plantilla', PruebaPlantillasService::DIA_5)
+            ->whereIn('estado', [PruebaWhatsappEnvio::ESTADO_ENVIADO, PruebaWhatsappEnvio::ESTADO_FALLIDO])
+            ->exists();
+
+        if ($resuelto || $this->ya_se_le_mando_hoy($client)
+            || $this->plantillas->estado_para_enviar(PruebaPlantillasService::DIA_5)['motivo'] !== null) {
+            return null;
+        }
+
+        $envio = $this->enviar_plantilla_por_ticket($client, $lead, PruebaPlantillasService::DIA_5, self::TOMAS_DIA_5, false, $falta);
+
+        return ['estado' => (string) $envio['estado'], 'detalle' => $envio['detalle'] !== null ? $envio['detalle'] : PruebaPlantillasService::DIA_5];
     }
 
     /**
