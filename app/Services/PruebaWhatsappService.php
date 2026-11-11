@@ -386,6 +386,8 @@ class PruebaWhatsappService
             ->where('client_id', (int) $client->id)
             ->where('estado', PruebaWhatsappEnvio::ESTADO_ENVIADO)
             ->where('plantilla', '!=', PruebaWhatsappEnvio::PLANTILLA_AVISO_TOMAS)
+            /* Solo WhatsApps: un correo o un mensaje dejado en el sistema no gastan el tope del día. */
+            ->where('canal', PruebaWhatsappEnvio::CANAL_WHATSAPP)
             ->where('dia', self::hoy())
             ->exists();
     }
@@ -412,7 +414,8 @@ class PruebaWhatsappService
      * @param string      $plantilla  Nombre de la plantilla de Meta.
      * @param string|null $hito       El hito que empuja (null para la bienvenida).
      * @param bool        $encolar    true = si la plantilla no está aprobada, queda `en_cola` para reintentar.
-     * @param string|null $numero_asistente Número oficial para las plantillas que lo informan.
+     * @param string|null $numero_asistente La segunda variable (`{{2}}`) de las plantillas que la llevan: el número
+     *                                      oficial del asistente, el enlace de la encuesta o los días que quedan.
      *
      * @return array{estado: string, detalle: string|null, whatsapp_message_id?: string|null, support_ticket_id?: int|null}
      */

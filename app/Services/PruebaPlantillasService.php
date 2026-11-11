@@ -35,6 +35,9 @@ class PruebaPlantillasService
 
     const BIENVENIDAS = [self::BIENVENIDA, self::BIENVENIDA_CON_ASISTENTE];
 
+    /** El pedido de la encuesta de fin de prueba (misión prueba-e2e-campana-imperio, 11/11/2026). `{{2}}` = el enlace. */
+    const FIN_ENCUESTA = 'cc_prueba_fin_encuesta';
+
     /** Prefijo de los empujones: `cc_prueba_paso_<hito>` (los hitos son los de PruebaDelClienteService::HITOS). */
     const PASO_PREFIJO = 'cc_prueba_paso_';
 
@@ -47,9 +50,10 @@ class PruebaPlantillasService
 
     /**
      * Los textos. La clave es el nombre de la plantilla; `uso` es el texto corto que dice cuándo se manda.
-     * `{{1}}` = primer nombre del contacto (ejemplo «Marcela»).
+     * `{{1}}` = primer nombre del contacto (ejemplo «Marcela»). `{{2}}`, cuando la hay, es el número del
+     * asistente o lo que diga `ejemplo_2` (el ejemplo que se le manda a Meta para aprobarla).
      *
-     * @var array<string, array{body: string, uso: string}>
+     * @var array<string, array{body: string, uso: string, ejemplo_2?: string}>
      */
     const PLANTILLAS = [
         self::BIENVENIDA => [
@@ -104,6 +108,11 @@ class PruebaPlantillasService
             'body' => 'Hola {{1}}, probá tu agente personal desde el sistema: preguntale cuánto vendiste hoy o pedile que cargue un gasto. Si no lo encontrás, escribime por acá y te guío.',
             'uso'  => 'Prueba gratuita: el negocio no habló con su agente personal.',
         ],
+        self::FIN_ENCUESTA => [
+            'body' => 'Hola {{1}}, soy Martín, de ComercioCity. Quiero saber cómo te fue con la prueba del sistema. ¿Me contás en esta encuesta? Te lleva un minuto: {{2}} Tu opinión nos ayuda mucho a mejorar.',
+            'uso'  => 'Prueba gratuita: pedido de la encuesta al terminar la prueba (venció o contrató). {{2}} es el enlace.',
+            'ejemplo_2' => 'https://api-admin.comerciocity.com/public/prueba/encuesta/AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKl',
+        ],
     ];
 
     /** El ejemplo de `{{1}}` que se le manda a Meta para aprobar. */
@@ -119,6 +128,30 @@ class PruebaPlantillasService
     public static function plantilla_del_paso(string $hito): string
     {
         return self::PASO_PREFIJO . $hito;
+    }
+
+    /**
+     * Todas las plantillas de la prueba que se crean en Meta.
+     *
+     * @return array<string, array<string, string>>
+     */
+    public static function todas(): array
+    {
+        return self::PLANTILLAS;
+    }
+
+    /**
+     * El texto de una plantilla tal como está escrito acá (vacío si no existe).
+     *
+     * @param string $nombre
+     *
+     * @return string
+     */
+    public static function cuerpo_de(string $nombre): string
+    {
+        $todas = self::todas();
+
+        return isset($todas[$nombre]) ? (string) $todas[$nombre]['body'] : '';
     }
 
     /**
@@ -148,7 +181,7 @@ class PruebaPlantillasService
 
         $cuerpo = $fila !== null && trim((string) $fila->body_template) !== ''
             ? (string) $fila->body_template
-            : (isset(self::PLANTILLAS[$nombre_de_plantilla]) ? self::PLANTILLAS[$nombre_de_plantilla]['body'] : '');
+            : self::cuerpo_de($nombre_de_plantilla);
 
         return strtr($cuerpo, ['{{1}}' => $primer_nombre, '{{2}}' => $numero_asistente ?? '']);
     }
@@ -167,7 +200,7 @@ class PruebaPlantillasService
     {
         $resultados = [];
 
-        foreach (self::PLANTILLAS as $nombre => $definicion) {
+        foreach (self::todas() as $nombre => $definicion) {
             $existente = FollowupTemplate::query()->where('template_name', $nombre)->first();
 
             if ($existente !== null) {
@@ -185,7 +218,7 @@ class PruebaPlantillasService
                 continue;
             }
 
-            $componentes = $this->componentes($definicion['body']);
+            $componentes = $this->componentes($definicion['body'], isset($definicion['ejemplo_2']) ? (string) $definicion['ejemplo_2'] : null);
 
             $respuesta = $meta->crear([
                 'name'       => $nombre,
@@ -248,15 +281,16 @@ class PruebaPlantillasService
     /**
      * El componente BODY tal como lo espera Meta, con el ejemplo de `{{1}}`.
      *
-     * @param string $cuerpo
+     * @param string      $cuerpo
+     * @param string|null $ejemplo_2 Ejemplo de `{{2}}`; null = el de un número de WhatsApp.
      *
      * @return array<int, array<string, mixed>>
      */
-    protected function componentes(string $cuerpo): array
+    protected function componentes(string $cuerpo, ?string $ejemplo_2 = null): array
     {
         $ejemplos = [self::EJEMPLO_NOMBRE];
         if (strpos($cuerpo, '{{2}}') !== false) {
-            $ejemplos[] = '+54 9 11 1234-5678';
+            $ejemplos[] = $ejemplo_2 !== null ? $ejemplo_2 : '+54 9 11 1234-5678';
         }
 
         return [[

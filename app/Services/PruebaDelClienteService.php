@@ -471,6 +471,9 @@ class PruebaDelClienteService
             return in_array($envio->plantilla, PruebaPlantillasService::BIENVENIDAS, true) && $envio->estado === PruebaWhatsappEnvio::ESTADO_EN_COLA;
         }) !== null;
 
+        /* La encuesta de fin de prueba, si ya se le creó (misión prueba-e2e-campana-imperio, 11/11/2026). Sin el token. */
+        $encuesta = \App\Models\PruebaEncuesta::where('client_id', (int) $client->id)->first();
+
         $ultimo_empujon = $envios->first(function ($envio) {
             return strpos((string) $envio->plantilla, PruebaPlantillasService::PASO_PREFIJO) === 0 && $envio->estado === PruebaWhatsappEnvio::ESTADO_ENVIADO;
         });
@@ -502,6 +505,7 @@ class PruebaDelClienteService
                 return [
                     'id'                  => (int) $envio->id,
                     'plantilla'           => $envio->plantilla,
+                    'canal'               => $envio->canal !== null ? (string) $envio->canal : PruebaWhatsappEnvio::CANAL_WHATSAPP,
                     'hito'                => $envio->hito,
                     'estado'              => $envio->estado,
                     'detalle'             => $envio->detalle,
@@ -510,6 +514,7 @@ class PruebaDelClienteService
                     'created_at'          => $envio->created_at !== null ? $envio->created_at->toIso8601String() : null,
                 ];
             })->values()->all(),
+            'encuesta'            => $encuesta !== null ? $encuesta->resumen() : null,
         ];
     }
 

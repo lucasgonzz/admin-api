@@ -38,6 +38,9 @@ class PruebaSettings
     const KEY_RESPALDO_SOPORTE_MINUTOS = 'prueba_respaldo_soporte_minutos';
     const DEFAULT_RESPALDO_SOPORTE_MINUTOS = 3;
 
+    /** Encuesta de fin de prueba (misión prueba-e2e-campana-imperio, 11/11/2026): 1 = se manda al vencer y al contratar. */
+    const KEY_ENCUESTA_ACTIVA = 'prueba_encuesta_activa';
+
     /** 0 hasta que Lucas prenda el pool desde admin_settings: sin DNS ni plantilla, un mínimo > 0 solo fabrica fallidas. */
     const DEFAULT_POOL_MINIMO         = 0;
     const DEFAULT_MAX_ACTIVAS         = 25;
@@ -102,6 +105,17 @@ class PruebaSettings
         $minutos = (int) AdminSetting::get(self::KEY_RESPALDO_SOPORTE_MINUTOS, self::DEFAULT_RESPALDO_SOPORTE_MINUTOS);
 
         return $minutos < 1 ? self::DEFAULT_RESPALDO_SOPORTE_MINUTOS : min($minutos, 120);
+    }
+
+    /**
+     * Si la encuesta de fin de prueba se manda (`prueba_encuesta_activa`, default 1). Con 0 no se crea ni se
+     * manda ninguna; las que ya salieron se pueden seguir contestando.
+     *
+     * @return bool
+     */
+    public static function encuesta_activa(): bool
+    {
+        return (string) AdminSetting::get(self::KEY_ENCUESTA_ACTIVA, '1') !== '0';
     }
 
     public static function whatsapp_soporte(): string

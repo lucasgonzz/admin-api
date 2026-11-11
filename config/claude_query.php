@@ -3202,6 +3202,50 @@ return [
             ],
             'nota' => 'Una cuota `pagada` con monto_pagado null (las importadas de la planilla) se considera cobrada por su monto entero. Lo cobrado y lo pendiente ya calculados, por venta, están en GET claude/clients/{id}/ventas. Para registrar un pago o eliminar una cuota: POST claude/clients/{id}/cuotas/{cuotaId}/pago y .../eliminar (dry_run por defecto).',
         ],
+
+        /* ---------------------------------------------------------------
+         | prueba_encuesta — la encuesta de fin de prueba gratuita (misión
+         | prueba-e2e-campana-imperio, 11/11/2026).
+         |
+         | 🔴 SIN `token`: es lo único que abre la página pública de la encuesta
+         | (GET prueba/encuesta/{token}), y además matchea la reja `token` de
+         | columnas_prohibidas.
+         --------------------------------------------------------------- */
+        'prueba_encuesta' => [
+            'tabla'           => 'prueba_encuestas',
+            'descripcion'     => 'La encuesta de fin de prueba gratuita, una por cliente: por qué se le mandó (vencida o contrato), cuándo salió, cuándo la contestó, las estrellas (1 a 5), las seis preguntas de sí/no (null = no la contestó) y el comentario libre.',
+            'columnas'        => [
+                'id', 'client_id', 'lead_id', 'motivo', 'enviada_at', 'respondida_at', 'estrellas',
+                'atencion_buena', 'implementacion_practica', 'soporte_sirvio',
+                'probo_gestion', 'probo_tienda', 'probo_agentes',
+                'comentario', 'contrato_al_responder', 'avisada_at', 'created_at', 'updated_at',
+            ],
+            'clave_de_cursor' => 'id',
+            'orden_default'   => 'desc',
+            'limite_default'  => 100,
+            'limite_max'      => 500,
+            'busqueda'        => ['comentario'],
+            'filtros'         => [
+                'client_id'        => ['columna' => 'client_id',     'tipo' => 'entero'],
+                'lead_id'          => ['columna' => 'lead_id',       'tipo' => 'entero'],
+                /* PruebaEncuesta::MOTIVO_VENCIDA y MOTIVO_CONTRATO. */
+                'motivo'           => ['columna' => 'motivo',        'tipo' => 'en', 'valores' => ['vencida', 'contrato']],
+                'sin_responder'    => ['columna' => 'respondida_at', 'tipo' => 'nulo'],
+                'estrellas'        => ['columna' => 'estrellas',     'tipo' => 'entero'],
+                'contrato'         => ['columna' => 'contrato_al_responder', 'tipo' => 'booleano'],
+                'respondida_desde' => ['columna' => 'respondida_at', 'tipo' => 'fecha_desde'],
+                'respondida_hasta' => ['columna' => 'respondida_at', 'tipo' => 'fecha_hasta'],
+                'ids'              => ['columna' => 'id',            'tipo' => 'lista_de_enteros'],
+            ],
+            'relaciones'      => [
+                'cliente' => [
+                    'tipo'        => 'belongs_to', 'tabla' => 'clients',
+                    'clave_local' => 'client_id', 'clave_externa' => 'id',
+                    'columnas'    => ['id', 'uuid', 'name', 'company_name', 'is_active'],
+                ],
+            ],
+            'nota' => 'contrato_al_responder dice si al contestar ya era cliente (clients.estado = activo). El resumen de cada prueba con su encuesta ya armado está en GET claude/prueba/resumen.',
+        ],
     ],
 
     /*
