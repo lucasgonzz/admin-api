@@ -234,6 +234,19 @@ class PermisoDelegadoEImagenesDelProveedorTest extends BaseDeImportacionesDeMart
     }
 
     /** @test */
+    public function la_ultima_tanda_deja_el_ticket_en_el_barrido_de_avisos_y_las_anteriores_no(): void
+    {
+        $this->fakear_empresa();
+        $web = $this->permiso('web', $this->reservar()['lease_token']);
+
+        $this->subir($this->tanda(['tarea_token' => $web]))->assertOk()->assertJsonPath('estado', 'aceptado');
+        $this->assertNull($this->ticket->fresh()->importacion_soporte_iniciada_at);
+
+        $this->subir($this->tanda(['tarea_token' => $web, 'ultima_tanda' => true]))->assertOk()->assertJsonPath('estado', 'aceptado');
+        $this->assertNotNull($this->ticket->fresh()->importacion_soporte_iniciada_at);
+    }
+
+    /** @test */
     public function un_rechazo_de_la_instancia_con_motivo_no_es_version_vieja(): void
     {
         $this->fakear_http(['*/admin-sync/catalogo/imagenes/proveedor' => Http::response(['message' => 'Otro dueño.', 'motivo' => 'dueno_distinto'], 409)]);

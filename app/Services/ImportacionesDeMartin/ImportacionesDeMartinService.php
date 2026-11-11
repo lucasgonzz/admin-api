@@ -546,6 +546,12 @@ class ImportacionesDeMartinService
                 'rechazadas_antes_de_enviar' => $rechazadas];
         }
 
+        if ($status >= 200 && $status < 300 && isset($campos['ultima_tanda']) && $ticket->importacion_soporte_iniciada_at === null) {
+            // El aviso de la última tanda («asigné N fotos…») lo deja empresa como `importacion_lista` del ticket, y el
+            // barrido de `AsistenteAvisosService` solo mira los tickets de activos con la importación de soporte iniciada.
+            $ticket->forceFill(['importacion_soporte_iniciada_at' => now()])->save();
+        }
+
         Log::channel('daily')->info('ImportacionesDeMartin: tanda de imágenes del proveedor reenviada.', [
             'ticket_id' => (int) $ticket->id, 'client_id' => (int) $ticket->client_id, 'fuente' => $campos['fuente'],
             'enviadas' => count($archivos), 'status' => $status,
