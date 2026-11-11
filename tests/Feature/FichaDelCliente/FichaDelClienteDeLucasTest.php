@@ -105,7 +105,7 @@ class FichaDelClienteDeLucasTest extends TestCase
         $vacio = $this->actingAs($admin, 'sanctum')->getJson($base)->assertOk();
         $this->assertSame([], $vacio->json('entradas'));
         $this->assertSame(ClientSupportMemoryEntry::CATEGORIAS, $vacio->json('categorias'));
-        $this->assertSame(60, $vacio->json('tope_vigentes'));
+        $this->assertSame(40, $vacio->json('tope_vigentes'));
         $this->assertSame([(int) $ticket->id], array_column($vacio->json('tickets'), 'id'));
         $this->assertSame('Importar lista', $vacio->json('tickets.0.titulo'));
         $this->assertSame('Se importó la lista de Bronzen.', $vacio->json('tickets.0.resumen'));

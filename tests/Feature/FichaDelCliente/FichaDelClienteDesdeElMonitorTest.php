@@ -145,7 +145,7 @@ class FichaDelClienteDesdeElMonitorTest extends TestCase
     }
 
     /**
-     * Tope de 60 vigentes: la 61 es 422 ficha_llena sin escribir nada; reemplazar con la ficha llena sigue andando
+     * Tope de 40 vigentes: la 41 es 422 ficha_llena sin escribir nada; reemplazar con la ficha llena sigue andando
      * (no suma vigentes).
      *
      * @return void
@@ -159,18 +159,20 @@ class FichaDelClienteDesdeElMonitorTest extends TestCase
         $ticket = $this->ticket($client);
         $token  = $this->reservar($ticket);
 
-        $this->ficha($ticket, $token, [['accion' => 'agregar', 'categoria' => 'otro', 'texto' => 'La 61']])
-            ->assertStatus(422)->assertJsonPath('error', 'ficha_llena')->assertJsonPath('tope', 60);
-        $this->assertCount(60, $this->entradas($client));
+        $this->assertSame(40, ClientSupportMemoryService::TOPE_VIGENTES);
+        $this->ficha($ticket, $token, [['accion' => 'agregar', 'categoria' => 'otro', 'texto' => 'La 41']])
+            ->assertStatus(422)->assertJsonPath('error', 'ficha_llena')->assertJsonPath('tope', 40);
+        $this->assertCount(40, $this->entradas($client));
 
         $primera = $this->entradas($client)->first();
         $this->ficha($ticket, $token, [['accion' => 'reemplazar', 'id' => $primera->id, 'texto' => 'Consolidada: entradas 1 a 3.']])->assertOk();
-        $this->assertCount(60, $this->entradas($client));
+        $this->assertCount(40, $this->entradas($client));
     }
 
     /**
-     * Lo que el historial oculta como secreto (lo que sigue a «contraseña» / «clave») no entra: 422 dato_sensible, sin
-     * escribir nada.
+     * Solo lo que PARECE un secreto no entra (422 dato_sensible con el tipo): una clave con su valor, un CBU/CVU o una
+     * tarjeta que pasa Luhn. Las notas legítimas sobre claves («Clave Fiscal nivel 3», «la clave de ARCA», «se le
+     * blanqueó la contraseña», «recuperar clave con código») entran.
      *
      * @return void
      */
@@ -180,13 +182,42 @@ class FichaDelClienteDesdeElMonitorTest extends TestCase
         $ticket = $this->ticket($client);
         $token  = $this->reservar($ticket);
 
-        foreach (['La contraseña es Perro123', 'Su clave: 4455', 'Clave fiscal nueva Gato99'] as $texto) {
+        $rechazados = [
+            'La contraseña es Perro123'                     => 'clave',
+            'Su clave: 4455'                                => 'clave',
+            'Clave fiscal nueva Gato99'                     => 'clave',
+            'clave Perro123'                                => 'clave',
+            'usuario y clave = gaston / 1234'               => 'clave',
+            'La clave de ARCA es Mendoza2026'               => 'clave',
+            'Clave fiscal nueva: Gato'                      => 'clave',
+            'password: hunter2'                             => 'clave',
+            'el pin del posnet 4321'                        => 'clave',
+            'CBU 0110599520000012345678'                    => 'cbu',
+            'Pagó con la 4111 1111 1111 1111'               => 'tarjeta',
+            'Tarjeta 4111-1111-1111-1111 vence 12/28'       => 'tarjeta',
+            'Amex 378282246310005'                          => 'tarjeta',
+        ];
+        foreach ($rechazados as $texto => $tipo) {
             $this->ficha($ticket, $token, [['accion' => 'agregar', 'categoria' => 'otro', 'texto' => $texto]])
-                ->assertStatus(422)->assertJsonPath('error', 'dato_sensible');
+                ->assertStatus(422)->assertJsonPath('error', 'dato_sensible')->assertJsonPath('tipo', $tipo);
         }
         $this->assertCount(0, $this->entradas($client));
 
-        $this->ficha($ticket, $token, [['accion' => 'agregar', 'categoria' => 'negocio', 'texto' => 'Factura A y tiene dos sucursales.']])->assertOk();
+        $pasan = [
+            'Tiene Clave Fiscal nivel 3.',
+            'Le falta la clave de ARCA para facturar.',
+            'Se le blanqueó la contraseña el 10/11.',
+            'Quiere recuperar clave con código por WhatsApp.',
+            'La clave es la misma de siempre, la tiene el contador.',
+            'Factura A y tiene dos sucursales.',
+            'El código de barras 7790001234567 no lee.',
+            'Su teléfono es +5493415551234.',
+            'Compró 1234567890123456 unidades de prueba.',
+        ];
+        foreach ($pasan as $numero => $texto) {
+            $this->ficha($ticket, $token, [['accion' => 'agregar', 'categoria' => 'negocio', 'texto' => $texto]])->assertOk();
+        }
+        $this->assertCount(count($pasan), $this->entradas($client));
     }
 
     /**
@@ -326,7 +357,7 @@ class FichaDelClienteDesdeElMonitorTest extends TestCase
     }
 
     /**
-     * El tope de ~12.000 caracteres: con 40 entradas de 590 caracteres no entran todas; truncada=true y
+     * El tope de ~20.000 caracteres: con 40 entradas de 590 caracteres no entran todas; truncada=true y
      * total_vigentes las cuenta todas. Las que entran son las primeras del orden.
      *
      * @return void
@@ -345,7 +376,8 @@ class FichaDelClienteDesdeElMonitorTest extends TestCase
         $this->assertSame(40, $bloque['total_vigentes']);
         $this->assertLessThan(40, count($bloque['entradas']));
         $this->assertGreaterThan(10, count($bloque['entradas']));
-        $this->assertLessThanOrEqual(12000, mb_strlen((string) json_encode($bloque['entradas'], JSON_UNESCAPED_UNICODE)));
+        $this->assertLessThanOrEqual(20000, mb_strlen((string) json_encode($bloque['entradas'], JSON_UNESCAPED_UNICODE)));
+        $this->assertGreaterThan(12000, mb_strlen((string) json_encode($bloque['entradas'], JSON_UNESCAPED_UNICODE)), 'El tope es 20.000, no el viejo de 12.000.');
         $this->assertSame(array_reverse(array_slice($ids, 0, 5)), array_slice(array_column($bloque['entradas'], 'id'), 0, 5), 'Los compromisos primero, el más nuevo arriba.');
     }
 
@@ -379,7 +411,10 @@ class FichaDelClienteDesdeElMonitorTest extends TestCase
         $coincidencias = $respuesta->json('coincidencias');
         $this->assertSame([(int) $actual->id, (int) $viejo->id, (int) $viejo->id], array_column($coincidencias, 'ticket_id'));
         $this->assertSame(['user', 'admin', 'user'], array_column($coincidencias, 'sender_type'));
-        $this->assertSame(['ticket_id', 'message_id', 'created_at', 'sender_type', 'fragmento'], array_keys($coincidencias[0]));
+        $this->assertSame(['ticket_id', 'message_id', 'created_at', 'sender_type', 'coinciden', 'fragmento'], array_keys($coincidencias[0]));
+        $this->assertSame(['impresora'], $respuesta->json('terminos'));
+        $this->assertSame('frase', $respuesta->json('busqueda'));
+        $this->assertSame([1, 1, 1], array_column($coincidencias, 'coinciden'));
         $equipo = $coincidencias[1]['fragmento'];
         $this->assertStringStartsWith('…', $equipo);
         $this->assertStringContainsString('driver de la impresora', $equipo);
@@ -566,7 +601,8 @@ class FichaDelClienteDesdeElMonitorTest extends TestCase
         $this->assertSame('Del empleado', $indice['tickets'][1]['titulo']);
         $this->assertSame(1, $indice['tickets'][1]['mensajes']);
         $this->assertSame(200, mb_strlen($indice['tickets'][2]['resumen']));
-        $this->assertSame(['id', 'titulo', 'resumen', 'status', 'opened_at', 'closed_at', 'mensajes', 'actual'], array_keys($indice['tickets'][0]));
+        $this->assertSame(['id', 'titulo', 'resumen', 'primer_mensaje', 'status', 'opened_at', 'closed_at', 'mensajes', 'actual'], array_keys($indice['tickets'][0]));
+        $this->assertNull($indice['tickets'][1]['primer_mensaje'], 'Con título no hace falta.');
         $this->assertSame('Resumen del actual', $contexto['summary']);
         $this->assertCount(5, $contexto['previous_tickets']);
         $this->assertSame(['id', 'status', 'opened_at', 'closed_at', 'mensajes'], array_keys($contexto['previous_tickets'][0]));

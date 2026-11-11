@@ -35,17 +35,17 @@ use Symfony\Component\HttpKernel\Exception\HttpException;
  *  - Las operaciones de un pedido entran todas o ninguna (transacción).
  *  - Un `id` de otro cliente (o inexistente) → 422 `entrada_ajena`; uno que ya no está vigente → 422
  *    `entrada_no_vigente`.
- *  - Tope de 60 vigentes por cliente: pasarlo → 422 `ficha_llena` (Martín consolida).
- *  - 🔴 El texto no puede llevar lo que el admin ya oculta como secreto en el historial (lo que sigue a
- *    «contraseña» / «clave», `SupportImplementationContextService::ocultar_claves()`, la MISMA regla) → 422
- *    `dato_sensible`. La ficha viaja en cada prompt: un secreto adentro se repetiría para siempre.
+ *  - Tope de 40 vigentes por cliente: pasarlo → 422 `ficha_llena` (Martín consolida).
+ *  - 🔴 El texto no puede llevar algo que parezca un secreto (una clave con su valor, un CBU/CVU, una tarjeta):
+ *    `DetectorDeDatosSensibles`, propio de la ficha → 422 `dato_sensible` con el `tipo`. La ficha viaja en cada
+ *    prompt: un secreto adentro se repetiría para siempre.
  *  - Reintentar es inofensivo: agregar el mismo texto en la misma categoría, reemplazar con el texto que ya quedó o
  *    archivar una archivada devuelven la entrada que ya estaba con `ya_estaba: true`.
  */
 class ClientSupportMemoryService
 {
     /** Entradas vigentes por cliente. */
-    const TOPE_VIGENTES = 60;
+    const TOPE_VIGENTES = 40;
 
     /** Operaciones por pedido. */
     const TOPE_OPERACIONES = 10;
@@ -57,7 +57,7 @@ class ClientSupportMemoryService
     const LARGO_MOTIVO = 300;
 
     /** Tope (aproximado, en caracteres de JSON) de las entradas del bloque `ficha_cliente`. */
-    const TOPE_CARACTERES_FICHA = 12000;
+    const TOPE_CARACTERES_FICHA = 20000;
 
     /** Tope (aproximado, en caracteres de JSON) de los tickets del bloque `indice_tickets`. */
     const TOPE_CARACTERES_INDICE = 10000;
@@ -71,6 +71,9 @@ class ClientSupportMemoryService
     /** Largo del primer mensaje de cada ticket en la lista de la búsqueda. */
     const LARGO_PRIMER_MENSAJE = 150;
 
+    /** Términos de una búsqueda de varias palabras. */
+    const TERMINOS_MAXIMOS = 5;
+
     /** Coincidencias por defecto y máximas de la búsqueda. */
     const COINCIDENCIAS_POR_DEFECTO = 20;
     const COINCIDENCIAS_MAXIMAS = 40;
@@ -79,6 +82,16 @@ class ClientSupportMemoryService
     const TITULO_MINIMO = 3;
     const TITULO_MAXIMO = 80;
     const RESUMEN_MAXIMO = 600;
+
+    /**
+     * Intentos de las transacciones de escritura de la ficha: el `lockForUpdate` sobre las vigentes de una ficha VACÍA
+     * toma un bloqueo de hueco, y dos altas encimadas sobre el mismo cliente pueden terminar en deadlock. Laravel
+     * reintenta la transacción entera ante un error de concurrencia (solo si es la de más afuera).
+     */
+    const INTENTOS_DE_TRANSACCION = 2;
+
+    /** Quién puede haber puesto un título que Martín puede reemplazar (null = viejo o sin título). */
+    const TITULOS_QUE_MARTIN_PISA = [null, 'martin', 'sistema'];
 
     /** Zona de los vencimientos (`vigente_hasta` es un día de Argentina). */
     const ZONA = 'America/Argentina/Buenos_Aires';
@@ -131,7 +144,7 @@ class ClientSupportMemoryService
             $resultados = $this->aplicar((int) $ticket->client_id, $operaciones, ClientSupportMemoryEntry::SOURCE_MARTIN, (int) $ticket->id, null);
 
             return ['ok' => true, 'resultados' => $resultados, 'ficha_cliente' => $this->bloque_para_el_cliente((int) $ticket->client_id)];
-        });
+        }, self::INTENTOS_DE_TRANSACCION);
     }
 
     /**
@@ -152,7 +165,7 @@ class ClientSupportMemoryService
             $resultados = $this->aplicar((int) $followup->client_id, $operaciones, ClientSupportMemoryEntry::SOURCE_MARTIN, null, null);
 
             return ['ok' => true, 'resultados' => $resultados, 'ficha_cliente' => $this->bloque_para_el_cliente((int) $followup->client_id)];
-        });
+        }, self::INTENTOS_DE_TRANSACCION);
     }
 
     /**
@@ -170,7 +183,7 @@ class ClientSupportMemoryService
             $resultados = $this->aplicar((int) $client_id, $operaciones, ClientSupportMemoryEntry::SOURCE_LUCAS, null, $admin_id === null ? null : (int) $admin_id);
 
             return ['ok' => true, 'resultados' => $resultados, 'ficha_cliente' => $this->bloque_para_el_cliente((int) $client_id)];
-        });
+        }, self::INTENTOS_DE_TRANSACCION);
     }
 
     /**
@@ -404,25 +417,43 @@ class ClientSupportMemoryService
         if (mb_strlen($texto) > $largo) {
             throw new FichaClienteException(422, 'texto_largo', 'El ' . $campo . ' de la operación ' . ($indice + 1) . ' supera los ' . $largo . ' caracteres. Una entrada = una idea. No se escribió nada.', ['operacion' => $indice]);
         }
-        if ($this->tiene_dato_sensible($texto)) {
-            throw new FichaClienteException(422, 'dato_sensible', 'El ' . $campo . ' de la operación ' . ($indice + 1) . ' trae lo que el historial oculta como secreto (lo que sigue a «contraseña» o «clave»). '
-                . 'En la ficha nunca van contraseñas, Clave Fiscal ni datos de acceso; si no es un secreto, escribilo sin esas palabras. No se escribió nada.', ['operacion' => $indice]);
-        }
+        $this->rechazar_dato_sensible($texto, 'El ' . $campo . ' de la operación ' . ($indice + 1), ['operacion' => $indice]);
 
         return $texto;
     }
 
     /**
-     * 🔴 La MISMA regla que oculta secretos en el historial del monitor: si `ocultar_claves()` cambiaría el texto,
-     * el texto tiene un secreto (o algo con su forma) y no entra en la ficha.
+     * El tipo de dato sensible que tiene el texto (`clave`, `cbu`, `tarjeta`) o null: el detector PROPIO de la ficha
+     * (`DetectorDeDatosSensibles`), que rechaza solo lo que parece un secreto («clave: Perro123», un CBU, una tarjeta)
+     * y deja pasar «Clave Fiscal nivel 3» o «se le blanqueó la contraseña».
      *
      * @param string $texto El texto.
      *
-     * @return bool
+     * @return string|null
      */
-    public function tiene_dato_sensible($texto)
+    public function dato_sensible($texto)
     {
-        return SupportImplementationContextService::ocultar_claves((string) $texto) !== (string) $texto;
+        return app(DetectorDeDatosSensibles::class)->detectar($texto);
+    }
+
+    /**
+     * 422 `dato_sensible` con el tipo detectado (`tipo`: clave | cbu | tarjeta) si el texto tiene uno.
+     *
+     * @param string               $texto El texto.
+     * @param string               $donde «El texto de la operación 2», «El título».
+     * @param array<string, mixed> $extra Claves de más para la respuesta.
+     *
+     * @return void
+     */
+    protected function rechazar_dato_sensible($texto, $donde, array $extra = [])
+    {
+        $tipo = $this->dato_sensible($texto);
+        if ($tipo === null) {
+            return;
+        }
+
+        throw new FichaClienteException(422, 'dato_sensible', $donde . ' parece traer ' . app(DetectorDeDatosSensibles::class)->etiqueta($tipo)
+            . '. En la ficha, el título y el resumen nunca van contraseñas, claves con su valor, CBU ni tarjetas. No se escribió nada.', array_merge($extra, ['tipo' => $tipo]));
     }
 
     /**
@@ -766,14 +797,17 @@ class ClientSupportMemoryService
         if ($resumen !== null && mb_strlen($resumen) > self::RESUMEN_MAXIMO) {
             throw new FichaClienteException(422, 'resumen_largo', 'El resumen supera los ' . self::RESUMEN_MAXIMO . ' caracteres.');
         }
-        if ($this->tiene_dato_sensible($titulo) || ($resumen !== null && $this->tiene_dato_sensible($resumen))) {
-            throw new FichaClienteException(422, 'dato_sensible', 'El título o el resumen traen lo que el historial oculta como secreto (lo que sigue a «contraseña» o «clave»). Escribilos sin datos de acceso.');
+        $this->rechazar_dato_sensible($titulo, 'El título');
+        if ($resumen !== null) {
+            $this->rechazar_dato_sensible($resumen, 'El resumen');
         }
 
         $resultado = DB::transaction(function () use ($ticket_id, $lease_token, $titulo, $resumen) {
             $ticket = $this->ticket_con_reserva($ticket_id, $lease_token);
 
-            $conservado = $ticket->name_source === ClientSupportMemoryEntry::SOURCE_LUCAS && trim((string) $ticket->name) !== '';
+            /* Martín solo pisa un título sin dueño (null), suyo o automático (`sistema`); el de Lucas (`lucas`) y el
+               asunto que mandó el cliente desde su sistema (`cliente`, que además se sincroniza allá) se conservan. */
+            $conservado = trim((string) $ticket->name) !== '' && ! in_array($ticket->name_source, self::TITULOS_QUE_MARTIN_PISA, true);
             if (! $conservado) {
                 $ticket->name        = $titulo;
                 $ticket->name_source = ClientSupportMemoryEntry::SOURCE_MARTIN;
@@ -832,8 +866,9 @@ class ClientSupportMemoryService
     /**
      * La clave `indice_tickets`: TODOS los tickets del cliente visibles para el contacto (la regla de
      * `previous_tickets`: un empleado ve solo los suyos), el más nuevo primero, con el actual marcado, hasta
-     * ~10.000 caracteres. `{tickets: [{id, titulo, resumen, status, opened_at, closed_at, mensajes, actual}], total,
-     * truncado}`. Nunca lanza: ante un error, null y al log.
+     * ~10.000 caracteres. `{tickets: [{id, titulo, resumen, primer_mensaje, status, opened_at, closed_at, mensajes,
+     * actual}], total, truncado}`; `primer_mensaje` (≤ 150) solo en los que no tienen título. Nunca lanza: ante un
+     * error, null y al log.
      *
      * @param SupportTicket $ticket El ticket (puede ser uno en memoria, sin id, del dueño).
      *
@@ -851,23 +886,31 @@ class ClientSupportMemoryService
                 SupportMessage::apply_mensaje_real_conditions($mensajes, 'support_messages');
             }])->orderByDesc('id')->get();
 
+            /* El primer mensaje del cliente, solo de los que no tienen título (para que Martín sepa de qué se trató). */
+            $primeros = $this->primeros_mensajes_del_cliente($tickets->filter(function (SupportTicket $uno) {
+                return $this->titulo_de($uno) === null;
+            })->keyBy('id'));
+
             $filas    = [];
             $usados   = 0;
             $truncado = false;
             foreach ($tickets as $uno) {
-                $resumen = $uno->summary === null ? null : (string) $uno->summary;
+                /* Coherente con `history`: un ticket del sistema sin identidad verificada no muestra su resumen. */
+                $resumen = $uno->summary === null || $uno->es_erp_sin_identidad_verificada() ? null : (string) $uno->summary;
                 if ($resumen !== null && mb_strlen($resumen) > self::RESUMEN_EN_EL_INDICE) {
                     $resumen = rtrim(mb_substr($resumen, 0, self::RESUMEN_EN_EL_INDICE - 1)) . '…';
                 }
+                $titulo = $this->titulo_de($uno);
                 $fila = [
-                    'id'        => (int) $uno->id,
-                    'titulo'    => $this->titulo_de($uno),
-                    'resumen'   => $resumen,
-                    'status'    => $uno->status,
-                    'opened_at' => $uno->opened_at ? $uno->opened_at->toIso8601String() : null,
-                    'closed_at' => $uno->closed_at ? $uno->closed_at->toIso8601String() : null,
-                    'mensajes'  => (int) $uno->mensajes_reales,
-                    'actual'    => $ticket->id !== null && (int) $uno->id === (int) $ticket->id,
+                    'id'             => (int) $uno->id,
+                    'titulo'         => $titulo,
+                    'resumen'        => $resumen,
+                    'primer_mensaje' => $titulo === null && isset($primeros[(int) $uno->id]) ? $primeros[(int) $uno->id] : null,
+                    'status'         => $uno->status,
+                    'opened_at'      => $uno->opened_at ? $uno->opened_at->toIso8601String() : null,
+                    'closed_at'      => $uno->closed_at ? $uno->closed_at->toIso8601String() : null,
+                    'mensajes'       => (int) $uno->mensajes_reales,
+                    'actual'         => $ticket->id !== null && (int) $uno->id === (int) $ticket->id,
                 ];
                 $largo = mb_strlen((string) json_encode($fila, JSON_UNESCAPED_UNICODE));
                 if ($usados + $largo > self::TOPE_CARACTERES_INDICE) {
@@ -920,28 +963,38 @@ class ClientSupportMemoryService
      * `GET .../history-search?q=`: busca `q` en los mensajes REALES (sin borradores del agente) de TODOS los tickets
      * del cliente visibles para el contacto, y devuelve además la lista de esos tickets.
      *
-     * 🔴 No es O(n) en PHP: un solo `LIKE` en SQL acotado por `support_ticket_id IN (tickets del cliente)` (índice
-     * `support_messages_support_ticket_id_index`), con tope de filas. A PHP llegan solo las coincidencias, para el
-     * filtro de confianza de los tickets del sistema (`mensaje_confiable_para_codex`) y el fragmento. El fragmento
-     * (±200 caracteres) sale del cuerpo YA saneado como el historial: en los mensajes del equipo lo que sigue a
-     * «contraseña» / «clave» llega como `[oculta]`.
+     * Primero la frase entera; si no aparece en ningún mensaje, cualquiera de sus TÉRMINOS (las palabras de 3 o más
+     * caracteres, hasta 5), ordenado por cuántos términos coinciden y después por fecha. La respuesta dice los
+     * `terminos`, si encontró la `frase` o los `terminos` (`busqueda`), y en cada coincidencia cuántos `coinciden`.
+     *
+     * 🔴 Performance, en dos pasos: (1) los ids de los tickets visibles del cliente; (2) los mensajes de esos tickets
+     * con `FORCE INDEX (support_messages_support_ticket_id_index)`. Sin el FORCE, con `ORDER BY id DESC LIMIT n` el
+     * optimizador puede elegir recorrer `PRIMARY` de atrás para adelante sobre TODOS los mensajes de todos los
+     * clientes hasta juntar n coincidencias (con una búsqueda que no aparece, la tabla entera). Con el índice del
+     * ticket lee solo los mensajes de este cliente y ordena esos. A PHP llegan solo las coincidencias (tope de filas),
+     * para el filtro de confianza de los tickets del sistema (`mensaje_confiable_para_codex`) y el fragmento (±200
+     * caracteres del cuerpo YA saneado como el historial: en los mensajes del equipo lo que sigue a «contraseña» /
+     * «clave» llega como `[oculta]`).
      *
      * @param SupportTicket $ticket El ticket (o uno en memoria del dueño, desde el seguimiento).
      * @param string        $q      2..100 caracteres.
      * @param int           $limite ≤ 40.
      *
-     * @return array<string, mixed> `{q, coincidencias, tickets, total_tickets}`.
+     * @return array<string, mixed> `{q, terminos, busqueda, coincidencias, tickets, total_tickets}`.
      */
     public function buscar_en_el_historial(SupportTicket $ticket, $q, $limite)
     {
-        $q      = trim((string) $q);
-        $limite = max(1, min(self::COINCIDENCIAS_MAXIMAS, (int) $limite));
+        $q        = trim((string) $q);
+        $limite   = max(1, min(self::COINCIDENCIAS_MAXIMAS, (int) $limite));
+        $terminos = $this->terminos_de($q);
+        $vacio    = ['q' => $q, 'terminos' => $terminos, 'busqueda' => 'frase', 'coincidencias' => [], 'tickets' => [], 'total_tickets' => 0];
 
         $consulta = app(SupportCodexService::class)->consulta_de_tickets_visibles($ticket);
         if ($consulta === null) {
-            return ['q' => $q, 'coincidencias' => [], 'tickets' => [], 'total_tickets' => 0];
+            return $vacio;
         }
 
+        /* Paso 1: los tickets visibles del cliente (con su conteo, para la lista). */
         $tickets = $consulta->withCount(['messages as mensajes_reales' => function ($mensajes) {
             SupportMessage::apply_mensaje_real_conditions($mensajes, 'support_messages');
         }])->orderByDesc('id')->get()->keyBy('id');
@@ -950,17 +1003,18 @@ class ClientSupportMemoryService
         })->all();
 
         if ($ids === []) {
-            return ['q' => $q, 'coincidencias' => [], 'tickets' => [], 'total_tickets' => 0];
+            return $vacio;
         }
 
-        $encontrados = SupportMessage::whereIn('support_ticket_id', $ids);
-        SupportMessage::apply_mensaje_real_conditions($encontrados, 'support_messages');
-        /* Un poco más que el límite: algunas pueden caer en el filtro de confianza de los tickets del sistema. */
-        $encontrados = $encontrados->where('body', 'like', '%' . $this->escapar_like($q) . '%')
-            ->orderByDesc('id')
-            ->limit($limite + 20)
-            ->get();
+        /* Paso 2: la frase; si no aparece, los términos. */
+        $busqueda    = 'frase';
+        $encontrados = $this->mensajes_que_coinciden($ids, [$q], $terminos, $limite);
+        if ($encontrados->isEmpty() && $terminos !== [$q]) {
+            $busqueda    = 'terminos';
+            $encontrados = $this->mensajes_que_coinciden($ids, $terminos, $terminos, $limite);
+        }
 
+        $agujas = $busqueda === 'frase' ? array_merge([$q], $terminos) : $terminos;
         $coincidencias = [];
         foreach ($encontrados as $mensaje) {
             $suyo = $tickets->get((int) $mensaje->support_ticket_id);
@@ -972,7 +1026,8 @@ class ClientSupportMemoryService
                 'message_id'  => (int) $mensaje->id,
                 'created_at'  => $mensaje->created_at ? $mensaje->created_at->toIso8601String() : null,
                 'sender_type' => $mensaje->sender_type,
-                'fragmento'   => $this->fragmento($this->cuerpo_saneado($mensaje), $q),
+                'coinciden'   => (int) $mensaje->coinciden,
+                'fragmento'   => $this->fragmento($this->cuerpo_saneado($mensaje), $agujas),
             ];
             if (count($coincidencias) >= $limite) {
                 break;
@@ -983,6 +1038,8 @@ class ClientSupportMemoryService
 
         return [
             'q'             => $q,
+            'terminos'      => $terminos,
+            'busqueda'      => $busqueda,
             'coincidencias' => $coincidencias,
             'tickets'       => $tickets->values()->map(function (SupportTicket $uno) use ($primeros) {
                 return [
@@ -997,6 +1054,71 @@ class ClientSupportMemoryService
             })->all(),
             'total_tickets' => $tickets->count(),
         ];
+    }
+
+    /**
+     * Los términos de una búsqueda: las palabras de 3 o más caracteres (sin la puntuación de los bordes), sin
+     * repetir, hasta 5. Si no queda ninguna, la frase entera es el único término.
+     *
+     * @param string $q La búsqueda.
+     *
+     * @return array<int, string>
+     */
+    public function terminos_de($q)
+    {
+        $terminos = [];
+        $vistos   = [];
+        foreach (preg_split('/\s+/u', trim((string) $q)) as $palabra) {
+            $palabra = (string) preg_replace('/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/u', '', (string) $palabra);
+            $clave   = mb_strtolower(Str::ascii($palabra));
+            if (mb_strlen($palabra) < 3 || isset($vistos[$clave])) {
+                continue;
+            }
+            $vistos[$clave] = true;
+            $terminos[]     = $palabra;
+            if (count($terminos) >= self::TERMINOS_MAXIMOS) {
+                break;
+            }
+        }
+
+        return $terminos === [] ? [trim((string) $q)] : $terminos;
+    }
+
+    /**
+     * Los mensajes reales de los tickets `$ids` cuyo cuerpo tiene ALGUNA de las `$agujas`, con `coinciden` = cuántos
+     * de los `$terminos` tiene cada uno; ordenados por `coinciden` y después por id (el más nuevo primero), con tope
+     * de `$limite + 20` (algunas pueden caer en el filtro de confianza). 🔴 Con `FORCE INDEX` del índice del ticket.
+     *
+     * @param array<int, int>    $ids      Los tickets.
+     * @param array<int, string> $agujas   Lo que tiene que aparecer (alguna).
+     * @param array<int, string> $terminos Lo que se cuenta.
+     * @param int                $limite   El límite pedido.
+     *
+     * @return \Illuminate\Support\Collection
+     */
+    protected function mensajes_que_coinciden(array $ids, array $agujas, array $terminos, $limite)
+    {
+        $consulta = SupportMessage::query()->from(DB::raw('`support_messages` FORCE INDEX (`support_messages_support_ticket_id_index`)'))
+            ->whereIn('support_messages.support_ticket_id', $ids);
+        SupportMessage::apply_mensaje_real_conditions($consulta, 'support_messages');
+
+        $consulta->where(function ($alguna) use ($agujas) {
+            foreach ($agujas as $aguja) {
+                $alguna->orWhere('support_messages.body', 'like', '%' . $this->escapar_like($aguja) . '%');
+            }
+        });
+
+        $conteo  = implode(' + ', array_fill(0, count($terminos), '(`support_messages`.`body` LIKE ?)'));
+        $valores = array_map(function ($termino) {
+            return '%' . $this->escapar_like($termino) . '%';
+        }, $terminos);
+
+        return $consulta->select('support_messages.*')
+            ->selectRaw('(' . $conteo . ') as coinciden', $valores)
+            ->orderByDesc('coinciden')
+            ->orderByDesc('support_messages.id')
+            ->limit($limite + 20)
+            ->get();
     }
 
     /**
@@ -1053,29 +1175,38 @@ class ClientSupportMemoryService
     }
 
     /**
-     * ±200 caracteres alrededor de la primera aparición de `q` (sin distinguir mayúsculas ni tildes, como el LIKE
-     * de MySQL), con «…» donde se cortó. Si `q` no aparece en el cuerpo saneado (cayó en lo oculto), el principio.
+     * ±200 caracteres alrededor de la primera aguja que aparezca (en el orden dado; sin distinguir mayúsculas ni
+     * tildes, como el LIKE de MySQL), con «…» donde se cortó. Si ninguna aparece en el cuerpo saneado (cayó en lo
+     * oculto), el principio.
      *
-     * @param string $cuerpo El cuerpo saneado.
-     * @param string $q      Lo buscado.
+     * @param string             $cuerpo El cuerpo saneado.
+     * @param array<int, string> $agujas Lo buscado (la frase y/o los términos).
      *
      * @return string
      */
-    protected function fragmento($cuerpo, $q)
+    protected function fragmento($cuerpo, array $agujas)
     {
         $cuerpo = (string) $cuerpo;
         $largo  = mb_strlen($cuerpo);
+        $plano  = Str::ascii($cuerpo);
 
-        $posicion = mb_stripos($cuerpo, $q);
-        if ($posicion === false) {
-            $plano   = Str::ascii($cuerpo);
-            $buscado = Str::ascii($q);
-            $posicion = mb_strlen($plano) === $largo && $buscado !== '' ? stripos($plano, $buscado) : false;
+        $posicion = false;
+        $ancho    = 0;
+        foreach ($agujas as $aguja) {
+            $aguja    = (string) $aguja;
+            $posicion = $aguja === '' ? false : mb_stripos($cuerpo, $aguja);
+            if ($posicion === false && $aguja !== '' && mb_strlen($plano) === $largo) {
+                $posicion = stripos($plano, Str::ascii($aguja));
+            }
+            if ($posicion !== false) {
+                $ancho = mb_strlen($aguja);
+                break;
+            }
         }
         $posicion = $posicion === false ? 0 : (int) $posicion;
 
         $desde = max(0, $posicion - self::CONTEXTO_DEL_FRAGMENTO);
-        $hasta = min($largo, $posicion + mb_strlen($q) + self::CONTEXTO_DEL_FRAGMENTO);
+        $hasta = min($largo, $posicion + $ancho + self::CONTEXTO_DEL_FRAGMENTO);
 
         return ($desde > 0 ? '…' : '') . mb_substr($cuerpo, $desde, $hasta - $desde) . ($hasta < $largo ? '…' : '');
     }
