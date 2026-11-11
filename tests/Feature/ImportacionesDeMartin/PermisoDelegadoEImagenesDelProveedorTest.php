@@ -32,7 +32,7 @@ class PermisoDelegadoEImagenesDelProveedorTest extends BaseDeImportacionesDeMart
 
     private function tanda(array $extra = []): array
     {
-        return [
+        return $extra + [
             'fuente' => 'www.proveedor.com.ar',
             'items' => [
                 ['article_id' => 11, 'tipo' => 'exacto', 'content_base64' => base64_encode($this->png('uno')),
@@ -41,7 +41,7 @@ class PermisoDelegadoEImagenesDelProveedorTest extends BaseDeImportacionesDeMart
                     'url_origen' => 'https://www.proveedor.com.ar/p/12', 'codigo_web' => 'ABC-12'],
                 ['article_id' => 13, 'tipo' => 'exacto', 'content_base64' => base64_encode('<html>no soy una foto</html>')],
             ],
-        ] + $extra;
+        ];
     }
 
     private function fakear_empresa(): void
@@ -230,6 +230,100 @@ class PermisoDelegadoEImagenesDelProveedorTest extends BaseDeImportacionesDeMart
         $this->subir($this->tanda(['lease_token' => $reserva['lease_token'], 'ultima_tanda' => true]))->assertOk()->assertJsonPath('estado', 'version_vieja');
         Http::assertSent(function ($request) {
             return strpos($request->url(), '/catalogo/imagenes/proveedor') !== false && $this->campo($request, 'ultima_tanda') === '1';
+        });
+    }
+
+    /* ------------------------------------------------------------------------------------- Fotos del catálogo PDF */
+
+    /** Un PDF adjunto al primer mensaje del ticket (el del dueño, acreditado en el setUp). */
+    private function pdf_del_dueno(): \App\Models\SupportMessageAttachment
+    {
+        $primero = \App\Models\SupportMessage::where('support_ticket_id', $this->ticket->id)->orderBy('id')->first();
+
+        return $this->adjuntar($this->ticket, 'soporte/catalogo.pdf', 'application/pdf', $primero);
+    }
+
+    /** @test */
+    public function las_fotos_del_pdf_del_dueno_viajan_con_tipo_fuente_pdf_con_la_reserva_o_el_permiso_pdf(): void
+    {
+        $this->fakear_empresa();
+        $pdf = $this->pdf_del_dueno();
+        $reserva = $this->reservar();
+        $permiso_pdf = $this->permiso('pdf', $reserva['lease_token']);
+        $fuente = 'Adjunto-' . $pdf->id . '.PDF';
+
+        $this->subir($this->tanda(['lease_token' => $reserva['lease_token'], 'tipo_fuente' => 'pdf', 'fuente' => $fuente]))
+            ->assertOk()->assertJsonPath('estado', 'aceptado');
+        $this->subir($this->tanda(['tarea_token' => $permiso_pdf, 'tipo_fuente' => 'pdf', 'fuente' => $fuente]))
+            ->assertOk()->assertJsonPath('estado', 'aceptado');
+
+        $pedidos = Http::recorded(function ($request) {
+            return strpos($request->url(), '/catalogo/imagenes/proveedor') !== false;
+        });
+        $this->assertCount(2, $pedidos);
+        foreach ($pedidos as $pedido) {
+            $this->assertSame('pdf', $this->campo($pedido[0], 'tipo_fuente'));
+            $this->assertSame('adjunto-' . $pdf->id . '.pdf', $this->campo($pedido[0], 'fuente'));
+        }
+    }
+
+    /** @test */
+    public function las_fotos_de_la_web_viajan_con_tipo_fuente_web_por_defecto(): void
+    {
+        $this->fakear_empresa();
+        $reserva = $this->reservar();
+
+        $this->subir($this->tanda(['lease_token' => $reserva['lease_token']]))->assertOk()->assertJsonPath('estado', 'aceptado');
+        Http::assertSent(function ($request) {
+            return strpos($request->url(), '/catalogo/imagenes/proveedor') !== false && $this->campo($request, 'tipo_fuente') === 'web';
+        });
+    }
+
+    /** @test */
+    public function el_permiso_web_no_sube_fotos_del_pdf_ni_el_pdf_fotos_de_la_web(): void
+    {
+        $this->fakear_empresa();
+        $pdf = $this->pdf_del_dueno();
+        $reserva = $this->reservar();
+        $web = $this->permiso('web', $reserva['lease_token']);
+        $permiso_pdf = $this->permiso('pdf', $reserva['lease_token']);
+
+        $this->subir($this->tanda(['tarea_token' => $web, 'tipo_fuente' => 'pdf', 'fuente' => 'adjunto-' . $pdf->id . '.pdf']))
+            ->assertStatus(403)->assertJsonPath('motivo', 'alcance_no_permitido');
+        $this->subir($this->tanda(['tarea_token' => $permiso_pdf, 'tipo_fuente' => 'web']))
+            ->assertStatus(403)->assertJsonPath('motivo', 'alcance_no_permitido');
+
+        Http::assertNotSent(function ($request) {
+            return strpos($request->url(), '/catalogo/imagenes/proveedor') !== false;
+        });
+    }
+
+    /** @test */
+    public function la_fuente_pdf_tiene_que_ser_un_pdf_entrante_del_dueno_de_este_ticket(): void
+    {
+        $this->fakear_empresa();
+        $de_empleado = $this->entrante($this->ticket, 'el catálogo', false, '+5493419999999');
+        $pdf_ajeno = $this->adjuntar($this->ticket, 'soporte/del-empleado.pdf', 'application/pdf', $de_empleado);
+        $otro = $this->ticket_del_cliente($this->client);
+        $this->acreditar($this->ultimo_mensaje($otro));
+        $pdf_de_otro = $this->adjuntar($otro, 'soporte/otro.pdf', 'application/pdf');
+        $primero = \App\Models\SupportMessage::where('support_ticket_id', $this->ticket->id)->orderBy('id')->first();
+        $excel = $this->adjuntar($this->ticket, 'soporte/lista.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', $primero);
+        $reserva = $this->reservar();
+        $subir = function (string $fuente) use ($reserva) {
+            return $this->subir($this->tanda(['lease_token' => $reserva['lease_token'], 'tipo_fuente' => 'pdf', 'fuente' => $fuente]));
+        };
+
+        $subir('adjunto-' . $pdf_ajeno->id . '.pdf')->assertStatus(422)->assertJsonPath('estado', 'archivo_sin_remitente_verificado');
+        $subir('adjunto-' . $pdf_de_otro->id . '.pdf')->assertStatus(422)->assertJsonPath('estado', 'sin_fuente');
+        $subir('adjunto-' . $excel->id . '.pdf')->assertStatus(422)->assertJsonPath('estado', 'sin_fuente');
+        $subir('www.proveedor.com.ar')->assertStatus(422)->assertJsonPath('error', 'parámetros inválidos');
+        $subir('adjunto-' . $excel->id . '.xlsx')->assertStatus(422)->assertJsonPath('error', 'parámetros inválidos');
+        $this->subir($this->tanda(['lease_token' => $reserva['lease_token'], 'tipo_fuente' => 'otro']))
+            ->assertStatus(422)->assertJsonPath('error', 'parámetros inválidos');
+
+        Http::assertNotSent(function ($request) {
+            return strpos($request->url(), '/catalogo/imagenes/proveedor') !== false;
         });
     }
 

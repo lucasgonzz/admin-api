@@ -5,6 +5,7 @@ namespace App\Services\ImportacionesDeMartin;
 use App\Models\SupportCodexCase;
 use App\Models\SupportCodexTaskGrant;
 use App\Models\SupportMessage;
+use App\Models\SupportMessageAttachment;
 use App\Models\SupportTicket;
 use App\Services\ClientCatalogoPuenteService;
 use App\Services\PruebaImportacionService;
@@ -58,10 +59,18 @@ class ImportacionesDeMartinService
     /** Qué alcances del permiso delegado abre cada ruta. */
     const RUTA_CATALOGO = 'catalogo';
     const RUTA_IMAGENES = 'imagenes';
+    const RUTA_IMAGENES_PDF = 'imagenes_pdf';
     const ALCANCES_POR_RUTA = [
         self::RUTA_CATALOGO => [SupportCodexTaskGrant::ALCANCE_PDF, SupportCodexTaskGrant::ALCANCE_WEB],
+        // Las fotos de la web, con el permiso `web`; las del catálogo PDF (`tipo_fuente=pdf`), con el permiso `pdf`.
         self::RUTA_IMAGENES => [SupportCodexTaskGrant::ALCANCE_WEB],
+        self::RUTA_IMAGENES_PDF => [SupportCodexTaskGrant::ALCANCE_PDF],
     ];
+
+    /** De dónde salen las fotos de `import-images-proveedor`. */
+    const TIPO_FUENTE_WEB = 'web';
+    const TIPO_FUENTE_PDF = 'pdf';
+    const TIPOS_DE_FUENTE = [self::TIPO_FUENTE_WEB, self::TIPO_FUENTE_PDF];
 
     /** Formatos de imagen por sus primeros bytes. */
     const FIRMAS = [
@@ -138,7 +147,7 @@ class ImportacionesDeMartinService
      * @param int         $ticket_id
      * @param string|null $lease_token
      * @param string|null $tarea_token
-     * @param string      $ruta        self::RUTA_CATALOGO | self::RUTA_IMAGENES.
+     * @param string      $ruta        self::RUTA_CATALOGO | self::RUTA_IMAGENES | self::RUTA_IMAGENES_PDF.
      *
      * @return SupportTicket
      */
@@ -496,14 +505,21 @@ class ImportacionesDeMartinService
      * idempotente por ticket, fuente y artículo.
      *
      * @param SupportTicket        $ticket
-     * @param array<string, mixed> $input `fuente`, `ultima_tanda` (deja el aviso al dueño), `items:[{article_id, tipo,
+     * @param array<string, mixed> $input `fuente`, `tipo_fuente` (web | pdf), `ultima_tanda` (deja el aviso al dueño), `items:[{article_id, tipo,
      *                                    content_base64, url_origen, codigo_web}]`.
      *
      * @return array<string, mixed>
      */
     public function importar_imagenes_proveedor(SupportTicket $ticket, array $input): array
     {
-        $campos = $this->contexto($ticket) + ['fuente' => strtolower(trim((string) $input['fuente']))]
+        $tipo_fuente = isset($input['tipo_fuente']) && $input['tipo_fuente'] === self::TIPO_FUENTE_PDF ? self::TIPO_FUENTE_PDF : self::TIPO_FUENTE_WEB;
+        $fuente = strtolower(trim((string) $input['fuente']));
+        $invalida = $tipo_fuente === self::TIPO_FUENTE_PDF ? $this->fuente_pdf_invalida($ticket, $fuente) : $this->fuente_web_invalida($fuente);
+        if ($invalida !== null) {
+            return $invalida;
+        }
+
+        $campos = $this->contexto($ticket) + ['fuente' => $fuente, 'tipo_fuente' => $tipo_fuente]
             + (! empty($input['ultima_tanda']) ? ['ultima_tanda' => '1'] : []);
         $archivos = [];
         $rechazadas = [];
@@ -567,6 +583,47 @@ class ImportacionesDeMartinService
             'enviadas' => count($archivos),
             'rechazadas_antes_de_enviar' => $rechazadas,
         ];
+    }
+
+    /**
+     * El dominio del sitio del proveedor (`www.proveedor.com.ar`), sin esquema ni ruta, como lo exige empresa.
+     *
+     * @param string $fuente En minúsculas.
+     *
+     * @return array<string, string>|null null = vale.
+     */
+    private function fuente_web_invalida(string $fuente): ?array
+    {
+        return preg_match('/\A[a-z0-9.-]+\.[a-z]{2,}\z/', $fuente) === 1 ? null
+            : ['estado' => 'archivo_invalido', 'mensaje' => 'La fuente tiene que ser el dominio del sitio del proveedor (www.proveedor.com.ar).'];
+    }
+
+    /**
+     * 🔴 Con `tipo_fuente=pdf`, la fuente es `adjunto-<id>.pdf` y `<id>` tiene que ser un adjunto PDF de ESTE ticket que
+     * llegó desde el WhatsApp registrado del dueño: el mismo freno que la planilla derivada del PDF en `import-excel`.
+     *
+     * @param SupportTicket $ticket
+     * @param string        $fuente En minúsculas.
+     *
+     * @return array<string, string>|null null = vale.
+     */
+    private function fuente_pdf_invalida(SupportTicket $ticket, string $fuente): ?array
+    {
+        if (preg_match('/\Aadjunto-([1-9][0-9]{0,18})\.pdf\z/', $fuente, $partes) !== 1) {
+            return ['estado' => 'archivo_invalido', 'mensaje' => 'Con tipo_fuente pdf, la fuente tiene que ser «adjunto-<id>.pdf».'];
+        }
+
+        $adjunto = SupportMessageAttachment::where('id', (int) $partes[1])->whereHas('message', function ($query) use ($ticket) {
+            $query->where('support_ticket_id', (int) $ticket->id)->where('sender_type', 'user');
+        })->with('message')->first();
+        if ($adjunto === null || ($adjunto->mime !== 'application/pdf' && PruebaImportacionService::extension_del_adjunto($adjunto) !== 'pdf')) {
+            return ['estado' => 'sin_fuente', 'mensaje' => 'El PDF de la fuente tiene que ser un adjunto del cliente en este ticket.'];
+        }
+        if (! $this->importacion->es_entrante_del_dueno($ticket, $adjunto->message)) {
+            return ['estado' => 'archivo_sin_remitente_verificado', 'mensaje' => 'El PDF tiene que haber llegado desde el WhatsApp registrado del dueño.'];
+        }
+
+        return null;
     }
 
     /**

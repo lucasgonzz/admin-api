@@ -197,9 +197,10 @@ class ClaudeImportacionesDeMartinController extends Controller
 
     /**
      * `POST claude/support-codex/tickets/{id}/import-images-proveedor` — una tanda de hasta 25 fotos de la web del
-     * proveedor, con la reserva del ticket o el permiso `web` de la tarea.
+     * proveedor (o del catálogo PDF del dueño, con `tipo_fuente=pdf`), con la reserva del ticket o el permiso de la
+     * tarea: `web` para las de la web, `pdf` para las del PDF.
      *
-     * @param Request    $request `{fuente, ultima_tanda?, items: [{article_id, tipo: exacto|dudosa, content_base64, url_origen?, codigo_web?}]}`.
+     * @param Request    $request `{fuente, tipo_fuente?: web|pdf, ultima_tanda?, items: [{article_id, tipo: exacto|dudosa, content_base64, url_origen?, codigo_web?}]}`.
      * @param int|string $id
      *
      * @return \Illuminate\Http\JsonResponse 200 `{estado: aceptado|rechazado|version_vieja, http, cuerpo: {run_id, asignadas,
@@ -208,8 +209,11 @@ class ClaudeImportacionesDeMartinController extends Controller
     public function import_images_proveedor(Request $request, $id)
     {
         $invalido = $this->validar_o_422($request, $this->reglas_de_tokens() + [
-            // El dominio del sitio, como lo exige empresa (`www.proveedor.com.ar`): sin esquema ni ruta.
-            'fuente' => ['required', 'string', 'max:190', 'regex:/\A[A-Za-z0-9.-]+\.[A-Za-z]{2,}\z/'],
+            // web: el dominio del sitio, como lo exige empresa (`www.proveedor.com.ar`, sin esquema ni ruta); pdf:
+            // `adjunto-<id>.pdf` (que el adjunto sea del dueño y de este ticket lo valida el servicio).
+            'fuente' => ['required', 'string', 'max:190', $request->input('tipo_fuente') === ImportacionesDeMartinService::TIPO_FUENTE_PDF
+                ? 'regex:/\A[Aa][Dd][Jj][Uu][Nn][Tt][Oo]-[1-9][0-9]{0,18}\.[Pp][Dd][Ff]\z/' : 'regex:/\A[A-Za-z0-9.-]+\.[A-Za-z]{2,}\z/'],
+            'tipo_fuente' => 'sometimes|string|in:' . implode(',', ImportacionesDeMartinService::TIPOS_DE_FUENTE),
             'ultima_tanda' => 'sometimes|boolean',
             'items' => 'required|array|min:1|max:' . ImportacionesDeMartinService::MAX_ITEMS,
             'items.*.article_id' => 'required|integer|min:1',
@@ -224,10 +228,13 @@ class ClaudeImportacionesDeMartinController extends Controller
         }
 
         return $this->responder(function () use ($request, $id) {
-            $ticket = $this->importaciones->ticket_autorizado((int) $id, $this->lease($request), $this->tarea($request), ImportacionesDeMartinService::RUTA_IMAGENES);
+            $de_pdf = $request->input('tipo_fuente') === ImportacionesDeMartinService::TIPO_FUENTE_PDF;
+            $ticket = $this->importaciones->ticket_autorizado((int) $id, $this->lease($request), $this->tarea($request),
+                $de_pdf ? ImportacionesDeMartinService::RUTA_IMAGENES_PDF : ImportacionesDeMartinService::RUTA_IMAGENES);
 
             return $this->importaciones->importar_imagenes_proveedor($ticket, [
                 'fuente' => (string) $request->input('fuente'),
+                'tipo_fuente' => $de_pdf ? ImportacionesDeMartinService::TIPO_FUENTE_PDF : ImportacionesDeMartinService::TIPO_FUENTE_WEB,
                 'ultima_tanda' => $request->boolean('ultima_tanda'),
                 'items' => (array) $request->input('items'),
             ]);
