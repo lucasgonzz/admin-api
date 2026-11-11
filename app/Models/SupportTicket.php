@@ -72,6 +72,8 @@ class SupportTicket extends Model
         'ai_suggestion_send_at' => 'datetime',
         /* Momento en que Claude escaló el ticket a revisión humana. */
         'escalated_at' => 'datetime',
+        /* Cuándo Martín escribió el resumen del ticket (misión cruzada ficha-del-cliente, 11/11/2026). */
+        'summary_updated_at' => 'datetime',
         /* Interruptores del agente por ticket, espejo de los que ya tiene `leads`. */
         'claude_auto_reply' => 'boolean',
         'requiere_verificacion_mensajes' => 'boolean',
