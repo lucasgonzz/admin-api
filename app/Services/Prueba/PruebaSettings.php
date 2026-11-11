@@ -34,6 +34,10 @@ class PruebaSettings
     /** WhatsApp de soporte que ve el negocio en la pantalla de vencimiento (viaja en C1 y en C6). */
     const KEY_WHATSAPP_SOPORTE = 'prueba_whatsapp_soporte';
 
+    /** Minutos sin respuesta antes del respaldo automático de soporte (ver respaldo_soporte_minutos()). */
+    const KEY_RESPALDO_SOPORTE_MINUTOS = 'prueba_respaldo_soporte_minutos';
+    const DEFAULT_RESPALDO_SOPORTE_MINUTOS = 3;
+
     /** 0 hasta que Lucas prenda el pool desde admin_settings: sin DNS ni plantilla, un mínimo > 0 solo fabrica fallidas. */
     const DEFAULT_POOL_MINIMO         = 0;
     const DEFAULT_MAX_ACTIVAS         = 25;
@@ -84,6 +88,20 @@ class PruebaSettings
 
         // Separar un destino no debe dejar sin video al otro ni exigir migrar la configuración anterior.
         return $url !== '' ? $url : self::video_url();
+    }
+
+    /**
+     * Minutos sin respuesta tras los que el respaldo automático contesta un ticket de prueba cuando Martín está
+     * caído (misión prueba-ayuda-unificada-en-soporte, 10/11/2026). `prueba_respaldo_soporte_minutos`, default 3,
+     * entre 1 y 120.
+     *
+     * @return int
+     */
+    public static function respaldo_soporte_minutos(): int
+    {
+        $minutos = (int) AdminSetting::get(self::KEY_RESPALDO_SOPORTE_MINUTOS, self::DEFAULT_RESPALDO_SOPORTE_MINUTOS);
+
+        return $minutos < 1 ? self::DEFAULT_RESPALDO_SOPORTE_MINUTOS : min($minutos, 120);
     }
 
     public static function whatsapp_soporte(): string

@@ -1954,7 +1954,8 @@ class WhatsappWebhookController extends Controller
     /**
      * Lo que dispara el entrante de un negocio en PRUEBA GRATUITA (misión prueba-ayuda-unificada-en-soporte,
      * 10/11/2026): el video 04 por el ticket si todavía no salió (la ventana recién se abrió con este entrante, y
-     * va antes de que Martín tome el ticket). Para cualquier otro cliente no hace nada. Nunca tumba el webhook.
+     * va antes de que Martín tome el ticket) y el job del respaldo automático por si Martín está caído (A4). Para
+     * cualquier otro cliente no hace nada. Nunca tumba el webhook.
      *
      * @param Client        $client
      * @param SupportTicket $ticket
@@ -1977,6 +1978,9 @@ class WhatsappWebhookController extends Controller
                 'error'     => $e->getMessage(),
             ]);
         }
+
+        /* El respaldo por si Martín está caído (A4): un job a los N minutos que decide al correr. Nunca lanza. */
+        app(\App\Services\Prueba\PruebaRespaldoSoporteService::class)->programar($ticket, $message_id);
     }
 
     /**

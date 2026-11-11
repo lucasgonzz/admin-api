@@ -126,29 +126,15 @@ class SupportCodexHealthService
             return ['result' => 'disabled'];
         }
         return $this->locked(function (array $state) {
-            if (empty($state['armed_at']) && empty($state['supervisor_incident'])) {
+            $evaluacion = $this->evaluar($state);
+            if ($evaluacion === null) {
                 return $state;
             }
-            $local = now(self::TIMEZONE);
-            $resume = $local->copy()->setTime(self::RESUME_HOUR, 0);
-            if ($local->lt($resume)) {
-                return $state;
-            }
-            $now = $local->getTimestamp();
-            $resumeAt = $resume->getTimestamp();
-            $silent = $now - max($resumeAt, (int) ($state['last_seen_at'] ?? 0)) >= self::TIMEOUT_SECONDS;
-            $failing = ! empty($state['first_error_at'])
-                && $now - max($resumeAt, (int) $state['first_error_at']) >= self::TIMEOUT_SECONDS;
-            $unhealthy = $silent || $failing;
-            $reason = $silent ? 'sin_pulso' : ($state['error_code'] ?? 'monitor_error');
-            $incident = $state['supervisor_incident'] ?? null;
-            if ($incident) {
-                $failed = $incident['state'] === 'failed';
-                $expired = $now - max($resumeAt, (int) $incident['started_at']) >= self::RECOVERY_SECONDS;
-                // Al reanudar a las 07:00 hay un presupuesto nuevo; los reportes no lo renuevan.
-                $unhealthy = ($failed || $expired) && $now - $resumeAt >= self::TIMEOUT_SECONDS;
-                $reason = $failed ? 'recovery_failed' : 'recovery_unverified';
-            }
+            $now = $evaluacion['now'];
+            $resumeAt = $evaluacion['resume_at'];
+            $unhealthy = $evaluacion['unhealthy'];
+            $reason = $evaluacion['reason'];
+            $incident = $evaluacion['incident'];
             $kind = null;
             if ($unhealthy && (empty($state['alert_sent_at']) || $now - (int) $state['alert_sent_at'] >= self::REMINDER_SECONDS)) {
                 $kind = empty($state['alert_sent_at']) ? 'failure' : 'reminder';
@@ -182,6 +168,65 @@ class SupportCodexHealthService
             }
             return $state;
         });
+    }
+
+    /**
+     * Si Martín está caído AHORA con el MISMO criterio del correo de vigilancia ({@see self::check()}): en falla
+     * o sin pulso hace {@see self::TIMEOUT_SECONDS}, o con una recuperación del supervisor fallida o vencida.
+     * Lo usa el respaldo automático de la prueba gratuita (misión prueba-ayuda-unificada-en-soporte, 10/11/2026)
+     * para no inventar otra definición de «caído».
+     *
+     * Solo lee: no toma el candado de la fila ni manda nada. Con el proveedor apagado a mano (pausa humana), sin
+     * pulso armado, o antes de las 07:00 (la vigilancia no mide de noche), da false.
+     *
+     * @return bool
+     */
+    public function en_falla(): bool
+    {
+        if (! SupportCodexSettings::enabled()) {
+            return false;
+        }
+        $state = json_decode((string) AdminSetting::where('key', self::KEY)->value('value'), true);
+        $evaluacion = $this->evaluar(is_array($state) ? $state : []);
+
+        return $evaluacion !== null && $evaluacion['unhealthy'];
+    }
+
+    /**
+     * El diagnóstico de salud que comparten el correo y el respaldo de la prueba. null = no se evalúa (sin
+     * pulso armado ni incidente, o antes de la hora de reanudar).
+     *
+     * @param array<string, mixed> $state
+     *
+     * @return array{now: int, resume_at: int, unhealthy: bool, reason: string, incident: array|null}|null
+     */
+    private function evaluar(array $state): ?array
+    {
+        if (empty($state['armed_at']) && empty($state['supervisor_incident'])) {
+            return null;
+        }
+        $local = now(self::TIMEZONE);
+        $resume = $local->copy()->setTime(self::RESUME_HOUR, 0);
+        if ($local->lt($resume)) {
+            return null;
+        }
+        $now = $local->getTimestamp();
+        $resumeAt = $resume->getTimestamp();
+        $silent = $now - max($resumeAt, (int) ($state['last_seen_at'] ?? 0)) >= self::TIMEOUT_SECONDS;
+        $failing = ! empty($state['first_error_at'])
+            && $now - max($resumeAt, (int) $state['first_error_at']) >= self::TIMEOUT_SECONDS;
+        $unhealthy = $silent || $failing;
+        $reason = $silent ? 'sin_pulso' : ($state['error_code'] ?? 'monitor_error');
+        $incident = $state['supervisor_incident'] ?? null;
+        if ($incident) {
+            $failed = $incident['state'] === 'failed';
+            $expired = $now - max($resumeAt, (int) $incident['started_at']) >= self::RECOVERY_SECONDS;
+            // Al reanudar a las 07:00 hay un presupuesto nuevo; los reportes no lo renuevan.
+            $unhealthy = ($failed || $expired) && $now - $resumeAt >= self::TIMEOUT_SECONDS;
+            $reason = $failed ? 'recovery_failed' : 'recovery_unverified';
+        }
+
+        return ['now' => $now, 'resume_at' => $resumeAt, 'unhealthy' => $unhealthy, 'reason' => $reason, 'incident' => $incident];
     }
 
     private function date($timestamp): ?string
