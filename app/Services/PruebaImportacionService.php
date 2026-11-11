@@ -88,7 +88,8 @@ class PruebaImportacionService
      * Reenvía un Excel del ticket (o uno en base64) a la instancia del cliente en prueba.
      *
      * @param SupportTicket        $ticket
-     * @param array<string, mixed> $input `attachment_id` | `file:{filename, content_base64}`, `pdf_attachment_id` opcional, `model`, `provider_id`, `origen`.
+     * @param array<string, mixed> $input `attachment_id` | `file:{filename, content_base64}`, `pdf_attachment_id` opcional, `model`, `provider_id`, `origen`,
+     *                                    `columnas_previas` opcional (`[{hoja?, columna, campo}]`, solo artículos y sin `alcance`).
      *
      * @return array<string, mixed> `estado`: aceptado | analizado_sin_corrida | rechazado | no_es_prueba |
      *                              ticket_cerrado | sin_fuente | archivo_invalido | sin_api_key | sin_url | no_responde.
@@ -168,6 +169,14 @@ class PruebaImportacionService
             $campos['importacion_clave'] = $clave;
         }
 
+        if ($modelo === 'article' && $alcance === null) {
+            $previas = $this->columnas_previas($input['columnas_previas'] ?? null);
+            if ($previas !== []) {
+                // Viaja como un string JSON: el multipart no lleva listas anidadas.
+                $campos['columnas_previas'] = json_encode($previas, JSON_UNESCAPED_UNICODE);
+            }
+        }
+
         // Si la instancia vuelve a una versión anterior después de la consulta, la ruta
         // específica rechaza el pedido antes de que un importador general lea el archivo.
         $ruta = $alcance === null ? self::RUTA_ANALYZE : self::RUTA_STOCK_EXISTENTE;
@@ -227,6 +236,38 @@ class PruebaImportacionService
             'cuerpo'        => $cuerpo,
             'filename'      => $archivo['filename'],
         ];
+    }
+
+    /**
+     * El mapeo previo ya validado, con solo `hoja` (si vino), `columna` (en mayúsculas) y `campo`. Lo que
+     * no es una lista o queda vacío no se reenvía: el sistema pregunta como siempre.
+     *
+     * @param mixed $entrada
+     *
+     * @return array<int, array<string, string>>
+     */
+    private function columnas_previas($entrada): array
+    {
+        if (!is_array($entrada)) {
+            return [];
+        }
+
+        $previas = [];
+        foreach ($entrada as $item) {
+            if (!is_array($item) || !isset($item['columna'], $item['campo'])) {
+                continue;
+            }
+
+            $previa = [];
+            if (isset($item['hoja']) && trim((string) $item['hoja']) !== '') {
+                $previa['hoja'] = (string) $item['hoja'];
+            }
+            $previa['columna'] = strtoupper(trim((string) $item['columna']));
+            $previa['campo'] = (string) $item['campo'];
+            $previas[] = $previa;
+        }
+
+        return array_values($previas);
     }
 
     /** Corridas de esta conversación. Una instancia anterior conserva el contexto de siempre. */

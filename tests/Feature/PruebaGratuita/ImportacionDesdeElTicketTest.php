@@ -734,6 +734,152 @@ class ImportacionDesdeElTicketTest extends BaseDeLaPrueba
         Http::assertNothingSent();
     }
 
+    /**
+     * El mapeo de columnas que soporte ya confirmó con el cliente (misión importacion-mapeo-previo-de-martin,
+     * 11/11/2026): viaja al análisis como un string JSON con solo `hoja`, `columna` y `campo`.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function columnas_previas(): array
+    {
+        return [
+            ['hoja' => 'ARTICULOS', 'columna' => 'A', 'campo' => 'ignorar', 'sobra' => 'no viaja'],
+            ['hoja' => 'ARTICULOS', 'columna' => 'c', 'campo' => 'nombre'],
+            ['hoja' => null, 'columna' => 'J', 'campo' => 'Depósito Principal'],
+        ];
+    }
+
+    /** @test */
+    public function reenvia_el_mapeo_previo_de_columnas_como_un_json_con_hoja_columna_y_campo(): void
+    {
+        $this->fakear_http(['*/admin-sync/ai-excel-import/analyze' => Http::response([
+            'analysis_uuid' => 'uuid-con-previas', 'automatizar_prueba' => true, 'columnas_previas' => 3,
+        ], 202)]);
+
+        $this->importar(['attachment_id' => $this->adjunto->id, 'columnas_previas' => $this->columnas_previas()])
+            ->assertOk()->assertJsonPath('estado', 'aceptado')->assertJsonPath('cuerpo.columnas_previas', 3);
+
+        Http::assertSent(function ($request) {
+            if (strpos($request->url(), '/admin-sync/ai-excel-import/analyze') === false) {
+                return false;
+            }
+            $crudo = $this->campo($request, 'columnas_previas');
+
+            return $crudo !== null
+                && strpos($crudo, 'Depósito Principal') !== false
+                && json_decode($crudo, true) === [
+                    ['hoja' => 'ARTICULOS', 'columna' => 'A', 'campo' => 'ignorar'],
+                    ['hoja' => 'ARTICULOS', 'columna' => 'C', 'campo' => 'nombre'],
+                    ['columna' => 'J', 'campo' => 'Depósito Principal'],
+                ];
+        });
+    }
+
+    /** @test */
+    public function el_mapeo_previo_tambien_viaja_en_la_importacion_de_soporte_de_un_activo(): void
+    {
+        $this->pasar_a_activo();
+        $this->fakear_http([
+            '*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response(['automatizar_soporte' => true], 200),
+            '*/admin-sync/ai-excel-import/analyze' => Http::response([
+                'analysis_uuid' => 'uuid-de-soporte', 'automatizar_soporte' => true, 'columnas_previas' => 3,
+            ], 202),
+        ]);
+        $reserva = $this->reservar_turno((int) $this->adjunto->support_message_id);
+
+        $this->importar(['attachment_id' => $this->adjunto->id, 'automatizar_soporte' => true,
+            'columnas_previas' => $this->columnas_previas()] + $reserva)
+            ->assertOk()->assertJsonPath('estado', 'aceptado')->assertJsonPath('cuerpo.columnas_previas', 3);
+
+        Http::assertSent(function ($request) {
+            $previas = json_decode((string) $this->campo($request, 'columnas_previas'), true);
+
+            return strpos($request->url(), '/admin-sync/ai-excel-import/analyze') !== false
+                && $this->campo($request, 'automatizar_soporte') === '1'
+                && is_array($previas) && count($previas) === 3;
+        });
+    }
+
+    /** @test */
+    public function sin_mapeo_previo_el_multipart_no_lleva_el_campo(): void
+    {
+        $this->fakear_http(['*/admin-sync/ai-excel-import/analyze' => Http::response(['analysis_uuid' => 'uuid-sin-previas'], 202)]);
+
+        $this->importar(['attachment_id' => $this->adjunto->id])->assertOk()->assertJsonPath('estado', 'aceptado');
+
+        Http::assertSent(function ($request) {
+            return strpos($request->url(), '/admin-sync/ai-excel-import/analyze') !== false
+                && $this->campo($request, 'columnas_previas') === null;
+        });
+    }
+
+    /** @test */
+    public function el_mapeo_previo_no_se_reenvia_si_el_modelo_no_es_de_articulos(): void
+    {
+        $this->fakear_http(['*/admin-sync/ai-excel-import/analyze' => Http::response(['analysis_uuid' => 'uuid-de-clientes'], 202)]);
+
+        $this->importar(['attachment_id' => $this->adjunto->id, 'model' => 'client', 'columnas_previas' => $this->columnas_previas()])
+            ->assertOk()->assertJsonPath('estado', 'aceptado');
+
+        Http::assertSent(function ($request) {
+            return $this->campo($request, 'model') === 'client' && $this->campo($request, 'columnas_previas') === null;
+        });
+    }
+
+    /** @test */
+    public function la_ruta_de_solo_stock_rechaza_el_mapeo_previo_sin_reenviar_el_excel(): void
+    {
+        $this->pasar_a_activo();
+        $this->fakear_http([
+            '*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response([
+                'automatizar_soporte' => true, 'alcances_soporte' => ['stock_existente'],
+            ], 200),
+            '*/admin-sync/ai-excel-import/analyze-stock-existente' => Http::response([
+                'automatizar_soporte' => true, 'alcance' => 'stock_existente', 'analysis_uuid' => 'no-deberia',
+            ], 202),
+        ]);
+        $reserva = $this->reservar_turno((int) $this->adjunto->support_message_id);
+
+        $this->importar_stock([
+            'attachment_id' => $this->adjunto->id, 'automatizar_soporte' => true, 'alcance' => 'stock_existente',
+            'columnas_previas' => [['columna' => 'J', 'campo' => 'address_1_amount']],
+        ] + $reserva)->assertStatus(422);
+
+        Http::assertNotSent(function ($request) {
+            return strpos($request->url(), '/ai-excel-import/analyze') !== false;
+        });
+        $this->assertNull($this->ticket->fresh()->importacion_soporte_iniciada_at);
+    }
+
+    /**
+     * @test
+     * @dataProvider mapeos_previos_invalidos
+     */
+    public function un_mapeo_previo_mal_formado_contesta_422_sin_mandar(array $columnas_previas, string $error): void
+    {
+        $this->fakear_http(['*/admin-sync/ai-excel-import/analyze' => Http::response(['analysis_uuid' => 'no-deberia'], 202)]);
+
+        $this->importar(['attachment_id' => $this->adjunto->id, 'columnas_previas' => $columnas_previas])
+            ->assertStatus(422)->assertJsonValidationErrors([$error]);
+
+        Http::assertNotSent(function ($request) {
+            return strpos($request->url(), '/ai-excel-import/analyze') !== false;
+        });
+    }
+
+    public function mapeos_previos_invalidos(): array
+    {
+        return [
+            'columna con número de fila' => [[['columna' => 'A1', 'campo' => 'nombre']], 'columnas_previas.0.columna'],
+            'columna de cuatro letras' => [[['columna' => 'ABCD', 'campo' => 'nombre']], 'columnas_previas.0.columna'],
+            'sin campo' => [[['columna' => 'B']], 'columnas_previas.0.campo'],
+            'campo vacío' => [[['columna' => 'B', 'campo' => '']], 'columnas_previas.0.campo'],
+            'hoja demasiado larga' => [[['hoja' => str_repeat('h', 121), 'columna' => 'B', 'campo' => 'nombre']], 'columnas_previas.0.hoja'],
+            'lista vacía' => [[], 'columnas_previas'],
+            'más de 80' => [array_fill(0, 81, ['columna' => 'B', 'campo' => 'nombre']), 'columnas_previas'],
+        ];
+    }
+
     /** @test */
     public function reenvia_las_imagenes_en_un_multipart_con_la_clave_del_cliente(): void
     {

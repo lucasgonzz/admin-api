@@ -346,6 +346,11 @@ class ClaudeSupportCodexController extends Controller
      *
      * Body: `attachment_id` (adjunto de ESTE ticket) o `file {filename, content_base64}`; opcionales `model`
      * (article|client|provider), `provider_id`, `origen` y `pdf_attachment_id` (adjunto original cuando `file` deriva de un PDF).
+     * Opcional `columnas_previas`: el mapeo de columnas que soporte ya confirmó con el cliente, de 1 a 80
+     * `{hoja?, columna, campo}` (`hoja` string ≤120 o null; `columna` en letras `A`..`ZZZ`; `campo` string 1..120:
+     * la clave o la etiqueta del campo del negocio, o `ignorar`). Se reenvía como string JSON al análisis de
+     * artículos; el sistema del negocio lo aplica y solo pregunta lo que no quedó cubierto. Sin el campo, todo
+     * igual que antes. La ruta de solo stock no lo admite (422).
      *
      * @return \Illuminate\Http\JsonResponse 200 aceptado/analizado_sin_corrida/rechazado · 404 no_es_prueba ·
      *                                       409 ticket_cerrado/sin_api_key/sin_url · 422 · 502 no_responde
@@ -359,6 +364,7 @@ class ClaudeSupportCodexController extends Controller
 
     public function import_excel_stock_existente(Request $request, $id, PruebaImportacionService $service, SupportCodexService $soporte)
     {
+        abort_if($request->has('columnas_previas'), 422, 'El mapeo previo de columnas es para la importación general de artículos.');
         abort_unless($request->boolean('automatizar_soporte'), 422, 'El alcance de stock requiere el modo de soporte.');
 
         return $this->importar_excel_del_ticket($request, $id, $service, $soporte, true);
@@ -378,7 +384,13 @@ class ClaudeSupportCodexController extends Controller
             'automatizar_soporte' => 'sometimes|boolean',
             'lease_token' => 'required_if:automatizar_soporte,true|nullable|string|min:32|max:128',
             'expected_message_id' => 'required_if:automatizar_soporte,true|nullable|integer|min:1',
-        ] + ($solo_stock ? ['alcance' => 'required|in:' . PruebaImportacionService::ALCANCE_STOCK_EXISTENTE] : []));
+        ] + ($solo_stock ? ['alcance' => 'required|in:' . PruebaImportacionService::ALCANCE_STOCK_EXISTENTE] : [
+            // Mapeo de columnas que soporte ya confirmó con el cliente: el sistema no vuelve a preguntarlo.
+            'columnas_previas' => 'sometimes|array|min:1|max:80',
+            'columnas_previas.*.hoja' => 'sometimes|nullable|string|max:120',
+            'columnas_previas.*.columna' => 'required|string|regex:/^[A-Za-z]{1,3}$/',
+            'columnas_previas.*.campo' => 'required|string|min:1|max:120',
+        ]));
         if ($request->boolean('automatizar_soporte')) {
             $resultado = DB::transaction(function () use ($id, $data, $service, $soporte) {
                 $ticket = SupportTicket::lockForUpdate()->findOrFail($id);
