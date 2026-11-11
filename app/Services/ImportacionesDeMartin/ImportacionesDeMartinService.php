@@ -48,8 +48,11 @@ class ImportacionesDeMartinService
     /** Modelos del servicio de clientes y proveedores. */
     const MODELOS = ['client', 'provider'];
 
-    /** Imágenes por pedido y peso de cada una. */
-    const MAX_ITEMS = 25;
+    /**
+     * Imágenes por pedido y peso de cada una. 🔴 20 y no 25: PHP corta los archivos de un multipart en
+     * `max_file_uploads` (20 por defecto) y las fotos de más se perdían sin aviso del lado de empresa.
+     */
+    const MAX_ITEMS = 20;
     const MAX_BYTES_IMAGEN = 4 * 1024 * 1024;
     const TIPOS = ['exacto', 'dudosa'];
 
@@ -71,6 +74,9 @@ class ImportacionesDeMartinService
     const TIPO_FUENTE_WEB = 'web';
     const TIPO_FUENTE_PDF = 'pdf';
     const TIPOS_DE_FUENTE = [self::TIPO_FUENTE_WEB, self::TIPO_FUENTE_PDF];
+
+    /** Estados de una corrida ya confirmada (con `confirmada_at`): un CONFIRMAR repetido es idempotente. */
+    const ESTADOS_YA_CONFIRMADOS = ['importar', 'terminada', 'revirtiendo', 'revertida'];
 
     /** Formatos de imagen por sus primeros bytes. */
     const FIRMAS = [
@@ -327,12 +333,26 @@ class ImportacionesDeMartinService
             return $estado;
         }
 
+        $prefijo = $decision === 'cancelar' ? 'CANCELAR ' : 'CONFIRMAR ';
+        $ya_resuelta = $decision === 'cancelar'
+            ? $estado['estado_corrida'] === 'cancelada'
+            : in_array($estado['estado_corrida'], self::ESTADOS_YA_CONFIRMADOS, true) && ! empty($estado['corrida']['confirmada_at']);
+        if ($ya_resuelta) {
+            // Idempotente: la misma respuesta del dueño, reintentada después de que empresa ya la tomó (o tomada por
+            // otra atención). Ya no hay código vigente para comparar: alcanza con que el mensaje diga exactamente
+            // `CONFIRMAR|CANCELAR <código>` y que ese texto haya salido en un aviso anterior. No se reenvía nada.
+            $cuerpo = strtoupper(trim((string) $mensaje->body));
+            if (preg_match('/\A' . $prefijo . '[A-Z0-9]{8}\z/D', $cuerpo) === 1 && $this->hubo_aviso_con($ticket, $mensaje, $cuerpo)) {
+                return $estado + ['idempotente' => true];
+            }
+
+            return ['estado' => 'confirmacion_invalida', 'mensaje' => 'La corrida ya no espera el código del dueño.'];
+        }
+
         $codigo = $estado['codigo'];
-        $texto = ($decision === 'cancelar' ? 'CANCELAR ' : 'CONFIRMAR ') . $codigo;
+        $texto = $prefijo . $codigo;
         if ($codigo === null || strtoupper(trim((string) $mensaje->body)) !== $texto
-            || ! SupportMessage::where('support_ticket_id', $ticket->id)->where('sender_type', 'admin')
-                ->where('is_trial_import_notice', true)->whereNotNull('whatsapp_message_id')
-                ->where('id', '<', $mensaje->id)->where('body', 'like', '%' . $texto . '%')->exists()) {
+            || ! $this->hubo_aviso_con($ticket, $mensaje, $texto)) {
             return ['estado' => 'confirmacion_invalida', 'mensaje' => 'Hace falta el código vigente de la corrida, escrito por el dueño después del aviso.'];
         }
 
@@ -343,6 +363,22 @@ class ImportacionesDeMartinService
         ], [], 60);
 
         return $this->resultado_de_corrida($respuesta, $modelo, 'No pude confirmar la importación.');
+    }
+
+    /**
+     * ¿Salió por el ticket, antes del mensaje del dueño, un aviso de importación entregado a WhatsApp con este texto?
+     *
+     * @param SupportTicket  $ticket
+     * @param SupportMessage $mensaje
+     * @param string         $texto   `CONFIRMAR <código>` o `CANCELAR <código>`.
+     *
+     * @return bool
+     */
+    private function hubo_aviso_con(SupportTicket $ticket, SupportMessage $mensaje, string $texto): bool
+    {
+        return SupportMessage::where('support_ticket_id', $ticket->id)->where('sender_type', 'admin')
+            ->where('is_trial_import_notice', true)->whereNotNull('whatsapp_message_id')
+            ->where('id', '<', $mensaje->id)->where('body', 'like', '%' . $texto . '%')->exists();
     }
 
     /**
@@ -394,6 +430,9 @@ class ImportacionesDeMartinService
         if (self::es_version_vieja($status, $cuerpo)) {
             return ['estado' => 'version_vieja', 'http' => 404, 'mensaje' => 'El sistema del negocio todavía no admite importar ' . $this->nombre($modelo) . ' desde soporte.'];
         }
+        if (self::respuesta_no_json($cuerpo)) {
+            return self::respuesta_invalida($status);
+        }
         // Empresa contesta `{corrida: {...}}` (también en sus 409, con la corrida como quedó).
         $corrida = isset($cuerpo['corrida']) && is_array($cuerpo['corrida']) ? $cuerpo['corrida'] : [];
         if ($status < 200 || $status >= 300 || ! isset($corrida['corrida_id'])) {
@@ -437,7 +476,33 @@ class ImportacionesDeMartinService
      */
     public static function es_version_vieja(int $status, array $cuerpo): bool
     {
-        return $status === 404 && (! isset($cuerpo['motivo']) || trim((string) $cuerpo['motivo']) === '');
+        return $status === 404 && ! self::respuesta_no_json($cuerpo) && (! isset($cuerpo['motivo']) || trim((string) $cuerpo['motivo']) === '');
+    }
+
+    /**
+     * ¿La instancia contestó algo que no es JSON (un warning de PHP mezclado con el cuerpo, una página de error)?
+     * `PruebaImportacionService::reenviar` lo deja como `{cuerpo_crudo}`.
+     *
+     * @param array<string, mixed> $cuerpo
+     *
+     * @return bool
+     */
+    private static function respuesta_no_json(array $cuerpo): bool
+    {
+        return array_keys($cuerpo) === ['cuerpo_crudo'];
+    }
+
+    /**
+     * Una respuesta de la instancia que no se puede leer: nunca `aceptado` ni el texto crudo hacia el monitor.
+     *
+     * @param int $status
+     *
+     * @return array<string, mixed>
+     */
+    private static function respuesta_invalida(int $status): array
+    {
+        return ['estado' => 'rechazado', 'motivo' => 'respuesta_invalida', 'http' => $status,
+            'mensaje' => 'El sistema del negocio contestó algo que no es JSON: no se sabe qué hizo. Revisá el estado antes de repetir.'];
     }
 
     /**
@@ -563,6 +628,10 @@ class ImportacionesDeMartinService
         if ($archivos === []) {
             return ['estado' => 'archivo_invalido', 'mensaje' => 'Ninguna imagen de la tanda es válida.', 'rechazadas_antes_de_enviar' => $rechazadas];
         }
+        if (count($archivos) > self::MAX_ITEMS) {
+            // El controlador ya lo valida; esto cuida los archivos reales del multipart (`max_file_uploads`).
+            return ['estado' => 'archivo_invalido', 'mensaje' => 'Hasta ' . self::MAX_ITEMS . ' imágenes por pedido.', 'rechazadas_antes_de_enviar' => $rechazadas];
+        }
 
         $respuesta = $this->importacion->reenviar($ticket->client, self::RUTA_IMAGENES_PROVEEDOR, $campos, $archivos, 180);
         if (isset($respuesta['estado'])) {
@@ -570,7 +639,10 @@ class ImportacionesDeMartinService
         }
 
         $status = (int) $respuesta['status'];
-        if (self::es_version_vieja($status, is_array($respuesta['cuerpo']) ? $respuesta['cuerpo'] : [])) {
+        if (! is_array($respuesta['cuerpo']) || self::respuesta_no_json($respuesta['cuerpo'])) {
+            return self::respuesta_invalida($status) + ['enviadas' => count($archivos), 'rechazadas_antes_de_enviar' => $rechazadas];
+        }
+        if (self::es_version_vieja($status, $respuesta['cuerpo'])) {
             return ['estado' => 'version_vieja', 'http' => 404, 'mensaje' => 'El sistema del negocio todavía no admite las imágenes de la web del proveedor.',
                 'rechazadas_antes_de_enviar' => $rechazadas];
         }
