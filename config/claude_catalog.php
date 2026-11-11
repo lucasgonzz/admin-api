@@ -2287,7 +2287,7 @@ return [
             ],
             'parametros'   => [
                 ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'La implementación.'],
-                ['nombre' => 'accion', 'obligatorio' => true, 'validacion' => 'required|string|in:presentacion,form_link,progreso,pedir_archivos,entrega,acceso,imagenes,categorias,descripciones,listo,nota', 'que_es' => 'Qué se hizo.'],
+                ['nombre' => 'accion', 'obligatorio' => true, 'validacion' => 'required|string|in:presentacion,form_link,progreso,pedir_archivos,entrega,acceso,imagenes,categorias,descripciones,listo,nota,seguimiento', 'que_es' => 'Qué se hizo.'],
                 ['nombre' => 'canal', 'obligatorio' => true, 'validacion' => 'required|string|in:whatsapp_web,mail,llamada,otro', 'que_es' => 'Por dónde. Solo whatsapp_web crea además el saliente del hilo.'],
                 ['nombre' => 'texto', 'obligatorio' => false, 'validacion' => 'required_if:canal,whatsapp_web|nullable|string|max:4000', 'que_es' => 'El texto que se mandó. Obligatorio con whatsapp_web (es el cuerpo del mensaje del hilo). Con accion=nota es la nota.'],
                 ['nombre' => 'telefono', 'obligatorio' => false, 'validacion' => 'nullable|string|max:30', 'que_es' => 'A quién se le mandó (solo cuenta con whatsapp_web). Se normaliza a E.164. Sin él, el del cliente.'],
@@ -2387,12 +2387,142 @@ return [
             'parametros'   => [
                 ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'La implementación.'],
                 ['nombre' => 'texto', 'obligatorio' => true, 'validacion' => 'required|string|max:4000 (no vacío)', 'que_es' => 'El mensaje al cliente, tal como lo aprobó Lucas. Con la ventana cerrada va adentro de la plantilla y no puede pasar de 600 caracteres.'],
-                ['nombre' => 'accion', 'obligatorio' => true, 'validacion' => 'required|string|in:presentacion,form_link,progreso,pedir_archivos,entrega,acceso,imagenes,categorias,descripciones,listo,nota', 'que_es' => 'Qué hito es (las mismas claves que POST .../actions). Es la clave que queda en data.actions[] y tilda el checklist del panel. nota es un mensaje real al cliente sin hito propio en el checklist (ARCA en la etapa 7, centro de recursos en la 6, artículos nuevos cargados): se registra igual que las demás, y el texto queda en el ticket, no en la entrada.'],
+                ['nombre' => 'accion', 'obligatorio' => true, 'validacion' => 'required|string|in:presentacion,form_link,progreso,pedir_archivos,entrega,acceso,imagenes,categorias,descripciones,listo,nota,seguimiento', 'que_es' => 'Qué hito es (las mismas claves que POST .../actions). Es la clave que queda en data.actions[] y tilda el checklist del panel. nota es un mensaje real al cliente sin hito propio en el checklist (ARCA en la etapa 7, centro de recursos en la 6, artículos nuevos cargados): se registra igual que las demás, y el texto queda en el ticket, no en la entrada.'],
                 ['nombre' => 'etapa', 'obligatorio' => false, 'validacion' => 'nullable|integer|between:1,8', 'que_es' => 'La etapa en cuyo registro se anota la acción y se guarda la operación. Por defecto la actual.'],
                 ['nombre' => 'telefono', 'obligatorio' => false, 'validacion' => 'nullable|string|max:30 — tiene que ser un contacto del cliente', 'que_es' => 'A quién (en cualquier formato; se resuelve contra los contactos del cliente). Sin él, el dueño: su teléfono personal (`asistente_phone`) si lo tiene cargado; si no, `clients.phone`.'],
                 ['nombre' => 'operation_id', 'obligatorio' => false, 'validacion' => 'required_if:dry_run,false|nullable|string|min:8|max:80|regex:/^[A-Za-z0-9_-]+$/', 'que_es' => 'Clave idempotente del envío, una nueva por mensaje. Obligatoria con dry_run=false. En el dry_run, si se pasa, operacion_previa dice si ya existe y si es el mismo contenido.'],
                 ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Con false lo manda de verdad (200). Sin él, devuelve lo que haría y no escribe nada.'],
                 ['nombre' => 'confirm_client_name', 'obligatorio' => false, 'validacion' => 'required_if:dry_run,false|nullable|string|max:190', 'que_es' => 'El nombre exacto del cliente (clients.name). Obligatorio con dry_run=false.'],
+            ],
+        ],
+        /* Seguimiento proactivo de las implementaciones (misión cruzada seguimiento-de-implementaciones, 11/11/2026).
+           Reglas en App\Services\ImplementationFollowups\ImplementationFollowupService; los frenos del monitor salen con
+           {error, motivo, message} (error y motivo = el código). */
+        'GET api/claude/support-codex/implementation-followups/pending' => [
+            'para_que'     => 'Los seguimientos de implementación que el monitor de Martín tiene que atender ahora (tope 10): activo, vencidos (next_due_at <= ahora), debajo del tope sin respuesta, sin reserva vigente, solo lun–vie 10–18 de Argentina y con Codex prendido. Excluye al cliente con un ticket que Martín tiene reservado o con algo esperándolo (inbound), al dado de baja, al que está en prueba gratuita y al que la respuesta no le caería en el ticket. Aplica antes la regla del contacto del cliente (si escribió, ya no vence). Responde {enabled, en_horario, followups:[{id, client_id, client_name, implementation_id, next_due_at, reason:"implementation_followup"}], server_time}.',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+        ],
+        'POST api/claude/support-codex/implementation-followups/{id}/claim' => [
+            'para_que'     => 'Reserva por 15 minutos un seguimiento vencido para el monitor (o renueva la reserva con el token vigente) y devuelve {lease_token, lease_expires_at, run_id, context}. context: seguimiento (estado, intervalo, sin_respuesta, próximo, pausa, hitos, hitos_no_aplican, obligatorios_pendientes y los últimos 20 eventos), client {id, name, company_name, slug, user_id, estado}, implementation (el mismo bloque sistema/tienda/agentes del contexto de un ticket, sin form_link), contacto {nombre, client_employee_id, ticket_destino_id, ventana {open, expires_at}}, historial (los últimos 5 tickets del cliente con sus últimos 30 mensajes reales, la forma de GET .../history) y martin_ocupado.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Sin lease_token: 409 reservado si otro tiene la reserva vigente; 409 no_vencido si ya no corresponde (no activo, no vencido, tope sin respuesta, el cliente escribió o fuera de horario). Con un token que no es el vigente: 409 reservado.',
+                'Kill switch implementation_followups_enabled = 0: 409 deshabilitado.',
+                'Solo escribe la reserva (hash del token, vencimiento, run_id) del seguimiento; no manda nada.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'lease_token', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|max:128', 'que_es' => 'El token vigente, para renovar. Sin él, reserva nueva.'],
+            ],
+        ],
+        'POST api/claude/support-codex/implementation-followups/{id}/milestones' => [
+            'para_que'     => 'Guarda la medición de los hitos de uso del cliente que hizo el monitor (SQL de solo lectura en su sistema). Evento hitos solo si cambió algo, con las claves nuevas en data.nuevos. Las claves desconocidas se guardan igual. Responde {guardado: true, nuevos, obligatorios_pendientes}.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Reserva vigente del seguimiento (lease_token): si no, 409 reservado.',
+                'Claves con forma [a-z0-9_] de hasta 60 (422 clave_invalida); hasta 50 hitos.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'lease_token', 'obligatorio' => true, 'validacion' => 'required|string|max:128', 'que_es' => 'La reserva del claim.'],
+                ['nombre' => 'medido_at', 'obligatorio' => true, 'validacion' => 'required|date (ISO)', 'que_es' => 'Cuándo se midió.'],
+                ['nombre' => 'hitos', 'obligatorio' => true, 'validacion' => 'present|array|max:50 — {clave: {cantidad: int ≥ 0, primero_at: ISO|null, ultimo_at: ISO|null}}', 'que_es' => 'La medición. Obligatorios para terminar la puesta en marcha: articulo_creado, articulos_actualizados, venta, venta_cc, pago_cc, compra, factura_arca.'],
+            ],
+        ],
+        'POST api/claude/support-codex/implementation-followups/{id}/send' => [
+            'para_que'     => '🔴 MANDA al cliente el seguimiento que redactó Martín, por su ticket de soporte, con ImplementationSupportWhatsappService (el mismo de los WhatsApp de hitos): texto libre con la ventana abierta, la plantilla cc_soporte_apertura con el texto adentro si está cerrada (el operador que figura es «Martín, asistente técnico»), registrado en data.actions[] de la etapa actual (o la última si la implementación está completed) con la acción seguimiento. Responde {status: sent|failed|unknown, parcial, ticket_id, message_id, used_template, operation_id, repetida, error, seguimiento}. Con sent: suma un sin respuesta, next_due_at = +2 días hábiles a las 10:00, evento enviado con el texto, y suelta la reserva.',
+            'escribe'      => true,
+            'peligrosidad' => 'media',
+            'frenos'       => [
+                'Idempotente por operation_id (uuid): el mismo id devuelve el resultado guardado (repetida=true) sin mandar nada, aunque la reserva ya se haya soltado; si la primera sigue mandando, 409 envio_en_curso; un id de otra acción de la implementación, 409 operation_id_reusado.',
+                'Reserva vigente del seguimiento: si no, 409 reservado. Seguimiento que ya no está activo: 409 no_vencido. Kill switch apagado: 409 deshabilitado.',
+                '409 cliente_escribio: el cliente escribió después del claim (se suelta la reserva y se reinicia el reloj; el monitor descarta y no reintenta).',
+                '423 martin_ocupado: Martín tiene reservado el ticket destino o hay un mensaje del cliente esperándolo. 422: cliente_inactivo, sin_implementacion, sin_etapa, sin_contacto, sin_admin, respuesta_al_hilo, texto_largo_para_plantilla, y validación (body 1..550).',
+                'unknown no se reintenta: el seguimiento se corre +2 hábiles y se le avisa a Lucas que mire el ticket. failed se corre una hora.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'lease_token', 'obligatorio' => true, 'validacion' => 'required|string|max:128', 'que_es' => 'La reserva del claim.'],
+                ['nombre' => 'operation_id', 'obligatorio' => true, 'validacion' => 'required|uuid', 'que_es' => 'Clave idempotente del envío (la fija el monitor).'],
+                ['nombre' => 'body', 'obligatorio' => true, 'validacion' => 'required|string|min:1|max:550 (no vacío)', 'que_es' => 'El mensaje, un solo párrafo.'],
+            ],
+        ],
+        'POST api/claude/support-codex/implementation-followups/{id}/postpone' => [
+            'para_que'     => 'Martín decide no escribir ahora. tipo=pausa (hasta ≥ hoy): pausado hasta esa fecha y next_due_at = primer día hábil después a las 10:00 (evento pausado). tipo=omitir: next_due_at = +2 días hábiles, no cuenta como sin respuesta (evento omitido). no_aplican se suma a hitos_no_aplican; avisar_a_lucas=true le manda un push a Lucas con el motivo. Suelta la reserva. Responde {ok: true, seguimiento}.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Reserva vigente (409 reservado). Seguimiento terminado: 409 seguimiento_terminado. hasta en el pasado: 422 fecha_pasada.',
+                'No manda nada al cliente.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'lease_token', 'obligatorio' => true, 'validacion' => 'required|string|max:128', 'que_es' => 'La reserva del claim.'],
+                ['nombre' => 'tipo', 'obligatorio' => true, 'validacion' => 'required|in:pausa,omitir', 'que_es' => 'pausa (el cliente pidió tiempo) u omitir (lo que sigue es del equipo o no hay nada útil para decir).'],
+                ['nombre' => 'hasta', 'obligatorio' => false, 'validacion' => 'required_if:tipo,pausa|nullable|date_format:Y-m-d', 'que_es' => 'Hasta cuándo se pausa (inclusive).'],
+                ['nombre' => 'motivo', 'obligatorio' => true, 'validacion' => 'required|string|min:1|max:500', 'que_es' => 'Por qué.'],
+                ['nombre' => 'avisar_a_lucas', 'obligatorio' => false, 'validacion' => 'sometimes|boolean', 'que_es' => 'true = push a Lucas con el motivo.'],
+                ['nombre' => 'no_aplican', 'obligatorio' => false, 'validacion' => 'sometimes|array|max:20 de claves [a-z0-9_]', 'que_es' => 'Hitos que no aplican a este negocio.'],
+            ],
+        ],
+        'POST api/claude/support-codex/implementation-followups/{id}/release' => [
+            'para_que'     => 'Suelta la reserva del seguimiento sin cambiar nada (evento fallido si trae error): el admin lo vuelve a ofrecer en la próxima vuelta. Responde {released: true}.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => ['Reserva vigente (409 reservado).'],
+            'parametros'   => [
+                ['nombre' => 'lease_token', 'obligatorio' => true, 'validacion' => 'required|string|max:128', 'que_es' => 'La reserva del claim.'],
+                ['nombre' => 'error', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|max:1000', 'que_es' => 'Lo que falló en el monitor.'],
+            ],
+        ],
+        'POST api/claude/support-codex/tickets/{id}/implementation-followup' => [
+            'para_que'     => 'Desde una atención normal (el cliente escribió «esta semana no puedo» o «ya estoy, arranquemos»): pausa o reanuda el seguimiento de implementación del cliente del ticket. pausar = las reglas de postpone pausa; reanudar = activo, sin respuesta en 0 y next_due_at = +2 días hábiles. Responde {registrado: true, seguimiento}.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Reserva vigente del TICKET (la misma validación que implementation-note): si no, 423 invalid_lease.',
+                'El cliente sale del ticket. Sin seguimiento: 404 sin_seguimiento. Terminado: 409 seguimiento_terminado. hasta en el pasado: 422 fecha_pasada.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'lease_token', 'obligatorio' => true, 'validacion' => 'required|string|min:32|max:128', 'que_es' => 'Reserva vigente de este ticket.'],
+                ['nombre' => 'accion', 'obligatorio' => true, 'validacion' => 'required|in:pausar,reanudar', 'que_es' => 'Qué hacer.'],
+                ['nombre' => 'hasta', 'obligatorio' => false, 'validacion' => 'required_if:accion,pausar|nullable|date_format:Y-m-d', 'que_es' => 'Hasta cuándo se pausa.'],
+                ['nombre' => 'motivo', 'obligatorio' => true, 'validacion' => 'required|string|min:1|max:500', 'que_es' => 'Lo que dijo el cliente.'],
+            ],
+        ],
+        'GET api/claude/implementation-followups' => [
+            'para_que'     => 'Los seguimientos de implementación (para Lucas), con cliente y próximo: {followups: [{...seguimiento, client_id, client_name, implementation_id, reservado}]}. Filtro opcional status (activo, pausado, frenado, terminado).',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+        ],
+        'POST api/claude/implementation-followups' => [
+            'para_que'     => 'Alta manual de un seguimiento de implementación para un cliente, aunque su implementación esté cerrada (puesta en marcha). Responde 201 {seguimiento}.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Uno por cliente: si ya tiene, 409 ya_existe (se cambia con PATCH). Cliente inexistente: 404 sin_cliente. En prueba gratuita: 422 cliente_en_prueba.',
+                'No manda nada: el primer seguimiento vence a los 2 días hábiles.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'client_id', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'El cliente.'],
+            ],
+        ],
+        'PATCH api/claude/implementation-followups/{id}' => [
+            'para_que'     => 'Cambios de Lucas sobre un seguimiento de implementación (estado, intervalo, tope sin respuesta, pausa, hitos que no aplican), con evento source lucas. Reactivarlo (status activo desde frenado o pausado) pone sin respuesta en 0. Responde {seguimiento}.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Lista blanca de parámetros: cualquier otra clave es 422 parametros_de_mas. Pausar sin paused_until: 422 sin_fecha.',
+                'No manda nada al cliente.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'status', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|in:activo,pausado,frenado,terminado', 'que_es' => 'El estado nuevo.'],
+                ['nombre' => 'interval_business_days', 'obligatorio' => false, 'validacion' => 'sometimes|integer|between:1,30', 'que_es' => 'Cada cuántos días hábiles se escribe.'],
+                ['nombre' => 'max_unanswered', 'obligatorio' => false, 'validacion' => 'sometimes|integer|between:1,10', 'que_es' => 'Tras cuántos sin respuesta se frena.'],
+                ['nombre' => 'paused_until', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|date_format:Y-m-d', 'que_es' => 'Hasta cuándo está pausado.'],
+                ['nombre' => 'pause_reason', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|max:500', 'que_es' => 'El motivo de la pausa.'],
+                ['nombre' => 'hitos_no_aplican', 'obligatorio' => false, 'validacion' => 'sometimes|array|max:20 de claves [a-z0-9_]', 'que_es' => 'La lista completa de hitos que no aplican (reemplaza la anterior).'],
             ],
         ],
         /* Implementaciones de Agentes de IA (misión implementacion-agentes-ia, 28/10/2026). Van después de
