@@ -3246,6 +3246,95 @@ return [
             ],
             'nota' => 'contrato_al_responder dice si al contestar ya era cliente (clients.estado = activo). El resumen de cada prueba con su encuesta ya armado está en GET claude/prueba/resumen.',
         ],
+
+        /* ---------------------------------------------------------------
+         | trial_instance — las instancias `prueba-NN` del VPS (misión
+         | prueba-alta-instancia) y a qué cliente y lead están asignadas.
+         |
+         | 🔴 SIN `password_cifrada`: es la clave del dueño de la instancia,
+         | cifrada. No matchea la reja de columnas_prohibidas (no dice
+         | "password" en inglés ni "encrypted"): por eso se deja escrito acá.
+         | Tampoco `contexto_meta` (datos de atribución del anuncio) ni
+         | `dns_labels`.
+         --------------------------------------------------------------- */
+        'trial_instance' => [
+            'tabla'           => 'trial_instances',
+            'descripcion'     => 'Instancias de prueba gratuita del VPS (prueba-NN): estado (creando, libre, asignando, asignada, cliente, fallida, borrando, borrada), a qué cliente y lead están asignadas, su alias, versión, cuándo quedó lista, si está dormida y cuándo se borró.',
+            'columnas'        => [
+                'id', 'nombre', 'estado', 'client_id', 'lead_id', 'user_id',
+                'version', 'ecommerce_version', 'alias_slug', 'etapa', 'progreso', 'error',
+                'dormida_at', 'asignada_at', 'lista_at', 'borrada_at',
+                'asistente_listo_at', 'correo_bienvenida_at', 'created_at', 'updated_at',
+            ],
+            'clave_de_cursor' => 'id',
+            'orden_default'   => 'desc',
+            'limite_default'  => 100,
+            'limite_max'      => 500,
+            'busqueda'        => ['nombre', 'alias_slug'],
+            'filtros'         => [
+                'client_id'      => ['columna' => 'client_id',  'tipo' => 'entero'],
+                'lead_id'        => ['columna' => 'lead_id',    'tipo' => 'entero'],
+                /* `estado` va como texto exacto y no como enumeración: las constantes viven en TrialInstance y un
+                   estado nuevo no tiene que dar 422 acá. */
+                'estado'         => ['columna' => 'estado',     'tipo' => 'texto_exacto'],
+                'nombre'         => ['columna' => 'nombre',     'tipo' => 'texto_exacto'],
+                'alias_slug'     => ['columna' => 'alias_slug', 'tipo' => 'texto_exacto'],
+                'sin_cliente'    => ['columna' => 'client_id',  'tipo' => 'nulo'],
+                'despierta'      => ['columna' => 'dormida_at', 'tipo' => 'nulo'],
+                'ids'            => ['columna' => 'id',         'tipo' => 'lista_de_enteros'],
+                'creada_desde'   => ['columna' => 'created_at', 'tipo' => 'fecha_desde'],
+                'creada_hasta'   => ['columna' => 'created_at', 'tipo' => 'fecha_hasta'],
+            ],
+            'relaciones'      => [
+                'cliente' => [
+                    'tipo'        => 'belongs_to', 'tabla' => 'clients',
+                    'clave_local' => 'client_id', 'clave_externa' => 'id',
+                    'columnas'    => ['id', 'uuid', 'name', 'company_name', 'is_active'],
+                ],
+            ],
+            'nota' => 'Solo lectura: dormir, despertar, borrar y mantener el pool van por el panel del admin. El estado del NEGOCIO en prueba (prueba, prueba_vencida, activo) está en clients.estado, no acá; la foto completa por negocio, en GET claude/prueba/resumen.',
+        ],
+
+        /* ---------------------------------------------------------------
+         | prueba_whatsapp_envio — lo que el admin le mandó a cada negocio en
+         | prueba: WhatsApp, correo y lo que dejó en su sistema.
+         --------------------------------------------------------------- */
+        'prueba_whatsapp_envio' => [
+            'tabla'           => 'prueba_whatsapp_envios',
+            'descripcion'     => 'Los envíos de la prueba gratuita por negocio: bienvenida, empujones por hito, aviso de que termina, encuesta, video 04 y avisos al closer, por WhatsApp (canal whatsapp) y por correo (canal correo). `plantilla` dice cuál fue; `dia` es la fecha de Argentina del envío.',
+            'columnas'        => [
+                'id', 'client_id', 'lead_id', 'plantilla', 'canal', 'hito', 'estado',
+                'support_ticket_id', 'support_message_id', 'whatsapp_message_id',
+                'detalle', 'dia', 'enviado_at', 'created_at', 'updated_at',
+            ],
+            'clave_de_cursor' => 'id',
+            'orden_default'   => 'desc',
+            'limite_default'  => 200,
+            'limite_max'      => 500,
+            'busqueda'        => ['plantilla', 'detalle'],
+            'filtros'         => [
+                'client_id'     => ['columna' => 'client_id',  'tipo' => 'entero'],
+                'lead_id'       => ['columna' => 'lead_id',    'tipo' => 'entero'],
+                'plantilla'     => ['columna' => 'plantilla',  'tipo' => 'texto_exacto'],
+                'hito'          => ['columna' => 'hito',       'tipo' => 'texto_exacto'],
+                /* PruebaWhatsappEnvio::CANAL_* y ESTADO_*. */
+                'canal'         => ['columna' => 'canal',      'tipo' => 'en', 'valores' => ['whatsapp', 'correo', 'sistema']],
+                'estado'        => ['columna' => 'estado',     'tipo' => 'en', 'valores' => ['enviado', 'en_cola', 'fallido', 'enviando']],
+                'ids'           => ['columna' => 'id',         'tipo' => 'lista_de_enteros'],
+                'enviado_desde' => ['columna' => 'enviado_at', 'tipo' => 'fecha_desde'],
+                'enviado_hasta' => ['columna' => 'enviado_at', 'tipo' => 'fecha_hasta'],
+                'creado_desde'  => ['columna' => 'created_at', 'tipo' => 'fecha_desde'],
+                'creado_hasta'  => ['columna' => 'created_at', 'tipo' => 'fecha_hasta'],
+            ],
+            'relaciones'      => [
+                'cliente' => [
+                    'tipo'        => 'belongs_to', 'tabla' => 'clients',
+                    'clave_local' => 'client_id', 'clave_externa' => 'id',
+                    'columnas'    => ['id', 'uuid', 'name', 'company_name', 'is_active'],
+                ],
+            ],
+            'nota' => 'plantilla: cc_prueba_bienvenida* (bienvenida), cc_prueba_paso_<hito> (empujón), cc_prueba_dia_5, cc_prueba_fin_encuesta, video_04, aviso_tomas (al closer, con el motivo en hito), correo_paso_<hito>, correo_dia_5, correo_fin_encuesta. Un `enviando` es un envío reservado que no se confirmó: puede haber salido y no se reintenta.',
+        ],
     ],
 
     /*
