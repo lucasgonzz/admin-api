@@ -283,11 +283,11 @@ class ImportacionesDeMartinService
      *
      * @param SupportTicket $ticket
      * @param string        $modelo
-     * @param int           $corrida_id
+     * @param string        $corrida_id El uuid de la corrida.
      *
      * @return array<string, mixed>
      */
-    public function estado(SupportTicket $ticket, string $modelo, int $corrida_id): array
+    public function estado(SupportTicket $ticket, string $modelo, string $corrida_id): array
     {
         $respuesta = $this->importacion->reenviar($ticket->client, self::RUTA_SOPORTE . $corrida_id, $this->contexto($ticket) + ['modelo' => $modelo], [], 12, 'GET');
 
@@ -295,18 +295,19 @@ class ImportacionesDeMartinService
     }
 
     /**
-     * Confirma una corrida con el código que escribió el dueño. El mensaje tiene que ser un texto entrante del dueño
-     * verificado, decir exactamente `CONFIRMAR <código>` con el código vigente de la corrida, y llegar después de un
-     * aviso enviado por el ticket que llevaba ese mismo texto.
+     * Confirma (o cancela) una corrida con el código que escribió el dueño. El mensaje tiene que ser un texto entrante
+     * del dueño verificado, decir exactamente `CONFIRMAR <código>` (o `CANCELAR <código>`) con el código vigente de la
+     * corrida, y llegar después de un aviso enviado por el ticket que llevaba ese mismo texto.
      *
      * @param SupportTicket  $ticket
      * @param SupportMessage $mensaje El `expected_message_id` de la reserva (ya validado por `assert_current`).
      * @param string         $modelo
-     * @param int            $corrida_id
+     * @param string         $corrida_id El uuid de la corrida.
+     * @param string         $decision   confirmar | cancelar.
      *
      * @return array<string, mixed>
      */
-    public function confirmar(SupportTicket $ticket, SupportMessage $mensaje, string $modelo, int $corrida_id): array
+    public function confirmar(SupportTicket $ticket, SupportMessage $mensaje, string $modelo, string $corrida_id, string $decision = 'confirmar'): array
     {
         if ($mensaje->kind !== 'text' || ! $this->importacion->es_entrante_del_dueno($ticket, $mensaje)) {
             return ['estado' => 'confirmacion_invalida', 'mensaje' => 'Hace falta una respuesta de texto del dueño por WhatsApp.'];
@@ -318,7 +319,7 @@ class ImportacionesDeMartinService
         }
 
         $codigo = $estado['codigo'];
-        $texto = 'CONFIRMAR ' . $codigo;
+        $texto = ($decision === 'cancelar' ? 'CANCELAR ' : 'CONFIRMAR ') . $codigo;
         if ($codigo === null || strtoupper(trim((string) $mensaje->body)) !== $texto
             || ! SupportMessage::where('support_ticket_id', $ticket->id)->where('sender_type', 'admin')
                 ->where('is_trial_import_notice', true)->whereNotNull('whatsapp_message_id')
@@ -329,6 +330,7 @@ class ImportacionesDeMartinService
         $respuesta = $this->importacion->reenviar($ticket->client, self::RUTA_SOPORTE . $corrida_id . '/confirmar', $this->contexto($ticket) + [
             'modelo' => $modelo,
             'codigo' => $codigo,
+            'decision' => $decision,
         ], [], 60);
 
         return $this->resultado_de_corrida($respuesta, $modelo, 'No pude confirmar la importación.');
@@ -339,11 +341,11 @@ class ImportacionesDeMartinService
      *
      * @param SupportTicket $ticket
      * @param string        $modelo
-     * @param int           $corrida_id
+     * @param string        $corrida_id El uuid de la corrida.
      *
      * @return array<string, mixed>
      */
-    public function revertir(SupportTicket $ticket, string $modelo, int $corrida_id): array
+    public function revertir(SupportTicket $ticket, string $modelo, string $corrida_id): array
     {
         $respuesta = $this->importacion->reenviar($ticket->client, self::RUTA_SOPORTE . $corrida_id . '/revertir', $this->contexto($ticket) + [
             'modelo' => $modelo,
@@ -377,44 +379,60 @@ class ImportacionesDeMartinService
         $status = (int) $respuesta['status'];
         $cuerpo = is_array($respuesta['cuerpo']) ? $respuesta['cuerpo'] : [];
 
-        if ($status === 404) {
+        if (self::es_version_vieja($status, $cuerpo)) {
             return ['estado' => 'version_vieja', 'http' => 404, 'mensaje' => 'El sistema del negocio todavía no admite importar ' . $this->nombre($modelo) . ' desde soporte.'];
         }
-        if ($status < 200 || $status >= 300 || ! isset($cuerpo['corrida_id'])) {
-            return ['estado' => 'rechazado', 'http' => $status, 'cuerpo' => $cuerpo, 'mensaje' => $falla];
+        // Empresa contesta `{corrida: {...}}` (también en sus 409, con la corrida como quedó).
+        $corrida = isset($cuerpo['corrida']) && is_array($cuerpo['corrida']) ? $cuerpo['corrida'] : [];
+        if ($status < 200 || $status >= 300 || ! isset($corrida['corrida_id'])) {
+            return ['estado' => 'rechazado', 'http' => $status, 'motivo_instancia' => isset($cuerpo['motivo']) ? (string) $cuerpo['motivo'] : null,
+                'cuerpo' => $cuerpo, 'mensaje' => isset($cuerpo['message']) ? (string) $cuerpo['message'] : $falla];
         }
 
         return [
             'estado' => 'aceptado',
             'http' => $status,
-            'modelo' => $modelo,
-            'corrida_id' => (int) $cuerpo['corrida_id'],
-            'estado_corrida' => isset($cuerpo['estado']) ? (string) $cuerpo['estado'] : null,
-            'resumen' => isset($cuerpo['resumen']) && is_array($cuerpo['resumen']) ? $cuerpo['resumen'] : null,
-            'codigo' => $this->codigo_de($cuerpo),
-            'codigo_requerido' => $cuerpo['codigo_requerido'] ?? null,
-            'revertible' => ($cuerpo['revertible'] ?? false) === true,
+            'modelo' => isset($corrida['modelo']) ? (string) $corrida['modelo'] : $modelo,
+            'corrida_id' => (string) $corrida['corrida_id'],
+            'estado_corrida' => isset($corrida['estado']) ? (string) $corrida['estado'] : null,
+            'resumen' => isset($corrida['resumen']) && is_array($corrida['resumen']) ? $corrida['resumen'] : null,
+            'codigo_requerido' => ($corrida['codigo_requerido'] ?? false) === true,
+            'codigo' => $this->codigo_de($corrida),
+            'texto_confirmacion' => isset($corrida['texto_confirmacion']) ? (string) $corrida['texto_confirmacion'] : null,
+            'resultado' => $corrida['resultado'] ?? null,
+            'error_corrida' => $corrida['error'] ?? null,
+            'revertible' => ($corrida['revertible'] ?? false) === true,
+            'corrida_existente' => ($cuerpo['corrida_existente'] ?? false) === true,
             'automatizar_soporte' => true,
-            'cuerpo' => $cuerpo,
         ];
     }
 
     /**
-     * El código de confirmación de la corrida: `codigo_requerido` cuando es el código, o `codigo`.
+     * 🔴 Un 404 SIN `motivo` es una instancia sin la ruta (su versión es anterior). Uno CON `motivo` es un rechazo de
+     * una instancia que sí la tiene (`corrida_no_encontrada`, por ejemplo): no es `version_vieja`.
      *
+     * @param int                  $status
      * @param array<string, mixed> $cuerpo
+     *
+     * @return bool
+     */
+    public static function es_version_vieja(int $status, array $cuerpo): bool
+    {
+        return $status === 404 && (! isset($cuerpo['motivo']) || trim((string) $cuerpo['motivo']) === '');
+    }
+
+    /**
+     * El código de confirmación vigente de la corrida (`codigo_confirmacion`, solo mientras espera al dueño).
+     *
+     * @param array<string, mixed> $corrida
      *
      * @return string|null
      */
-    private function codigo_de(array $cuerpo): ?string
+    private function codigo_de(array $corrida): ?string
     {
-        foreach (['codigo_requerido', 'codigo', 'codigo_confirmacion'] as $clave) {
-            if (isset($cuerpo[$clave]) && is_string($cuerpo[$clave]) && preg_match('/^[A-Z0-9]{8}$/D', $cuerpo[$clave]) === 1) {
-                return $cuerpo[$clave];
-            }
-        }
+        $codigo = $corrida['codigo_confirmacion'] ?? null;
 
-        return null;
+        return is_string($codigo) && preg_match('/^[A-Z0-9]{8}$/D', $codigo) === 1 ? $codigo : null;
     }
 
     private function nombre(string $modelo): string
@@ -457,7 +475,7 @@ class ImportacionesDeMartinService
 
         $status = (int) $respuesta['status'];
         $cuerpo = json_decode((string) json_encode($respuesta['cuerpo']), true);
-        if ($status === 404) {
+        if (self::es_version_vieja($status, is_array($cuerpo) ? $cuerpo : [])) {
             return ['estado' => 'version_vieja', 'http' => 404, 'mensaje' => 'El sistema del negocio todavía no tiene el catálogo para soporte.'];
         }
         if ($status !== 200 || ! is_array($cuerpo) || ! isset($cuerpo['articulos']) || ! is_array($cuerpo['articulos'])) {
@@ -478,13 +496,15 @@ class ImportacionesDeMartinService
      * idempotente por ticket, fuente y artículo.
      *
      * @param SupportTicket        $ticket
-     * @param array<string, mixed> $input `fuente`, `items:[{article_id, tipo, filename, content_base64, url_origen, codigo_web}]`.
+     * @param array<string, mixed> $input `fuente`, `ultima_tanda` (deja el aviso al dueño), `items:[{article_id, tipo,
+     *                                    content_base64, url_origen, codigo_web}]`.
      *
      * @return array<string, mixed>
      */
     public function importar_imagenes_proveedor(SupportTicket $ticket, array $input): array
     {
-        $campos = $this->contexto($ticket) + ['fuente' => strtolower(trim((string) $input['fuente']))];
+        $campos = $this->contexto($ticket) + ['fuente' => strtolower(trim((string) $input['fuente']))]
+            + (! empty($input['ultima_tanda']) ? ['ultima_tanda' => '1'] : []);
         $archivos = [];
         $rechazadas = [];
         $vistos = [];
@@ -521,7 +541,7 @@ class ImportacionesDeMartinService
         }
 
         $status = (int) $respuesta['status'];
-        if ($status === 404) {
+        if (self::es_version_vieja($status, is_array($respuesta['cuerpo']) ? $respuesta['cuerpo'] : [])) {
             return ['estado' => 'version_vieja', 'http' => 404, 'mensaje' => 'El sistema del negocio todavía no admite las imágenes de la web del proveedor.',
                 'rechazadas_antes_de_enviar' => $rechazadas];
         }

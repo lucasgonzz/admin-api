@@ -42,6 +42,7 @@ class ClaudeImportacionesDeMartinController extends Controller
         'rechazado' => 200,
         'version_vieja' => 200,
         'contacto_no_habilitado' => 403,
+        'archivo_sin_remitente_verificado' => 422,
         'ticket_cerrado' => 409,
         'confirmacion_invalida' => 409,
         'sin_api_key' => 409,
@@ -198,7 +199,7 @@ class ClaudeImportacionesDeMartinController extends Controller
      * `POST claude/support-codex/tickets/{id}/import-images-proveedor` — una tanda de hasta 25 fotos de la web del
      * proveedor, con la reserva del ticket o el permiso `web` de la tarea.
      *
-     * @param Request    $request `{fuente, items: [{article_id, tipo: exacto|dudosa, content_base64, url_origen?, codigo_web?}]}`.
+     * @param Request    $request `{fuente, ultima_tanda?, items: [{article_id, tipo: exacto|dudosa, content_base64, url_origen?, codigo_web?}]}`.
      * @param int|string $id
      *
      * @return \Illuminate\Http\JsonResponse 200 `{estado: aceptado|rechazado|version_vieja, http, cuerpo: {run_id, asignadas,
@@ -207,14 +208,16 @@ class ClaudeImportacionesDeMartinController extends Controller
     public function import_images_proveedor(Request $request, $id)
     {
         $invalido = $this->validar_o_422($request, $this->reglas_de_tokens() + [
-            'fuente' => ['required', 'string', 'max:190', 'regex:/\A[A-Za-z0-9][A-Za-z0-9.-]{0,189}\z/'],
+            // El dominio del sitio, como lo exige empresa (`www.proveedor.com.ar`): sin esquema ni ruta.
+            'fuente' => ['required', 'string', 'max:190', 'regex:/\A[A-Za-z0-9.-]+\.[A-Za-z]{2,}\z/'],
+            'ultima_tanda' => 'sometimes|boolean',
             'items' => 'required|array|min:1|max:' . ImportacionesDeMartinService::MAX_ITEMS,
             'items.*.article_id' => 'required|integer|min:1',
             'items.*.tipo' => 'required|string|in:' . implode(',', ImportacionesDeMartinService::TIPOS),
             'items.*.content_base64' => 'required|string|max:5600000',
             'items.*.filename' => 'sometimes|nullable|string|max:160',
-            'items.*.url_origen' => ['sometimes', 'nullable', 'string', 'max:2000', 'regex:~\Ahttps?://~i'],
-            'items.*.codigo_web' => 'sometimes|nullable|string|max:120',
+            'items.*.url_origen' => ['sometimes', 'nullable', 'string', 'max:500', 'regex:~\Ahttps?://~i'],
+            'items.*.codigo_web' => 'sometimes|nullable|string|max:100',
         ]);
         if ($invalido !== null) {
             return $invalido;
@@ -225,6 +228,7 @@ class ClaudeImportacionesDeMartinController extends Controller
 
             return $this->importaciones->importar_imagenes_proveedor($ticket, [
                 'fuente' => (string) $request->input('fuente'),
+                'ultima_tanda' => $request->boolean('ultima_tanda'),
                 'items' => (array) $request->input('items'),
             ]);
         });
@@ -235,7 +239,7 @@ class ClaudeImportacionesDeMartinController extends Controller
     {
         return [
             'modelo' => 'required|string|in:' . implode(',', ImportacionesDeMartinService::MODELOS),
-            'corrida_id' => 'required|integer|min:1',
+            'corrida_id' => 'required|uuid',
         ];
     }
 
@@ -258,15 +262,15 @@ class ClaudeImportacionesDeMartinController extends Controller
         return $this->responder(function () use ($request, $id) {
             $ticket = $this->importaciones->ticket_con_reserva((int) $id, (string) $this->lease($request));
 
-            return $this->importaciones->estado($ticket, (string) $request->input('modelo'), (int) $request->input('corrida_id'));
+            return $this->importaciones->estado($ticket, (string) $request->input('modelo'), (string) $request->input('corrida_id'));
         });
     }
 
     /**
-     * `POST claude/support-codex/tickets/{id}/import-confirm` — confirma la corrida cuando el último mensaje del
-     * ticket (el de la reserva) es el `CONFIRMAR <código>` del dueño.
+     * `POST claude/support-codex/tickets/{id}/import-confirm` — confirma (o cancela) la corrida cuando el último mensaje
+     * del ticket (el de la reserva) es el `CONFIRMAR <código>` (o `CANCELAR <código>`) del dueño.
      *
-     * @param Request                  $request `{lease_token, expected_message_id, modelo, corrida_id}`.
+     * @param Request                  $request `{lease_token, expected_message_id, modelo, corrida_id, decision?: confirmar|cancelar}`.
      * @param int|string               $id
      * @param SupportCodexService      $soporte
      * @param PruebaImportacionService $importacion
@@ -278,6 +282,7 @@ class ClaudeImportacionesDeMartinController extends Controller
         $invalido = $this->validar_o_422($request, $this->reglas_de_corrida() + [
             'lease_token' => 'required|string|min:32|max:128',
             'expected_message_id' => 'required|integer|min:1',
+            'decision' => 'sometimes|string|in:confirmar,cancelar',
         ]);
         if ($invalido !== null) {
             return $invalido;
@@ -304,7 +309,8 @@ class ClaudeImportacionesDeMartinController extends Controller
                     return ['estado' => 'confirmacion_invalida', 'mensaje' => 'Hace falta la respuesta del dueño en este ticket.'];
                 }
 
-                return $this->importaciones->confirmar($ticket, $mensaje, (string) $request->input('modelo'), (int) $request->input('corrida_id'));
+                return $this->importaciones->confirmar($ticket, $mensaje, (string) $request->input('modelo'), (string) $request->input('corrida_id'),
+                    (string) $request->input('decision', 'confirmar'));
             });
         });
     }
@@ -328,7 +334,7 @@ class ClaudeImportacionesDeMartinController extends Controller
         return $this->responder(function () use ($request, $id) {
             $ticket = $this->importaciones->ticket_con_reserva((int) $id, (string) $request->input('lease_token'));
 
-            return $this->importaciones->revertir($ticket, (string) $request->input('modelo'), (int) $request->input('corrida_id'));
+            return $this->importaciones->revertir($ticket, (string) $request->input('modelo'), (string) $request->input('corrida_id'));
         });
     }
 }

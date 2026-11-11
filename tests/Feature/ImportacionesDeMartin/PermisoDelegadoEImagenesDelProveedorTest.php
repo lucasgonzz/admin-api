@@ -227,7 +227,23 @@ class PermisoDelegadoEImagenesDelProveedorTest extends BaseDeImportacionesDeMart
         $this->fakear_http(['*/admin-sync/catalogo/imagenes/proveedor' => Http::response(['message' => 'Not Found'], 404)]);
         $reserva = $this->reservar();
 
-        $this->subir($this->tanda(['lease_token' => $reserva['lease_token']]))->assertOk()->assertJsonPath('estado', 'version_vieja');
+        $this->subir($this->tanda(['lease_token' => $reserva['lease_token'], 'ultima_tanda' => true]))->assertOk()->assertJsonPath('estado', 'version_vieja');
+        Http::assertSent(function ($request) {
+            return strpos($request->url(), '/catalogo/imagenes/proveedor') !== false && $this->campo($request, 'ultima_tanda') === '1';
+        });
+    }
+
+    /** @test */
+    public function un_rechazo_de_la_instancia_con_motivo_no_es_version_vieja(): void
+    {
+        $this->fakear_http(['*/admin-sync/catalogo/imagenes/proveedor' => Http::response(['message' => 'Otro dueño.', 'motivo' => 'dueno_distinto'], 409)]);
+        $reserva = $this->reservar();
+
+        $this->subir($this->tanda(['lease_token' => $reserva['lease_token']]))->assertOk()
+            ->assertJsonPath('estado', 'rechazado')->assertJsonPath('http', 409)->assertJsonPath('cuerpo.motivo', 'dueno_distinto');
+        Http::assertSent(function ($request) {
+            return strpos($request->url(), '/catalogo/imagenes/proveedor') !== false && $this->campo($request, 'ultima_tanda') === null;
+        });
     }
 
     /** @test */

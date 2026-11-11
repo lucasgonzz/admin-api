@@ -22,6 +22,11 @@ class ExcelPdfClientesYProveedoresDeActivosTest extends BaseDeImportacionesDeMar
 {
     const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
+    /** Las corridas de empresa se identifican por uuid. */
+    const CORRIDA = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
+    const OTRA_CORRIDA = '9b2f1f40-1111-4a2b-8c3d-1234567890ab';
+    const AJENA = '0f0e0d0c-2222-4b3a-9c8d-abcdefabcdef';
+
     private function importar(array $body)
     {
         return $this->postJson($this->ruta('import-excel'), $body, $this->headers_de_claude());
@@ -35,16 +40,19 @@ class ExcelPdfClientesYProveedoresDeActivosTest extends BaseDeImportacionesDeMar
         ]);
     }
 
-    /** Lo que contesta el servicio de soporte de empresa sobre una corrida. */
-    private function corrida(string $estado = 'esperando_confirmacion', bool $revertible = false): array
+    /** Lo que contesta el servicio de soporte de empresa sobre una corrida (`{corrida: payload}`). */
+    private function corrida(string $estado = 'confirmacion', bool $revertible = false, string $modelo = 'client'): array
     {
-        return [
-            'corrida_id' => 77,
+        return ['corrida' => [
+            'corrida_id' => self::CORRIDA,
+            'modelo' => $modelo,
             'estado' => $estado,
             'resumen' => ['crear' => 3, 'actualizar' => 1, 'saldos' => [['nombre' => 'Juan', 'saldo_actual' => 0, 'saldo_resultante' => 1500, 'nota' => 'debito']]],
-            'codigo_requerido' => 'ABCD1234',
+            'codigo_requerido' => $estado === 'confirmacion',
+            'codigo_confirmacion' => $estado === 'confirmacion' ? 'ABCD1234' : null,
+            'texto_confirmacion' => $estado === 'confirmacion' ? 'Respondé CONFIRMAR ABCD1234.' : null,
             'revertible' => $revertible,
-        ];
+        ], 'corrida_existente' => false];
     }
 
     private function no_llego_al_analisis(): void
@@ -133,16 +141,17 @@ class ExcelPdfClientesYProveedoresDeActivosTest extends BaseDeImportacionesDeMar
     public function el_excel_de_clientes_o_proveedores_va_al_servicio_de_soporte_con_su_resumen(string $modelo): void
     {
         $this->fakear_http([
-            '*/admin-sync/importacion-soporte/' . $modelo . '/iniciar' => Http::response($this->corrida(), 201),
+            '*/admin-sync/importacion-soporte/' . $modelo . '/iniciar' => Http::response($this->corrida('confirmacion', false, $modelo), 202),
         ]);
         $excel = $this->adjuntar($this->ticket, 'soporte/' . $modelo . '.xlsx', self::XLSX, null, 'excel-de-' . $modelo);
         $reserva = $this->reservar();
 
         $this->importar(['attachment_id' => $excel->id, 'model' => $modelo, 'automatizar_soporte' => true] + $reserva)
             ->assertOk()->assertJsonPath('estado', 'aceptado')->assertJsonPath('modelo', $modelo)
-            ->assertJsonPath('corrida_id', 77)->assertJsonPath('estado_corrida', 'esperando_confirmacion')
+            ->assertJsonPath('corrida_id', self::CORRIDA)->assertJsonPath('estado_corrida', 'confirmacion')
             ->assertJsonPath('resumen.crear', 3)->assertJsonPath('resumen.saldos.0.saldo_resultante', 1500)
-            ->assertJsonPath('codigo_requerido', 'ABCD1234')->assertJsonPath('revertible', false);
+            ->assertJsonPath('codigo_requerido', true)->assertJsonPath('codigo', 'ABCD1234')->assertJsonPath('revertible', false)
+            ->assertJsonPath('texto_confirmacion', 'Respondé CONFIRMAR ABCD1234.')->assertJsonPath('corrida_existente', false);
 
         $this->assertNotNull($this->ticket->fresh()->importacion_soporte_iniciada_at);
         Http::assertSent(function ($request) use ($modelo) {
@@ -178,7 +187,7 @@ class ExcelPdfClientesYProveedoresDeActivosTest extends BaseDeImportacionesDeMar
     /** @test */
     public function el_excel_de_clientes_de_un_numero_que_no_es_el_del_dueno_no_se_reenvia(): void
     {
-        $this->fakear_http(['*/admin-sync/importacion-soporte/*' => Http::response($this->corrida(), 201)]);
+        $this->fakear_http(['*/admin-sync/importacion-soporte/*' => Http::response($this->corrida(), 202)]);
         $ajeno = $this->entrante($this->ticket, 'acá va', false, '+5493419999999');
         $excel = $this->adjuntar($this->ticket, 'soporte/clientes.xlsx', self::XLSX, $ajeno);
         $reserva = $this->reservar();
@@ -197,7 +206,8 @@ class ExcelPdfClientesYProveedoresDeActivosTest extends BaseDeImportacionesDeMar
             'support_ticket_id' => $this->ticket->id,
             'sender_type' => 'admin',
             'kind' => 'text',
-            'body' => 'Voy a crear 3 clientes y actualizar 1. Respondé CONFIRMAR ' . $codigo . ' para seguir.',
+            'body' => 'Voy a crear 3 clientes y actualizar 1. Para aprobar la carga respondé CONFIRMAR ' . $codigo
+                . '. Para cancelarla, respondé CANCELAR ' . $codigo . '.',
             'delivered_at' => now(),
             'is_trial_import_notice' => true,
             'whatsapp_message_id' => $enviado ? 'wamid.aviso.1' : null,
@@ -206,14 +216,14 @@ class ExcelPdfClientesYProveedoresDeActivosTest extends BaseDeImportacionesDeMar
 
     private function confirmar(array $reserva)
     {
-        return $this->postJson($this->ruta('import-confirm'), ['modelo' => 'client', 'corrida_id' => 77] + $reserva, $this->headers_de_claude());
+        return $this->postJson($this->ruta('import-confirm'), ['modelo' => 'client', 'corrida_id' => self::CORRIDA] + $reserva, $this->headers_de_claude());
     }
 
-    private function fakear_corrida_77(): void
+    private function fakear_la_corrida(): void
     {
         $this->fakear_http([
-            '*/admin-sync/importacion-soporte/77/confirmar' => Http::response($this->corrida('confirmada', true), 200),
-            '*/admin-sync/importacion-soporte/77?*' => Http::response($this->corrida(), 200),
+            '*/admin-sync/importacion-soporte/' . self::CORRIDA . '/confirmar' => Http::response($this->corrida('importar'), 202),
+            '*/admin-sync/importacion-soporte/' . self::CORRIDA . '?*' => Http::response($this->corrida(), 200),
         ]);
     }
 
@@ -227,17 +237,36 @@ class ExcelPdfClientesYProveedoresDeActivosTest extends BaseDeImportacionesDeMar
     /** @test */
     public function confirma_con_el_codigo_que_escribio_el_dueno_despues_del_aviso(): void
     {
-        $this->fakear_corrida_77();
+        $this->fakear_la_corrida();
         $this->aviso_con_codigo();
         $this->entrante($this->ticket, 'confirmar abcd1234');
         $reserva = $this->reservar();
 
         $this->confirmar($reserva)->assertOk()->assertJsonPath('estado', 'aceptado')
-            ->assertJsonPath('estado_corrida', 'confirmada')->assertJsonPath('revertible', true);
+            ->assertJsonPath('estado_corrida', 'importar');
         Http::assertSent(function ($request) {
-            return strpos($request->url(), '/api/admin-sync/importacion-soporte/77/confirmar') !== false
-                && $request['codigo'] === 'ABCD1234' && $request['modelo'] === 'client'
+            return strpos($request->url(), '/api/admin-sync/importacion-soporte/' . self::CORRIDA . '/confirmar') !== false
+                && $request['codigo'] === 'ABCD1234' && $request['modelo'] === 'client' && $request['decision'] === 'confirmar'
                 && (int) $request['support_ticket_id'] === (int) $this->ticket->id;
+        });
+    }
+
+    /** @test */
+    public function cancela_con_el_cancelar_del_dueno_y_no_con_un_confirmar_si_se_pidio_cancelar(): void
+    {
+        $this->fakear_la_corrida();
+        $this->aviso_con_codigo();
+        $this->entrante($this->ticket, 'CONFIRMAR ABCD1234');
+        $reserva = $this->reservar();
+        $this->confirmar($reserva + ['decision' => 'cancelar'])->assertStatus(409)->assertJsonPath('estado', 'confirmacion_invalida');
+        $this->no_confirmo();
+
+        $this->entrante($this->ticket, 'CANCELAR ABCD1234');
+        \App\Models\SupportCodexCase::where('support_ticket_id', $this->ticket->id)->update(['lease_expires_at' => now()->subMinute()]);
+        $reserva = $this->reservar();
+        $this->confirmar($reserva + ['decision' => 'cancelar'])->assertOk()->assertJsonPath('estado', 'aceptado');
+        Http::assertSent(function ($request) {
+            return strpos($request->url(), '/confirmar') !== false && $request['decision'] === 'cancelar' && $request['codigo'] === 'ABCD1234';
         });
     }
 
@@ -247,7 +276,7 @@ class ExcelPdfClientesYProveedoresDeActivosTest extends BaseDeImportacionesDeMar
      */
     public function no_confirma_sin_el_codigo_vigente_del_dueno_despues_del_aviso(string $body, bool $hay_aviso, bool $del_dueno): void
     {
-        $this->fakear_corrida_77();
+        $this->fakear_la_corrida();
         if ($hay_aviso) {
             $this->aviso_con_codigo();
         }
@@ -272,7 +301,7 @@ class ExcelPdfClientesYProveedoresDeActivosTest extends BaseDeImportacionesDeMar
     /** @test */
     public function confirmar_exige_la_reserva_y_el_mensaje_vigente(): void
     {
-        $this->fakear_corrida_77();
+        $this->fakear_la_corrida();
         $this->aviso_con_codigo();
         $this->entrante($this->ticket, 'CONFIRMAR ABCD1234');
         $reserva = $this->reservar();
@@ -287,25 +316,29 @@ class ExcelPdfClientesYProveedoresDeActivosTest extends BaseDeImportacionesDeMar
     public function revierte_con_la_reserva_y_un_sistema_viejo_es_version_vieja(): void
     {
         $this->fakear_http([
-            '*/admin-sync/importacion-soporte/77/revertir' => Http::response($this->corrida('revertida', false), 200),
-            '*/admin-sync/importacion-soporte/78/revertir' => Http::response(['message' => 'Not Found'], 404),
+            '*/admin-sync/importacion-soporte/' . self::CORRIDA . '/revertir' => Http::response($this->corrida('revertida', false), 200),
+            '*/admin-sync/importacion-soporte/' . self::OTRA_CORRIDA . '/revertir' => Http::response(['message' => 'Not Found'], 404),
+            '*/admin-sync/importacion-soporte/' . self::AJENA . '/revertir' => Http::response(['message' => 'No se encontró.', 'motivo' => 'corrida_no_encontrada'], 404),
         ]);
         $reserva = $this->reservar();
         $revertir = function (array $body) {
             return $this->postJson($this->ruta('import-revert'), $body, $this->headers_de_claude());
         };
 
-        $revertir(['lease_token' => str_repeat('x', 64), 'modelo' => 'client', 'corrida_id' => 77])
+        $revertir(['lease_token' => str_repeat('x', 64), 'modelo' => 'client', 'corrida_id' => self::CORRIDA])
             ->assertStatus(423)->assertJsonPath('error', 'invalid_lease');
-        $revertir(['lease_token' => $reserva['lease_token'], 'modelo' => 'otro', 'corrida_id' => 77])
+        $revertir(['lease_token' => $reserva['lease_token'], 'modelo' => 'otro', 'corrida_id' => self::CORRIDA])
             ->assertStatus(422)->assertJsonPath('error', 'parámetros inválidos');
-        $revertir(['lease_token' => $reserva['lease_token'], 'modelo' => 'provider', 'corrida_id' => 77])
+        $revertir(['lease_token' => $reserva['lease_token'], 'modelo' => 'provider', 'corrida_id' => self::CORRIDA])
             ->assertOk()->assertJsonPath('estado', 'aceptado')->assertJsonPath('estado_corrida', 'revertida');
-        $revertir(['lease_token' => $reserva['lease_token'], 'modelo' => 'client', 'corrida_id' => 78])
+        $revertir(['lease_token' => $reserva['lease_token'], 'modelo' => 'client', 'corrida_id' => self::OTRA_CORRIDA])
             ->assertOk()->assertJsonPath('estado', 'version_vieja');
+        // Un 404 CON motivo es de una instancia que tiene la ruta: la corrida no es de este dueño y ticket.
+        $revertir(['lease_token' => $reserva['lease_token'], 'modelo' => 'client', 'corrida_id' => self::AJENA])
+            ->assertOk()->assertJsonPath('estado', 'rechazado')->assertJsonPath('motivo_instancia', 'corrida_no_encontrada');
 
         Http::assertSent(function ($request) {
-            return strpos($request->url(), '/api/admin-sync/importacion-soporte/77/revertir') !== false
+            return strpos($request->url(), '/api/admin-sync/importacion-soporte/' . self::CORRIDA . '/revertir') !== false
                 && $request['modelo'] === 'provider' && (int) $request['user_id'] === (int) $this->client->user_id;
         });
     }
@@ -313,12 +346,12 @@ class ExcelPdfClientesYProveedoresDeActivosTest extends BaseDeImportacionesDeMar
     /** @test */
     public function el_estado_de_la_corrida_se_lee_con_la_reserva(): void
     {
-        $this->fakear_corrida_77();
+        $this->fakear_la_corrida();
         $reserva = $this->reservar();
 
-        $this->getJson($this->ruta('import-status') . '?modelo=client&corrida_id=77', $this->headers_de_claude())
+        $this->getJson($this->ruta('import-status') . '?modelo=client&corrida_id=' . self::CORRIDA, $this->headers_de_claude())
             ->assertStatus(423);
-        $this->getJson($this->ruta('import-status') . '?modelo=client&corrida_id=77',
+        $this->getJson($this->ruta('import-status') . '?modelo=client&corrida_id=' . self::CORRIDA,
             $this->headers_de_claude() + ['X-Support-Lease-Token' => $reserva['lease_token']])
             ->assertOk()->assertJsonPath('estado', 'aceptado')->assertJsonPath('resumen.actualizar', 1)
             ->assertJsonPath('codigo', 'ABCD1234');
