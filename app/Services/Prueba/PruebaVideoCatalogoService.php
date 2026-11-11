@@ -7,18 +7,18 @@ use App\Models\AdminSetting;
 /** Catálogo propio de la prueba: nunca importa planes, cierres ni videos históricos de la demo. */
 class PruebaVideoCatalogoService
 {
-    /** Tanda aprobada del 7/11/2026, verificada por hash completo. Configurar no autoriza otro material. */
+    /** Tanda aprobada del 11/11/2026 (pizarra animada), verificada por hash completo. Configurar no autoriza otro material. */
     const URLS_APROBADAS = [
-        '04' => 'https://videos.comerciocity.store/landing-prueba/20261107/04-bienvenida-y-recorrido-v8-904bf6fb63ed71ec.mp4',
-        '05' => 'https://videos.comerciocity.store/landing-prueba/20261107/05-importa-tu-catalogo-v4-5c3ff8667f590302.mp4',
-        '06' => 'https://videos.comerciocity.store/landing-prueba/20261107/06-revisa-y-cambia-un-precio-v4-0f33edc6012184fc.mp4',
-        '07' => 'https://videos.comerciocity.store/landing-prueba/20261107/07-carga-una-compra-con-una-foto-v4-b7ab810b35ab2a1d.mp4',
-        '08' => 'https://videos.comerciocity.store/landing-prueba/20261107/08-hace-tu-primera-venta-v4-6bf28a33ad57bee8.mp4',
-        '09' => 'https://videos.comerciocity.store/landing-prueba/20261107/09-proba-al-agente-con-tu-catalogo-v4-afa99edf54562d4f.mp4',
+        '04' => 'https://videos.comerciocity.store/landing-prueba/20261111/04-bienvenida-y-recorrido-claude-v2-d77600fcb3c9f595.mp4',
+        '05' => 'https://videos.comerciocity.store/landing-prueba/20261111/05-importa-tu-catalogo-claude-v1-7e315f5c9f377c3c.mp4',
+        '06' => 'https://videos.comerciocity.store/landing-prueba/20261111/06-revisa-y-cambia-un-precio-claude-v1-53fdff8d1ebbabba.mp4',
+        '07' => 'https://videos.comerciocity.store/landing-prueba/20261111/07-carga-una-compra-con-una-foto-claude-v1-35e86755dfa2c7e2.mp4',
+        '08' => 'https://videos.comerciocity.store/landing-prueba/20261111/08-hace-tu-primera-venta-claude-v1-0348d9fe2f116f4a.mp4',
+        '09' => 'https://videos.comerciocity.store/landing-prueba/20261111/09-proba-al-agente-con-tu-catalogo-claude-v1-81faa2a7b4e798a7.mp4',
     ];
 
     const PIEZAS = [
-        '04' => ['titulo' => 'Bienvenida y recorrido del sistema', 'duracion' => 230,
+        '04' => ['titulo' => 'Bienvenida y recorrido del sistema', 'duracion' => 228,
             'descripcion' => 'Un mapa del sistema para elegir qué explorar durante la prueba.'],
         '05' => ['titulo' => 'Importá tu catálogo', 'duracion' => 72,
             'descripcion' => 'Preparar los artículos del negocio y conocer las opciones de importación.'],

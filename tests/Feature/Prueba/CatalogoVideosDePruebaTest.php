@@ -66,7 +66,7 @@ class CatalogoVideosDePruebaTest extends TestCase
             [PruebaVideoCatalogoService::URLS_APROBADAS['04'] . '?otro=1'],
             [PruebaVideoCatalogoService::URLS_APROBADAS['04'] . '#fragmento'],
             [str_replace('videos.comerciocity.store', 'otro.test', PruebaVideoCatalogoService::URLS_APROBADAS['04'])],
-            [str_replace('/20261107/', '/20261020/', PruebaVideoCatalogoService::URLS_APROBADAS['04'])],
+            [str_replace('/20261111/', '/20261107/', PruebaVideoCatalogoService::URLS_APROBADAS['04'])],
             [str_replace('https://', 'https://usuario:clave@', PruebaVideoCatalogoService::URLS_APROBADAS['04'])],
             [PruebaVideoCatalogoService::URLS_APROBADAS['05']]];
     }

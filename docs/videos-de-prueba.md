@@ -4,10 +4,10 @@
 
 Admin guarda estos valores en `admin_settings` mediante `App\Models\AdminSetting::set()`:
 
-| Clave | Destino | Pieza aprobada del 7/11/2026 |
+| Clave | Destino | Pieza vigente (pizarra animada, 11/11/2026) |
 |---|---|---|
-| `prueba_video_espera_url` | `GET /api/landing/prueba/{uuid}/estado`, campo `video_url` | 02 Historia, v4 |
-| `prueba_video_bienvenida_url` | C1 `POST /api/admin-sync/demo-setup`, campo `prueba.video_url` | 03 Bienvenida corta, v3 |
+| `prueba_video_espera_url` | `GET /api/landing/prueba/{uuid}/estado`, campo `video_url` | 02 Historia, claude-v1 (antes v4) |
+| `prueba_video_bienvenida_url` | C1 `POST /api/admin-sync/demo-setup`, campo `prueba.video_url` | 03 Bienvenida corta, claude-v3 (antes v3) |
 | `prueba_video_url` | Respaldo compatible de cada destino que no tiene valor propio | Valor anterior, no reemplazar |
 
 Un ajuste nuevo ausente, vacío o con espacios vuelve al valor anterior. Configurar uno no cambia el otro. No se renombra ningún campo de C1 ni C6 y no se requiere migración de esquema. La espera conserva su video cuando pasa de `creando` a `lista`, para no interrumpir la historia ni demorar el ingreso.
@@ -54,14 +54,14 @@ La demo por turno tiene `GET/PUT /api/claude/demo-media` (y editor autenticado d
 
 | Pieza | Clave en `admin_settings` | Propósito |
 |---|---|---|
-| 04 v8 | `prueba_video_guia_04_url` | Bienvenida y recorrido completo |
-| 05 v4 | `prueba_video_guia_05_url` | Importar catálogo |
-| 06 v4 | `prueba_video_guia_06_url` | Revisar y cambiar un precio |
-| 07 v4 | `prueba_video_guia_07_url` | Compra por foto desde Compras |
-| 08 v4 | `prueba_video_guia_08_url` | Primera venta |
-| 09 v4 | `prueba_video_guia_09_url` | Probar agente con catálogo |
+| 04 claude-v2 | `prueba_video_guia_04_url` | Bienvenida y recorrido completo |
+| 05 claude-v1 | `prueba_video_guia_05_url` | Importar catálogo |
+| 06 claude-v1 | `prueba_video_guia_06_url` | Revisar y cambiar un precio |
+| 07 claude-v1 | `prueba_video_guia_07_url` | Compra por foto desde Compras |
+| 08 claude-v1 | `prueba_video_guia_08_url` | Primera venta |
+| 09 claude-v1 | `prueba_video_guia_09_url` | Probar agente con catálogo |
 
-No tienen fallback al catálogo de demo ni a la bienvenida. Se acepta únicamente la URL exacta de cada pieza de la tanda aprobada del 7/11/2026, en `https://videos.comerciocity.store/landing-prueba/20261107/` y con versión y hash en el nombre. No se aceptan query, fragmentos, credenciales, otro host, otra fecha ni la URL de otra pieza. Las seis URLs están en `PruebaVideoCatalogoService::URLS_APROBADAS`, verificadas contra el registro de publicación por hash completo y tamaño. Una futura tanda requiere revisión explícita del catálogo, no sólo cambiar una configuración. No se hace una petición al recurso al construir el catálogo.
+No tienen fallback al catálogo de demo ni a la bienvenida. Se acepta únicamente la URL exacta de cada pieza de la tanda aprobada del 11/11/2026 (pizarra animada, que reemplazó a la del 7/11), en `https://videos.comerciocity.store/landing-prueba/20261111/` y con versión y hash en el nombre. No se aceptan query, fragmentos, credenciales, otro host, otra fecha ni la URL de otra pieza. Las seis URLs están en `PruebaVideoCatalogoService::URLS_APROBADAS`, verificadas contra el registro de publicación por hash completo y tamaño. Una futura tanda requiere revisión explícita del catálogo, no sólo cambiar una configuración. No se hace una petición al recurso al construir el catálogo.
 
 El snapshot ya existente de `GET /api/prueba-chat` añade estos objetos a `catalogo` y resuelve `mensajes[].videos` con el mismo catálogo vigente. Conserva `version: 1` y los campos existentes. Las claves son `prueba:04` a `prueba:09`, el origen es `prueba`; no se aceptan claves de `demo:` ni `recurso:`. Vaciar un ajuste retira el video del selector y de los adjuntos sin borrar mensajes. Los campos de reproducción (`porcentaje`, `completado`, `omitido`) permanecen en cero/false: mirar no completa una acción del negocio.
 
@@ -95,3 +95,7 @@ Publicar primero Admin. Configurar sólo URLs verificadas. Incorporar luego el c
 Para el backfill de bienvenida usar Query Builder con un `update` que incluya sólo `video_url`, no `save()` Eloquent que pueda cambiar `updated_at`: la comparación de las demás columnas tiene que dar idéntica.
 
 Verificación local: PHP 7.4, pruebas focales de split, alta, armado, medición, catálogo y ambos chats. La base local S16 necesitó aplicar las migraciones ya existentes `2026_11_05_210000_add_guia_to_demo_chat_mensajes` y `2026_11_06_193000_separate_trial_from_demo_chat`; no se crearon migraciones nuevas, no se usó `migrate:fresh` y no se tocó producción. La reproducción y el responsive corresponden a la verificación independiente de Empresa SPA.
+
+## Tanda vigente: 11/11/2026
+
+La serie se reeditó con pizarra animada y se publicó en `landing-prueba/20261111/` con nombres nuevos (hash en el nombre); la tanda del 7/11 sigue en R2 sin borrar. Se reemplazaron 02 (espera), 03 (bienvenida) y 04–09 (catálogo de la prueba). 04 dura 228 s. Registro: `informes/20261111-videos-pizarra-en-produccion.md` del repo de conocimiento.
