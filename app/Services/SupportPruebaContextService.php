@@ -56,6 +56,10 @@ class SupportPruebaContextService
      */
     public static function registrar(bool $forzar = false): void
     {
+        /* `prueba.videos` (misión prueba-ayuda-unificada-en-soporte, 10/11/2026): otra extensión, con su propio
+         * try, para que una falla del catálogo no anule las claves de seguimiento de acá (ni al revés). */
+        \App\Services\Prueba\PruebaVideoSoporteService::registrar($forzar);
+
         if (self::$registrada && ! $forzar) {
             return;
         }
