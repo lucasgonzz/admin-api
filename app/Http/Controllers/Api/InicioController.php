@@ -41,8 +41,11 @@ class InicioController extends Controller
     public function tarjetas(): JsonResponse
     {
         return response()->json([
-            'tickets_sin_responder' => (int) SupportTicket::query()->sinResponder()->count(),
-            'tickets_abiertos_hoy'  => (int) SupportTicket::query()->abiertoHoy()->count(),
+            /* Sin los tickets de prueba gratuita (misión prueba-ayuda-unificada-en-soporte, 10/11/2026): los atiende
+               Martín y la bandeja los muestra aparte, en «Prueba». La bandeja por defecto los saca con el mismo
+               criterio, así que el número de la tarjeta y las filas del deep link siguen coincidiendo. */
+            'tickets_sin_responder' => (int) SupportTicket::query()->sinResponder()->sinPrueba()->count(),
+            'tickets_abiertos_hoy'  => (int) SupportTicket::query()->abiertoHoy()->sinPrueba()->count(),
             'leads_sin_responder'   => (int) Lead::query()->requiereRevision(true)->count(),
             /* Momento del cálculo, para el "actualizado hace…" de la vista. Sale de AppTime y no de
                now() para respetar el reloj virtual de local, igual que el resto del sistema. */

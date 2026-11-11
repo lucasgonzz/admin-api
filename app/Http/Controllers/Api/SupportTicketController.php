@@ -52,8 +52,10 @@ class SupportTicketController extends BaseController
         return response()->json(
             [
                 'models' => $models,
-                // Contador único de no leídos: todos los mensajes del cliente sin leer.
+                // Contador único de no leídos: todos los mensajes del cliente sin leer (sin los tickets de prueba).
                 'unread_total' => $this->unread_total_for_inbox(),
+                // No leídos de los tickets de prueba gratuita, aparte (el botón «Prueba» de la bandeja).
+                'unread_total_prueba' => $this->unread_total_for_inbox(true),
                 'unread_totals' => $this->unread_totals_for_admin_inbox($admin_id),
                 // Tickets abiertos (status open) para los badges de la bandeja y de la barra.
                 'open_totals' => $this->open_totals_for_admin_inbox($admin_id, $open_map),
@@ -76,6 +78,7 @@ class SupportTicketController extends BaseController
         return response()->json(
             [
                 'unread_total' => $this->unread_total_for_inbox(),
+                'unread_total_prueba' => $this->unread_total_for_inbox(true),
                 'unread_totals' => $this->unread_totals_for_admin_inbox($admin_id),
                 // Tickets abiertos (status open) para los badges de la bandeja y de la barra.
                 'open_totals' => $this->open_totals_for_admin_inbox($admin_id, $open_map),
@@ -86,18 +89,40 @@ class SupportTicketController extends BaseController
     }
 
     /**
-     * Total de mensajes del cliente (sender_type = user) sin leer, en todos los tickets.
+     * Total de mensajes del cliente (sender_type = user) sin leer.
      *
      * Es el número único de no leídos de la bandeja y del menú: ya no se reparte por operador.
      *
+     * 🔴 Desde el 10/11/2026 (misión prueba-ayuda-unificada-en-soporte) los tickets de PRUEBA GRATUITA no
+     * cuentan acá: los atiende Martín y van aparte, en el botón «Prueba» de la bandeja. Con `$de_prueba` en
+     * true se cuentan solo esos. El criterio es el de {@see SupportTicket::scopeSinPrueba()} /
+     * {@see SupportTicket::scopeDePrueba()}: por `clients.estado`, sin columna nueva.
+     *
+     * @param bool $de_prueba
+     *
      * @return int
      */
-    protected function unread_total_for_inbox(): int
+    protected function unread_total_for_inbox(bool $de_prueba = false): int
     {
         return (int) SupportMessage::query()
             ->where('sender_type', 'user')
             ->whereNull('read_at')
+            ->whereIn('support_messages.support_ticket_id', $this->ids_de_tickets($de_prueba))
             ->count();
+    }
+
+    /**
+     * Subconsulta de ids de tickets: sin los de prueba (lo que cuentan las métricas) o solo los de prueba.
+     *
+     * @param bool $de_prueba
+     *
+     * @return \Illuminate\Database\Eloquent\Builder
+     */
+    protected function ids_de_tickets(bool $de_prueba = false)
+    {
+        $query = SupportTicket::query()->select('support_tickets.id');
+
+        return $de_prueba ? $query->dePrueba() : $query->sinPrueba();
     }
 
     /**
@@ -122,7 +147,10 @@ class SupportTicketController extends BaseController
             /* Indicadores del panel de inicio (`sin_responder`, `abierto_hoy`): los dos deep links
                de /inicio filtran la lista por estas dos claves, con el MISMO criterio con el que se
                contaron las tarjetas. Ver SupportTicket::scopeWithIndicadoresDeInicio(). */
-            ->withIndicadoresDeInicio();
+            ->withIndicadoresDeInicio()
+            /* `es_prueba`: el filtro «Prueba» de la bandeja (misión prueba-ayuda-unificada-en-soporte). La lista
+               sigue trayendo TODOS los tickets (un SPA viejo no pierde ninguno); el SPA nuevo los separa. */
+            ->withEsPrueba();
     }
 
     /**
@@ -185,6 +213,8 @@ class SupportTicketController extends BaseController
             ->where('support_messages.sender_type', 'user')
             ->whereNull('support_messages.read_at')
             ->join('support_tickets', 'support_tickets.id', '=', 'support_messages.support_ticket_id')
+            // Sin los tickets de prueba gratuita, como el resto de los contadores.
+            ->whereIn('support_messages.support_ticket_id', $this->ids_de_tickets())
             ->selectRaw('support_tickets.assigned_admin_id as aid, COUNT(*) as cnt')
             ->groupBy('support_tickets.assigned_admin_id')
             ->get();
@@ -211,6 +241,8 @@ class SupportTicketController extends BaseController
     {
         $aggregates = SupportTicket::query()
             ->where('status', SupportTicket::STATUS_ABIERTO)
+            // Sin los tickets de prueba gratuita, como el resto de los contadores.
+            ->sinPrueba()
             ->selectRaw('assigned_admin_id as aid, COUNT(*) as cnt')
             ->groupBy('assigned_admin_id')
             ->get();
@@ -256,7 +288,7 @@ class SupportTicketController extends BaseController
             ->where('sender_type', 'user')
             ->whereNull('read_at')
             ->whereHas('ticket', function ($query) use ($admin_id) {
-                $query->where('assigned_admin_id', $admin_id);
+                $query->where('assigned_admin_id', $admin_id)->sinPrueba();
             })
             ->count();
 
@@ -269,7 +301,7 @@ class SupportTicketController extends BaseController
                     $sub_query
                         ->where('assigned_admin_id', '<>', $admin_id)
                         ->orWhereNull('assigned_admin_id');
-                });
+                })->sinPrueba();
             })
             ->count();
 

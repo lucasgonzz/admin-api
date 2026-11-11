@@ -110,6 +110,81 @@ class SupportTicket extends Model
         return $query->whereIn('source', ['whatsapp', 'erp']);
     }
 
+    /**
+     * Estados de `clients.estado` que hacen que un ticket sea DE PRUEBA GRATUITA (misión
+     * prueba-ayuda-unificada-en-soporte, 10/11/2026). Los atiende Martín (y, si está caído, el respaldo
+     * automático): se separan de la cola y de las métricas de soporte sin columna nueva, por el estado del
+     * cliente. Una prueba borrada ya no tiene sistema y vuelve a contar como cualquier otro ticket.
+     *
+     * @var array<int, string>
+     */
+    const ESTADOS_DE_PRUEBA = [
+        \App\Services\Prueba\PruebaCicloService::CLIENTE_PRUEBA,
+        \App\Services\Prueba\PruebaCicloService::CLIENTE_PRUEBA_VENCIDA,
+    ];
+
+    /**
+     * Subconsulta de los ids de clientes en prueba (o con la prueba vencida).
+     *
+     * @return \Illuminate\Database\Query\Builder
+     */
+    protected static function ids_de_clientes_en_prueba()
+    {
+        return \Illuminate\Support\Facades\DB::table('clients')->select('clients.id')->whereIn('clients.estado', self::ESTADOS_DE_PRUEBA);
+    }
+
+    /**
+     * Solo los tickets de prueba gratuita.
+     *
+     * @param \Illuminate\Database\Eloquent\Builder $query
+     *
+     * @return \Illuminate\Database\Eloquent\Builder
+     */
+    public function scopeDePrueba($query)
+    {
+        return $query->whereIn('support_tickets.client_id', self::ids_de_clientes_en_prueba());
+    }
+
+    /**
+     * Todos los tickets MENOS los de prueba gratuita: lo que cuentan las métricas y contadores de soporte.
+     *
+     * ⚠️ El `whereNull` es DEFENSA: hoy `client_id` es NOT NULL, pero en MySQL `NULL NOT IN (...)` da NULL y,
+     * el día que la columna admita null, sin él un ticket sin cliente desaparecería de los contadores.
+     *
+     * @param \Illuminate\Database\Eloquent\Builder $query
+     *
+     * @return \Illuminate\Database\Eloquent\Builder
+     */
+    public function scopeSinPrueba($query)
+    {
+        return $query->where(function ($fuera) {
+            $fuera->whereNull('support_tickets.client_id')
+                ->orWhereNotIn('support_tickets.client_id', self::ids_de_clientes_en_prueba());
+        });
+    }
+
+    /**
+     * Suma a cada fila del listado la columna calculada `es_prueba` (booleana), para el filtro «Prueba» de la
+     * bandeja. Mismo criterio que {@see self::scopeDePrueba()}.
+     *
+     * @param \Illuminate\Database\Eloquent\Builder $query
+     *
+     * @return \Illuminate\Database\Eloquent\Builder
+     */
+    public function scopeWithEsPrueba($query)
+    {
+        if ($query->getQuery()->columns === null) {
+            $query->select('support_tickets.*');
+        }
+
+        $marcadores = implode(',', array_fill(0, count(self::ESTADOS_DE_PRUEBA), '?'));
+
+        return $query->selectRaw(
+            'EXISTS(SELECT 1 FROM clients WHERE clients.id = support_tickets.client_id AND clients.estado IN (' . $marcadores . ')) as es_prueba',
+            self::ESTADOS_DE_PRUEBA
+        )->withCasts(['es_prueba' => 'boolean']);
+    }
+
     public function es_erp_sin_identidad_verificada(): bool
     {
         return $this->source === 'erp' && ! $this->agentes_erp;
