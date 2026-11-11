@@ -61,6 +61,9 @@ class PruebaVideoSoporteService
     /** El video que pone el admin sin Codex. */
     const CODIGO_BIENVENIDA = '04';
 
+    /** Estado del envío reservado antes del HTTP (ver entregar_bienvenida()). Nunca se reintenta. */
+    const ESTADO_ENVIANDO = 'enviando';
+
     /** Prefijo de `prueba_whatsapp_envios.plantilla` para los videos entregados por el ticket. */
     const PLANTILLA_PREFIJO = 'video_';
 
@@ -136,23 +139,75 @@ class PruebaVideoSoporteService
             ->orderBy('id')
             ->get();
 
+        $catalogo  = app(PruebaVideoCatalogoService::class)->videos();
+        $salientes = $this->salientes_con_videos($client, $catalogo);
+
         $videos = [];
-        foreach (app(PruebaVideoCatalogoService::class)->videos() as $video) {
+        foreach ($catalogo as $video) {
             $codigo  = (string) $video['codigo'];
+            $url     = (string) $video['url'];
             $entrega = $entregas->first(function (PruebaWhatsappEnvio $envio) use ($codigo) {
                 return $envio->plantilla === self::plantilla($codigo);
+            });
+
+            /* Lo primero que haya: el registro de envíos (video 04 del admin, respaldo) o un mensaje del equipo que
+             * salió con la URL exacta (Martín la manda por su cuenta y nadie más lo registra). */
+            $momentos = [];
+            if ($entrega !== null && $entrega->enviado_at !== null) {
+                $momentos[] = $entrega->enviado_at;
+            }
+            $mensaje = $salientes->first(function ($fila) use ($url) {
+                return strpos((string) $fila->body, $url) !== false;
+            });
+            if ($mensaje !== null && $mensaje->created_at !== null) {
+                $momentos[] = \Carbon\Carbon::parse($mensaje->created_at);
+            }
+            usort($momentos, function ($a, $b) {
+                return $a->getTimestamp() - $b->getTimestamp();
             });
 
             $videos[] = [
                 'codigo'       => $codigo,
                 'titulo'       => (string) $video['titulo'],
-                'url'          => (string) $video['url'],
+                'url'          => $url,
                 'hito'         => isset(self::HITOS[$codigo]) ? self::HITOS[$codigo] : null,
-                'entregado_at' => $entrega !== null && $entrega->enviado_at !== null ? $entrega->enviado_at->toIso8601String() : null,
+                'entregado_at' => $momentos === [] ? null : $momentos[0]->toIso8601String(),
             ];
         }
 
         return $videos;
+    }
+
+    /**
+     * Los mensajes del equipo que SALIERON (con wamid de WhatsApp o sincronizados al sistema) en los tickets del
+     * cliente y que contienen la URL de algún video del catálogo, del más viejo al más nuevo. Sin borradores.
+     *
+     * @param Client                            $client
+     * @param array<string, array<string, mixed>> $catalogo
+     *
+     * @return \Illuminate\Support\Collection<int, object>
+     */
+    protected function salientes_con_videos(Client $client, array $catalogo)
+    {
+        if ($catalogo === []) {
+            return collect();
+        }
+
+        $query = \Illuminate\Support\Facades\DB::table('support_messages')
+            ->join('support_tickets', 'support_tickets.id', '=', 'support_messages.support_ticket_id')
+            ->where('support_tickets.client_id', (int) $client->id)
+            ->where('support_messages.sender_type', 'admin')
+            ->where(function ($salio) {
+                $salio->whereNotNull('support_messages.whatsapp_message_id')->orWhereNotNull('support_messages.synced_to_client_at');
+            })
+            ->where(function ($con_url) use ($catalogo) {
+                foreach ($catalogo as $video) {
+                    $con_url->orWhere('support_messages.body', 'like', '%' . addcslashes((string) $video['url'], '%_\\') . '%');
+                }
+            });
+        \App\Models\SupportMessage::apply_mensaje_real_conditions($query, 'support_messages');
+
+        return $query->orderBy('support_messages.id')->get(['support_messages.body', 'support_messages.created_at']);
     }
 
     /**
@@ -212,14 +267,32 @@ class PruebaVideoSoporteService
                 return ['estado' => 'ya_entregado', 'detalle' => null];
             }
 
-            $envio = app(PruebaWhatsappService::class)->mandar_texto_por_ticket($client, $this->texto_del_video($catalogo[$clave]), (int) $ticket->id);
-
-            if ($envio['motivo'] === 'ventana_cerrada') {
+            if (! app(\App\Services\WhatsappSessionWindowService::class)->is_open((string) $ticket->whatsapp_phone)) {
                 return ['estado' => 'ventana_cerrada', 'detalle' => null];
             }
+
+            /* 🔴 El registro va ANTES del HTTP, en `enviando`, y fuera de cualquier transacción de quien llama (la toma
+             * de Martín lo llama antes de abrir la suya): si algo falla después de que el WhatsApp salió, la fila
+             * sigue ahí y corta todo reintento. Un `enviando` que quedó colgado (el proceso murió en el medio) no se
+             * reintenta nunca: puede haber salido, y Martín ve `entregado_at` en null y decide él. */
+            $registro = PruebaWhatsappEnvio::create([
+                'client_id'         => (int) $client->id,
+                'lead_id'           => optional(app(PruebaDelClienteService::class)->lead_del_cliente($client))->id,
+                'plantilla'         => self::plantilla(self::CODIGO_BIENVENIDA),
+                'hito'              => self::HITOS[self::CODIGO_BIENVENIDA],
+                'estado'            => self::ESTADO_ENVIANDO,
+                'support_ticket_id' => (int) $ticket->id,
+                'dia'               => PruebaWhatsappService::hoy(),
+            ]);
+
+            $envio = app(PruebaWhatsappService::class)->mandar_texto_por_ticket($client, $this->texto_del_video($catalogo[$clave]), (int) $ticket->id);
+
             if ($envio['support_ticket_id'] === null) {
-                /* No se creó ningún mensaje (sin contacto, ticket que ya no sirve): se reintenta en el próximo entrante. */
-                return ['estado' => 'sin_ticket', 'detalle' => $envio['motivo']];
+                /* No se creó ningún mensaje ni salió nada (la ventana se cerró en el medio, sin contacto, ticket que
+                 * ya no sirve): se borra la reserva y se reintenta en el próximo entrante. */
+                $registro->delete();
+
+                return ['estado' => $envio['motivo'] === 'ventana_cerrada' ? 'ventana_cerrada' : 'sin_ticket', 'detalle' => $envio['motivo']];
             }
 
             $mensaje_id = \App\Models\SupportMessage::where('support_ticket_id', (int) $envio['support_ticket_id'])
@@ -227,19 +300,12 @@ class PruebaVideoSoporteService
 
             /* Un fallido también corta los reintentos: el mensaje ya quedó en el hilo (sin entregar) y Martín ve
              * `entregado_at` en null y lo manda él. Reintentar en cada entrante llenaría el hilo de copias. */
-            PruebaWhatsappEnvio::create([
-                'client_id'           => (int) $client->id,
-                'lead_id'             => optional(app(PruebaDelClienteService::class)->lead_del_cliente($client))->id,
-                'plantilla'           => self::plantilla(self::CODIGO_BIENVENIDA),
-                'hito'                => self::HITOS[self::CODIGO_BIENVENIDA],
-                'estado'              => $envio['enviado'] ? PruebaWhatsappEnvio::ESTADO_ENVIADO : PruebaWhatsappEnvio::ESTADO_FALLIDO,
-                'support_ticket_id'   => (int) $envio['support_ticket_id'],
-                'support_message_id'  => $mensaje_id !== null ? (int) $mensaje_id : null,
-                'whatsapp_message_id' => $envio['whatsapp_message_id'],
-                'detalle'             => $envio['enviado'] ? null : mb_substr((string) $envio['motivo'], 0, 1000),
-                'dia'                 => PruebaWhatsappService::hoy(),
-                'enviado_at'          => $envio['enviado'] ? now() : null,
-            ]);
+            $registro->estado              = $envio['enviado'] ? PruebaWhatsappEnvio::ESTADO_ENVIADO : PruebaWhatsappEnvio::ESTADO_FALLIDO;
+            $registro->support_message_id  = $mensaje_id !== null ? (int) $mensaje_id : null;
+            $registro->whatsapp_message_id = $envio['whatsapp_message_id'];
+            $registro->detalle             = $envio['enviado'] ? null : mb_substr((string) $envio['motivo'], 0, 1000);
+            $registro->enviado_at          = $envio['enviado'] ? now() : null;
+            $registro->save();
 
             return ['estado' => $envio['enviado'] ? 'enviado' : 'fallido', 'detalle' => $envio['motivo']];
         } finally {
@@ -248,7 +314,7 @@ class PruebaVideoSoporteService
     }
 
     /**
-     * Si el video 04 ya salió (o ya se intentó y falló) para este cliente.
+     * Si el video 04 ya salió, se intentó y falló, o quedó `enviando` (puede haber salido) para este cliente.
      *
      * @param Client $client
      *
@@ -259,7 +325,7 @@ class PruebaVideoSoporteService
         return PruebaWhatsappEnvio::query()
             ->where('client_id', (int) $client->id)
             ->where('plantilla', self::plantilla(self::CODIGO_BIENVENIDA))
-            ->whereIn('estado', [PruebaWhatsappEnvio::ESTADO_ENVIADO, PruebaWhatsappEnvio::ESTADO_FALLIDO])
+            ->whereIn('estado', [PruebaWhatsappEnvio::ESTADO_ENVIADO, PruebaWhatsappEnvio::ESTADO_FALLIDO, self::ESTADO_ENVIANDO])
             ->exists();
     }
 

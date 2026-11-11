@@ -101,6 +101,16 @@ class SupportCodexService
 
     public function claim(int $id, array $input): array
     {
+        /* El video 04 de la prueba va ANTES y AFUERA de la transacción de la toma: un rollback posterior (un
+         * error armando el contexto) no puede borrar el registro de un WhatsApp que ya salió. */
+        if (empty($input['lease_token'])) {
+            $previo = SupportTicket::find($id);
+            if ($previo !== null && $previo->status === 'open' && $previo->source === 'whatsapp'
+                && $previo->client_employee_id === null && SupportCodexSettings::manages($previo)) {
+                $this->entregar_video_de_prueba_antes_de_martin($previo);
+            }
+        }
+
         return DB::transaction(function () use ($id, $input) {
             $ticket = SupportTicket::lockForUpdate()->findOrFail($id);
             $this->assert_managed($ticket);
@@ -135,9 +145,6 @@ class SupportCodexService
             $last = $this->last_real_message($id);
             if ($last === null || (int) $last->id !== (int) $input['expected_message_id']) {
                 $this->fail(409, 'stale_message', 'La conversación cambió; volvé a leerla.');
-            }
-            if (! $renewing && $reason === 'inbound' && $ticket->source === 'whatsapp' && $ticket->client_employee_id === null) {
-                $this->entregar_video_de_prueba_antes_de_martin($ticket);
             }
             $cortesia_de_prueba = ! $renewing && ! $recover_dispatch && $reason === 'inbound'
                 && ! empty($input['supports_trial_import_quiet']) && $this->es_cortesia_aislada($case, $last);

@@ -256,4 +256,82 @@ class VideosDeLaPruebaEnSoporteTest extends BaseDeLaPrueba
         $this->assertSame('sin_ticket', app(PruebaVideoSoporteService::class)->entregar_bienvenida($client, (int) $ticket->id)['estado']);
         $this->assertSame([], $espia->textos);
     }
+
+    /** @test */
+    public function un_error_despues_del_envio_no_provoca_un_segundo_envio(): void
+    {
+        $this->prender_codex();
+        $espia = $this->espiar_sender();
+        $this->crear_config_whatsapp();
+        $this->admin();
+        $this->videos_aprobados(['04']);
+        $client   = $this->cliente_en_prueba();
+        $ticket   = $this->ticket_del_cliente($client, true);
+        $entrante = SupportMessage::where('support_ticket_id', $ticket->id)->sole();
+
+        /* Armar el contexto revienta DESPUÉS de que el video salió: la toma hace rollback. */
+        $this->mock(\App\Services\Prueba\PruebaContextoSoporteService::class, function ($mock) {
+            $mock->shouldReceive('bloque_para_el_cliente')->andThrow(new \RuntimeException('falla armando el contexto'));
+        });
+        $this->postJson('/api/claude/support-codex/tickets/' . $ticket->id . '/claim', [
+            'worker_id' => 'martin', 'expected_message_id' => (int) $entrante->id,
+        ], $this->headers_de_claude())->assertStatus(500);
+        $this->assertCount(1, $this->videos_04_mandados($espia));
+        $this->assertSame(PruebaWhatsappEnvio::ESTADO_ENVIADO, PruebaWhatsappEnvio::where('plantilla', 'video_04')->sole()->estado);
+
+        /* La toma siguiente no lo vuelve a mandar. */
+        $this->app->instance(\App\Services\Prueba\PruebaContextoSoporteService::class, new \App\Services\Prueba\PruebaContextoSoporteService());
+        $this->fakear_http(['*/admin-sync/prueba/estado' => Http::response($this->estado_de_la_instancia(['ingreso']), 200)]);
+        $this->postJson('/api/claude/support-codex/tickets/' . $ticket->id . '/claim', [
+            'worker_id' => 'martin', 'expected_message_id' => (int) $entrante->id,
+        ], $this->headers_de_claude())->assertOk();
+        $this->assertCount(1, $this->videos_04_mandados($espia));
+    }
+
+    /** @test */
+    public function un_envio_que_quedo_enviando_no_se_reintenta(): void
+    {
+        $espia = $this->espiar_sender();
+        $this->crear_config_whatsapp();
+        $this->admin();
+        $this->videos_aprobados(['04']);
+        $client = $this->cliente_en_prueba();
+        $ticket = $this->ticket_del_cliente($client, true);
+        PruebaWhatsappEnvio::create([
+            'client_id' => $client->id, 'plantilla' => 'video_04', 'hito' => 'ingreso',
+            'estado' => PruebaVideoSoporteService::ESTADO_ENVIANDO, 'support_ticket_id' => $ticket->id,
+            'dia' => PruebaWhatsappService::hoy(),
+        ]);
+
+        $this->assertSame('ya_entregado', app(PruebaVideoSoporteService::class)->entregar_bienvenida($client, (int) $ticket->id)['estado']);
+        $this->assertSame([], $espia->textos);
+    }
+
+    /** @test */
+    public function un_mensaje_de_martin_con_la_url_del_video_lo_marca_entregado(): void
+    {
+        $this->videos_aprobados(['04', '08']);
+        $client = $this->cliente_en_prueba();
+        $ticket = $this->ticket_del_cliente($client);
+        $url = PruebaVideoCatalogoService::URLS_APROBADAS['08'];
+
+        /* Un borrador sin aprobar y un mensaje que no salió no cuentan. */
+        SupportMessage::create(['support_ticket_id' => $ticket->id, 'sender_type' => 'admin', 'kind' => 'text',
+            'body' => 'Mirá ' . $url, 'is_ai_suggestion_draft' => true, 'whatsapp_message_id' => 'wamid.borrador']);
+        SupportMessage::create(['support_ticket_id' => $ticket->id, 'sender_type' => 'admin', 'kind' => 'text', 'body' => 'Mirá ' . $url]);
+        $videos = app(PruebaVideoSoporteService::class)->videos_del_cliente($client);
+        $this->assertNull($videos[1]['entregado_at']);
+
+        $this->travel(5)->minutes();
+        $primero = SupportMessage::create(['support_ticket_id' => $ticket->id, 'sender_type' => 'admin', 'kind' => 'text',
+            'body' => "Te paso el video de la primera venta:\n" . $url, 'whatsapp_message_id' => 'wamid.martin.1']);
+        $this->travel(5)->minutes();
+        SupportMessage::create(['support_ticket_id' => $ticket->id, 'sender_type' => 'admin', 'kind' => 'text',
+            'body' => 'Otra vez: ' . $url, 'whatsapp_message_id' => 'wamid.martin.2']);
+
+        $videos = app(PruebaVideoSoporteService::class)->videos_del_cliente($client);
+        $this->assertSame('08', $videos[1]['codigo']);
+        $this->assertSame($primero->created_at->toIso8601String(), $videos[1]['entregado_at'], 'Cuenta el primero, por fecha.');
+        $this->assertNull($videos[0]['entregado_at'], 'El 04 no se mandó.');
+    }
 }
