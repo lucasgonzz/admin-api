@@ -13,6 +13,7 @@ use App\Models\Lead;
 use App\Models\SupportTicket;
 use App\Models\SupportMessage;
 use App\Services\ClientPhoneDirectory;
+use App\Services\MartinActivity\MartinActivityService;
 use App\Services\SupportAiSuggestionDraftService;
 use App\Services\SupportClientSyncService;
 use App\Services\SupportTemplateSendService;
@@ -150,7 +151,12 @@ class SupportTicketController extends BaseController
             ->withIndicadoresDeInicio()
             /* `es_prueba`: el filtro «Prueba» de la bandeja (misión prueba-ayuda-unificada-en-soporte). La lista
                sigue trayendo TODOS los tickets (un SPA viejo no pierde ninguno); el SPA nuevo los separa. */
-            ->withEsPrueba();
+            ->withEsPrueba()
+            /* `martin_activity_count` / `martin_writes_count`: el puntito de la auditoría de Martín en el encabezado
+               de la conversación (misión cruzada auditoria-de-martin). Dos subconsultas que resuelve el índice. */
+            ->tap(function ($query) {
+                MartinActivityService::sumar_contadores($query);
+            });
     }
 
     /**
@@ -324,6 +330,10 @@ class SupportTicketController extends BaseController
             /* `es_prueba` también acá: la bandeja trae por este GET el ticket nuevo que avisó Pusher, y sin la marca
                un ticket de prueba caería en «Clientes». */
             ->withEsPrueba()
+            /* Los contadores de la auditoría de Martín, igual que en el listado. */
+            ->tap(function ($query) {
+                MartinActivityService::sumar_contadores($query);
+            })
             ->firstOrFail();
         return response()->json(['model' => $model], 200);
     }
