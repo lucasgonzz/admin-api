@@ -231,6 +231,110 @@ class RespaldoDeSoporteDeLaPruebaTest extends BaseDeLaPrueba
         $this->assertFalse(app(SupportCodexHealthService::class)->en_falla());
     }
 
+    /**
+     * Un ticket de Soporte DEL SISTEMA de una prueba (`source = erp`, del dueño, con el entrante verificado).
+     *
+     * @param string $texto
+     *
+     * @return array{0: SupportTicket, 1: SupportMessage}
+     */
+    private function ticket_del_sistema_con_pregunta(string $texto = '¿Cómo cargo un artículo?'): array
+    {
+        $client = $this->cliente_en_prueba();
+        $ticket = SupportTicket::create([
+            'client_id' => $client->id, 'client_user_id' => (int) $client->user_id, 'status' => 'open',
+            'source' => 'erp', 'opened_at' => now(), 'last_client_message_at' => now(), 'agentes_erp' => true,
+        ]);
+        $entrante = SupportMessage::create([
+            'support_ticket_id' => $ticket->id, 'sender_type' => 'user', 'kind' => 'text', 'body' => $texto,
+            /* Hace más de 24 h: en el sistema la ventana no aplica. */
+            'delivered_at' => now()->subHours(30), 'synced_to_client_at' => now(),
+            'erp_auto_reply' => [SupportMessage::MARCA_ERP_VERIFICADO_PARA_CODEX => true],
+        ]);
+
+        return [$ticket, $entrante];
+    }
+
+    /** @test */
+    public function en_soporte_del_sistema_contesta_por_el_camino_del_sistema_sin_ventana(): void
+    {
+        $this->martin_caido();
+        $this->red();
+        [$ticket, $entrante] = $this->ticket_del_sistema_con_pregunta();
+
+        $this->assertSame('enviado', $this->responder($ticket, $entrante)['estado']);
+
+        $this->assertSame([], $this->espia->textos, 'No sale nada por WhatsApp.');
+        Http::assertSent(function ($request) use ($ticket) {
+            return strpos($request->url(), '/api/admin-sync/support/messages') !== false
+                && $request['ticket_uuid'] === $ticket->uuid
+                && strpos((string) $request['body'], 'Respuesta automática: Entrá a Artículos y tocá Nuevo.') === 0;
+        });
+        $mensaje = SupportMessage::where('support_ticket_id', $ticket->id)->where('sender_type', 'admin')->sole();
+        $this->assertTrue((bool) $mensaje->is_trial_import_notice);
+        $this->assertNotNull($mensaje->synced_to_client_at);
+        $this->assertNotNull($mensaje->ai_generated_at);
+        $this->assertSame(PruebaWhatsappEnvio::ESTADO_ENVIADO,
+            PruebaWhatsappEnvio::where('plantilla', PruebaRespaldoSoporteService::PLANTILLA)->sole()->estado);
+        $this->assertSame('ya_respondido', $this->responder($ticket, $entrante)['estado']);
+    }
+
+    /** @test */
+    public function en_soporte_del_sistema_mantiene_las_guardas(): void
+    {
+        $this->martin_sano();
+        $this->red();
+        [$ticket, $entrante] = $this->ticket_del_sistema_con_pregunta();
+        $this->assertSame('martin_sano', $this->responder($ticket, $entrante)['estado']);
+
+        $this->martin_caido();
+        [$comercial, $pedido] = $this->ticket_del_sistema_con_pregunta('Quiero contratar el plan mensual');
+        $this->assertSame('pedido_comercial', $this->responder($comercial, $pedido)['estado']);
+
+        /* Un entrante sin verificar (Martín no lo leería) no se contesta. */
+        [$sin_firma, $dudoso] = $this->ticket_del_sistema_con_pregunta();
+        SupportTicket::whereKey($sin_firma->id)->update(['agentes_erp' => false]);
+        SupportMessage::whereKey($dudoso->id)->update(['erp_auto_reply' => null]);
+        $this->assertSame('no_corresponde', $this->responder($sin_firma, $dudoso)['estado']);
+
+        /* La conversación de un empleado del negocio, tampoco. */
+        [$de_empleado, $del_empleado] = $this->ticket_del_sistema_con_pregunta();
+        SupportTicket::whereKey($de_empleado->id)->update(['client_user_id' => 123]);
+        $this->assertSame('no_corresponde', $this->responder($de_empleado, $del_empleado)['estado']);
+
+        $this->assertSame(0, SupportMessage::where('sender_type', 'admin')
+            ->whereIn('support_ticket_id', [$ticket->id, $comercial->id, $sin_firma->id, $de_empleado->id])->count());
+    }
+
+    /** @test */
+    public function el_entrante_de_soporte_del_sistema_de_una_prueba_programa_el_job(): void
+    {
+        Queue::fake();
+        $client = $this->cliente_en_prueba();
+        $client->inbound_api_key = 'firma-prueba-respaldo';
+        $client->save();
+        $comun = $this->crear_cliente('+5493417770001', false, 'otra-clave');
+        $comun->user_id = 777700;
+        $comun->inbound_api_key = 'firma-comun-respaldo';
+        $comun->save();
+
+        foreach ([$client, $comun] as $quien) {
+            $this->postJson('/api/inbound/support/messages', [
+                'agentes_version' => 1, 'es_dueno' => 1, 'client_uuid' => $quien->uuid, 'ticket_uuid' => (string) Str::uuid(),
+                'client_user_id' => $quien->user_id, 'sender_user_id' => $quien->user_id, 'sender_type' => 'user',
+                'message_uuid' => (string) Str::uuid(), 'kind' => 'text', 'body' => '¿Me armás un tour de Vender?',
+            ], ['X-Admin-Api-Key' => (string) $quien->inbound_api_key])->assertCreated();
+        }
+
+        $entrante = SupportMessage::whereHas('ticket', function ($ticket) use ($client) {
+            $ticket->where('client_id', $client->id);
+        })->sole();
+        Queue::assertPushed(ResponderRespaldoDePruebaJob::class, 1);
+        Queue::assertPushed(ResponderRespaldoDePruebaJob::class, function ($job) use ($entrante) {
+            return $job->message_id === (int) $entrante->id;
+        });
+    }
+
     /** @test */
     public function no_pasa_de_tres_respuestas_por_ticket_por_dia(): void
     {

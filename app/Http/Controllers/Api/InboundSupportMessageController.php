@@ -43,6 +43,12 @@ class InboundSupportMessageController extends Controller
         $message = SupportMessage::where('id', $message->id)->withAll()->firstOrFail();
         if ($creado) {
             SupportMessageReceived::dispatch_after_commit($message->id);
+            /* El respaldo de la prueba gratuita por si Martín está caído (misión prueba-ayuda-unificada-en-soporte,
+             * 10/11/2026): el lead en prueba escribe en Soporte del sistema desde «Seguir con Soporte». Solo programa
+             * un job que decide al correr; para cualquier otro ticket no hace nada y nunca lanza. */
+            if ($message->sender_type === 'user' && $message->ticket !== null) {
+                app(\App\Services\Prueba\PruebaRespaldoSoporteService::class)->programar($message->ticket, (int) $message->id);
+            }
         }
         if ($message->ticket !== null && ! $message->ticket->agentes_erp
             && $this->entrada_robotito_valida($request, $client, $message->ticket)) {

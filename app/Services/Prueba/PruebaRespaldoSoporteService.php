@@ -2,6 +2,7 @@
 
 namespace App\Services\Prueba;
 
+use App\Events\SupportMessageReceived;
 use App\Jobs\ResponderRespaldoDePruebaJob;
 use App\Models\PruebaWhatsappEnvio;
 use App\Models\SupportCodexCase;
@@ -10,6 +11,7 @@ use App\Models\SupportTicket;
 use App\Services\DemoChatAiService;
 use App\Services\PruebaImportacionService;
 use App\Services\PruebaWhatsappService;
+use App\Services\SupportClientSyncService;
 use App\Services\SupportCodexHealthService;
 use App\Services\WhatsappSessionWindowService;
 use Illuminate\Support\Facades\Cache;
@@ -31,7 +33,7 @@ use Illuminate\Support\Facades\Log;
  *    propio job) y Martín no tiene el ticket tomado;
  *  - Martín está caído (si está sano, contesta él);
  *  - como mucho {@see self::TOPE_DIARIO} respuestas automáticas por ticket por día (hora de Argentina);
- *  - la ventana de 24 h abierta (nunca texto libre con la ventana cerrada);
+ *  - la ventana de 24 h abierta (nunca texto libre con la ventana cerrada), solo en WhatsApp;
  *  - sin importación en curso o por revisar en el ticket, sin adjuntos ni mensajes que no sean texto en el turno
  *    del lead, y sin pedido de precio o de contratación: ahí no contesta, lo ve una persona;
  *  - si el modelo falla, no manda nada.
@@ -42,6 +44,12 @@ use Illuminate\Support\Facades\Log;
  * con `plantilla = respaldo_automatico` y el mensaje en `support_message_id`.
  *
  * Idempotente: un candado por ticket y una fila de envío por entrante (`detalle = entrante:<id>`).
+ *
+ * 🔴 Dos canales. El ticket de WhatsApp del dueño y, desde el 10/11/2026, la conversación de Soporte DEL SISTEMA
+ * (`source = erp`), adonde el botón «Seguir con Soporte» del asistente de la prueba manda la pregunta. En el sistema
+ * la ventana de 24 h no aplica; la respuesta llega al sistema del lead por el mismo camino que las respuestas de
+ * Martín (`SupportClientSyncService::sync_message_to_client()`), y solo se contesta un entrante que Martín
+ * consideraría confiable (`SupportTicket::mensaje_confiable_para_codex()`) del dueño.
  */
 class PruebaRespaldoSoporteService
 {
@@ -77,8 +85,7 @@ class PruebaRespaldoSoporteService
     {
         try {
             $ticket->loadMissing('client');
-            if ($ticket->source !== 'whatsapp' || $ticket->client_employee_id !== null || $ticket->client === null
-                || (string) $ticket->client->estado !== PruebaCicloService::CLIENTE_PRUEBA) {
+            if (! $this->es_ticket_del_dueno_en_prueba($ticket)) {
                 return false;
             }
 
@@ -110,9 +117,7 @@ class PruebaRespaldoSoporteService
     public function responder(int $ticket_id, int $message_id): array
     {
         $ticket = SupportTicket::with('client')->find($ticket_id);
-        if ($ticket === null || $ticket->status !== SupportTicket::STATUS_ABIERTO || $ticket->source !== 'whatsapp'
-            || $ticket->client_employee_id !== null || $ticket->client === null
-            || (string) $ticket->client->estado !== PruebaCicloService::CLIENTE_PRUEBA) {
+        if ($ticket === null || $ticket->status !== SupportTicket::STATUS_ABIERTO || ! $this->es_ticket_del_dueno_en_prueba($ticket)) {
             return $this->no('no_corresponde');
         }
 
@@ -181,6 +186,9 @@ class PruebaRespaldoSoporteService
         if ($ultimo === null || (int) $ultimo->id !== $message_id || $ultimo->sender_type !== 'user') {
             return 'ya_respondido';
         }
+        if (! $ticket->mensaje_confiable_para_codex($ultimo)) {
+            return 'no_corresponde';
+        }
 
         if (PruebaWhatsappEnvio::where('support_ticket_id', (int) $ticket->id)->where('plantilla', self::PLANTILLA)
             ->where('detalle', 'entrante:' . $message_id)->exists()) {
@@ -202,7 +210,7 @@ class PruebaRespaldoSoporteService
             return 'tope_diario';
         }
 
-        if (! app(WhatsappSessionWindowService::class)->is_open((string) $ticket->whatsapp_phone)) {
+        if ($ticket->source === 'whatsapp' && ! app(WhatsappSessionWindowService::class)->is_open((string) $ticket->whatsapp_phone)) {
             return 'ventana_cerrada';
         }
 
@@ -234,7 +242,9 @@ class PruebaRespaldoSoporteService
             $texto .= "\n" . $video['titulo'] . ': ' . $video['url'];
         }
 
-        $envio = app(PruebaWhatsappService::class)->mandar_texto_por_ticket($ticket->client, $texto, (int) $ticket->id);
+        $envio = $ticket->source === 'erp'
+            ? $this->mandar_al_sistema($ticket, $texto)
+            : app(PruebaWhatsappService::class)->mandar_texto_por_ticket($ticket->client, $texto, (int) $ticket->id);
         if ($envio['support_ticket_id'] === null) {
             /* No salió nada ni quedó nada en el hilo (ventana cerrada, contacto inválido). */
             return $this->no($envio['motivo'] === 'ventana_cerrada' ? 'ventana_cerrada' : 'no_corresponde', $envio['motivo']);
@@ -257,6 +267,72 @@ class PruebaRespaldoSoporteService
         }
 
         return ['estado' => $envio['enviado'] ? 'enviado' : 'fallido', 'detalle' => $envio['motivo']];
+    }
+
+    /**
+     * La respuesta en la conversación de Soporte del sistema: el mensaje queda en el hilo (como aviso que no tapa
+     * el entrante, y con `ai_generated_at` porque lo escribió el modelo) y se sincroniza al sistema del lead por
+     * el mismo camino que las respuestas de Martín. Devuelve la misma forma que `mandar_texto_por_ticket()`.
+     *
+     * @param SupportTicket $ticket
+     * @param string        $texto
+     *
+     * @return array{enviado: bool, motivo: string|null, whatsapp_message_id: string|null, support_ticket_id: int|null}
+     */
+    protected function mandar_al_sistema(SupportTicket $ticket, string $texto): array
+    {
+        $mensaje = SupportMessage::create([
+            'support_ticket_id'      => (int) $ticket->id,
+            'sender_type'            => 'admin',
+            'sender_admin_id'        => null,
+            'kind'                   => 'text',
+            'body'                   => $texto,
+            'delivered_at'           => now(),
+            'ai_generated_at'        => now(),
+            'is_trial_import_notice' => true,
+        ]);
+
+        $enviado = app(SupportClientSyncService::class)->sync_message_to_client($mensaje);
+        if (! $enviado) {
+            $mensaje->remote_delivery_status = 'not_received';
+            $mensaje->save();
+        }
+
+        try {
+            event(new SupportMessageReceived((int) $mensaje->id));
+        } catch (\Throwable $e) {
+            Log::channel('daily')->warning('PruebaRespaldoSoporte: no se pudo emitir el evento del mensaje.', ['message_id' => $mensaje->id]);
+        }
+
+        return [
+            'enviado'             => $enviado,
+            'motivo'              => $enviado ? null : 'El sistema del lead no confirmó el mensaje.',
+            'whatsapp_message_id' => null,
+            'support_ticket_id'   => (int) $ticket->id,
+        ];
+    }
+
+    /**
+     * Si el ticket es del DUEÑO de un negocio en prueba, por WhatsApp o por la conversación de Soporte del sistema.
+     *
+     * @param SupportTicket $ticket
+     *
+     * @return bool
+     */
+    protected function es_ticket_del_dueno_en_prueba(SupportTicket $ticket): bool
+    {
+        $ticket->loadMissing('client');
+        if ($ticket->client === null || (string) $ticket->client->estado !== PruebaCicloService::CLIENTE_PRUEBA
+            || $ticket->client_employee_id !== null) {
+            return false;
+        }
+
+        if ($ticket->source === 'whatsapp') {
+            return true;
+        }
+
+        return $ticket->source === 'erp' && (int) $ticket->client_user_id > 0
+            && (int) $ticket->client_user_id === (int) $ticket->client->user_id;
     }
 
     /**
