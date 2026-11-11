@@ -41,6 +41,9 @@ class PruebaSettings
     /** Encuesta de fin de prueba (misión prueba-e2e-campana-imperio, 11/11/2026): 1 = se manda al vencer y al contratar. */
     const KEY_ENCUESTA_ACTIVA = 'prueba_encuesta_activa';
 
+    /** Qué bienvenida de WhatsApp se manda: `v2` (default; con respaldo a la v1 mientras Meta no la apruebe) o `v1`. */
+    const KEY_BIENVENIDA_VERSION = 'prueba_bienvenida_version';
+
     /** 0 hasta que Lucas prenda el pool desde admin_settings: sin DNS ni plantilla, un mínimo > 0 solo fabrica fallidas. */
     const DEFAULT_POOL_MINIMO         = 0;
     const DEFAULT_MAX_ACTIVAS         = 25;
@@ -116,6 +119,16 @@ class PruebaSettings
     public static function encuesta_activa(): bool
     {
         return (string) AdminSetting::get(self::KEY_ENCUESTA_ACTIVA, '1') !== '0';
+    }
+
+    /**
+     * La versión de la bienvenida por WhatsApp (`prueba_bienvenida_version`): `v2` salvo que el setting diga `v1`.
+     *
+     * @return string `v1` o `v2`.
+     */
+    public static function bienvenida_version(): string
+    {
+        return strtolower(trim((string) AdminSetting::get(self::KEY_BIENVENIDA_VERSION, 'v2'))) === 'v1' ? 'v1' : 'v2';
     }
 
     public static function whatsapp_soporte(): string

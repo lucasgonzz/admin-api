@@ -33,7 +33,18 @@ class PruebaPlantillasService
 
     const ASISTENTE_LISTO = 'cc_prueba_asistente_listo';
 
-    const BIENVENIDAS = [self::BIENVENIDA, self::BIENVENIDA_CON_ASISTENTE];
+    /**
+     * La bienvenida que además explica los agentes (misión prueba-e2e-campana-imperio, 11/11/2026). Son plantillas
+     * NUEVAS en Meta (las aprobadas no se editan): mientras no estén `APPROVED` sale la anterior.
+     */
+    const BIENVENIDA_V2 = 'cc_prueba_bienvenida_v2';
+
+    const BIENVENIDA_CON_ASISTENTE_V2 = 'cc_prueba_bienvenida_asistente_v2';
+
+    const BIENVENIDAS = [self::BIENVENIDA, self::BIENVENIDA_CON_ASISTENTE, self::BIENVENIDA_V2, self::BIENVENIDA_CON_ASISTENTE_V2];
+
+    /** Las bienvenidas que presentan el número del asistente personal. */
+    const BIENVENIDAS_CON_ASISTENTE = [self::BIENVENIDA_CON_ASISTENTE, self::BIENVENIDA_CON_ASISTENTE_V2];
 
     /** El pedido de la encuesta de fin de prueba (misión prueba-e2e-campana-imperio, 11/11/2026). `{{2}}` = el enlace. */
     const FIN_ENCUESTA = 'cc_prueba_fin_encuesta';
@@ -123,6 +134,25 @@ class PruebaPlantillasService
         ],
     ];
 
+    /**
+     * Las bienvenidas v2. Van aparte de {@see self::PLANTILLAS} porque no reemplazan a nadie hasta que Meta las
+     * aprueba ({@see self::bienvenida_vigente()}); se crean con el mismo comando (`prueba:crear-plantillas`).
+     *
+     * El texto sirve para los dos canales: lo lee el negocio en WhatsApp y también en Soporte de su sistema.
+     *
+     * @var array<string, array{body: string, uso: string}>
+     */
+    const PLANTILLAS_V2 = [
+        self::BIENVENIDA_V2 => [
+            'body' => 'Hola {{1}}, soy Martín, del equipo de ComercioCity. Ya tenés tu sistema armado con datos de ejemplo para que lo pruebes tranquilo. Adentro del sistema, en Agentes, tenés dos ayudas: Soporte, que soy yo (te contesto, te paso los videos y te muestro cómo se hace con un recorrido guiado en tu pantalla), y tu Asistente personal, al que le pedís cosas del negocio. Si querés, te cargamos tu información sin costo: mandame el Excel de tus artículos o el catálogo de tu proveedor en PDF, por este chat o desde Soporte en tu sistema, y lo dejamos listo.',
+            'uso'  => 'Prueba gratuita: bienvenida de Martín que explica los agentes del sistema (Soporte y Asistente personal). Reemplaza a cc_prueba_bienvenida cuando Meta la aprueba.',
+        ],
+        self::BIENVENIDA_CON_ASISTENTE_V2 => [
+            'body' => 'Hola {{1}}, soy Martín, del equipo de ComercioCity. Tu prueba de siete días ya está lista con datos de ejemplo. Adentro del sistema, en Agentes, tenés dos ayudas: Soporte, que soy yo (te contesto, te paso los videos y te muestro cómo se hace con un recorrido guiado en tu pantalla), y tu Asistente personal, al que le pedís cosas del negocio. Si querés que carguemos tu catálogo sin costo, mandame tu Excel o el PDF del proveedor, por este chat o desde Soporte en tu sistema. Tu asistente personal también te atiende por WhatsApp en el {{2}}. ' . \App\Services\Prueba\PruebaAsistenteService::USO,
+            'uso'  => 'Prueba gratuita: bienvenida de Martín que explica los agentes y da el WhatsApp del asistente personal. Reemplaza a cc_prueba_bienvenida_asistente cuando Meta la aprueba.',
+        ],
+    ];
+
     /** El ejemplo de `{{1}}` que se le manda a Meta para aprobar. */
     const EJEMPLO_NOMBRE = 'Marcela';
 
@@ -145,7 +175,27 @@ class PruebaPlantillasService
      */
     public static function todas(): array
     {
-        return self::PLANTILLAS;
+        return self::PLANTILLAS + self::PLANTILLAS_V2;
+    }
+
+    /**
+     * La plantilla de bienvenida que corresponde mandar HOY: la v2 si el setting no la apaga
+     * (`prueba_bienvenida_version`, default `v2`) y Meta ya la aprobó; si no, la v1 de siempre.
+     *
+     * @param bool $con_asistente true = la variante que presenta el número del asistente personal.
+     *
+     * @return string
+     */
+    public function bienvenida_vigente(bool $con_asistente): string
+    {
+        $v1 = $con_asistente ? self::BIENVENIDA_CON_ASISTENTE : self::BIENVENIDA;
+        $v2 = $con_asistente ? self::BIENVENIDA_CON_ASISTENTE_V2 : self::BIENVENIDA_V2;
+
+        if (\App\Services\Prueba\PruebaSettings::bienvenida_version() !== 'v2') {
+            return $v1;
+        }
+
+        return $this->estado_para_enviar($v2)['motivo'] === null ? $v2 : $v1;
     }
 
     /**

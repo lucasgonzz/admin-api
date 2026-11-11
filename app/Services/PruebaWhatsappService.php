@@ -53,6 +53,12 @@ class PruebaWhatsappService
     const TOMAS_VENCIDA = 'vencida';
     const TOMAS_MANUAL = 'manual';
 
+    /**
+     * Marca (en `support_messages.erp_auto_reply`) de la copia de la bienvenida que se deja visible en Soporte del
+     * sistema del negocio cuando el WhatsApp no pudo salir. Ver {@see self::asegurar_bienvenida_en_el_sistema()}.
+     */
+    const MARCA_BIENVENIDA_SISTEMA = 'prueba_bienvenida_sistema';
+
     /** Zona horaria del tope diario. */
     const ZONA = 'America/Argentina/Buenos_Aires';
 
@@ -179,6 +185,25 @@ class PruebaWhatsappService
         }
 
         try {
+            $resultado = $this->bienvenida_por_whatsapp($client, $lead);
+            $this->asegurar_bienvenida_en_el_sistema($client, $lead, $resultado);
+
+            return $resultado;
+        } finally {
+            $reserva->release();
+        }
+    }
+
+    /**
+     * La bienvenida por WhatsApp (plantilla por el ticket de soporte), con el candado ya tomado.
+     *
+     * @param Client    $client
+     * @param Lead|null $lead
+     *
+     * @return array{estado: string, detalle: string|null}
+     */
+    protected function bienvenida_por_whatsapp(Client $client, ?Lead $lead): array
+    {
             $enviadas = PruebaWhatsappEnvio::query()
                 ->where('client_id', (int) $client->id)
                 ->whereIn('plantilla', array_merge(PruebaPlantillasService::BIENVENIDAS, [PruebaPlantillasService::ASISTENTE_LISTO]))
@@ -186,11 +211,11 @@ class PruebaWhatsappService
                 ->pluck('plantilla');
 
             $ya = $enviadas->isNotEmpty();
-            $plantilla = $ya ? PruebaPlantillasService::ASISTENTE_LISTO : PruebaPlantillasService::BIENVENIDA_CON_ASISTENTE;
+            $plantilla = $ya ? PruebaPlantillasService::ASISTENTE_LISTO : $this->plantillas->bienvenida_vigente(true);
             $instancia = $lead !== null ? Prueba\PruebaAsistenteService::instancia_vigente($client) : null;
             if ($instancia !== null) {
                 $falta_correo = $instancia->correo_bienvenida_at === null && filter_var((string) $client->email, FILTER_VALIDATE_EMAIL);
-                $falta_whatsapp = ! $enviadas->contains(PruebaPlantillasService::BIENVENIDA_CON_ASISTENTE)
+                $falta_whatsapp = $enviadas->intersect(PruebaPlantillasService::BIENVENIDAS_CON_ASISTENTE)->isEmpty()
                     && ! $enviadas->contains(PruebaPlantillasService::ASISTENTE_LISTO)
                     && $this->plantillas->estado_para_enviar($plantilla)['motivo'] === null;
 
@@ -211,10 +236,123 @@ class PruebaWhatsappService
                 return ['estado' => 'ya_enviada', 'detalle' => null];
             }
 
-            return $this->con_video_de_bienvenida($client, $this->enviar_plantilla_por_ticket($client, $lead, PruebaPlantillasService::BIENVENIDA, null, true));
-        } finally {
-            $reserva->release();
+            return $this->con_video_de_bienvenida($client, $this->enviar_plantilla_por_ticket($client, $lead, $this->plantillas->bienvenida_vigente(false), null, true));
+    }
+
+    /**
+     * El negocio tiene que ver la bienvenida en Soporte de SU SISTEMA aunque el WhatsApp no salga (misión
+     * prueba-e2e-campana-imperio, 11/11/2026). Lo que el sistema muestra es el ticket «Prueba gratuita» de
+     * WhatsApp, y de él solo los mensajes que salieron (con wamid) o que están marcados como sincronizados
+     * (`InboundAgentesController::filtrar_mensajes_visibles()`). Entonces:
+     *
+     *  - Si la plantilla salió, no hay nada que hacer: el mensaje ya se ve. Y si antes se había dejado una copia
+     *    para el sistema, se retira: la bienvenida no se duplica.
+     *  - Si quedó en cola (Meta todavía no aprobó la plantilla) o Meta la rechazó, se abre igual el ticket y se
+     *    deja UNA copia para el sistema: el texto de la bienvenida v2 y el video 04, marcada como sincronizada.
+     *    No sale nada por WhatsApp ni se registra en `prueba_whatsapp_envios`: la bienvenida por WhatsApp sigue
+     *    pendiente y sale cuando se pueda.
+     *
+     * Nunca cambia el resultado de la bienvenida ni la tumba.
+     *
+     * @param Client               $client
+     * @param Lead|null            $lead
+     * @param array<string, mixed> $resultado Lo que devolvió `bienvenida_por_whatsapp()`.
+     *
+     * @return void
+     */
+    protected function asegurar_bienvenida_en_el_sistema(Client $client, ?Lead $lead, array $resultado): void
+    {
+        try {
+            $estado = isset($resultado['estado']) ? (string) $resultado['estado'] : '';
+
+            if ($estado === 'enviado') {
+                $copia = $this->bienvenida_del_sistema($client);
+                if ($copia !== null) {
+                    $copia->delete();
+                }
+
+                return;
+            }
+
+            if (! in_array($estado, ['en_cola', 'fallido'], true) || $this->bienvenida_del_sistema($client) !== null) {
+                return;
+            }
+
+            /* Si alguna bienvenida ya salió por WhatsApp (lo que falló fue otra cosa), ya la ve. */
+            $ya_salio = PruebaWhatsappEnvio::query()
+                ->where('client_id', (int) $client->id)
+                ->whereIn('plantilla', PruebaPlantillasService::BIENVENIDAS)
+                ->where('estado', PruebaWhatsappEnvio::ESTADO_ENVIADO)
+                ->exists();
+            if ($ya_salio) {
+                return;
+            }
+
+            $telefono = trim((string) $client->telefono_personal());
+            $contacto = $telefono === '' ? null : $this->directorio->resolve_for_client($client, $telefono);
+            $admin    = $this->remitente();
+            if ($contacto === null || $contacto['client_employee_id'] !== null || $admin === null) {
+                return;
+            }
+
+            $ticket = $this->opener->resolve_or_create_ticket($client, (string) $contacto['phone'], $admin, 'Prueba gratuita', 'sistema')['ticket'];
+            if ($ticket === null || $ticket->source !== 'whatsapp') {
+                return;
+            }
+
+            $texto = strtr(PruebaPlantillasService::cuerpo_de(PruebaPlantillasService::BIENVENIDA_V2), [
+                '{{1}}' => $this->primer_nombre($client, $lead, (string) $contacto['label']),
+            ]);
+
+            $catalogo = app(Prueba\PruebaVideoCatalogoService::class)->videos();
+            $clave    = 'prueba:' . Prueba\PruebaVideoSoporteService::CODIGO_BIENVENIDA;
+            if (isset($catalogo[$clave])) {
+                $texto .= "\n\n" . app(Prueba\PruebaVideoSoporteService::class)->texto_del_video($catalogo[$clave]);
+            }
+
+            $mensaje = SupportMessage::create([
+                'support_ticket_id'      => (int) $ticket->id,
+                'sender_type'            => 'admin',
+                'sender_admin_id'        => (int) $admin->id,
+                'kind'                   => 'text',
+                'body'                   => $texto,
+                'delivered_at'           => now(),
+                /* Sin wamid: no salió por WhatsApp. Lo que lo hace visible en el sistema es esta marca. */
+                'synced_to_client_at'    => now(),
+                'is_trial_import_notice' => true,
+                'erp_auto_reply'         => [self::MARCA_BIENVENIDA_SISTEMA => true],
+            ]);
+
+            try {
+                event(new SupportMessageReceived((int) $mensaje->id));
+            } catch (\Throwable $e) {
+                Log::channel('daily')->warning('PruebaWhatsapp: no se pudo emitir el evento del mensaje.', ['message_id' => $mensaje->id, 'error' => $e->getMessage()]);
+            }
+        } catch (\Throwable $e) {
+            Log::channel('daily')->warning('PruebaWhatsapp: no se pudo dejar la bienvenida visible en el sistema del negocio.', [
+                'client_id' => (int) $client->id,
+                'error'     => $e->getMessage(),
+            ]);
         }
+    }
+
+    /**
+     * La copia de la bienvenida dejada para el sistema del negocio, si existe.
+     *
+     * @param Client $client
+     *
+     * @return SupportMessage|null
+     */
+    protected function bienvenida_del_sistema(Client $client): ?SupportMessage
+    {
+        return SupportMessage::query()
+            ->whereHas('ticket', function ($ticket) use ($client) {
+                $ticket->where('client_id', (int) $client->id);
+            })
+            ->where('sender_type', 'admin')
+            ->where('erp_auto_reply->' . self::MARCA_BIENVENIDA_SISTEMA, true)
+            ->orderByDesc('id')
+            ->first();
     }
 
     /**
