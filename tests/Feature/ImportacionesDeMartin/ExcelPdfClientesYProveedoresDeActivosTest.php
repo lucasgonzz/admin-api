@@ -343,6 +343,34 @@ class ExcelPdfClientesYProveedoresDeActivosTest extends BaseDeImportacionesDeMar
         });
     }
 
+    /**
+     * 🔴 Con una corrida de clientes o proveedores abierta, `prueba-pendientes` de empresa trae
+     * `importaciones_de_contactos` y `en_proceso: true`: Martín no puede cerrar el ticket a mitad de camino.
+     *
+     * @test
+     */
+    public function una_corrida_de_contactos_abierta_no_deja_cerrar_el_ticket(): void
+    {
+        $this->ticket->update(['importacion_soporte_iniciada_at' => now()]);
+        $this->fakear_http([
+            '*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response([
+                'automatizar_soporte' => true, 'pendientes' => [], 'en_proceso' => true,
+                'importaciones_de_contactos' => [['corrida_id' => self::CORRIDA, 'modelo' => 'client', 'estado' => 'confirmacion',
+                    'revision' => 1, 'codigo_requerido' => true]],
+            ], 200),
+        ]);
+        $gracias = $this->entrante($this->ticket, 'Gracias');
+        $reserva = $this->reservar();
+
+        $this->postJson($this->ruta('reply'), [
+            'lease_token' => $reserva['lease_token'], 'expected_message_id' => (int) $gracias->id,
+            'operation_id' => 'cerrar-con-contactos', 'action' => 'cerrar', 'body' => 'De nada.',
+        ], $this->headers_de_claude())->assertStatus(409)
+            ->assertJsonPath('message', 'trial_import_pending: Hay una importación en curso en este ticket. Dejá abierta la conversación.');
+        $this->assertSame('open', $this->ticket->fresh()->status);
+        $this->assertDatabaseMissing('support_codex_operations', ['operation_id' => 'cerrar-con-contactos']);
+    }
+
     /** @test */
     public function el_estado_de_la_corrida_se_lee_con_la_reserva(): void
     {
