@@ -525,8 +525,11 @@ class ImportacionesDeMartinService
             $prefijo = 'items[' . $i . ']';
             $campos[$prefijo . '[article_id]'] = (string) $article_id;
             $campos[$prefijo . '[tipo]'] = (string) $item['tipo'];
-            $campos[$prefijo . '[url_origen]'] = (string) ($item['url_origen'] ?? '');
-            $campos[$prefijo . '[codigo_web]'] = (string) ($item['codigo_web'] ?? '');
+            foreach (['url_origen', 'codigo_web'] as $opcional) {
+                if (isset($item[$opcional]) && trim((string) $item[$opcional]) !== '') {
+                    $campos[$prefijo . '[' . $opcional . ']'] = trim((string) $item[$opcional]);
+                }
+            }
             $archivos[] = ['nombre' => $prefijo . '[imagen]', 'bytes' => $imagen['bytes'], 'filename' => 'articulo-' . $article_id . '.' . $imagen['extension']];
             $i++;
         }
