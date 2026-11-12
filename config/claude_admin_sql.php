@@ -186,6 +186,7 @@ return [
             'demo_chat_mensajes.contenido', 'support_tickets.ai_pending_suggestion', 'whatsapp_ad_referrals.body',
             'whatsapp_ad_referrals.headline', 'lead_calls.transcript', 'lead_calls.call_summary', 'leads.call_summary',
             'recursos_preguntas.texto', 'recursos_preguntas.borrador', 'recursos_preguntas.respuesta', 'recursos_encuestas.mejora',
+            'prueba_encuestas.comentario',
         ], 'Cuerpo de una conversación (con un lead, un cliente o el equipo). Es lo que soporte necesita leer; sale con «contraseña»/«clave» tapadas con la misma regla que el contexto del ticket.'),
         array_fill_keys([
             'admin_tasks.content', 'agenda_tasks.notes', 'client_employees.notes', 'client_support_contexts.ficha_operativa',
