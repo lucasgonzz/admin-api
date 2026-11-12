@@ -280,6 +280,17 @@ class SupportCodexService
             ->where('id', '>', $case->handled_message_id)->where('id', '<', $last->id)->exists();
     }
 
+    /**
+     * Si el ticket es de un cliente marcado como ENSAYO (`clients.es_ensayo`).
+     *
+     * @param SupportTicket $ticket Ticket con la relación `client` cargada o cargable.
+     * @return bool true solo si el cliente existe y está marcado; un ticket sin cliente no es de ensayo.
+     */
+    private function es_cliente_de_ensayo(SupportTicket $ticket): bool
+    {
+        return $ticket->client !== null && (bool) $ticket->client->es_ensayo;
+    }
+
     public function context(SupportTicket $ticket, SupportCodexCase $case = null): array
     {
         $ticket->loadMissing('client', 'client_employee');
@@ -317,6 +328,9 @@ class SupportCodexService
                 'slug' => $ticket->client ? $ticket->client->slug : null,
                 // `prueba` si el negocio está en prueba gratuita (misión prueba-martin-importacion, 3/11/2026); si no, null.
                 'estado' => app(PruebaDelClienteService::class)->es_cliente_en_prueba($ticket->client) ? (string) $ticket->client->estado : null,
+                // Cliente de ENSAYO (`clients.es_ensayo`): un negocio de prueba que maneja una sesión haciendo de
+                // cliente. Misión ensayo-sin-mision-automatica (12/11/2026): sus misiones no arrancan solas.
+                'es_ensayo' => $this->es_cliente_de_ensayo($ticket),
             ],
             'contact_name' => $ticket->es_erp_sin_identidad_verificada() ? null : $ticket->resolve_contact_display_name(),
             'contact_role' => $ticket->es_contacto_empleado() ? 'employee' : 'owner',
@@ -326,6 +340,12 @@ class SupportCodexService
             'thread_id' => $case ? $case->thread_id : null,
             'mission' => $case ? $case->mission : null,
             'mission_lifecycle' => $case ? $case->mission_lifecycle() : null,
+            // Si el monitor puede abrir SOLO la tarea de una misión de error de este ticket. Un cliente de ensayo
+            // ya tiene una sesión corrigiendo lo que encuentra: la misión queda escrita en el ticket para que esa
+            // sesión la lea, pero el monitor no crea el hilo de Codex (tickets 102 y 107 del 11/11/2026). El
+            // inicio manual de Lucas no cambia. Un monitor que no conoce el campo sigue como antes.
+            'mission_autostart' => ! $this->es_cliente_de_ensayo($ticket),
+            'mission_autostart_reason' => $this->es_cliente_de_ensayo($ticket) ? 'cliente_de_ensayo' : null,
             'mission_fix_evidence' => $fix_evidence === null ? null : $fix_evidence->payload,
             'upgrade_agreement' => app(SupportCodexUpgradeAgreementService::class)->context($fix_evidence),
             'review_reason' => $case ? $case->review_reason : null,

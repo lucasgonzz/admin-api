@@ -917,6 +917,41 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         Event::assertDispatched(SupportTicketUpdated::class);
     }
 
+    /**
+     * Misión ensayo-sin-mision-automatica (12/11/2026): el ticket de un cliente de ensayo prepara la misión igual
+     * (queda escrita en el ticket), pero el contexto le dice al monitor que no la arranque solo.
+     */
+    public function test_cliente_de_ensayo_prepara_la_mision_sin_inicio_automatico(): void
+    {
+        $ticket = $this->ticket();
+        $ticket->client->es_ensayo = true;
+        $ticket->client->save();
+        $case = $this->prepare_mission($ticket);
+        $this->getJson($this->base . '/tickets/' . $ticket->id, $this->headers)->assertOk()
+            ->assertJsonPath('ticket.client.es_ensayo', true)
+            ->assertJsonPath('ticket.mission_autostart', false)
+            ->assertJsonPath('ticket.mission_autostart_reason', 'cliente_de_ensayo')
+            ->assertJsonPath('ticket.mission', 'Corregir la barra del listado que tapa la foto ampliada.')
+            ->assertJsonPath('ticket.mission_lifecycle.status', 'pending')
+            // El inicio manual (Lucas) sigue disponible: la capacidad no cambia.
+            ->assertJsonPath('ticket.capabilities.mission_started', true);
+        $this->assertSame('mission_pending', $case->fresh()->state);
+        $this->assertNull($case->fresh()->mission_thread_id);
+        $this->assertSame('open', $ticket->fresh()->status);
+    }
+
+    /** Un cliente normal conserva el inicio automático, como antes de la marca. */
+    public function test_cliente_normal_conserva_el_inicio_automatico_de_la_mision(): void
+    {
+        $ticket = $this->ticket();
+        $this->prepare_mission($ticket);
+        $this->getJson($this->base . '/tickets/' . $ticket->id, $this->headers)->assertOk()
+            ->assertJsonPath('ticket.client.es_ensayo', false)
+            ->assertJsonPath('ticket.mission_autostart', true)
+            ->assertJsonPath('ticket.mission_autostart_reason', null)
+            ->assertJsonPath('ticket.mission_lifecycle.status', 'pending');
+    }
+
     public function test_registro_exige_diagnostico_vigente_y_no_reemplaza_otra_tarea(): void
     {
         $ticket = $this->ticket();
