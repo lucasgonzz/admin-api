@@ -10,21 +10,37 @@ use Illuminate\Support\Str;
 
 class SupportTourPlannerService
 {
+    /**
+     * Por qué el último planificar() no usó (o no logró) un recorrido del modelo: `sin_catalogo`,
+     * `modelo_sin_clave`, `modelo_sin_respuesta`, `respuesta_invalida`, `tarea_no_clara`, `clave_rechazada: x`.
+     * null si el modelo armó el recorrido. Lo leen el log y la respuesta de tour/prepare.
+     *
+     * @var string|null
+     */
+    public $motivo = null;
+
+    /** Si el recorrido devuelto es el de respaldo (el mínimo o la tarjeta de reintento) y no el del modelo. */
+    public $respaldo = false;
+
     public function planificar(SupportTicket $ticket, SupportMessage $entrante, SupportMessage $invitacion): ?array
     {
+        $this->motivo = null;
+        $this->respaldo = false;
         $clave = trim((string) config('services.deepseek.api_key'));
         $recalculo = $invitacion->id === $entrante->id;
+        // La pregunta escrita dentro de una guía en curso lleva su marca. Sin ella, el mensaje es un pedido del
+        // recorrido hecho con palabras propias («mostrámelo con el robotito»), que no tiene guía anterior.
+        $pregunta_en_guia = $recalculo
+            && ($entrante->erp_auto_reply[SupportMessage::MARCA_PREGUNTA_ROBOTITO] ?? null) === true;
         $pregunta = $recalculo ? ($entrante->erp_auto_reply['robotito_question'] ?? (string) $entrante->body) : null;
         $ajuste = $pregunta === null ? null : $this->ajuste_de_porcentaje($pregunta);
-        if ($clave === '' && ! $recalculo) {
-            return null;
-        }
 
         $historial = $this->historial($ticket, $invitacion);
         $turno_actual = $recalculo ? [['autor' => 'cliente', 'texto' => $pregunta]] : $historial;
         $id = $invitacion->erp_auto_reply['tour_import_history_id'] ?? $this->id_importacion($turno_actual);
         $catalogo = app(SupportTourService::class)->catalogo_dinamico($ticket, $entrante, $id);
         if (($catalogo['available'] ?? null) !== true || empty($catalogo['pasos']) || ! is_array($catalogo['pasos'])) {
+            $this->motivo = 'sin_catalogo';
             return null;
         }
 
@@ -38,19 +54,35 @@ class SupportTourPlannerService
             }
         }
         if ($pasos === []) {
+            $this->motivo = 'sin_catalogo';
             return null;
         }
 
         if ($ajuste !== null && ($pasos['vista.abm']['requiere_destino'] ?? null) === false) {
             return $this->guia_de_porcentaje($ajuste, $pasos);
         }
-        $reintento = $recalculo ? $this->guia_de_indicacion(
-            $pasos,
-            'Reintentar el recorrido',
-            'No pude preparar la guía en este momento. Volvé a escribir tu pregunta en «Preguntale a Robotito» para reintentar.'
-        ) : null;
+
+        // Si el modelo no arma el recorrido, la persona igual recibe uno: dentro de una guía, la tarjeta para
+        // reintentar; si lo pidió o lo aceptó desde el chat, el recorrido mínimo (la pantalla más cercana que el
+        // catálogo sabe abrir y una tarjeta con el camino). Ver recorrido_minimo().
+        $explicacion = $recalculo ? '' : SupportTourService::quitar_invitacion((string) $invitacion->body);
+        if ($pregunta_en_guia) {
+            $respaldo = $this->guia_de_indicacion(
+                $pasos,
+                'Reintentar el recorrido',
+                'No pude preparar la guía en este momento. Volvé a escribir tu pregunta en «Preguntale a Robotito» para reintentar.'
+            );
+        } else {
+            $de_soporte = [];
+            foreach (array_reverse($historial) as $mensaje) {
+                if ($mensaje['autor'] === 'soporte') {
+                    $de_soporte[] = $mensaje['texto'];
+                }
+            }
+            $respaldo = $this->recorrido_minimo($pasos, array_merge([$explicacion], $de_soporte), (string) $pregunta);
+        }
         if ($clave === '') {
-            return $reintento;
+            return $this->con_respaldo($respaldo, 'modelo_sin_clave');
         }
 
         $destinos = $catalogo['destinos']['listado.revertir_importacion'] ?? [];
@@ -82,7 +114,7 @@ class SupportTourPlannerService
                     'role' => 'user',
                     'content' => json_encode([
                         'historial' => $historial,
-                        'respuesta_que_invito' => $recalculo ? null : mb_substr(SupportTourService::quitar_invitacion((string) $invitacion->body), 0, 1500),
+                        'respuesta_que_invito' => $recalculo ? null : mb_substr($explicacion, 0, 1500),
                         'pregunta_durante_recorrido' => $pregunta,
                         'contexto_del_recorrido' => $recalculo ? mb_substr((string) $entrante->body, 0, 1700) : null,
                         'pasos_disponibles' => array_values($pasos),
@@ -92,10 +124,10 @@ class SupportTourPlannerService
             ], 16);
         } catch (\Throwable $e) {
             Log::warning('No se pudo planificar el tour de soporte con DeepSeek.', ['ticket_id' => $ticket->id]);
-            return $reintento;
+            return $this->con_respaldo($respaldo, 'modelo_sin_respuesta');
         }
         if (! $respuesta->successful()) {
-            return $reintento;
+            return $this->con_respaldo($respaldo, 'modelo_sin_respuesta: HTTP ' . $respuesta->status());
         }
 
         $texto = '';
@@ -107,27 +139,131 @@ class SupportTourPlannerService
         $texto = preg_replace('/^\s*```(?:json)?\s*|\s*```\s*$/i', '', $texto);
         $datos = json_decode($texto, true);
         if ($recalculo && preg_match('/^\{\s*\}$/D', trim($texto))) {
-            return $this->guia_de_indicacion(
-                $pasos,
-                'Aclarar el próximo paso',
-                'Contame qué querés hacer y en qué pantalla. Podés agregar ese detalle en «Preguntale a Robotito».'
-            );
+            if ($pregunta_en_guia) {
+                return $this->guia_de_indicacion(
+                    $pasos,
+                    'Aclarar el próximo paso',
+                    'Contame qué querés hacer y en qué pantalla. Podés agregar ese detalle en «Preguntale a Robotito».'
+                );
+            }
+            return $this->con_respaldo($respaldo, 'tarea_no_clara');
         }
 
         $guion = SupportTourService::guion($datos);
         if ($guion === null || $guion['tema'] !== SupportTourService::TEMA_DINAMICO) {
-            return $reintento;
+            return $this->con_respaldo($respaldo, 'respuesta_invalida');
         }
         foreach ($guion['pasos'] as $paso) {
             $habilitado = $pasos[$paso['clave']] ?? null;
             if ($habilitado === null || $habilitado['requiere_destino'] !== isset($paso['destino'])
                 || ! $this->coincide_con_operacion($paso, $turno_actual)
                 || (isset($paso['destino']) && ($paso['clave'] !== 'listado.revertir_importacion' || $paso['destino'] !== $importacion_confirmada))) {
-                return null;
+                // Un control que el catálogo no habilita nunca se entrega. Dentro de una guía no hay respaldo
+                // (como antes); desde el chat queda el recorrido mínimo, que no usa nada de lo que propuso el modelo.
+                return $this->con_respaldo($pregunta_en_guia ? null : $respaldo, 'clave_rechazada: ' . $paso['clave']);
             }
         }
 
         return $guion;
+    }
+
+    private function con_respaldo(?array $respaldo, string $motivo): ?array
+    {
+        $this->motivo = $motivo;
+        $this->respaldo = $respaldo !== null;
+
+        return $respaldo;
+    }
+
+    /**
+     * El recorrido que se entrega cuando el modelo no arma uno (12/11/2026): la pantalla más cercana que el
+     * catálogo de ese sistema sabe abrir, y una tarjeta con el camino que Soporte ya le escribió a la persona.
+     * No inventa nada: las claves salen del catálogo y el texto, de la explicación enviada.
+     *
+     * @param array<string, array> $pasos   Catálogo del sistema, por clave.
+     * @param string[]             $textos  La explicación que invitó y, después, lo último que escribió Soporte.
+     * @param string               $pedido  Lo que pidió la persona, si el recorrido nace de su propio mensaje.
+     */
+    private function recorrido_minimo(array $pasos, array $textos, string $pedido): ?array
+    {
+        $normalizar = function (string $texto): string {
+            return Str::ascii(mb_strtolower($texto));
+        };
+        $camino = null;
+        foreach ($textos as $texto) {
+            foreach (preg_split('/\R/u', $texto) as $linea) {
+                if (mb_strpos($linea, '→') !== false) {
+                    $camino = trim(preg_replace('/\s+/u', ' ', $linea));
+                    break 2;
+                }
+            }
+        }
+        $todo = $normalizar(implode("\n", $textos) . "\n" . $pedido);
+        $hay_indicacion = ($pasos['indicacion']['requiere_destino'] ?? null) === false;
+        $tarjeta = $camino !== null ? 'Seguí este camino: ' . $camino
+            : 'Seguí en esta pantalla los pasos que te escribimos en Soporte.';
+        $tarjeta = mb_strlen($tarjeta) > 240 ? mb_substr($tarjeta, 0, 239) . '…' : $tarjeta;
+
+        // 1. Una solapa del ABM nombrada en la explicación (sistemas desde 4.3.53).
+        $solapa = null;
+        if (preg_match('/\babm\b/', $todo)) {
+            foreach ($pasos as $clave => $paso) {
+                if (strpos($clave, 'abm.solapa.') !== 0
+                    || ! preg_match('/^Abrir ABM → (.+?) y señalar la solapa «(.+?)»/u', $paso['descripcion'], $partes)) {
+                    continue;
+                }
+                $nombre = $normalizar($partes[2]);
+                if (mb_strlen($nombre) >= 5 && strpos($todo, $nombre) !== false
+                    && ($solapa === null || mb_strlen($nombre) > mb_strlen($solapa['nombre']))) {
+                    $solapa = ['clave' => $clave, 'grupo' => $partes[1], 'texto' => $partes[2], 'nombre' => $nombre];
+                }
+            }
+        }
+        if ($solapa !== null) {
+            $recorrido = [];
+            $grupo = 'abm.grupo.' . explode('.', $solapa['clave'])[2];
+            if (isset($pasos[$grupo])) {
+                $recorrido[] = ['clave' => $grupo, 'texto' => 'En el ABM, tocá «' . $solapa['grupo'] . '».'];
+            }
+            $recorrido[] = ['clave' => $solapa['clave'], 'texto' => 'Ahora tocá «' . $solapa['texto'] . '».'];
+            if ($hay_indicacion) {
+                $recorrido[] = ['clave' => 'indicacion', 'texto' => $tarjeta];
+            }
+
+            return $this->guion_minimo('Ir a ' . $solapa['texto'], $recorrido);
+        }
+
+        // 2. La primera pantalla del camino que el catálogo sabe abrir.
+        if ($camino !== null) {
+            $pantallas = [
+                'vista.abm' => 'abm', 'vista.listado' => 'listado', 'vista.vender' => 'vender', 'vista.ventas' => 'ventas',
+                'vista.compras' => 'compras', 'vista.tesoreria' => 'tesoreria', 'vista.gastos' => 'gastos',
+                'vista.cheques' => 'cheques', 'vista.agenda' => 'agenda', 'vista.comprobantes' => 'comprobantes',
+                'vista.alertas' => 'alertas', 'vista.clientes' => 'clientes', 'vista.proveedores' => 'proveedores',
+                'vista.presupuestos' => 'presupuestos', 'vista.reportes' => 'reportes',
+            ];
+            $elegida = null;
+            $camino_normalizado = $normalizar($camino);
+            foreach ($pantallas as $vista => $nombre) {
+                if (isset($pasos[$vista]) && preg_match('/\b' . $nombre . '\b/', $camino_normalizado, $hallado, PREG_OFFSET_CAPTURE)
+                    && ($elegida === null || $hallado[0][1] < $elegida[1])) {
+                    $elegida = [$vista, $hallado[0][1]];
+                }
+            }
+            if ($elegida !== null) {
+                return $this->guion_minimo('Seguí el camino en tu pantalla', [['clave' => $elegida[0], 'texto' => $tarjeta]]);
+            }
+        }
+
+        // 3. Sin pantalla que abrir: la tarjeta con el camino, sobre lo que la persona tenga abierto.
+        return $hay_indicacion && $camino !== null
+            ? $this->guion_minimo('Seguí el camino en tu pantalla', [['clave' => 'indicacion', 'texto' => $tarjeta]])
+            : null;
+    }
+
+    private function guion_minimo(string $titulo, array $pasos): array
+    {
+        return ['tema' => SupportTourService::TEMA_DINAMICO, 'titulo' => mb_substr($titulo, 0, 120), 'pasos' => $pasos];
     }
 
     private function guia_de_indicacion(array $pasos, string $titulo, string $texto): ?array

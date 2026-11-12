@@ -1398,6 +1398,254 @@ class ToursDeSoporteTest extends TestCase
         $this->getJson($url)->assertOk()->assertExactJson(['available' => false, 'model' => []]);
     }
 
+    /*
+    |------------------------------------------------------------------------------------------------
+    | Ticket 107 (12/11/2026): el dueño pidió el recorrido, aceptó la invitación y el admin contestó
+    | tour_consent_required las dos veces. Canal sistema, empresa 4.3.53 con su catálogo real.
+    |------------------------------------------------------------------------------------------------
+    */
+
+    private const CAMINO_107 = 'Para verlo, entrá a ABM → Precios → Impuestos sobre ventas → Ingresos Brutos → casilla "Activo".';
+    private const PEDIDO_107 = 'mostrámelo con el robotito ese. quiero ver dónde se apaga lo de ingresos brutos';
+    private const GUION_107 = [
+        'tema' => 'guia_dinamica', 'titulo' => 'Dónde se apaga Ingresos Brutos',
+        'pasos' => [
+            ['clave' => 'abm.grupo.precios', 'texto' => 'Dentro de ABM, tocá Precios.'],
+            ['clave' => 'abm.solapa.precios.impuestos_sobre_ventas', 'texto' => 'Ahora tocá Impuestos sobre ventas.'],
+            ['clave' => 'indicacion', 'texto' => 'Abrí "Ingresos Brutos" tocando su fila.'],
+            ['clave' => 'indicacion', 'texto' => 'La casilla "Activo" lo prende o lo apaga. Destildala y guardá.'],
+        ],
+    ];
+
+    private function catalogo_4_3_53(): array
+    {
+        return json_decode(file_get_contents(base_path('tests/Fixtures/catalogo_tours_empresa_4_3_53.json')), true);
+    }
+
+    /** Arma el ticket del sistema con un primer mensaje del dueño y devuelve [ticket, mensaje, cuerpo, firma]. */
+    private function ticket_erp_107(string $primer_mensaje): array
+    {
+        $body = $this->mensaje_erp($this->cliente());
+        SupportCodexSettings::set_enabled(true);
+        $firma = ['X-Admin-Api-Key' => 'clave-inbound'];
+        $body['body'] = $primer_mensaje;
+        $mensaje = SupportMessage::findOrFail($this->postJson(self::INBOUND, $body, $firma)->assertCreated()->json('model.id'));
+
+        return [$mensaje->ticket, $mensaje, $body, $firma];
+    }
+
+    private function invitacion_de_martin_107(SupportTicket $ticket): SupportMessage
+    {
+        return $this->invitacion($ticket, self::GUION_DINAMICO, [
+            'body' => "Raúl, lo revisé y \"Ingresos Brutos\" ya está desactivado en tu sistema.\n\n" . self::CAMINO_107
+                . " Esa casilla tiene que quedar destildada.\n\nEste video muestra esa configuración: https://recursos.comerciocity.com/?v=T11.31\n\n"
+                . "Todavía no pude activar Robotito con tu pedido. Te dejo la invitación para que te señale esa casilla.\n\n"
+                . SupportTourService::INVITACION,
+            'erp_auto_reply' => ['tour_requested' => true],
+        ]);
+    }
+
+    private function puente_107(array $catalogo, $modelo, ?array &$recibido): void
+    {
+        Http::fake([
+            self::PUENTE . '/catalogo?user_id=17' => Http::response($catalogo),
+            'api.deepseek.com/*' => $modelo,
+            self::PUENTE => function ($request) use (&$recibido) {
+                $recibido = $request->data();
+                return Http::response(['ok' => true, 'uuid' => $request['uuid']]);
+            },
+        ]);
+    }
+
+    public function test_107_el_pedido_del_recorrido_con_palabras_propias_es_el_consentimiento_y_el_catalogo_de_4_3_53_pasa(): void
+    {
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
+        [$ticket, $pedido] = $this->ticket_erp_107(self::PEDIDO_107);
+        $headers = $this->reserva($ticket, $pedido);
+        $recibido = null;
+        $this->puente_107($this->catalogo_4_3_53(), Http::response($this->respuesta_deepseek(self::GUION_107)), $recibido);
+
+        $this->getJson(self::CLAUDE . $ticket->id, $headers)->assertOk()
+            ->assertJsonPath('ticket.accepted_tour_request', true)->assertJsonPath('ticket.last_tour_failure', null);
+        $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare', ['expected_message_id' => $pedido->id], $headers)
+            ->assertOk()->assertExactJson(['ok' => true, 'uuid' => $pedido->uuid]);
+
+        $this->assertSame(self::GUION_107['pasos'], $recibido['pasos']);
+        $this->assertSame($pedido->uuid, $recibido['uuid']);
+        Http::assertSent(function ($request) {
+            if (strpos($request->url(), 'https://api.deepseek.com/') !== 0) {
+                return false;
+            }
+            $contenido = json_decode($request['messages'][0]['content'], true);
+            // El modelo recibe el pedido del dueño como la tarea y las claves de una 4.3.53: las 112 del catálogo
+            // menos revertir una importación, que solo viaja con un destino verificado.
+            return $contenido['pregunta_durante_recorrido'] === self::PEDIDO_107
+                && count($contenido['pasos_disponibles']) === 111
+                && in_array('abm.solapa.precios.impuestos_sobre_ventas', array_column($contenido['pasos_disponibles'], 'clave'), true);
+        });
+    }
+
+    public function test_107_si_ya_te_dije_que_si_acepta_la_invitacion_que_dejo_martin(): void
+    {
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
+        [$ticket, , $body, $firma] = $this->ticket_erp_107('¿Dónde apago ingresos brutos?');
+        $this->invitacion_de_martin_107($ticket);
+        $si = SupportMessage::findOrFail($this->postJson(self::INBOUND, array_replace($body, [
+            'body' => 'sí, ya te dije que sí', 'message_uuid' => (string) Str::uuid(),
+        ]), $firma)->assertCreated()->json('model.id'));
+        $headers = $this->reserva($ticket, $si);
+        $recibido = null;
+        $this->puente_107($this->catalogo_4_3_53(), Http::response($this->respuesta_deepseek(self::GUION_107)), $recibido);
+
+        $this->getJson(self::CLAUDE . $ticket->id, $headers)->assertOk()->assertJsonPath('ticket.accepted_tour_request', true);
+        $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare', ['expected_message_id' => $si->id], $headers)
+            ->assertOk()->assertExactJson(['ok' => true, 'uuid' => $si->uuid]);
+        $this->assertSame(self::GUION_107['pasos'], $recibido['pasos']);
+    }
+
+    /** @dataProvider respuestas_a_la_invitacion_107 */
+    public function test_107_que_respuestas_valen_como_si_a_la_invitacion(string $respuesta, bool $acepta): void
+    {
+        [$ticket, , $body, $firma] = $this->ticket_erp_107('¿Dónde apago ingresos brutos?');
+        $this->invitacion_de_martin_107($ticket);
+        $entrante = SupportMessage::findOrFail($this->postJson(self::INBOUND, array_replace($body, [
+            'body' => $respuesta, 'message_uuid' => (string) Str::uuid(),
+        ]), $firma)->assertCreated()->json('model.id'));
+
+        $this->assertSame($acepta, app(SupportTourService::class)->solicitud_aceptada($ticket->fresh(), $entrante) !== null);
+    }
+
+    public function respuestas_a_la_invitacion_107(): array
+    {
+        return [
+            'insiste' => ['sí, ya te dije que sí', true],
+            'sí repetido' => ['Sí sí, dale nomás', true],
+            'pide verlo con Robotito' => ['mostrámelo con el robotito ese', true],
+            'lo deja para después' => ['sí, pero después', false],
+            'condición, no un sí' => ['si me decís cuánto sale', false],
+            'lo rechaza' => ['no, no quiero el tour', false],
+            'agradece' => ['gracias, ya lo encontré', false],
+            'pregunta otra cosa' => ['sí, ¿y cómo cargo un artículo?', false],
+        ];
+    }
+
+    /** @dataProvider mensajes_que_piden_o_no_el_recorrido */
+    public function test_107_que_mensajes_son_un_pedido_del_recorrido(string $mensaje, bool $pide): void
+    {
+        $this->assertSame($pide, SupportTourService::pide_recorrido(Str::ascii(mb_strtolower($mensaje))));
+    }
+
+    public function mensajes_que_piden_o_no_el_recorrido(): array
+    {
+        return [
+            [self::PEDIDO_107, true],
+            ['Quiero el tour para ver cómo se cargan los precios', true],
+            ['me lo mostrás con Robotito?', true],
+            // Empieza con un sí: contesta una invitación y lo resuelven las reglas de la invitación.
+            ['dale, preparame un recorrido guiado', false],
+            ['preparame un recorrido guiado para cargar precios', true],
+            ['no quiero el tour, explicame por acá', false],
+            ['¿Qué es el robotito ese?', false],
+            ['quiero saber para qué sirve el tour', false],
+            ['¿Cómo apago ingresos brutos?', false],
+            ['El recorrido del repartidor quedó mal cargado', false],
+        ];
+    }
+
+    /** @dataProvider fallas_del_modelo_107 */
+    public function test_107_si_el_modelo_no_arma_el_recorrido_se_entrega_el_minimo_con_la_solapa_y_el_camino($modelo): void
+    {
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
+        [$ticket, , $body, $firma] = $this->ticket_erp_107('¿Dónde apago ingresos brutos?');
+        $this->invitacion_de_martin_107($ticket);
+        $si = SupportMessage::findOrFail($this->postJson(self::INBOUND, array_replace($body, [
+            'body' => 'Sí', 'message_uuid' => (string) Str::uuid(),
+        ]), $firma)->assertCreated()->json('model.id'));
+        $headers = $this->reserva($ticket, $si);
+        $recibido = null;
+        $this->puente_107($this->catalogo_4_3_53(), $modelo($this), $recibido);
+
+        $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare', ['expected_message_id' => $si->id], $headers)
+            ->assertOk()->assertExactJson(['ok' => true, 'uuid' => $si->uuid]);
+        $this->assertSame('Ir a Impuestos sobre ventas', $recibido['titulo']);
+        $this->assertSame([
+            ['clave' => 'abm.grupo.precios', 'texto' => 'En el ABM, tocá «Precios».'],
+            ['clave' => 'abm.solapa.precios.impuestos_sobre_ventas', 'texto' => 'Ahora tocá «Impuestos sobre ventas».'],
+            ['clave' => 'indicacion', 'texto' => 'Seguí este camino: ' . self::CAMINO_107 . ' Esa casilla tiene que quedar destildada.'],
+        ], $recibido['pasos']);
+    }
+
+    public function fallas_del_modelo_107(): array
+    {
+        return [
+            'el modelo no responde' => [function () { return Http::response([], 503); }],
+            'devuelve algo que no es un recorrido' => [function (self $test) { return Http::response($test->respuesta_deepseek(['hola' => 'mundo'])); }],
+            'elige una clave que no existe' => [function (self $test) {
+                return Http::response($test->respuesta_deepseek(['tema' => 'guia_dinamica', 'titulo' => 'x', 'pasos' => [
+                    ['clave' => 'abm.solapa.precios.ingresos_brutos', 'texto' => 'Tocá Ingresos Brutos.'],
+                ]]));
+            }],
+            'no entiende la tarea' => [function (self $test) { return Http::response($test->respuesta_deepseek([])); }],
+        ];
+    }
+
+    public function test_107_en_un_sistema_4_3_52_el_minimo_abre_el_abm_con_el_camino(): void
+    {
+        config(['services.deepseek.api_key' => '']);
+        [$ticket, , $body, $firma] = $this->ticket_erp_107('¿Dónde apago ingresos brutos?');
+        $this->invitacion_de_martin_107($ticket);
+        $si = SupportMessage::findOrFail($this->postJson(self::INBOUND, array_replace($body, [
+            'body' => 'Sí', 'message_uuid' => (string) Str::uuid(),
+        ]), $firma)->assertCreated()->json('model.id'));
+        $headers = $this->reserva($ticket, $si);
+        $catalogo = self::CATALOGO_DINAMICO;
+        $catalogo['pasos'][] = ['clave' => 'vista.abm', 'descripcion' => 'Abrir el ABM y mostrar una indicación textual.'];
+        $recibido = null;
+        $this->puente_107($catalogo, Http::response([], 500), $recibido);
+
+        $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare', ['expected_message_id' => $si->id], $headers)->assertOk();
+        $this->assertSame([['clave' => 'vista.abm', 'texto' => 'Seguí este camino: ' . self::CAMINO_107 . ' Esa casilla tiene que quedar destildada.']], $recibido['pasos']);
+        Http::assertNotSent(function ($request) { return strpos($request->url(), 'https://api.deepseek.com/') === 0; });
+    }
+
+    public function test_107_un_tour_que_no_sale_deja_el_motivo_en_la_respuesta_en_el_log_y_en_el_contexto(): void
+    {
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
+        \Illuminate\Support\Facades\Log::spy();
+
+        // Un mensaje que no acepta ni pide el recorrido.
+        [$ticket, , $body, $firma] = $this->ticket_erp_107('¿Dónde apago ingresos brutos?');
+        $this->invitacion_de_martin_107($ticket);
+        $gracias = SupportMessage::findOrFail($this->postJson(self::INBOUND, array_replace($body, [
+            'body' => 'gracias, después lo miro', 'message_uuid' => (string) Str::uuid(),
+        ]), $firma)->assertCreated()->json('model.id'));
+        $headers = $this->reserva($ticket, $gracias);
+        $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare', ['expected_message_id' => $gracias->id], $headers)
+            ->assertStatus(409)->assertJsonPath('code', 'tour_consent_required')
+            ->assertJsonPath('reason', 'El último mensaje de la persona no se reconoció como un sí a la invitación ni como un pedido del recorrido.');
+        $this->getJson(self::CLAUDE . $ticket->id, $headers)->assertOk()
+            ->assertJsonPath('ticket.last_tour_failure.code', 'tour_consent_required')
+            ->assertJsonPath('ticket.last_tour_failure.expected_message_id', $gracias->id);
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('warning')->withArgs(function ($mensaje, $contexto) use ($ticket) {
+            return $mensaje === 'Robotito: tour/prepare no entregó el recorrido.'
+                && $contexto['ticket_id'] === (int) $ticket->id && $contexto['code'] === 'tour_consent_required';
+        })->once();
+
+    }
+
+    public function test_107_sin_catalogo_del_comercio_el_motivo_lo_dice(): void
+    {
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
+        [$ticket, $pedido] = $this->ticket_erp_107(self::PEDIDO_107);
+        $headers = $this->reserva($ticket, $pedido);
+        Http::fake([self::PUENTE . '/catalogo?user_id=17' => Http::response(['message' => 'Server Error'], 500)]);
+        $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare', ['expected_message_id' => $pedido->id], $headers)
+            ->assertStatus(422)->assertJsonPath('code', 'tour_plan_unavailable')
+            ->assertJsonPath('reason', 'El sistema del comercio no entregó su catálogo de pasos (sin conexión, versión anterior o persona sin identificar).');
+        $this->getJson(self::CLAUDE . $ticket->id, $headers)->assertOk()
+            ->assertJsonPath('ticket.last_tour_failure.code', 'tour_plan_unavailable');
+    }
+
     private function cliente(array $extra = []): Client
     {
         return Client::create($extra + [
