@@ -348,8 +348,9 @@ class SupportCodexService
             'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
             'robotito_available' => $robotito_disponible,
-            // Por qué no salió el último tour/prepare de este ticket ({code, reason, expected_message_id, at}) o null.
-            'last_tour_failure' => SupportDynamicTourService::ultimo_fallo((int) $ticket->id),
+            // Por qué no salió el tour/prepare del ÚLTIMO mensaje de la persona ({code, reason, expected_message_id, at}),
+            // o null: el fallo de un mensaje anterior ya no describe este turno.
+            'last_tour_failure' => SupportDynamicTourService::ultimo_fallo((int) $ticket->id, $last !== null && $last->sender_type === 'user' ? (int) $last->id : null),
             'accepted_tour' => $last && ! $ticket->requiere_verificacion_mensajes
                 ? app(SupportTourService::class)->guion_aceptado($ticket, $last) : null,
             'accepted_tour_request' => $last && ! $ticket->requiere_verificacion_mensajes

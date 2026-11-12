@@ -204,18 +204,32 @@ class SupportTourPlannerService
             : 'Seguí en esta pantalla los pasos que te escribimos en Soporte.';
         $tarjeta = mb_strlen($tarjeta) > 240 ? mb_substr($tarjeta, 0, 239) . '…' : $tarjeta;
 
-        // 1. Una solapa del ABM nombrada en la explicación (sistemas desde 4.3.53).
+        // 1. Una solapa del ABM nombrada por Soporte (sistemas desde 4.3.53). Se busca primero SOLO en el renglón del
+        //    camino, después en la explicación y recién al final en mensajes anteriores; por palabra completa
+        //    («marcas» no está en «desmarcas») y, dentro de un mismo texto, gana la que aparece primero.
         $solapa = null;
+        $fuentes = array_merge($camino !== null ? [$camino] : [], $textos);
         if (preg_match('/\babm\b/', $todo)) {
-            foreach ($pasos as $clave => $paso) {
-                if (strpos($clave, 'abm.solapa.') !== 0
-                    || ! preg_match('/^Abrir ABM → (.+?) y señalar la solapa «(.+?)»/u', $paso['descripcion'], $partes)) {
-                    continue;
+            foreach ($fuentes as $fuente) {
+                $fuente = $normalizar($fuente);
+                foreach ($pasos as $clave => $paso) {
+                    if (strpos($clave, 'abm.solapa.') !== 0
+                        || ! preg_match('/^Abrir ABM → (.+?) y señalar la solapa «(.+?)»/u', $paso['descripcion'], $partes)) {
+                        continue;
+                    }
+                    $nombre = $normalizar($partes[2]);
+                    if (mb_strlen($nombre) < 5
+                        || ! preg_match('/(?<![a-z0-9])' . preg_quote($nombre, '/') . '(?![a-z0-9])/', $fuente, $hallado, PREG_OFFSET_CAPTURE)) {
+                        continue;
+                    }
+                    $posicion = $hallado[0][1];
+                    if ($solapa === null || $posicion < $solapa['posicion']
+                        || ($posicion === $solapa['posicion'] && mb_strlen($nombre) > mb_strlen($solapa['nombre']))) {
+                        $solapa = ['clave' => $clave, 'grupo' => $partes[1], 'texto' => $partes[2], 'nombre' => $nombre, 'posicion' => $posicion];
+                    }
                 }
-                $nombre = $normalizar($partes[2]);
-                if (mb_strlen($nombre) >= 5 && strpos($todo, $nombre) !== false
-                    && ($solapa === null || mb_strlen($nombre) > mb_strlen($solapa['nombre']))) {
-                    $solapa = ['clave' => $clave, 'grupo' => $partes[1], 'texto' => $partes[2], 'nombre' => $nombre];
+                if ($solapa !== null) {
+                    break;
                 }
             }
         }
@@ -233,7 +247,8 @@ class SupportTourPlannerService
             return $this->guion_minimo('Ir a ' . $solapa['texto'], $recorrido);
         }
 
-        // 2. La primera pantalla del camino que el catálogo sabe abrir.
+        // 2. La pantalla donde EMPIEZA el camino: lo que está justo antes de la primera «→», sin lo que venga antes en
+        //    el renglón («En Reportes no está; andá a Ventas → …» abre Ventas, no Reportes).
         if ($camino !== null) {
             $pantallas = [
                 'vista.abm' => 'abm', 'vista.listado' => 'listado', 'vista.vender' => 'vender', 'vista.ventas' => 'ventas',
@@ -242,12 +257,16 @@ class SupportTourPlannerService
                 'vista.alertas' => 'alertas', 'vista.clientes' => 'clientes', 'vista.proveedores' => 'proveedores',
                 'vista.presupuestos' => 'presupuestos', 'vista.reportes' => 'reportes',
             ];
+            $inicio = preg_split('/[;:.]/u', (string) mb_substr($camino, 0, mb_strpos($camino, '→')));
+            $inicio = $normalizar((string) end($inicio));
             $elegida = null;
-            $camino_normalizado = $normalizar($camino);
             foreach ($pantallas as $vista => $nombre) {
-                if (isset($pasos[$vista]) && preg_match('/\b' . $nombre . '\b/', $camino_normalizado, $hallado, PREG_OFFSET_CAPTURE)
-                    && ($elegida === null || $hallado[0][1] < $elegida[1])) {
-                    $elegida = [$vista, $hallado[0][1]];
+                if (isset($pasos[$vista]) && preg_match_all('/\b' . $nombre . '\b/', $inicio, $hallados, PREG_OFFSET_CAPTURE)) {
+                    $posicion = end($hallados[0])[1];
+                    // La más cercana a la flecha.
+                    if ($elegida === null || $posicion > $elegida[1]) {
+                        $elegida = [$vista, $posicion];
+                    }
                 }
             }
             if ($elegida !== null) {

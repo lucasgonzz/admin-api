@@ -53,10 +53,10 @@ class SupportDynamicTourService
         return 'support_tour_last_failure:' . $ticket_id;
     }
 
-    public static function ultimo_fallo(int $ticket_id): ?array
+    public static function ultimo_fallo(int $ticket_id, ?int $mensaje_id): ?array
     {
         $fallo = Cache::get(self::clave_de_fallo($ticket_id));
-        return is_array($fallo) ? $fallo : null;
+        return is_array($fallo) && $mensaje_id !== null && (int) ($fallo['expected_message_id'] ?? 0) === $mensaje_id ? $fallo : null;
     }
 
     public static function registrar_fallo(int $ticket_id, int $expected_message_id, string $code, string $reason): void

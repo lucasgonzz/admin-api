@@ -1517,16 +1517,38 @@ class ToursDeSoporteTest extends TestCase
 
     public function respuestas_a_la_invitacion_107(): array
     {
-        return [
-            'insiste' => ['sí, ya te dije que sí', true],
-            'sí repetido' => ['Sí sí, dale nomás', true],
-            'pide verlo con Robotito' => ['mostrámelo con el robotito ese', true],
-            'lo deja para después' => ['sí, pero después', false],
-            'condición, no un sí' => ['si me decís cuánto sale', false],
-            'lo rechaza' => ['no, no quiero el tour', false],
-            'agradece' => ['gracias, ya lo encontré', false],
-            'pregunta otra cosa' => ['sí, ¿y cómo cargo un artículo?', false],
-        ];
+        $casos = [];
+        // Aceptan: un sí hecho solo de rellenos, o el pedido de verlo con Robotito.
+        foreach (['sí', 'sí dale', 'si, gracias', 'sí, ya te dije que sí', 'Sí sí, dale nomás', 'dale, hacelo por favor',
+            'mostrámelo con el robotito ese', self::PEDIDO_107] as $respuesta) {
+            $casos['acepta: ' . $respuesta] = [$respuesta, true];
+        }
+        // No aceptan (revisión del 12/11/2026): empiezan con un sí pero aplazan, contestan otra cosa o ponen una condición.
+        foreach (['sí pero después', 'sí, pero después', 'dale, pero primero cargame la lista', 'no, gracias', 'no, no quiero el tour',
+            'sí, mañana', 'sí, mañana a la tarde', 'sí, ahora estoy ocupado', 'sí, el lunes', 'sí, cuando puedas', 'sí, ya lo hice',
+            'sí, ya lo encontré, gracias', 'sí, ya está', 'sí, es mi costo', 'sí, ese es el precio', 'dale, hacé el tour mañana',
+            'dale lo vemos', 'si me decís cuánto sale', 'gracias, ya lo encontré', 'sí, ¿y cómo cargo un artículo?', 'ok',
+            'no quiero el robotito', 'el robotito no anda', '¿qué es el robotito?', 'el tour de bienvenida no lo vi',
+            'mandame el robotito mañana', 'quisiera cancelar el tour'] as $respuesta) {
+            $casos['no acepta: ' . $respuesta] = [$respuesta, false];
+        }
+
+        return $casos;
+    }
+
+    public function test_107_una_invitacion_de_mas_de_un_dia_ya_no_se_acepta_con_un_si(): void
+    {
+        [$ticket, , $body, $firma] = $this->ticket_erp_107('¿Dónde apago ingresos brutos?');
+        $invitacion = $this->invitacion_de_martin_107($ticket);
+        $si = SupportMessage::findOrFail($this->postJson(self::INBOUND, array_replace($body, [
+            'body' => 'Sí', 'message_uuid' => (string) Str::uuid(),
+        ]), $firma)->assertCreated()->json('model.id'));
+        $tours = app(SupportTourService::class);
+
+        $invitacion->forceFill(['created_at' => now()->subHours(23)])->save();
+        $this->assertNotNull($tours->solicitud_aceptada($ticket->fresh(), $si));
+        $invitacion->forceFill(['created_at' => now()->subHours(25)])->save();
+        $this->assertNull($tours->solicitud_aceptada($ticket->fresh(), $si));
     }
 
     /** @dataProvider mensajes_que_piden_o_no_el_recorrido */
@@ -1537,18 +1559,67 @@ class ToursDeSoporteTest extends TestCase
 
     public function mensajes_que_piden_o_no_el_recorrido(): array
     {
+        $casos = [];
+        foreach ([self::PEDIDO_107, 'mostrámelo con el robotito', 'preparame un recorrido guiado para cargar precios',
+            'quiero que robotito me muestre dónde se cargan los precios'] as $mensaje) {
+            $casos['pide: ' . $mensaje] = [$mensaje, true];
+        }
+        // Revisión del 12/11/2026: un verbo de pedido y la palabra «tour» no alcanzan. Ante la duda, no.
+        foreach (['quisiera cancelar el tour', 'quiero un tour por el local', 'quiero que el tour me lo hagas otro día',
+            'mandame el robotito mañana', 'quiero saber si el tour sirve', 'necesito un tour?',
+            'necesito que me muestres el tour de ventas que no anda', 'quiero ver el tour',
+            'Quiero el tour para ver cómo se cargan los precios', 'me lo mostrás con Robotito?',
+            'no quiero el robotito', 'el robotito no anda', '¿qué es el robotito?', 'el tour de bienvenida no lo vi',
+            'ya no necesito el robotito', 'quiero hablar con una persona, no con el robotito ni el tour',
+            'mostrame cómo hago una venta, sin el tour', 'no quiero el tour, explicame por acá',
+            'quiero saber para qué sirve el tour', 'mostrame el robotito cuando puedas', 'quiero el robotito el lunes',
+            '¿Cómo apago ingresos brutos?', 'El recorrido del repartidor quedó mal cargado',
+            // Empiezan con un sí: contestan una invitación y lo resuelven las reglas de la invitación.
+            'dale, preparame un recorrido guiado', 'sí, mostrame con el robotito'] as $mensaje) {
+            $casos['no pide: ' . $mensaje] = [$mensaje, false];
+        }
+
+        return $casos;
+    }
+
+    /** @dataProvider caminos_para_el_recorrido_minimo */
+    public function test_107_el_recorrido_minimo_sigue_el_camino_y_no_lo_primero_que_encuentra(array $textos, array $claves): void
+    {
+        $pasos = [];
+        foreach ($this->catalogo_4_3_53()['pasos'] as $paso) {
+            $pasos[$paso['clave']] = $paso + ['requiere_destino' => false];
+        }
+        $minimo = new \ReflectionMethod(\App\Services\SupportTourPlannerService::class, 'recorrido_minimo');
+        $minimo->setAccessible(true);
+        $guion = $minimo->invoke(new \App\Services\SupportTourPlannerService(), $pasos, $textos, '');
+
+        $this->assertSame($claves, array_column($guion['pasos'], 'clave'));
+        $this->assertNotNull(SupportTourService::guion($guion), 'El recorrido mínimo pasa la validación del guion.');
+    }
+
+    public function caminos_para_el_recorrido_minimo(): array
+    {
         return [
-            [self::PEDIDO_107, true],
-            ['Quiero el tour para ver cómo se cargan los precios', true],
-            ['me lo mostrás con Robotito?', true],
-            // Empieza con un sí: contesta una invitación y lo resuelven las reglas de la invitación.
-            ['dale, preparame un recorrido guiado', false],
-            ['preparame un recorrido guiado para cargar precios', true],
-            ['no quiero el tour, explicame por acá', false],
-            ['¿Qué es el robotito ese?', false],
-            ['quiero saber para qué sirve el tour', false],
-            ['¿Cómo apago ingresos brutos?', false],
-            ['El recorrido del repartidor quedó mal cargado', false],
+            'la solapa del camino le gana a otra de nombre más largo nombrada después' => [
+                ["Entrá a ABM → Articulos → Marcas.\nNo es en Tipos de Propiedad de Articulo, eso es otra cosa."],
+                ['abm.grupo.articulos', 'abm.solapa.articulos.marcas', 'indicacion'],
+            ],
+            'la solapa del camino le gana a la de un mensaje anterior' => [
+                ['Andá a ABM → Precios → Recargos.', 'Antes te hablé de ABM → Precios → Impuestos sobre ventas.'],
+                ['abm.grupo.precios', 'abm.solapa.precios.recargos', 'indicacion'],
+            ],
+            'una palabra que contiene el nombre de una solapa no es esa solapa' => [
+                ['En ABM → Ventas vas a ver la lista. Si desmarcas la casilla no se guarda.'],
+                ['vista.abm'],
+            ],
+            'la pantalla es la que está justo antes de la flecha, no una negada antes' => [
+                ['En Reportes no está; andá a Ventas → Todas → botón de filtro.'],
+                ['vista.ventas'],
+            ],
+            'sin pantalla reconocible queda la tarjeta con el camino' => [
+                ['Tocá tu nombre → Configuración → General.'],
+                ['indicacion'],
+            ],
         ];
     }
 
@@ -1630,6 +1701,13 @@ class ToursDeSoporteTest extends TestCase
             return $mensaje === 'Robotito: tour/prepare no entregó el recorrido.'
                 && $contexto['ticket_id'] === (int) $ticket->id && $contexto['code'] === 'tour_consent_required';
         })->once();
+
+        // Con un mensaje nuevo de la persona, el fallo del anterior ya no describe el turno.
+        $otro = SupportMessage::findOrFail($this->postJson(self::INBOUND, array_replace($body, [
+            'body' => '¿Y cómo cargo un artículo?', 'message_uuid' => (string) Str::uuid(),
+        ]), $firma)->assertCreated()->json('model.id'));
+        $this->assertNotNull(\App\Services\SupportDynamicTourService::ultimo_fallo((int) $ticket->id, (int) $gracias->id));
+        $this->assertNull(\App\Services\SupportDynamicTourService::ultimo_fallo((int) $ticket->id, (int) $otro->id));
 
     }
 
