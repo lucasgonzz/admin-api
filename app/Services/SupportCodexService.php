@@ -2387,12 +2387,32 @@ class SupportCodexService
             && preg_match('/^si([,.! ]+(muchas )?gracias)?[!. ]*$/', $body));
         $implicit_completed = ($task_question || $answer_to_resolution)
             && preg_match('/^(?:(?:listo|perfecto|si)[,.! ]+)?(?:ya )?pude(?: hacerlo)?(?:[,.! ]+(?:muchas )?gracias)?[!. ]*$/', $body);
+        // Ticket #109: «ya lo hice» confirma los pasos anteriores aunque la acción no se
+        // repita por nombre. No alcanza con buscar esas palabras: la orientación y la
+        // respuesta deben ser contiguas, del mismo tema y sin una tarea aún pendiente.
+        $implicit_completed = $implicit_completed || ($question !== null
+            && $this->completed_task_after_guidance($ticket, $message, $question, $body));
         $own_error = $question !== null && $question->id < $message->id
             && ($this->acknowledges_own_error_after_guidance($body, $question_body)
                 || $this->completed_after_identifying_error($ticket, $message, $question, $body, $question_body));
         $natural_thanks = $allow_thanks_only && $this->natural_thanks_can_close($ticket, $case, $message, $body);
         return ($own_error || ! $negative)
             && ($resolved || $short_answer || $task_completed || $implicit_completed || $own_error || $natural_thanks);
+    }
+
+    private function completed_task_after_guidance(SupportTicket $ticket, SupportMessage $message, SupportMessage $guidance, string $body): bool
+    {
+        if (! preg_match('/^(?:(?:excelente|exelente|perfecto|buenisimo|genial|listo|si|ok|oka)[,.!\s]+)*ya (?:lo|la|los|las) (?:hice|hicimos)(?:[,.!\s]+(?:muchas )?gracias)?[.!\s]*$/D', $body)
+            || ($message->reply_to_message_id !== null && (int) $message->reply_to_message_id !== (int) $guidance->id)) {
+            return false;
+        }
+        $previous = $this->previous_conversation_message($ticket, $message);
+        if ($previous === null || ! $previous->is($guidance)) {
+            return false;
+        }
+        $instructions = $this->guidance_for_closure((string) $guidance->body);
+        return $this->guidance_can_end_exchange($instructions)
+            && preg_match('/→|\b(?:entra|ingresa|abri|crea|carga|guarda|selecciona|marca|toca|apreta|busca|edita|cambia|activa|desactiva)\b/', $instructions);
     }
 
     /**
@@ -2421,8 +2441,22 @@ class SupportCodexService
         if ($last->sender_type !== 'admin' || ! $ticket->mensaje_confiable_para_codex($last)) {
             return false; // Hay otra consulta entrante que todavía nadie contestó.
         }
-        // El «?» de un enlace al centro de recursos no es una pregunta pendiente.
-        $guidance = preg_replace('~https?://\S+~', '', Str::ascii(mb_strtolower((string) $last->body)));
+        return $this->guidance_can_end_exchange($this->guidance_for_closure((string) $last->body));
+    }
+
+    private function guidance_for_closure(string $body): string
+    {
+        // El enlace no es una pregunta. La invitación opcional de Robotito tampoco
+        // convierte en pendiente una orientación ya entregada; las demás preguntas sí.
+        $guidance = preg_replace('~https?://\S+~', '', $body);
+        // Str::ascii también aplana los saltos de línea: se recorta antes para no
+        // perder el límite que distingue la invitación de una pregunta en los pasos.
+        $guidance = preg_replace('/(?:^|[\r\n])\h*quer[eé]s que te prepare un tour con robotito\?\h*$/iuD', '', $guidance);
+        return Str::ascii(mb_strtolower(trim($guidance)));
+    }
+
+    private function guidance_can_end_exchange(string $guidance): bool
+    {
         if (preg_match('/\b(manana|proximamente|pendiente|revisando|investigando|escalado)\b|\b(?:voy|vamos) a\b|\b(?:te|lo) (?:aviso|avisamos|reviso|revisamos|confirmo|confirmamos)\b|\b(?:pasame|mandame|enviame|necesito|necesitamos)\b|\b(?:proba|probar|prueba|probarlo) (?:luego|despues)\b|\bcuando (?:puedas|puedan|podamos)\b|\b(?:dame|danos) un (?:minuto|momento)\b|\b(?:estoy|estamos|sigo|seguimos) (?:viendo|revisando|investigando)\b|\bque reviso\b/', $guidance)) {
             return false;
         }

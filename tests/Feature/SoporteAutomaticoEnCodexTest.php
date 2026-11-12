@@ -2080,6 +2080,72 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         ];
     }
 
+    /** @dataProvider respuestas_al_banner_con_robotito */
+    public function test_cierre_del_banner_reconoce_el_resultado_previo_y_la_oferta_opcional(
+        array $answers,
+        bool $can_close,
+        bool $approval = false,
+        bool $quote_other_topic = false
+    ): void {
+        $ticket = $this->ticket();
+        $first = SupportMessage::where('support_ticket_id', $ticket->id)->firstOrFail();
+        $guidance = 'Buen día Patricio! Sí, podés poner un banner en la portada que diga "Compra mínima $300.000". '
+            . 'En tu sistema entrá a ABM → Tienda online → Banners → Nuevo y cargá el título, el texto y las imágenes para computadora y celular. '
+            . 'El armado del banner también está incluido en el servicio si preferís que lo hagamos nosotros.'
+            . "\n\nEl banner avisa, pero no impide enviar pedidos menores. Hoy no hay una opción de compra mínima que los bloquee automáticamente; para eso habría que agregar esa función."
+            . "\n\nAcá tenés el video de los banners: https://recursos.comerciocity.com/?v=T9.34"
+            . "\n\nQuerés que te prepare un tour con Robotito?";
+        $this->reply($ticket, $this->claim($ticket), ['body' => $guidance])->assertOk();
+        foreach ($answers as $index => $answer) {
+            $last = $this->inbound($ticket, $answer);
+            if ($quote_other_topic && $index === 0) {
+                $last->update(['reply_to_message_id' => $first->id]);
+            }
+        }
+        if ($approval) {
+            $ticket->update(['requiere_verificacion_mensajes' => true]);
+        }
+        $claim = $this->claim($ticket);
+        $payload = ['action' => 'cerrar', 'confirmation_message_id' => $last->id,
+            'body' => 'De nada Patricio!', 'supports_human_approval' => true];
+        if (! $can_close) {
+            $this->reply($ticket, $claim, $payload)->assertStatus(422);
+            $this->assertSame('open', $ticket->fresh()->status);
+            $this->assertSame([$guidance], $this->deliveries->bodies);
+            return;
+        }
+        $result = $this->reply($ticket, $claim, $payload)->assertOk();
+        if ($approval) {
+            $result->assertJsonPath('operation.status', 'awaiting_approval');
+            $this->assertSame('open', $ticket->fresh()->status);
+            $this->assertSame([$guidance], $this->deliveries->bodies);
+            $admin = Admin::create(['name' => 'Lucas', 'email' => uniqid('banner') . '@test.local', 'password' => bcrypt('prueba')]);
+            $this->actingAs($admin, 'sanctum')->postJson('/api/admin/support-message/' . $result->json('operation.message_id') . '/approve-ai-draft')
+                ->assertOk()->assertJsonPath('delivered', true);
+        }
+        $this->assertSame('closed', $ticket->fresh()->status);
+        $this->reply($ticket, $claim, $payload)->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->assertSame([$guidance, 'De nada Patricio!'], $this->deliveries->bodies);
+        $this->assertSame(['open', 'open'], $this->deliveries->ticket_states_during_delivery);
+    }
+
+    public function respuestas_al_banner_con_robotito(): array
+    {
+        return [
+            'ticket 109 exacto' => [['Exelente ya lo hice', 'Gracias'], true],
+            'resultado en un mensaje' => [['Excelente, ya lo hice!'], true],
+            'resultado plural' => [['Ya lo hicimos', 'Muchas gracias'], true],
+            'cortesía tras orientación con oferta opcional' => [['Gracias'], true],
+            'aprobación humana del mismo intercambio' => [['Exelente ya lo hice', 'Gracias'], true, true],
+            'resultado citado de otro tema' => [['Exelente ya lo hice', 'Gracias'], false, false, true],
+            'dificultad entre resultado y gracias' => [['Ya lo hice', 'Pero sigue fallando', 'Gracias'], false],
+            'duda entre resultado y gracias' => [['Ya lo hice', 'Cómo cambio las imágenes?', 'Gracias'], false],
+            'prueba futura entre resultado y gracias' => [['Ya lo hice', 'Lo pruebo mañana', 'Gracias'], false],
+            'resultado con negación' => [['Excelente pero no lo hice', 'Gracias'], false],
+            'solo aceptación del tour' => [['Sí', 'Gracias'], false],
+        ];
+    }
+
     /** @dataProvider agradecimientos_naturales */
     public function test_agradecimiento_natural_cierra_despues_de_despedir_sin_duplicar(string $thanks): void
     {
@@ -2136,6 +2202,11 @@ class SoporteAutomaticoEnCodexTest extends TestCase
             ['Probá guardar el artículo.', 'Gracias sos un genio. Lo pruebo el viernes'],
             ['Probá guardar el artículo.', 'Gracias sos un genio. Te aviso en cuanto pueda probarlo'],
             ['Probá guardar el artículo.', 'Gracias Martín sos un genio, tengo otra consulta'],
+            ["Mandame una captura de la pantalla.\n\nQuerés que te prepare un tour con Robotito?", 'Gracias'],
+            ["Hola!\n\nQuerés que te prepare un tour con Robotito?", 'Gracias'],
+            ['Podés probar mañana?', 'Ya lo hice'],
+            ['Entrá a Ventas. Qué error aparece?', 'Ya lo hice'],
+            ['Entrá a Ventas. Estamos investigando la falla.', 'Ya lo hice'],
         ];
     }
 
