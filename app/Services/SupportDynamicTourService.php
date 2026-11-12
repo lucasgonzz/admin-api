@@ -110,6 +110,8 @@ class SupportDynamicTourService
             Log::info('Robotito: recorrido planificado.', [
                 'ticket_id' => $ticket_id, 'origen' => $planificador->origen, 'pasos' => count($plan['pasos'] ?? []),
                 'con_ancla' => SupportTourPlannerService::pasos_con_ancla($plan), 'motivo' => $motivo,
+                'camino' => $planificador->camino['origen'], 'tramos_anclados' => $planificador->camino['anclados'],
+                'camino_ambiguo' => $planificador->camino['ambiguo'],
             ]);
         }
 

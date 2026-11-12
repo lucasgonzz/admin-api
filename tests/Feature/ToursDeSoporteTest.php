@@ -1895,6 +1895,196 @@ class ToursDeSoporteTest extends TestCase
         })->once();
     }
 
+    /*
+    |------------------------------------------------------------------------------------------------
+    | Revisión de la rama 3 (12/11/2026): el camino no puede tirar un plan del modelo que ya señala, ni una
+    | frase normal de una instrucción («si no aparece, buscalo por nombre») puede invalidarlo.
+    |------------------------------------------------------------------------------------------------
+    */
+
+    /** El catálogo de un sistema anterior: `sin` saca las claves que empiezan con esos prefijos. */
+    private function catalogo_sin(array $prefijos): array
+    {
+        $catalogo = $this->catalogo_4_3_53();
+        $catalogo['pasos'] = array_values(array_filter($catalogo['pasos'], function (array $paso) use ($prefijos) {
+            foreach ($prefijos as $prefijo) {
+                if (strpos($paso['clave'], $prefijo) === 0) {
+                    return false;
+                }
+            }
+            return true;
+        }));
+
+        return $catalogo;
+    }
+
+    /** Prepara el recorrido de un pedido hecho con palabras propias y devuelve [respuesta, lo que recibió Empresa]. */
+    private function preparar_pedido(string $pedido, array $plan_del_modelo, ?string $path, array $catalogo): array
+    {
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
+        [$ticket, $mensaje] = $this->ticket_erp_107($pedido);
+        $headers = $this->reserva($ticket, $mensaje);
+        $recibido = null;
+        $this->puente_107($catalogo, Http::response($this->respuesta_deepseek($plan_del_modelo)), $recibido);
+        $respuesta = $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare',
+            ['expected_message_id' => $mensaje->id] + ($path === null ? [] : ['path' => $path]), $headers);
+
+        return [$respuesta, $recibido];
+    }
+
+    /** @dataProvider planes_anclados_con_frases_normales */
+    public function test_un_plan_con_anclas_se_entrega_aunque_tenga_frases_condicionales(string $pedido, array $pasos): void
+    {
+        // Catálogo de una 4.3.48: sin ninguna clave del ABM.
+        [$respuesta, $recibido] = $this->preparar_pedido($pedido, ['tema' => 'guia_dinamica', 'titulo' => 'Recorrido', 'pasos' => $pasos],
+            null, $this->catalogo_sin(['abm.']));
+
+        $respuesta->assertOk();
+        $this->assertSame($pasos, $recibido['pasos']);
+    }
+
+    public function planes_anclados_con_frases_normales(): array
+    {
+        return [
+            'compra' => ['mostrame con el robotito cómo cargo una compra', [
+                ['clave' => 'vista.compras', 'texto' => 'Entrá a Compras.'],
+                ['clave' => 'compras.nueva', 'texto' => 'Tocá el botón para crear la compra. Si no está cargado el proveedor, crealo primero.'],
+            ]],
+            'venta' => ['mostrame con el robotito cómo hago una venta', [
+                ['clave' => 'vender.buscar_articulo', 'texto' => 'Abrí el buscador de artículos.'],
+                ['clave' => 'vender.campo_busqueda', 'texto' => 'Escribí el nombre. Si no aparece, buscalo por nombre más corto.'],
+                ['clave' => 'vender.total', 'texto' => 'Revisá el total antes de guardar.'],
+            ]],
+            'venta a un cliente' => ['mostrame con el robotito cómo le vendo a un cliente', [
+                ['clave' => 'vista.vender', 'texto' => 'Abrí Vender.'],
+                ['clave' => 'indicacion', 'texto' => 'Elegí el cliente; tal vez tengas que crearlo antes.'],
+                ['clave' => 'vender.total', 'texto' => 'Revisá el total antes de guardar.'],
+            ]],
+            'artículo con un campo que puede estar vacío' => ['mostrame con el robotito cómo cargo un artículo', [
+                ['clave' => 'vista.listado', 'texto' => 'Abrí el Listado.'],
+                ['clave' => 'listado.nuevo_articulo', 'texto' => 'Tocá Crear. El código de barras puede estar vacío.'],
+            ]],
+            'artículo simple' => ['mostrame con el robotito dónde creo un artículo', [
+                ['clave' => 'listado.nuevo_articulo', 'texto' => 'Tocá Crear para abrir la ficha del artículo.'],
+            ]],
+        ];
+    }
+
+    /** @dataProvider caminos_que_no_son_del_abm_nuevo */
+    public function test_un_camino_que_no_ancla_grupo_y_solapa_conserva_el_plan_anclado_del_modelo(string $path, array $sin, array $pasos): void
+    {
+        [$respuesta, $recibido] = $this->preparar_pedido('mostrame con el robotito cómo se hace', ['tema' => 'guia_dinamica', 'titulo' => 'Recorrido', 'pasos' => $pasos],
+            $path, $this->catalogo_sin($sin));
+
+        $respuesta->assertOk();
+        $this->assertSame($pasos, $recibido['pasos']);
+    }
+
+    public function caminos_que_no_son_del_abm_nuevo(): array
+    {
+        return [
+            'Proveedores → Compras → Crear' => ['Proveedores → Compras → Crear', [], [
+                ['clave' => 'vista.compras', 'texto' => 'Entrá a Compras.'],
+                ['clave' => 'compras.nueva', 'texto' => 'Tocá el botón para crear la compra.'],
+            ]],
+            'Vender → buscador → artículo' => ['Vender → buscador → artículo', [], [
+                ['clave' => 'vender.buscar_articulo', 'texto' => 'Abrí el buscador de artículos.'],
+                ['clave' => 'vender.campo_busqueda', 'texto' => 'Escribí el nombre del artículo.'],
+                ['clave' => 'vender.resultados_busqueda', 'texto' => 'Elegí el artículo de la lista.'],
+            ]],
+            'ABM en un sistema 4.3.52, que ya tenía abm.editar_recargo' => ['ABM → Precios → Recargos → Porcentaje', ['abm.grupo.', 'abm.solapa.'], [
+                ['clave' => 'abm.editar_recargo', 'texto' => 'Tocá el recargo que querés editar.'],
+                ['clave' => 'abm.porcentaje_recargo', 'texto' => 'Cambiá el porcentaje y guardá.'],
+            ]],
+        ];
+    }
+
+    public function test_el_camino_del_abm_se_fusiona_con_los_controles_que_señala_el_modelo(): void
+    {
+        $plan = ['tema' => 'guia_dinamica', 'titulo' => 'Cambiar un recargo', 'pasos' => [
+            ['clave' => 'vista.abm', 'texto' => 'Abrí el ABM.'],
+            ['clave' => 'abm.editar_recargo', 'texto' => 'Tocá el recargo que querés editar.'],
+            ['clave' => 'abm.porcentaje_recargo', 'texto' => 'Cambiá el porcentaje y guardá.'],
+        ]];
+        [$respuesta, $recibido] = $this->preparar_pedido('mostrame con el robotito cómo cambio un recargo', $plan,
+            'ABM → Precios → Recargos → el recargo → Porcentaje', $this->catalogo_4_3_53());
+
+        $respuesta->assertOk();
+        $this->assertSame([
+            ['clave' => 'abm.grupo.precios', 'texto' => 'En el ABM, tocá «Precios».'],
+            ['clave' => 'abm.solapa.precios.recargos', 'texto' => 'Ahora tocá «Recargos».'],
+            ['clave' => 'abm.editar_recargo', 'texto' => 'Tocá el recargo que querés editar.'],
+            ['clave' => 'abm.porcentaje_recargo', 'texto' => 'Cambiá el porcentaje y guardá.'],
+        ], $recibido['pasos']);
+    }
+
+    /** @dataProvider tramos_del_camino */
+    public function test_que_tramos_del_camino_se_anclan(string $camino, array $claves, bool $ambiguo, string $resto = ''): void
+    {
+        $pasos = [];
+        foreach ($this->catalogo_4_3_53()['pasos'] as $paso) {
+            $pasos[$paso['clave']] = $paso + ['requiere_destino' => false];
+        }
+        $planificador = new \App\Services\SupportTourPlannerService();
+        $leer = new \ReflectionMethod($planificador, 'camino_de');
+        $leer->setAccessible(true);
+        $anclar = new \ReflectionMethod($planificador, 'pasos_del_camino');
+        $anclar->setAccessible(true);
+        $resultado = $anclar->invoke($planificador, $pasos, $leer->invoke($planificador, [$camino]));
+
+        $this->assertSame($claves, array_column($resultado['anclados'], 'clave'));
+        $this->assertSame($ambiguo, $resultado['ambiguo']);
+        $this->assertSame($resto, $resultado['resto']);
+    }
+
+    public function tramos_del_camino(): array
+    {
+        $precios_recargos = ['abm.grupo.precios', 'abm.solapa.precios.recargos'];
+
+        return [
+            'el del ticket 110' => [self::PATH_110, ['abm.grupo.precios', 'abm.solapa.precios.impuestos_sobre_ventas'], false, 'Ingresos Brutos → casilla "Activo"'],
+            'sin espacios y con el signo mayor' => ['ABM>Precios>Recargos', $precios_recargos, false],
+            'con guion y mayor' => ['Entrá a ABM -> Precios -> Recargos', $precios_recargos, false],
+            'un tramo desconocido en el medio se saltea' => ['ABM → Configuración → Precios → Recargos', $precios_recargos, false],
+            'la solapa está en un solo grupo y no es el nombrado: manda el suyo' => ['ABM → Ventas → Recargos', $precios_recargos, false],
+            'sin grupo, la solapa de un solo grupo trae el suyo' => ['ABM → Recargos → el de tarjeta', $precios_recargos, false, 'el de tarjeta'],
+            'la solapa está en varios grupos y el nombrado no la tiene: no se adivina' => ['ABM → Ventas → Métodos de pago', [], true],
+            'la solapa está en varios grupos y no se nombró ninguno' => ['ABM → Métodos de pago', [], true],
+            'con su grupo no hay ambigüedad' => ['ABM → Cuenta corriente → Métodos de pago', ['abm.grupo.cuenta_corriente', 'abm.solapa.cuenta_corriente.metodos_de_pago'], false],
+            'solo el grupo' => ['ABM → Precios → Ingresos Brutos', ['abm.grupo.precios'], false, 'Ingresos Brutos'],
+            'otra pantalla: decide el modelo' => ['Proveedores → Compras → Crear', [], false],
+            'la pantalla negada antes no cuenta' => ['En el ABM no está; andá a Ventas → Todas', [], false],
+        ];
+    }
+
+    public function test_un_signo_mayor_suelto_no_es_un_camino(): void
+    {
+        $planificador = new \App\Services\SupportTourPlannerService();
+        $leer = new \ReflectionMethod($planificador, 'camino_de');
+        $leer->setAccessible(true);
+
+        $this->assertNull($leer->invoke($planificador, ['Si el costo es >100 se aplica el recargo.', 'Poné <b>negrita</b> > y listo > fin']));
+        $this->assertSame('Entrá a ABM → Precios', $leer->invoke($planificador, ['Entrá a ABM > Precios']));
+    }
+
+    public function test_un_camino_ambiguo_no_elige_en_silencio_y_queda_en_el_log(): void
+    {
+        \Illuminate\Support\Facades\Log::spy();
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
+        [$ticket, $mensaje] = $this->ticket_erp_107('mostrame con el robotito dónde cargo los métodos de pago');
+        $headers = $this->reserva($ticket, $mensaje);
+        $recibido = null;
+        $this->puente_107($this->catalogo_4_3_53(), Http::response([], 503), $recibido);
+
+        $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare',
+            ['expected_message_id' => $mensaje->id, 'path' => 'ABM → Métodos de pago'], $headers)->assertOk();
+        $this->assertSame([['clave' => 'vista.abm', 'texto' => 'Seguí este camino: ABM → Métodos de pago']], $recibido['pasos']);
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('info')->withArgs(function ($mensaje, $contexto) {
+            return $mensaje === 'Robotito: recorrido planificado.' && $contexto['origen'] === 'respaldo'
+                && $contexto['camino'] === 'path' && $contexto['camino_ambiguo'] === true && $contexto['tramos_anclados'] === 0;
+        })->once();
+    }
+
     private function cliente(array $extra = []): Client
     {
         return Client::create($extra + [

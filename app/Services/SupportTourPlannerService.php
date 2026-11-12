@@ -30,6 +30,14 @@ class SupportTourPlannerService
      */
     public $origen = null;
 
+    /**
+     * Qué pasó con el camino escrito: de dónde vino (`path`, `explicacion` o null si no había), cuántos tramos se
+     * anclaron y si quedó sin usar por ambiguo (una solapa con ese nombre en más de un grupo). Va al log.
+     *
+     * @var array{origen: string|null, anclados: int, ambiguo: bool}
+     */
+    public $camino = ['origen' => null, 'anclados' => 0, 'ambiguo' => false];
+
     /** Los tramos del camino que el catálogo sabe señalar (ver pasos_del_camino) y el catálogo de este planificar(). */
     private $fijo = null;
     private $catalogo = [];
@@ -45,6 +53,8 @@ class SupportTourPlannerService
         $this->origen = null;
         $this->fijo = null;
         $this->catalogo = [];
+        $this->camino = ['origen' => null, 'anclados' => 0, 'ambiguo' => false];
+        $hay_camino = false;
         $clave = trim((string) config('services.deepseek.api_key'));
         $recalculo = $invitacion->id === $entrante->id;
         // La pregunta escrita dentro de una guía en curso lleva su marca. Sin ella, el mensaje es un pedido del
@@ -100,10 +110,21 @@ class SupportTourPlannerService
                     $de_soporte[] = $mensaje['texto'];
                 }
             }
-            $respaldo = $this->recorrido_minimo($pasos, array_merge([$explicacion], $de_soporte), (string) $pregunta);
-            // EL CAMINO MANDA: si hay un camino escrito, sus tramos con ancla quedan fijos antes de consultar al modelo.
-            $camino = $this->camino_de([(string) $camino_dado, $explicacion]);
-            $this->fijo = $camino === null ? null : $this->pasos_del_camino($pasos, $camino);
+            $respaldo = $this->recorrido_minimo($pasos, array_merge([(string) $camino_dado, $explicacion], $de_soporte), (string) $pregunta);
+            // EL CAMINO MANDA: si el camino escrito nombra el grupo y la solapa del ABM, esos pasos quedan fijos antes de
+            // consultar al modelo. Con menos que eso (otra pantalla, un sistema sin esas claves, una solapa ambigua)
+            // decide el modelo, y el camino queda de respaldo por si no señala nada.
+            $del_path = $this->camino_de([(string) $camino_dado]);
+            $camino = $del_path ?? $this->camino_de([$explicacion]);
+            if ($camino !== null) {
+                $hay_camino = true;
+                $del_camino = $this->pasos_del_camino($pasos, $camino);
+                $this->camino = [
+                    'origen' => $del_path !== null ? 'path' : 'explicacion',
+                    'anclados' => count($del_camino['anclados']), 'ambiguo' => $del_camino['ambiguo'],
+                ];
+                $this->fijo = count($del_camino['anclados']) >= 2 ? $del_camino : null;
+            }
         }
         if ($clave === '') {
             return $this->con_respaldo($respaldo, 'modelo_sin_clave');
@@ -202,7 +223,7 @@ class SupportTourPlannerService
         while (count($guion['pasos']) > 1 && strpos($guion['pasos'][count($guion['pasos']) - 1]['clave'], 'vista.') === 0) {
             array_pop($guion['pasos']);
         }
-        $defecto = $this->defecto_del_plan($guion, $pasos, [(string) $pregunta, $explicacion]);
+        $defecto = $this->defecto_del_plan($guion, $pasos, [(string) $pregunta, $explicacion], $hay_camino);
         if ($defecto !== null) {
             return $this->con_respaldo($respaldo, $defecto);
         }
@@ -234,10 +255,13 @@ class SupportTourPlannerService
         'vista.presupuestos' => 'presupuestos', 'vista.reportes' => 'reportes',
     ];
 
-    /** Un recorrido no manda a buscar: frases con las que un paso duda de dónde está lo que señala. */
-    private const DUDA = '/\bsi no (?:lo |la |los |las |te )?(?:encontras|ves|aparece|esta|figura|sale)\b|\brevisa (?:en )?(?:el|otro|los) grupos?\b'
-        . '|\bbusca (?:el grupo|la solapa|la seccion|la pantalla|el menu)\b|\bgrupo donde\b|\bsolapa donde\b|\bproba (?:en|con) (?:el|la|otro|otra)\b'
-        . '|\bpuede estar\b|\bdeberia estar\b|\bquizas?\b|\btal vez\b|\ba lo mejor\b|\bprobablemente\b/';
+    /**
+     * Un recorrido no manda a buscar DÓNDE está algo. Solo frases de ubicación incierta: «si no aparece, buscalo por
+     * nombre», «tal vez» o «puede estar vacío» son parte normal de una instrucción y no entran acá.
+     */
+    private const DUDA = '/\brevisa (?:en )?(?:el|otro|los|otros) grupos?\b'
+        . '|\bbusca (?:el grupo|la solapa|la seccion|la pantalla|el menu) (?:donde|que|en)\b|\b(?:grupo|solapa|seccion) donde\b'
+        . '|\bsi no (?:lo |la |los |las )?(?:encontras|ves|aparece|esta|figura) en (?:esta|esa|este|ese|la|el) (?:solapa|pantalla|seccion|grupo)\b/';
 
     private static function normalizar(string $texto): string
     {
@@ -260,7 +284,12 @@ class SupportTourPlannerService
     {
         foreach ($textos as $texto) {
             foreach (preg_split('/\R/u', (string) $texto) as $linea) {
-                $linea = preg_replace('/\s*(?:->|=>|\s>\s)\s*/u', ' → ', $linea);
+                // «ABM > Precios > Recargos», «ABM>Precios>Recargos» y «ABM -> Precios»: con un solo «>» suelto y sin
+                // espacios no se lo toma por camino (puede ser una comparación o una cita).
+                if (mb_strpos($linea, '→') === false && strpos($linea, '<') === false
+                    && (preg_match('/\s-?>\s|\S->\S/', $linea) || substr_count($linea, '>') >= 2)) {
+                    $linea = preg_replace('/\s*[-=]?>\s*/u', ' → ', $linea);
+                }
                 if (mb_strpos($linea, '→') !== false) {
                     return trim(preg_replace('/\s+/u', ' ', $linea));
                 }
@@ -292,114 +321,138 @@ class SupportTourPlannerService
      * sin modelo. El modelo había devuelto cuatro tarjetas de texto («abrí el ABM y buscá el grupo donde…») teniendo
      * las claves del grupo y de la solapa en el catálogo.
      *
-     * Devuelve los pasos con ancla o ruta, lo que queda del camino sin señalar (`resto`) y si el único paso es una
-     * pantalla (`vista`), o null si el camino no empieza en algo que este catálogo conozca.
+     * Solo arma el grupo y la solapa del ABM, que es lo que el catálogo publica con su nombre visible. Un camino que
+     * empieza en otra pantalla, o un ABM sin esas claves (sistemas anteriores a la 4.3.53), devuelve `anclados` vacío:
+     * ahí decide el modelo y el camino queda de respaldo (ver recorrido_minimo).
      *
-     * @return array{anclados: array, resto: string, vista: bool}|null
+     * - Un tramo que el catálogo no conoce se saltea y se sigue con el que viene («ABM → Configuración → Precios →
+     *   Recargos» ancla Precios y Recargos).
+     * - Si la solapa nombrada no es del grupo nombrado, se busca en los demás: si está en uno solo, manda ese grupo.
+     * - Si está en varios, no se adivina: `ambiguo`.
+     *
+     * @return array{anclados: array, resto: string, ambiguo: bool}
      */
-    private function pasos_del_camino(array $pasos, string $camino): ?array
+    private function pasos_del_camino(array $pasos, string $camino): array
     {
+        $nada = ['anclados' => [], 'resto' => '', 'ambiguo' => false];
         $tramos = array_values(array_filter(array_map('trim', explode('→', $camino)), 'strlen'));
         if (count($tramos) < 2) {
-            return null;
+            return $nada;
         }
-        // Del primer tramo vale solo lo que está pegado a la flecha («En Reportes no está; andá a Ventas → …»).
+        // Del primer tramo vale solo lo que está pegado a la flecha («En Reportes no está; andá al ABM → …»).
         $partes = preg_split('/[;:.]/u', $tramos[0]);
-        $inicio = trim((string) end($partes));
-        $tarjeta = 'Seguí este camino: ' . $camino;
-        $tarjeta = mb_strlen($tarjeta) > 240 ? mb_substr($tarjeta, 0, 239) . '…' : $tarjeta;
-
-        $pantalla = null;
-        foreach (self::PANTALLAS as $vista => $nombre) {
-            if (preg_match_all('/\b' . $nombre . '\b/', self::normalizar($inicio), $hallados, PREG_OFFSET_CAPTURE)) {
-                $posicion = end($hallados[0])[1];
-                if ($pantalla === null || $posicion > $pantalla[1]) {
-                    $pantalla = [$vista, $posicion];
-                }
-            }
-        }
-        if ($pantalla === null) {
-            return null;
-        }
-        if ($pantalla[0] !== 'vista.abm') {
-            return isset($pasos[$pantalla[0]])
-                ? ['anclados' => [['clave' => $pantalla[0], 'texto' => $tarjeta]], 'resto' => '', 'vista' => true] : null;
+        if (! self::nombra(trim((string) end($partes)), 'abm')) {
+            return $nada;
         }
 
         [$grupos, $solapas] = $this->nombres_del_abm($pasos);
         $limpio = function (string $tramo): string {
             return trim(preg_replace('/[^a-z0-9]+/', ' ', self::normalizar($tramo)));
         };
-        $anclados = [];
-        $i = 1;
-        // El grupo tiene que ser el tramo entero: «Impuestos sobre ventas» contiene «ventas» y no es el grupo Ventas.
-        $grupo = null;
-        foreach ($grupos as $clave => $texto) {
-            if (isset($tramos[$i]) && $limpio($tramos[$i]) === $limpio($texto)) {
-                $grupo = $clave;
-                $anclados[] = ['clave' => $clave, 'texto' => 'En el ABM, tocá «' . $texto . '».'];
-                $i++;
-                break;
-            }
-        }
-        if (isset($tramos[$i])) {
+        // Las solapas que nombra un tramo, quedándose con las de nombre idéntico al tramo si hay alguna.
+        $solapas_de = function (string $tramo, ?string $grupo) use ($solapas, $limpio): array {
             $prefijo = $grupo === null ? 'abm.solapa.' : 'abm.solapa.' . substr($grupo, strlen('abm.grupo.')) . '.';
-            $elegida = null;
+            $exactas = [];
+            $otras = [];
             foreach ($solapas as $clave => $solapa) {
-                if (strpos($clave, $prefijo) !== 0 || ! self::nombra($tramos[$i], $solapa['texto'])) {
+                if (strpos($clave, $prefijo) !== 0 || ! self::nombra($tramo, $solapa['texto'])) {
                     continue;
                 }
-                $exacta = $limpio($tramos[$i]) === $limpio($solapa['texto']);
-                if ($elegida === null || ($exacta && ! $elegida['exacta'])
-                    || ($exacta === $elegida['exacta'] && mb_strlen($solapa['texto']) > mb_strlen($elegida['texto']))) {
-                    $elegida = ['clave' => $clave, 'texto' => $solapa['texto'], 'grupo' => $solapa['grupo'], 'exacta' => $exacta];
+                if ($limpio($tramo) === $limpio($solapa['texto'])) {
+                    $exactas[$clave] = $solapa;
+                } else {
+                    $otras[$clave] = $solapa;
                 }
             }
-            if ($elegida !== null) {
-                $su_grupo = 'abm.grupo.' . explode('.', $elegida['clave'])[2];
-                if ($grupo === null && isset($pasos[$su_grupo])) {
-                    $anclados[] = ['clave' => $su_grupo, 'texto' => 'En el ABM, tocá «' . $elegida['grupo'] . '».'];
-                }
-                $anclados[] = ['clave' => $elegida['clave'], 'texto' => 'Ahora tocá «' . $elegida['texto'] . '».'];
-                $i++;
+            if ($exactas !== []) {
+                return $exactas;
             }
-        }
-        if ($anclados === []) {
-            // Un sistema anterior a las solapas (4.3.52) o un tramo que el catálogo no conoce: se abre el ABM.
-            return isset($pasos['vista.abm'])
-                ? ['anclados' => [['clave' => 'vista.abm', 'texto' => $tarjeta]], 'resto' => '', 'vista' => true] : null;
+            // Entre las que solo están contenidas en el tramo, la de nombre más largo («Sub Categorias» antes que «Categorias»).
+            $largo = 0;
+            foreach ($otras as $solapa) {
+                $largo = max($largo, mb_strlen($solapa['texto']));
+            }
+
+            return array_filter($otras, function (array $solapa) use ($largo) {
+                return mb_strlen($solapa['texto']) === $largo;
+            });
+        };
+
+        // 1. El grupo: el primer tramo que ES el nombre de un grupo («Impuestos sobre ventas» contiene «ventas» y no
+        //    es el grupo Ventas). Lo que haya antes y el catálogo no conozca se saltea.
+        $grupo = null;
+        $desde = 1;
+        for ($i = 1; $i < count($tramos) && $grupo === null; $i++) {
+            foreach ($grupos as $clave => $texto) {
+                if ($limpio($tramos[$i]) === $limpio($texto)) {
+                    $grupo = $clave;
+                    $desde = $i + 1;
+                    break;
+                }
+            }
         }
 
-        return ['anclados' => $anclados, 'resto' => implode(' → ', array_slice($tramos, $i)), 'vista' => false];
+        // 2. La solapa: el primer tramo siguiente que nombra una. Primero dentro del grupo; si no, en los demás.
+        $solapa = null;
+        $hasta = $desde;
+        for ($i = $desde; $i < count($tramos) && $solapa === null; $i++) {
+            $candidatas = $grupo === null ? [] : $solapas_de($tramos[$i], $grupo);
+            // En otro grupo solo se busca el tramo pegado al grupo nombrado (o cualquiera, si no se nombró ninguno).
+            if ($candidatas === [] && ($grupo === null || $i === $desde)) {
+                $candidatas = $solapas_de($tramos[$i], null);
+            }
+            if (count($candidatas) > 1) {
+                return ['anclados' => [], 'resto' => '', 'ambiguo' => true];
+            }
+            if (count($candidatas) === 1) {
+                $solapa = ['clave' => key($candidatas)] + current($candidatas);
+                $hasta = $i + 1;
+            }
+        }
+
+        $anclados = [];
+        if ($solapa !== null) {
+            // El grupo es el de la solapa, aunque el camino haya nombrado otro.
+            $grupo = 'abm.grupo.' . explode('.', $solapa['clave'])[2];
+            if (isset($grupos[$grupo])) {
+                $anclados[] = ['clave' => $grupo, 'texto' => 'En el ABM, tocá «' . $grupos[$grupo] . '».'];
+            }
+            $anclados[] = ['clave' => $solapa['clave'], 'texto' => 'Ahora tocá «' . $solapa['texto'] . '».'];
+        } elseif ($grupo !== null) {
+            $anclados[] = ['clave' => $grupo, 'texto' => 'En el ABM, tocá «' . $grupos[$grupo] . '».'];
+            $hasta = $desde;
+        }
+
+        return ['anclados' => $anclados, 'resto' => implode(' → ', array_slice($tramos, $hasta)), 'ambiguo' => false];
     }
 
     /**
-     * Arma el recorrido del camino. Del plan del modelo se toman solo dos cosas: el texto de un paso con la misma
-     * clave, y las indicaciones finales para lo que el catálogo no sabe señalar. El modelo no quita, reordena ni
-     * reemplaza un tramo que tiene ancla, y el recorrido termina en la pantalla a la que llevó.
+     * Arma el recorrido del camino FUSIONADO con el plan del modelo: primero los pasos fijos del camino, en su orden;
+     * después, lo que el modelo agregó a continuación y no los repite (otros controles con ancla y las indicaciones de
+     * lo que el catálogo no sabe señalar). El modelo puede redactar el texto de un paso fijo, pero no lo quita, no lo
+     * reordena ni lo reemplaza, y el recorrido no termina abriendo otra pantalla ni otra solapa.
      */
     private function recorrido_del_camino(array $fijo, ?array $del_modelo, array $pasos): array
     {
-        $ultimo = end($fijo['anclados']);
-        $titulo = is_array($del_modelo) ? $del_modelo['titulo'] : 'Seguí el camino en tu pantalla';
-        if ($fijo['vista']) {
-            return $this->guion_minimo($titulo, $fijo['anclados']);
-        }
-
         $claves = array_column($fijo['anclados'], 'clave');
         $textos = [];
-        $indicaciones = [];
+        $cola = [];
         foreach (is_array($del_modelo) ? $del_modelo['pasos'] : [] as $paso) {
             $dudoso = (bool) preg_match(self::DUDA, self::normalizar($paso['texto']));
             if (in_array($paso['clave'], $claves, true)) {
                 if (! $dudoso) {
                     $textos[$paso['clave']] = $paso['texto'];
                 }
-                // Lo que el modelo escribió ANTES de un tramo con ancla era llegar hasta ahí: ya lo hace el ancla.
-                $indicaciones = [];
-            } elseif ($paso['clave'] === 'indicacion' && ! $dudoso && ! self::nombra($paso['texto'], 'abm')
-                && ! preg_match('/\b(?:grupo|solapa)\b/', self::normalizar($paso['texto']))) {
-                $indicaciones[] = $paso;
+                // Lo que el modelo puso ANTES de un tramo con ancla era llegar hasta ahí: ya lo hace el ancla.
+                $cola = [];
+            } elseif ($paso['clave'] === 'indicacion') {
+                if (! $dudoso && ! self::nombra($paso['texto'], 'abm') && ! preg_match('/\b(?:grupo|solapa)\b/', self::normalizar($paso['texto']))) {
+                    $cola[] = $paso;
+                }
+            } elseif (strpos($paso['clave'], 'vista.') !== 0 && strpos($paso['clave'], 'abm.grupo.') !== 0
+                && strpos($paso['clave'], 'abm.solapa.') !== 0) {
+                // Un control con ancla que el modelo señala dentro de la solapa (por ejemplo abm.editar_recargo).
+                $cola[] = $paso;
             }
         }
 
@@ -407,44 +460,49 @@ class SupportTourPlannerService
         foreach ($fijo['anclados'] as $paso) {
             $recorrido[] = ['clave' => $paso['clave'], 'texto' => $textos[$paso['clave']] ?? $paso['texto']];
         }
-        if (($pasos['indicacion']['requiere_destino'] ?? null) === false) {
-            if ($fijo['resto'] !== '') {
-                $primero = trim((string) explode('→', $fijo['resto'])[0], " \t\"'«»“”.");
-                $lo_nombra = false;
-                foreach ($indicaciones as $paso) {
-                    $lo_nombra = $lo_nombra || ($primero !== '' && self::nombra($paso['texto'], $primero));
-                }
-                if (! $lo_nombra) {
-                    $texto = 'En esta solapa seguí: ' . $fijo['resto'];
-                    array_unshift($indicaciones, ['clave' => 'indicacion', 'texto' => mb_strlen($texto) > 240 ? mb_substr($texto, 0, 239) . '…' : $texto]);
-                }
+        if ($fijo['resto'] !== '' && ($pasos['indicacion']['requiere_destino'] ?? null) === false) {
+            $primero = trim((string) explode('→', $fijo['resto'])[0], " \t\"'«»“”.");
+            $lo_nombra = false;
+            foreach ($cola as $paso) {
+                $lo_nombra = $lo_nombra || ($primero !== '' && self::nombra($paso['texto'], $primero));
             }
-            $recorrido = array_merge($recorrido, array_slice($indicaciones, 0, 8 - count($recorrido)));
+            if (! $lo_nombra) {
+                $texto = 'En esta solapa seguí: ' . $fijo['resto'];
+                array_unshift($cola, ['clave' => 'indicacion', 'texto' => mb_strlen($texto) > 240 ? mb_substr($texto, 0, 239) . '…' : $texto]);
+            }
         }
+        $recorrido = array_merge($recorrido, array_slice($cola, 0, 8 - count($recorrido)));
+        $ultimo = end($fijo['anclados']);
 
-        return $this->guion_minimo(is_array($del_modelo) ? $titulo : 'Ir a ' . preg_replace('/^.*«(.+)».*$/u', '$1', $ultimo['texto']), $recorrido);
+        return $this->guion_minimo(
+            is_array($del_modelo) ? $del_modelo['titulo'] : 'Ir a ' . preg_replace('/^.*«(.+)».*$/u', '$1', $ultimo['texto']),
+            $recorrido
+        );
     }
 
     /**
-     * Por qué no se puede entregar tal cual un plan del modelo cuando no había camino escrito, o null si sirve.
-     * `plan_dudoso`: un paso manda a buscar. `plan_sin_anclas`: todo es texto aunque la tarea o el propio plan
-     * nombran una pantalla, un grupo o una solapa que el catálogo sabe abrir.
+     * Por qué no se puede entregar tal cual un plan del modelo, o null si sirve. Un plan con al menos un paso que
+     * señala o abre algo se entrega SIEMPRE: «si no aparece, buscalo por nombre» o «puede estar vacío» son frases
+     * normales de una instrucción y no lo invalidan. Solo se mira un plan de puro texto:
+     * `plan_dudoso` si manda a buscar DÓNDE está algo, y `plan_sin_anclas` si había un camino escrito, o si la tarea
+     * o el propio plan nombran una pantalla, un grupo o una solapa que el catálogo sabe abrir.
      *
      * @param string[] $tarea Lo que pidió la persona y la explicación que la invitó.
      */
-    private function defecto_del_plan(array $guion, array $pasos, array $tarea): ?string
+    private function defecto_del_plan(array $guion, array $pasos, array $tarea, bool $hay_camino): ?string
     {
+        if (self::pasos_con_ancla($guion) > 0) {
+            return null;
+        }
         $textos = $tarea;
-        $con_ancla = 0;
         foreach ($guion['pasos'] as $paso) {
             if (preg_match(self::DUDA, self::normalizar($paso['texto']))) {
                 return 'plan_dudoso';
             }
-            $con_ancla += $paso['clave'] === 'indicacion' ? 0 : 1;
             $textos[] = $paso['texto'];
         }
-        if ($con_ancla > 0) {
-            return null;
+        if ($hay_camino) {
+            return 'plan_sin_anclas';
         }
 
         [$grupos, $solapas] = $this->nombres_del_abm($pasos);
@@ -522,6 +580,17 @@ class SupportTourPlannerService
                     }
                 }
                 if ($solapa !== null) {
+                    break;
+                }
+            }
+        }
+        if ($solapa !== null) {
+            foreach ($pasos as $clave => $paso) {
+                if ($clave !== $solapa['clave'] && strpos($clave, 'abm.solapa.') === 0
+                    && preg_match('/señalar la solapa «(.+?)»/u', $paso['descripcion'], $partes)
+                    && $normalizar($partes[1]) === $solapa['nombre']) {
+                    // El mismo nombre en otro grupo: no se adivina cuál; queda la pantalla con el camino.
+                    $solapa = null;
                     break;
                 }
             }
