@@ -9,19 +9,30 @@ namespace App\Services;
  * Es un servicio PURO: recibe texto y contesta sí o no, sin tocar la base. Por eso se prueba con
  * tests unitarios, barrera por barrera.
  *
- * 🔴 ES UN PORTE, MÁS ESTRICTO, DE `validar_sql` DE `herramientas/soporte-codex/diagnostico.py`
- * (repo de conocimiento), que es la que valida el SQL contra el sistema de un cliente. La lista
- * positiva de funciones y la de palabras prohibidas son LAS MISMAS; si se toca una, se toca la
- * otra. Lo que esta agrega, porque la base del admin guarda las claves de todos los clientes:
+ * 🔴 NACIÓ COMO UN PORTE DE `validar_sql` DE `herramientas/soporte-codex/diagnostico.py` (repo de
+ * conocimiento), que es la que valida el SQL contra el sistema de un cliente. La lista positiva de
+ * funciones y la de palabras prohibidas son LAS MISMAS; si se toca una, se toca la otra. Lo que
+ * esta ENDURECE, porque la base del admin guarda las claves de todos los clientes:
  *
  *  - sin `UNION`, sin `WITH`, sin `TABLE`/`VALUES` y sin `SHOW CREATE TABLE`. Las cuatro primeras
  *    son formas de RENOMBRAR columnas sin nombrarlas (`SELECT 1,2 UNION SELECT * FROM clients`,
  *    `(TABLE clients) AS t(a, b, …)`), y la redacción del resultado es por nombre de columna;
- *  - `*` adentro de un paréntesis solo como `COUNT(*)`, por el mismo motivo (tablas derivadas);
+ *  - `*` comodín adentro de un paréntesis solo como `COUNT(*)`, por el mismo motivo;
  *  - sin comillas dobles: con `ANSI_QUOTES` serían identificadores, y acá se vaciarían como si
  *    fueran un dato literal;
- *  - el patrón de nombres sensibles ampliado y la lista de tablas vedadas, las dos en
- *    `config/claude_admin_sql.php`.
+ *  - un identificador entre backticks solo puede ser un nombre simple (`` `clients` ``). Un alias
+ *    como `` `a'` `` haría que este validador viera un literal donde MySQL ve un nombre, y entre
+ *    dos de esos se esconde `api_key AS k`;
+ *  - el patrón de nombres sensibles ampliado, la lista de tablas vedadas y la de columnas
+ *    reservadas, las tres en `config/claude_admin_sql.php`.
+ *
+ * Y lo que AFLOJA respecto del original, sin abrir nada (cada caso tiene su test de ataque):
+ *
+ *  - `;`, `--`, `/*`, `#` y `@` se buscan con los literales ya vaciados: `email = 'a@b.com'` pasa.
+ *    Fuera de un literal siguen prohibidos;
+ *  - un paréntesis de agrupación puede seguir a `AND`, `OR`, `NOT`, `WHERE`, `ON`, `HAVING`,
+ *    `WHEN`, `THEN` y `ELSE`. `FROM (`, `JOIN (` y `SELECT (` siguen prohibidos;
+ *  - `*` dentro de un paréntesis se admite cuando es una multiplicación (`SUM(a * b)`).
  *
  * ⚠️ Lo que NO hace: no garantiza que la consulta sea SQL válido (eso lo dice MySQL) ni es la
  * única barrera. `ClaudeAdminSqlService` la corre en una transacción READ ONLY y redacta el
@@ -33,9 +44,7 @@ class ClaudeAdminSqlValidator
      * Lista positiva de lo que puede ir pegado a un `(`. Igual a `_FUNCIONES` de `diagnostico.py`.
      *
      * ⚠️ `IN`, `EXISTS`, `NOT`, `OVER` y `AS` no son funciones: están porque la regla mira toda
-     * palabra seguida de paréntesis. `AND (`, `OR (`, `WHERE (` y `FROM (` NO están, igual que en
-     * el original: una condición agrupada se escribe sin el paréntesis pegado a esas palabras, o
-     * se reordena. Es incómodo y es a propósito: `FROM (` es una tabla derivada.
+     * palabra seguida de paréntesis.
      */
     const FUNCIONES = [
         'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'COALESCE', 'IFNULL', 'NULLIF', 'IF', 'CONCAT', 'CONCAT_WS',
@@ -48,8 +57,28 @@ class ClaudeAdminSqlValidator
     ];
 
     /**
+     * Palabras que pueden ir pegadas a un paréntesis de AGRUPACIÓN (`AND (a OR b)`). No están en
+     * la lista del monitor; se agregan acá porque sin ellas no se puede escribir una condición
+     * compuesta.
+     *
+     * 🔴 `FROM`, `JOIN` y `SELECT` NO ESTÁN Y NO TIENEN QUE ESTAR. `FROM (` y `JOIN (` son tablas
+     * derivadas, y `SELECT (` una subconsulta escalar: las tres devuelven columnas con un nombre
+     * que elige el que consulta.
+     */
+    const AGRUPADORES = ['AND', 'OR', 'NOT', 'WHERE', 'ON', 'HAVING', 'WHEN', 'THEN', 'ELSE'];
+
+    /**
+     * Modificadores de SELECT: lo que puede haber entre `SELECT` y un `*` comodín. Un `*` precedido
+     * por una de estas palabras nunca es una multiplicación.
+     */
+    const MODIFICADORES_DE_SELECT = [
+        'SELECT', 'ALL', 'DISTINCT', 'DISTINCTROW', 'HIGH_PRIORITY', 'STRAIGHT_JOIN', 'SQL_SMALL_RESULT',
+        'SQL_BIG_RESULT', 'SQL_BUFFER_RESULT', 'SQL_NO_CACHE', 'SQL_CALC_FOUND_ROWS',
+    ];
+
+    /**
      * Palabras que no pueden aparecer en un SELECT. Las de `_PROHIBIDOS` de `diagnostico.py` más
-     * `UNION`, `WITH`, `TABLE` y `VALUES` (ver el docblock de la clase).
+     * `UNION`, `WITH`, `TABLE`, `VALUES` y `SHARE` (ver el docblock de la clase).
      */
     const PROHIBIDAS = 'INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|REPLACE|GRANT|REVOKE|CALL|DO|SET|INTO|OUTFILE|DUMPFILE'
         . '|LOAD_FILE|SLEEP|BENCHMARK|GET_LOCK|RELEASE_LOCK|LOCK|UNLOCK|PROCEDURE|HANDLER|PREPARE|EXECUTE|DEALLOCATE'
@@ -65,6 +94,9 @@ class ClaudeAdminSqlValidator
     /** @var array<int, string> Nombres de las tablas vedadas, en minúscula. */
     private $tablas_vedadas;
 
+    /** @var array<int, string> Nombres de columna reservados, en minúscula. */
+    private $columnas_reservadas;
+
     /**
      * @param array<string, mixed>|null $config Config de `claude_admin_sql`; null = la del proyecto.
      */
@@ -72,13 +104,19 @@ class ClaudeAdminSqlValidator
     {
         $config = $config === null ? (array) config('claude_admin_sql') : $config;
 
-        $this->max_caracteres  = isset($config['max_caracteres']) ? (int) $config['max_caracteres'] : 12000;
-        $this->patron_sensible = isset($config['patron_sensible']) ? (string) $config['patron_sensible'] : '';
-        $this->tablas_vedadas  = [];
+        $this->max_caracteres      = isset($config['max_caracteres']) ? (int) $config['max_caracteres'] : 12000;
+        $this->patron_sensible     = isset($config['patron_sensible']) ? (string) $config['patron_sensible'] : '';
+        $this->tablas_vedadas      = [];
+        $this->columnas_reservadas = [];
 
         $vedadas = isset($config['tablas_vedadas']) ? (array) $config['tablas_vedadas'] : [];
         foreach ($vedadas as $tabla => $motivo) {
             $this->tablas_vedadas[] = strtolower((string) $tabla);
+        }
+
+        $reservadas = isset($config['columnas_reservadas']) ? (array) $config['columnas_reservadas'] : [];
+        foreach ($reservadas as $columna => $motivo) {
+            $this->columnas_reservadas[] = mb_strtolower((string) $columna, 'UTF-8');
         }
     }
 
@@ -87,8 +125,9 @@ class ClaudeAdminSqlValidator
      *
      * @param mixed $sql La consulta tal como llegó.
      *
-     * @return array<string, mixed> `['ok' => true, 'sql' => string]` (ya sin espacios de los bordes)
-     *                              o `['ok' => false, 'codigo' => string, 'error' => string]`.
+     * @return array<string, mixed> `['ok' => true, 'sql' => string]` (la consulta tal cual llegó,
+     *                              sin los espacios de los bordes: es la que se ejecuta) o
+     *                              `['ok' => false, 'codigo' => string, 'error' => string]`.
      */
     public function validar($sql)
     {
@@ -96,35 +135,72 @@ class ClaudeAdminSqlValidator
             return $this->rechazo('consulta_invalida', 'La consulta debe tener entre 1 y ' . $this->max_caracteres . ' caracteres.');
         }
 
+        if (strpos($sql, "\0") !== false) {
+            return $this->rechazo('varias_sentencias', 'La consulta tiene un carácter nulo.');
+        }
+
         $sql = trim($sql);
 
-        foreach ([';', '--', '/*', '*/', '#', "\0", '@'] as $vedado) {
-            if (strpos($sql, $vedado) !== false) {
-                return $this->rechazo('varias_sentencias', 'No se permiten varias sentencias, comentarios ni variables SQL (sin `;`, `--`, `/*`, `#` ni `@`).');
-            }
-        }
+        /* Se recorre la consulta de izquierda a derecha, como la lee MySQL, y se vacía cada
+           literal entre comillas simples: un dato literal no es una instrucción. Los
+           identificadores entre backticks se resuelven EN LA MISMA PASADA y no en otra: si se
+           sacaran después, un alias como `a'` (válido para MySQL) abriría acá un literal que MySQL
+           no ve. */
+        $backtick_invalido = false;
+        $limpio            = preg_replace_callback(
+            "/`[^`]*`|'(?:\\\\.|''|[^'\\\\])*'/su",
+            function ($coincidencia) use (&$backtick_invalido) {
+                $trozo = $coincidencia[0];
 
-        if (strpos($sql, '"') !== false) {
-            return $this->rechazo('comillas_dobles', 'Escribí los textos entre comillas simples: las comillas dobles no se admiten.');
-        }
+                if ($trozo[0] === "'") {
+                    return "''";
+                }
 
-        /* Las cadenas se vacían antes de buscar palabras: un dato literal no es una instrucción. */
-        $limpio = preg_replace("/'(?:\\\\.|''|[^'\\\\])*'/su", "''", $sql);
+                if (! preg_match('/^`[A-Za-z_][A-Za-z0-9_]*`$/', $trozo)) {
+                    $backtick_invalido = true;
+                }
+
+                return ' ' . substr($trozo, 1, -1) . ' ';
+            },
+            $sql
+        );
+
         if ($limpio === null) {
             return $this->rechazo('consulta_invalida', 'La consulta tiene caracteres que no se pueden analizar (¿no es UTF-8?).');
         }
 
-        $limpio = str_replace('`', '', $limpio);
+        if ($backtick_invalido) {
+            return $this->rechazo('consulta_invalida', 'Entre backticks solo se admite un nombre simple de tabla o de columna (letras, números y guion bajo).');
+        }
 
-        /* Si después de vaciar las cadenas queda una comilla suelta, hay un literal sin cerrar y
-           todo lo que sigue se analizaría como si fuera código cuando MySQL lo leería como dato
-           (o al revés). No se adivina. */
-        if (strpos(str_replace("''", '', $limpio), "'") !== false) {
-            return $this->rechazo('consulta_invalida', 'La consulta tiene una comilla simple sin cerrar.');
+        /* Si después de vaciar queda una comilla o un backtick sueltos, hay algo sin cerrar y todo
+           lo que sigue se analizaría como código cuando MySQL lo leería como dato (o al revés). No
+           se adivina. */
+        if (strpos(str_replace("''", '', $limpio), "'") !== false || strpos($limpio, '`') !== false) {
+            return $this->rechazo('consulta_invalida', 'La consulta tiene una comilla simple o un backtick sin cerrar.');
+        }
+
+        /* Recién ahora, sin literales: `email = 'a@b.com'` pasa y `SELECT @@version` no. Un
+           comentario o un `;` que estén ANTES de la comilla que pretende esconderlos sobreviven al
+           vaciado, así que no se puede usar una comilla dentro de un comentario para tapar código. */
+        foreach ([';', '--', '/*', '*/', '#', '@'] as $vedado) {
+            if (strpos($limpio, $vedado) !== false) {
+                return $this->rechazo('varias_sentencias', 'No se permiten varias sentencias, comentarios ni variables SQL (sin `;`, `--`, `/*`, `#` ni `@` fuera de un texto entre comillas simples).');
+            }
+        }
+
+        if (strpos($limpio, '"') !== false) {
+            return $this->rechazo('comillas_dobles', 'Escribí los textos entre comillas simples: las comillas dobles no se admiten.');
         }
 
         if ($this->patron_sensible !== '' && preg_match('~' . $this->patron_sensible . '~i', $limpio)) {
             return $this->rechazo('campo_sensible', 'La consulta nombra un campo o una tabla reservados (claves, tokens, secretos). Esos datos no se consultan.');
+        }
+
+        foreach ($this->columnas_reservadas as $columna) {
+            if (preg_match('~(?<![\p{L}\p{N}_])' . preg_quote($columna, '~') . '(?![\p{L}\p{N}_])~iu', $limpio)) {
+                return $this->rechazo('campo_sensible', 'La consulta nombra `' . $columna . '`, una columna reservada: su contenido no se consulta.');
+            }
         }
 
         foreach ($this->tablas_vedadas as $tabla) {
@@ -146,7 +222,7 @@ class ClaudeAdminSqlValidator
         }
 
         if (preg_match('~\b(?:' . self::PROHIBIDAS . ')\b~i', $limpio)) {
-            return $this->rechazo('operacion_no_permitida', 'La consulta contiene una operación que no está habilitada (solo lectura, sin UNION ni WITH).');
+            return $this->rechazo('operacion_no_permitida', 'La consulta contiene una operación que no está habilitada (solo lectura, sin UNION, WITH, TABLE ni VALUES).');
         }
 
         if (! preg_match('~^(?:EXPLAIN\s+)?SELECT\b~i', $limpio)) {
@@ -158,13 +234,15 @@ class ClaudeAdminSqlValidator
         }
 
         if ($this->tiene_un_comodin_dentro_de_parentesis($limpio)) {
-            return $this->rechazo('comodin_en_parentesis', 'Dentro de un paréntesis, `*` solo se admite como COUNT(*). Nombrá las columnas.');
+            return $this->rechazo('comodin_en_parentesis', 'Dentro de un paréntesis, `*` solo se admite como COUNT(*) o como multiplicación. Nombrá las columnas.');
         }
 
         if (preg_match_all('~\b([A-Za-z_]\w*)\s*\(~', $limpio, $coincidencias)) {
             foreach ($coincidencias[1] as $funcion) {
-                if (! in_array(strtoupper($funcion), self::FUNCIONES, true)) {
-                    return $this->rechazo('funcion_no_permitida', 'La consulta usa `' . $funcion . '(`, que no está en la lista de funciones habilitadas.');
+                $mayuscula = strtoupper($funcion);
+
+                if (! in_array($mayuscula, self::FUNCIONES, true) && ! in_array($mayuscula, self::AGRUPADORES, true)) {
+                    return $this->rechazo('funcion_no_permitida', 'La consulta usa `' . $funcion . '(`, que no está en la lista de funciones habilitadas (tampoco se admiten subconsultas en FROM, JOIN ni SELECT).');
                 }
             }
         }
@@ -226,13 +304,17 @@ class ClaudeAdminSqlValidator
     }
 
     /**
-     * ¿Hay un `*` adentro de un paréntesis que no sea exactamente `COUNT(*)`?
+     * ¿Hay un `*` COMODÍN adentro de un paréntesis que no sea exactamente `COUNT(*)`?
      *
-     * 🔴 Es más ancha de lo necesario a propósito: también rechaza una multiplicación entre
-     * paréntesis (`SUM(a * b)`). Distinguir un comodín de un producto exige conocer todos los
-     * modificadores de SELECT de MySQL, y un modificador que falte es un agujero por el que una
-     * tabla derivada renombra `api_key`. La cuenta se hace afuera del paréntesis o del lado del
-     * que consulta.
+     * Un `*` dentro de un paréntesis es una multiplicación —y pasa— solo si tiene un operando de
+     * cada lado: antes, un identificador que no sea un modificador de SELECT, un número, un
+     * literal o un `)`; después, un identificador que no sea `FROM`, un número, un literal, un `(`
+     * o un signo. Cualquier otra cosa es un comodín: `(SELECT * FROM`, `(t.*)`, `(a, *)`,
+     * `COUNT(DISTINCT *)`, `( * )`.
+     *
+     * 🔴 Las dos condiciones, no una. Mirar solo lo de antes obliga a conocer TODOS los
+     * modificadores de SELECT de MySQL (el que falte es un agujero); mirar además lo de después lo
+     * cierra, porque a un comodín lo sigue siempre una coma, `FROM` o un `)`.
      *
      * @param string $limpio Consulta sin literales ni backticks.
      *
@@ -242,17 +324,42 @@ class ClaudeAdminSqlValidator
     {
         $sin_count = preg_replace('~\bCOUNT\s*\(\s*\*\s*\)~i', 'COUNT(1)', $limpio);
 
+        if (! preg_match_all("~''|[A-Za-z_]\w*|\d+(?:\.\d+)?|\S~u", (string) $sin_count, $coincidencias)) {
+            return false;
+        }
+
+        $tokens      = $coincidencias[0];
+        $cantidad    = count($tokens);
         $profundidad = 0;
-        $largo       = strlen($sin_count);
+        $operando    = '~^(?:[A-Za-z_]\w*|\d+(?:\.\d+)?)$~';
 
-        for ($i = 0; $i < $largo; $i++) {
-            $caracter = $sin_count[$i];
+        for ($i = 0; $i < $cantidad; $i++) {
+            $token = $tokens[$i];
 
-            if ($caracter === '(') {
+            if ($token === '(') {
                 $profundidad++;
-            } elseif ($caracter === ')') {
+                continue;
+            }
+
+            if ($token === ')') {
                 $profundidad = $profundidad > 0 ? $profundidad - 1 : 0;
-            } elseif ($caracter === '*' && $profundidad > 0) {
+                continue;
+            }
+
+            if ($token !== '*' || $profundidad === 0) {
+                continue;
+            }
+
+            $anterior  = $i > 0 ? $tokens[$i - 1] : '';
+            $siguiente = $i + 1 < $cantidad ? $tokens[$i + 1] : '';
+
+            $operando_antes = $anterior === ')' || $anterior === "''"
+                || (preg_match($operando, $anterior) && ! in_array(strtoupper($anterior), self::MODIFICADORES_DE_SELECT, true));
+
+            $operando_despues = $siguiente === '(' || $siguiente === "''" || $siguiente === '-' || $siguiente === '+'
+                || (preg_match($operando, $siguiente) && strtoupper($siguiente) !== 'FROM');
+
+            if (! $operando_antes || ! $operando_despues) {
                 return true;
             }
         }

@@ -40,6 +40,12 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
     const API_KEY         = 'CANARIO-api-key-9f3a1c';
     const INBOUND_API_KEY = 'CANARIO-inbound-7b2e4d';
 
+    /** El SOAP que se le manda a ARCA, con el ticket de acceso centinela. */
+    const SOAP_REQUEST = '<soapenv:Envelope><soapenv:Body><ar:FECAESolicitar><ar:Auth><ar:Token>CANARIO-TOKEN-ARCA</ar:Token><ar:Sign>CANARIO-SIGN-ARCA</ar:Sign><ar:Cuit>20111111112</ar:Cuit></ar:Auth></ar:FECAESolicitar></soapenv:Body></soapenv:Envelope>';
+
+    /** La respuesta cruda de ARCA. */
+    const SOAP_RESPONSE = '<soap:Envelope><soap:Body><FECAESolicitarResponse><Resultado>A</Resultado><Token>CANARIO-TOKEN-RESPUESTA</Token></FECAESolicitarResponse></soap:Body></soap:Envelope>';
+
     /** @var int Id del cliente de la fixture. */
     private $client_id;
 
@@ -74,7 +80,33 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
                 'db_password' => 'CANARIO-db-pass',
                 'anidado'     => ['api_key' => 'CANARIO-anidado', 'ciudad' => 'Gualeguay'],
             ]),
+            'contract_financiacion' => json_encode([
+                'cuotas'      => 3,
+                'db_password' => 'CANARIO-db-pass-2',
+                'anidado'     => [
+                    'api_key' => 'CANARIO-anidado-2',
+                    'ciudad'  => 'Gualeguay',
+                    'request' => 'CANARIO-reservada-anidada',
+                    'lista'   => [['Clave' => 'CANARIO-clave-json', 'visible' => 'sí']],
+                ],
+            ]),
             'cobranzas_observaciones' => 'Le pasamos el acceso: la contraseña es CANARIO-clave-1234 y paga los 10.',
+            'created_at'      => now(),
+            'updated_at'      => now(),
+        ]);
+
+        /* 🔴 El caso que originó `columnas_reservadas`: una factura con el SOAP crudo de ARCA, que
+           lleva el ticket de acceso (`Token` y `Sign`) en `request` y vuelve en `response`. */
+        DB::table('mensualidad_invoices')->insert([
+            'client_id'       => $this->client_id,
+            'periodo'         => '2026-11',
+            'cbte_tipo'       => 11,
+            'cbte_letra'      => 'C',
+            'afip_produccion' => 0,
+            'resultado'       => 'A',
+            'error_message'   => 'Observación 10016 de ARCA',
+            'request'         => self::SOAP_REQUEST,
+            'response'        => self::SOAP_RESPONSE,
             'created_at'      => now(),
             'updated_at'      => now(),
         ]);
@@ -101,7 +133,14 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
      */
     private function borrar_fixtures(): void
     {
-        DB::table('clients')->where('slug', 'like', self::PREFIJO . '%')->delete();
+        $ids = DB::table('clients')->where('slug', 'like', self::PREFIJO . '%')->pluck('id')->all();
+
+        if ($ids === []) {
+            return;
+        }
+
+        DB::table('mensualidad_invoices')->whereIn('client_id', $ids)->delete();
+        DB::table('clients')->whereIn('id', $ids)->delete();
     }
 
     /**
@@ -371,17 +410,84 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
 
     public function test_la_redaccion_es_recursiva_dentro_de_un_valor_json(): void
     {
-        $respuesta = $this->consultar('SELECT setup_data FROM clients WHERE id = ' . $this->client_id);
+        $respuesta = $this->consultar('SELECT contract_financiacion FROM clients WHERE id = ' . $this->client_id);
 
         $respuesta->assertStatus(200);
 
-        $datos = json_decode($respuesta->json('rows.0.setup_data'), true);
+        $datos = json_decode($respuesta->json('rows.0.contract_financiacion'), true);
 
-        $this->assertSame('ferretería', $datos['rubro']);
+        $this->assertSame(3, $datos['cuotas']);
+        /* Clave que matchea el patrón sensible, en la raíz y anidada. */
         $this->assertSame('[dato reservado]', $datos['db_password']);
         $this->assertSame('[dato reservado]', $datos['anidado']['api_key']);
+        /* 🔴 Clave RESERVADA anidada (`request`), y otra dentro de una lista y con mayúscula (`Clave`). */
+        $this->assertSame('[dato reservado]', $datos['anidado']['request']);
+        $this->assertSame('[dato reservado]', $datos['anidado']['lista'][0]['Clave']);
+        $this->assertSame('sí', $datos['anidado']['lista'][0]['visible']);
         $this->assertSame('Gualeguay', $datos['anidado']['ciudad']);
         $this->assertStringNotContainsString('CANARIO', $respuesta->getContent());
+    }
+
+    public function test_el_soap_de_arca_con_el_ticket_de_acceso_no_sale_por_ningun_camino(): void
+    {
+        /* 1. No se puede nombrar: ni para leerla ni para filtrar por ella. */
+        foreach ([
+            'SELECT request, response FROM mensualidad_invoices',
+            'SELECT response FROM mensualidad_invoices WHERE client_id = ' . $this->client_id,
+            'SELECT id FROM mensualidad_invoices WHERE request LIKE \'%CANARIO%\'',
+            'SELECT LENGTH(request) FROM mensualidad_invoices',
+            'SELECT SUBSTRING(`request`, 1, 200) AS x FROM mensualidad_invoices',
+        ] as $sql) {
+            $this->consultar($sql)->assertStatus(422)->assertJsonPath('codigo', 'campo_sensible');
+        }
+
+        /* 2. Con `SELECT *` la fila sale, y las dos columnas van reservadas enteras. */
+        foreach ([
+            'SELECT * FROM mensualidad_invoices WHERE client_id = ' . $this->client_id,
+            'SELECT i.*, c.name FROM mensualidad_invoices i JOIN clients c ON c.id = i.client_id WHERE c.id = ' . $this->client_id,
+        ] as $sql) {
+            $respuesta = $this->consultar($sql);
+
+            $respuesta->assertStatus(200);
+            $this->assertSame(1, $respuesta->json('row_count'), $sql);
+            $this->assertSame('[dato reservado]', $respuesta->json('rows.0.request'), $sql);
+            $this->assertSame('[dato reservado]', $respuesta->json('rows.0.response'), $sql);
+            $this->assertSame('2026-11', $respuesta->json('rows.0.periodo'), $sql);
+            $this->assertSame('Observación 10016 de ARCA', $respuesta->json('rows.0.error_message'), $sql);
+            $this->assertStringNotContainsString('CANARIO', $respuesta->getContent(), $sql);
+        }
+
+        /* 3. Lo que sí se puede leer de una factura sigue saliendo. */
+        $this->consultar('SELECT id, periodo, resultado, cae, error_message FROM mensualidad_invoices WHERE client_id = ' . $this->client_id)
+            ->assertStatus(200)
+            ->assertJsonPath('rows.0.resultado', 'A');
+    }
+
+    public function test_el_redactor_tapa_las_etiquetas_xml_de_credenciales_en_cualquier_texto(): void
+    {
+        $servicio = app(ClaudeAdminSqlService::class);
+
+        /* El mismo SOAP, guardado en una columna de nombre inocente: la segunda reja. */
+        $fila = $servicio->redactar_fila([
+            'nota'     => self::SOAP_REQUEST,
+            'escapado' => 'Falló: &lt;Auth&gt;&lt;Token&gt;CANARIO-ESCAPADO&lt;/Token&gt;&lt;Sign&gt;CANARIO-SIGN-2&lt;/Sign&gt;&lt;/Auth&gt; y siguió',
+            'variado'  => "<TOKEN>CANARIO-MAYUS</TOKEN> <password attr=\"x\">CANARIO-PASS</password>\n<Clave>\nCANARIO-MULTILINEA\n</Clave> <ApiKey>CANARIO-PATRON</ApiKey> <Resultado>A</Resultado>",
+            'en_json'  => json_encode(['xml' => '<Sign>CANARIO-EN-JSON</Sign>', 'ok' => '<b>negrita</b>']),
+        ]);
+
+        foreach ($fila as $columna => $valor) {
+            $this->assertStringNotContainsString('CANARIO', (string) $valor, $columna);
+        }
+
+        $this->assertStringContainsString('<ar:Token>[dato reservado]</ar:Token>', $fila['nota']);
+        $this->assertStringContainsString('<ar:Sign>[dato reservado]</ar:Sign>', $fila['nota']);
+        /* Lo que no es credencial queda como estaba. */
+        $this->assertStringContainsString('<ar:Cuit>20111111112</ar:Cuit>', $fila['nota']);
+        $this->assertStringContainsString('&lt;Token&gt;[dato reservado]&lt;/Token&gt;', $fila['escapado']);
+        $this->assertStringContainsString('y siguió', $fila['escapado']);
+        $this->assertStringContainsString('<Resultado>A</Resultado>', $fila['variado']);
+        $this->assertStringContainsString('<password attr="x">[dato reservado]</password>', $fila['variado']);
+        $this->assertStringContainsString('negrita', $fila['en_json']);
     }
 
     public function test_en_un_texto_libre_se_tapa_lo_que_sigue_a_contrasena(): void
@@ -400,17 +506,25 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
         $servicio = app(ClaudeAdminSqlService::class);
 
         $fila = $servicio->redactar_fila([
-            'line'    => 'curl -H "Authorization: Bearer abc.DEF-123" y DB_PASSWORD=supersecreta MAIL_HOST=smtp.test',
+            'texto'   => 'curl -H "Authorization: Bearer abc.DEF-123" y DB_PASSWORD=supersecreta MAIL_HOST=smtp.test',
             'otra'    => 'APP_KEY no, pero META_ACCESS_TOKEN: EAAG123 sí',
             'numero'  => 15,
             'nulo'    => null,
             'token'   => 'se-va-entero',
             'detalle' => ['secret' => 'x', 'visible' => 'y'],
+            /* Columnas reservadas: se van enteras, sin mirar el valor y sin distinguir mayúsculas. */
+            'line'    => 'php artisan migrate',
+            'RAW'     => ['a' => 1],
+            'datos'   => '{"ip":"1.2.3.4"}',
         ]);
 
-        $this->assertStringNotContainsString('abc.DEF-123', $fila['line']);
-        $this->assertStringNotContainsString('supersecreta', $fila['line']);
-        $this->assertStringContainsString('MAIL_HOST=smtp.test', $fila['line']);
+        $this->assertSame('[dato reservado]', $fila['line']);
+        $this->assertSame('[dato reservado]', $fila['RAW']);
+        $this->assertSame('[dato reservado]', $fila['datos']);
+
+        $this->assertStringNotContainsString('abc.DEF-123', $fila['texto']);
+        $this->assertStringNotContainsString('supersecreta', $fila['texto']);
+        $this->assertStringContainsString('MAIL_HOST=smtp.test', $fila['texto']);
         $this->assertStringNotContainsString('EAAG123', $fila['otra']);
         $this->assertSame(15, $fila['numero']);
         $this->assertNull($fila['nulo']);
@@ -510,11 +624,91 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
         }
     }
 
+    public function test_toda_columna_de_texto_libre_o_json_de_una_tabla_no_vedada_esta_decidida(): void
+    {
+        /* 🔴 FAIL-CLOSED. Un texto libre o un JSON pueden traer cualquier cosa (el SOAP de ARCA
+           con su ticket de acceso estaba en una columna `request`). Toda columna así, de una tabla
+           que se puede consultar, tiene que estar decidida a mano: o no se sirve (patrón sensible
+           o `columnas_reservadas`), o alguien miró qué guarda y lo anotó en
+           `columnas_de_texto_revisadas`. Una migración que agregue una y no lo decida rompe acá. */
+        $vedadas    = array_keys((array) config('claude_admin_sql.tablas_vedadas'));
+        $reservadas = array_map('mb_strtolower', array_keys((array) config('claude_admin_sql.columnas_reservadas')));
+        $revisadas  = (array) config('claude_admin_sql.columnas_de_texto_revisadas');
+        $patron     = '~' . config('claude_admin_sql.patron_sensible') . '~i';
+
+        $filas = DB::select(
+            'SELECT table_name AS tabla, column_name AS columna, data_type AS tipo FROM information_schema.columns '
+            . 'WHERE table_schema = DATABASE() '
+            . 'AND (data_type IN (\'json\', \'text\', \'tinytext\', \'mediumtext\', \'longtext\') OR data_type LIKE \'%blob\') '
+            . 'ORDER BY table_name, column_name'
+        );
+
+        $this->assertGreaterThan(100, count($filas), 'La consulta al esquema devolvió muy pocas columnas de texto: quedó mal.');
+
+        $sin_decidir = [];
+        $vistas      = [];
+        $por_camino  = ['patron' => 0, 'reservada' => 0, 'revisada' => 0];
+
+        foreach ($filas as $fila) {
+            if (in_array($fila->tabla, $vedadas, true)) {
+                continue;
+            }
+
+            $clave    = $fila->tabla . '.' . $fila->columna;
+            $vistas[] = $clave;
+
+            if (preg_match($patron, $fila->columna)) {
+                $por_camino['patron']++;
+                continue;
+            }
+
+            if (in_array(mb_strtolower($fila->columna), $reservadas, true)) {
+                $por_camino['reservada']++;
+                continue;
+            }
+
+            if (isset($revisadas[$clave])) {
+                $por_camino['revisada']++;
+                continue;
+            }
+
+            $sin_decidir[] = $clave . ' (' . $fila->tipo . ')';
+        }
+
+        $this->assertSame(
+            [],
+            $sin_decidir,
+            'Hay columnas de texto libre o JSON sin decidir en config/claude_admin_sql.php. Mirá qué escribe el código en cada una: si '
+            . 'puede traer credenciales, tokens, cuerpos crudos de terceros, valores de .env o datos de formato libre, agregá su nombre a '
+            . '`columnas_reservadas`; si es legible, agregá `tabla.columna` a `columnas_de_texto_revisadas` con el motivo. En la duda, '
+            . 'reservala: ' . implode(', ', $sin_decidir)
+        );
+
+        /* Que midió por los tres caminos. */
+        $this->assertGreaterThan(0, $por_camino['patron']);
+        $this->assertGreaterThan(10, $por_camino['reservada']);
+        $this->assertGreaterThan(100, $por_camino['revisada']);
+
+        /* Y que el mapa de revisadas no quedó viejo ni se contradice: cada entrada es una columna
+           de texto que existe, de una tabla no vedada, que NO está reservada, y dice por qué. */
+        foreach ($revisadas as $clave => $motivo) {
+            $this->assertContains($clave, $vistas, 'columnas_de_texto_revisadas nombra algo que no es una columna de texto de una tabla consultable: ' . $clave);
+            $this->assertGreaterThan(20, strlen(trim((string) $motivo)), 'La columna revisada "' . $clave . '" no dice por qué es legible.');
+
+            $columna = substr($clave, strpos($clave, '.') + 1);
+            $this->assertNotContains(mb_strtolower($columna), $reservadas, 'La columna "' . $clave . '" figura como legible, pero su nombre está reservado: nunca se serviría.');
+            $this->assertSame(0, preg_match($patron, $columna), 'La columna "' . $clave . '" figura como legible, pero su nombre matchea el patrón sensible.');
+        }
+    }
+
     public function test_en_toda_tabla_no_vedada_las_columnas_de_nombre_sensible_salen_redactadas(): void
     {
-        $vedadas  = array_keys((array) config('claude_admin_sql.tablas_vedadas'));
-        $patron   = '~' . config('claude_admin_sql.patron_sensible') . '~i';
-        $servicio = app(ClaudeAdminSqlService::class);
+        $vedadas    = array_keys((array) config('claude_admin_sql.tablas_vedadas'));
+        $reservadas = array_keys((array) config('claude_admin_sql.columnas_reservadas'));
+        $nombre     = '~' . config('claude_admin_sql.patron_sensible') . '~i';
+        /* «Sensible» = matchea el patrón O es una columna reservada. */
+        $patron     = '~' . config('claude_admin_sql.patron_sensible') . '|^(?:' . implode('|', array_map('preg_quote', $reservadas)) . ')$~iu';
+        $servicio   = app(ClaudeAdminSqlService::class);
 
         $tablas_consultadas  = 0;
         $columnas_sensibles  = 0;
@@ -555,7 +749,7 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
 
             if (! $resultado['ok']) {
                 $this->assertSame('campo_sensible', $resultado['codigo'], 'El SELECT * de ' . $tabla . ' falló por algo que no es su nombre: ' . $resultado['codigo']);
-                $this->assertSame(1, preg_match($patron, $tabla), $tabla);
+                $this->assertSame(1, preg_match($nombre, $tabla), $tabla);
                 $rechazadas_por_nombre++;
                 continue;
             }

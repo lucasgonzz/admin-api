@@ -85,13 +85,136 @@ class ValidadorDeSqlDeLecturaDelAdminTest extends TestCase
         $this->assert_admite('SELECT id FROM support_messages WHERE body LIKE \'%password%\'');
         $this->assert_admite('SELECT id FROM support_messages WHERE body = \'DROP TABLE clients UNION information_schema\' ');
 
-        /* ⚠️ Salvo los caracteres vedados (`;`, `--`, `#`, `@`…): esos se buscan en el texto CRUDO,
-           igual que en el validador del monitor, así que tampoco pueden ir dentro de un literal.
-           Un mail se busca con LIKE y `_` en lugar de la arroba. */
-        $this->assert_rechaza('varias_sentencias', 'SELECT id FROM support_messages WHERE body = \'hola; chau\'');
-        $this->assert_rechaza('varias_sentencias', 'SELECT id FROM leads WHERE email = \'a@b.test\'');
-        $this->assert_admite('SELECT id FROM leads WHERE email LIKE \'a_b.test\'');
+        /* Y los caracteres vedados también pueden ir DENTRO de un literal: un mail, un texto con
+           punto y coma, un numeral. Se buscan con los literales ya vaciados. */
+        $this->assert_admite('SELECT id FROM leads WHERE email = \'a@b.test\'');
+        $this->assert_admite('SELECT id FROM support_messages WHERE body = \'hola; chau -- y /* esto */ #1\'');
         $this->assert_admite('SELECT id FROM leads WHERE name = \'O\\\'Brien\' OR name = \'D\'\'Angelo\'');
+        $this->assert_admite('SELECT id FROM leads WHERE name = \'termina en barra \\\\\' AND email = \'a@b.test\'');
+
+        /* La consulta que se ejecuta es la que llegó, con sus literales intactos. */
+        $this->assertSame(
+            'SELECT id FROM leads WHERE email = \'a@b.test\'',
+            $this->validar('  SELECT id FROM leads WHERE email = \'a@b.test\'  ')['sql']
+        );
+    }
+
+    public function test_el_vaciado_de_literales_no_se_puede_usar_para_esconder_codigo(): void
+    {
+        /* 🔴 Cada una de estas intenta que el validador vea un literal donde MySQL ve código (o al
+           revés), para que `api_key` quede «adentro de un texto» y no se analice. */
+
+        /* Fuera de un literal, los caracteres vedados siguen vedados aunque haya literales cerca. */
+        $this->assert_rechaza('varias_sentencias', 'SELECT id FROM clients WHERE name = \'a\'; DELETE FROM clients');
+        $this->assert_rechaza('varias_sentencias', 'SELECT id FROM clients WHERE name = \'a\' -- comentario');
+        /* Con una comilla suelta en el comentario se rechaza antes, por el literal sin cerrar. */
+        $this->assert_rechaza('consulta_invalida', 'SELECT id FROM clients WHERE name = \'a\' -- \'');
+        $this->assert_rechaza('varias_sentencias', 'SELECT id FROM clients WHERE name = \'a\' AND id = @x');
+        $this->assert_rechaza('varias_sentencias', 'SELECT \'a\' # comentario');
+        $this->assert_rechaza('consulta_invalida', 'SELECT \'a\' # \'');
+
+        /* Una comilla adentro de un comentario: para MySQL el comentario no abre ningún literal y
+           `api_key` es código. El `/*` y el `--` quedan antes de la comilla y sobreviven al vaciado. */
+        $this->assert_rechaza('varias_sentencias', 'SELECT 1 /* \' */ , api_key , /* \' */ 2 FROM clients');
+        $this->assert_rechaza('varias_sentencias', "SELECT 1 -- '\n , api_key -- '\n FROM clients");
+        $this->assert_rechaza('varias_sentencias', "SELECT 1 # '\n , api_key # '\n FROM clients");
+
+        /* La barra invertida: `\'` NO cierra el literal, `\\'` sí. */
+        $this->assert_rechaza('consulta_invalida', 'SELECT id FROM clients WHERE name = \'a\\\' OR 1=1');
+        $this->assert_rechaza('campo_sensible', 'SELECT id FROM clients WHERE name = \'a\\\\\' OR api_key = \'x\'');
+        $this->assert_rechaza('campo_sensible', 'SELECT id FROM clients WHERE name = \'a\'\'b\' OR api_key = \'\'');
+
+        /* Un alias entre backticks con una comilla adentro: para MySQL es un nombre; sin la regla
+           de backticks, acá abriría un literal que se traga `api_key AS k`. */
+        $this->assert_rechaza('consulta_invalida', 'SELECT 1 AS `a\'`, api_key AS k, 2 AS `\'b` FROM clients');
+        $this->assert_rechaza('consulta_invalida', 'SELECT id AS `con espacio` FROM clients');
+        $this->assert_rechaza('consulta_invalida', 'SELECT id FROM `clients');
+        $this->assert_rechaza('campo_sensible', 'SELECT `api_key` AS k FROM `clients`');
+
+        /* Comillas dobles fuera de un literal: no se admiten (con ANSI_QUOTES serían nombres). */
+        $this->assert_rechaza('comillas_dobles', 'SELECT "api_key" FROM clients');
+        $this->assert_rechaza('comillas_dobles', 'SELECT 1 AS "a\'", api_key, 2 AS "\'b" FROM clients');
+        $this->assert_admite('SELECT id FROM leads WHERE notes = \'dijo "hola"\'');
+    }
+
+    public function test_un_parentesis_de_agrupacion_se_admite_y_una_tabla_derivada_no(): void
+    {
+        $this->assert_admite('SELECT id FROM clients WHERE is_active = 1 AND (estado = \'a\' OR estado = \'b\')');
+        $this->assert_admite('SELECT id FROM clients WHERE (estado = \'a\' OR estado = \'b\') AND NOT (is_active = 0)');
+        $this->assert_admite('SELECT c.id FROM clients c JOIN versions v ON (v.id = c.current_version_id) WHERE c.id > 0 OR (c.id = 0)');
+        $this->assert_admite('SELECT estado, COUNT(*) FROM clients GROUP BY estado HAVING (COUNT(*) > 1)');
+        $this->assert_admite('SELECT CASE WHEN (is_active = 1) THEN (id + 1) ELSE (0) END AS x FROM clients');
+
+        /* 🔴 `FROM (`, `JOIN (` y `SELECT (` siguen prohibidos. */
+        $this->assert_rechaza('funcion_no_permitida', 'SELECT t.id FROM (SELECT id FROM clients) t');
+        $this->assert_rechaza('funcion_no_permitida', 'SELECT c.id FROM clients c JOIN (SELECT id FROM versions) v ON v.id = c.id');
+        $this->assert_rechaza('funcion_no_permitida', 'SELECT (SELECT name FROM versions LIMIT 1) FROM clients');
+        $this->assert_rechaza('comodin_en_parentesis', 'SELECT t.id FROM (SELECT * FROM clients) t');
+        $this->assert_rechaza('comodin_en_parentesis', 'SELECT id FROM clients WHERE (SELECT * FROM versions LIMIT 1) = 1');
+        $this->assert_rechaza('operacion_no_permitida', 'SELECT id FROM clients WHERE (id) IN (TABLE versions)');
+        $this->assert_rechaza('operacion_no_permitida', 'SELECT id FROM clients WHERE (id, name) IN (VALUES ROW(1, 2))');
+
+        /* Y un nombre sensible adentro de un paréntesis de agrupación sigue siendo sensible. */
+        $this->assert_rechaza('campo_sensible', 'SELECT id FROM clients WHERE is_active = 1 AND (api_key LIKE \'a%\' OR id = 1)');
+    }
+
+    public function test_una_multiplicacion_dentro_de_un_parentesis_se_admite_y_un_comodin_no(): void
+    {
+        $this->assert_admite('SELECT SUM(precio_plan * cantidad_empleados) FROM clients');
+        $this->assert_admite('SELECT ROUND(total_mensualidad * 1.21, 2) FROM clients');
+        $this->assert_admite('SELECT ROUND((precio_plan + 1) * (cantidad_empleados - 1), 2) FROM clients');
+        $this->assert_admite('SELECT ROUND(2 * precio_plan * -1, 2) FROM clients');
+        $this->assert_admite('SELECT id FROM clients WHERE (c.precio_plan * 2) > 10');
+
+        foreach ([
+            'SELECT id FROM clients WHERE EXISTS (SELECT * FROM versions)',
+            'SELECT id FROM clients WHERE id IN (SELECT DISTINCT * FROM versions)',
+            'SELECT id FROM clients WHERE id IN (SELECT SQL_NO_CACHE * FROM versions)',
+            'SELECT id FROM clients WHERE id IN (SELECT ALL *, id FROM versions)',
+            'SELECT id FROM clients WHERE id IN (SELECT v.* FROM versions v)',
+            'SELECT id FROM clients WHERE id IN (SELECT id, * FROM versions)',
+            'SELECT COUNT(DISTINCT *) FROM clients',
+            'SELECT id FROM clients WHERE ( * ) = 1',
+            'SELECT id FROM clients WHERE (id, *) = (1, 2)',
+            'SELECT id FROM clients WHERE id IN (SELECT id * FROM versions)',
+            'SELECT GROUP_CONCAT(c.*) FROM clients c',
+        ] as $sql) {
+            $this->assert_rechaza('comodin_en_parentesis', $sql);
+        }
+    }
+
+    public function test_rechaza_una_consulta_que_nombra_una_columna_reservada(): void
+    {
+        $reservadas = array_keys((array) config('claude_admin_sql.columnas_reservadas'));
+
+        foreach (['request', 'response', 'raw', 'setup_data', 'ecommerce_setup_data', 'approval_payload', 'env_manual_values'] as $minima) {
+            $this->assertContains($minima, $reservadas, 'Falta una columna reservada obligatoria: ' . $minima);
+        }
+
+        foreach ($reservadas as $columna) {
+            foreach ([
+                'SELECT ' . $columna . ' FROM clients',
+                'SELECT ' . mb_strtoupper($columna, 'UTF-8') . ' AS x FROM clients',
+                'SELECT id FROM clients WHERE c.' . $columna . ' LIKE \'a%\'',
+                'SELECT id FROM clients ORDER BY ' . $columna,
+                'SELECT JSON_EXTRACT(' . $columna . ', \'$.a\') FROM clients',
+            ] as $sql) {
+                $this->assert_rechaza('campo_sensible', $sql);
+            }
+        }
+
+        /* 🔴 El caso que originó la lista: el SOAP de ARCA con el ticket de acceso. */
+        $this->assert_rechaza('campo_sensible', 'SELECT request, response FROM mensualidad_invoices');
+        $this->assert_rechaza('campo_sensible', 'SELECT id FROM mensualidad_invoices WHERE request LIKE \'%Token%\'');
+
+        /* Es por PALABRA: un nombre que solo la contiene, o el mismo texto dentro de un literal, pasan. */
+        $this->assert_admite('SELECT requested_at, logo_url, pinned_at, deadline FROM leads');
+        $this->assert_admite('SELECT id FROM support_messages WHERE body LIKE \'%request%\' OR body = \'la clave\'');
+
+        /* Y cada reservada dice por qué. */
+        foreach ((array) config('claude_admin_sql.columnas_reservadas') as $columna => $motivo) {
+            $this->assertGreaterThan(20, strlen(trim((string) $motivo)), 'La columna reservada "' . $columna . '" no dice por qué.');
+        }
     }
 
     public function test_rechaza_lo_que_no_es_una_consulta_de_texto_con_largo_valido(): void
@@ -243,7 +366,7 @@ class ValidadorDeSqlDeLecturaDelAdminTest extends TestCase
         $this->assert_rechaza('funcion_no_permitida', 'SELECT USER()');
         $this->assert_rechaza('funcion_no_permitida', 'SELECT HEX(name) FROM clients');
         $this->assert_rechaza('funcion_no_permitida', 'SELECT JSON_OBJECT(\'a\', name) FROM clients');
-        $this->assert_rechaza('funcion_no_permitida', 'SELECT id FROM clients WHERE is_active = 1 AND (estado = \'a\' OR estado = \'b\')');
+        $this->assert_rechaza('funcion_no_permitida', 'SELECT id FROM clients WHERE is_active = 1 AND USER() = \'x\'');
         $this->assert_rechaza('operacion_no_permitida', 'SELECT LOAD_FILE(\'/etc/passwd\')');
         $this->assert_rechaza('operacion_no_permitida', 'SELECT BENCHMARK(1000000, 1)');
         $this->assert_rechaza('operacion_no_permitida', 'SELECT GET_LOCK(\'x\', 10)');

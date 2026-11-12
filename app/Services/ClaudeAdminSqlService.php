@@ -108,6 +108,12 @@ class ClaudeAdminSqlService
 
             $this->limitar_el_tiempo($pdo);
 
+            /* El validador lee la consulta con las reglas de MySQL por defecto: `\'` escapa una
+               comilla y las comillas dobles no son identificadores. Si el servidor tuviera
+               `NO_BACKSLASH_ESCAPES` o `ANSI_QUOTES`, validador y MySQL leerían cosas distintas; se
+               los saca de ESTA sesión, que es descartable. */
+            $pdo->exec("SET SESSION sql_mode = REPLACE(REPLACE(REPLACE(@@SESSION.sql_mode, 'NO_BACKSLASH_ESCAPES', ''), 'ANSI_QUOTES', ''), 'ANSI', '')");
+
             $pdo->exec('SET SESSION TRANSACTION READ ONLY');
             $pdo->exec('START TRANSACTION READ ONLY');
 
@@ -284,6 +290,10 @@ class ClaudeAdminSqlService
             return $mascara;
         }
 
+        if ($clave !== '' && $this->es_una_columna_reservada($clave)) {
+            return $mascara;
+        }
+
         if (is_array($valor)) {
             foreach ($valor as $k => $v) {
                 $valor[$k] = $this->redactar($v, (string) $k);
@@ -305,6 +315,8 @@ class ClaudeAdminSqlService
             }
         }
 
+        $valor = $this->tapar_etiquetas_de_credenciales($valor, $patron, $mascara);
+
         $tapado = preg_replace('~(Bearer\s+)[A-Za-z0-9._\~+/\-]+~i', '$1' . $mascara, $valor);
         $tapado = $tapado === null ? $valor : $tapado;
 
@@ -318,6 +330,70 @@ class ClaudeAdminSqlService
         $oculto = SupportImplementationContextService::ocultar_claves($tapado);
 
         return $oculto === null ? $tapado : $oculto;
+    }
+
+    /**
+     * ¿El nombre (de columna o de clave de JSON) está en `claude_admin_sql.columnas_reservadas`?
+     * Sin distinguir mayúsculas.
+     *
+     * @param string $nombre Nombre a mirar.
+     *
+     * @return bool
+     */
+    private function es_una_columna_reservada($nombre)
+    {
+        $nombre = mb_strtolower((string) $nombre, 'UTF-8');
+
+        foreach ((array) config('claude_admin_sql.columnas_reservadas') as $reservada => $motivo) {
+            if (mb_strtolower((string) $reservada, 'UTF-8') === $nombre) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Tapa el contenido de las etiquetas XML/HTML de credenciales: las que se llaman `Token`,
+     * `Sign`, `Password` o `Clave`, y toda etiqueta cuyo nombre matchee el patrón sensible. Con o
+     * sin prefijo de namespace (`<ar:Token>`), con atributos, sin distinguir mayúsculas, y también
+     * cuando el XML viene escapado (`&lt;Token&gt;…&lt;/Token&gt;`), que es como queda un SOAP
+     * guardado adentro de otro.
+     *
+     * 🔴 POR QUÉ: el ticket de acceso de ARCA viaja como `<Auth><Token>…</Token><Sign>…</Sign>` y
+     * ninguna de las otras reglas de texto (Bearer, `clave=valor`) lo ve. La columna que lo guarda
+     * está reservada; esto es la segunda reja, para el próximo XML que aparezca en otra columna.
+     *
+     * @param string $valor   Texto.
+     * @param string $patron  Patrón sensible (sin delimitadores).
+     * @param string $mascara Máscara.
+     *
+     * @return string
+     */
+    private function tapar_etiquetas_de_credenciales($valor, $patron, $mascara)
+    {
+        if (strpos($valor, '<') === false && stripos($valor, '&lt;') === false) {
+            return $valor;
+        }
+
+        $nombre = '(?:[\w.\-]+:)?(?:Token|Sign|Password|Clave'
+            . ($patron === '' ? '' : '|[\w.\-]*(?:' . $patron . ')[\w.\-]*')
+            . ')';
+
+        $tapado = preg_replace(
+            '~<(' . $nombre . ')(\s[^<>]*)?>.*?</\1\s*>~is',
+            '<$1$2>' . $mascara . '</$1>',
+            $valor
+        );
+        $tapado = $tapado === null ? $valor : $tapado;
+
+        $escapado = preg_replace(
+            '~&lt;(' . $nombre . ')((?:\s(?:(?!&gt;).)*)?)&gt;.*?&lt;/\1\s*&gt;~is',
+            '&lt;$1$2&gt;' . $mascara . '&lt;/$1&gt;',
+            $tapado
+        );
+
+        return $escapado === null ? $tapado : $escapado;
     }
 
     /**
