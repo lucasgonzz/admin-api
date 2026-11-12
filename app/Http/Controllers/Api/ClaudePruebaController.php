@@ -89,6 +89,7 @@ class ClaudePruebaController extends Controller
             'generado_at'   => Carbon::now()->toIso8601String(),
             'vencidas_dias' => $dias,
             'hitos_fuente'  => $en_vivo ? 'instancia' : 'admin',
+            'novedades_alcance' => \App\Services\Prueba\PruebaSettings::novedades_alcance(),
             'hitos_catalogo' => PruebaDelClienteService::HITOS,
             'totales'       => $totales,
             'pruebas'       => $filas,
@@ -109,7 +110,8 @@ class ClaudePruebaController extends Controller
         $lead      = $pruebas->lead_del_cliente($client);
         $en_prueba = PruebaCicloService::esta_en_prueba($client);
         $dias      = $pruebas->datos($client);
-        $hitos     = $pruebas->hitos($client, $lead, $en_vivo && $en_prueba);
+        /* Lectura interna: el catálogo entero de hitos, sin mirar el alcance de las novedades. */
+        $hitos     = $pruebas->hitos($client, $lead, $en_vivo && $en_prueba, true);
         $instancia = TrialInstance::where('client_id', (int) $client->id)->orderByDesc('id')->first();
         $encuesta  = PruebaEncuesta::where('client_id', (int) $client->id)->first();
 
@@ -142,6 +144,8 @@ class ClaudePruebaController extends Controller
             'nombre'         => $client->resolve_display_name(),
             'estado'         => (string) $client->estado,
             'es_ensayo'      => (bool) $client->es_ensayo,
+            /* Si a este negocio le llegan las novedades (encuesta, aviso de que termina, correos por paso…). */
+            'recibe_novedades' => \App\Services\Prueba\PruebaSettings::novedades_para($client),
             'lead_id'        => $lead !== null ? (int) $lead->id : null,
             'contacto'       => $lead !== null ? trim((string) $lead->contact_name) : null,
             'tiene_correo'   => (bool) filter_var(trim((string) $client->email), FILTER_VALIDATE_EMAIL),

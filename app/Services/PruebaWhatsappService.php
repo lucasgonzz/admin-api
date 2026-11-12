@@ -211,7 +211,7 @@ class PruebaWhatsappService
                 ->pluck('plantilla');
 
             $ya = $enviadas->isNotEmpty();
-            $plantilla = $ya ? PruebaPlantillasService::ASISTENTE_LISTO : $this->plantillas->bienvenida_vigente(true);
+            $plantilla = $ya ? PruebaPlantillasService::ASISTENTE_LISTO : $this->plantillas->bienvenida_vigente(true, $client);
             $instancia = $lead !== null ? Prueba\PruebaAsistenteService::instancia_vigente($client) : null;
             if ($instancia !== null) {
                 $falta_correo = $instancia->correo_bienvenida_at === null && filter_var((string) $client->email, FILTER_VALIDATE_EMAIL);
@@ -236,7 +236,7 @@ class PruebaWhatsappService
                 return ['estado' => 'ya_enviada', 'detalle' => null];
             }
 
-            return $this->con_video_de_bienvenida($client, $this->enviar_plantilla_por_ticket($client, $lead, $this->plantillas->bienvenida_vigente(false), null, true));
+            return $this->con_video_de_bienvenida($client, $this->enviar_plantilla_por_ticket($client, $lead, $this->plantillas->bienvenida_vigente(false, $client), null, true));
     }
 
     /**
@@ -274,7 +274,8 @@ class PruebaWhatsappService
                 return;
             }
 
-            if (! in_array($estado, ['en_cola', 'fallido'], true) || $this->bienvenida_del_sistema($client) !== null) {
+            if (! in_array($estado, ['en_cola', 'fallido'], true) || ! Prueba\PruebaSettings::novedades_para($client)
+                || $this->bienvenida_del_sistema($client) !== null) {
                 return;
             }
 
@@ -538,6 +539,10 @@ class PruebaWhatsappService
      */
     protected function correo_del_paso(Client $client, ?Lead $lead, string $hito): void
     {
+        if (! Prueba\PruebaSettings::novedades_para($client)) {
+            return;
+        }
+
         try {
             app(Prueba\PruebaCorreoService::class)->enviar_paso($client, $lead, $hito);
         } catch (\Throwable $e) {
@@ -563,7 +568,7 @@ class PruebaWhatsappService
      */
     public function avisar_al_negocio_que_esta_por_terminar(Client $client, ?Lead $lead, array $datos): ?array
     {
-        if ($datos['dia_actual'] === null || $datos['vencida'] === true
+        if (! Prueba\PruebaSettings::novedades_para($client) || $datos['dia_actual'] === null || $datos['vencida'] === true
             || (int) $datos['dia_actual'] < PruebaDelClienteService::DIA_DEL_AVISO_A_TOMAS) {
             return null;
         }

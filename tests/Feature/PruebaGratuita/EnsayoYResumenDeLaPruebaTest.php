@@ -273,6 +273,7 @@ class EnsayoYResumenDeLaPruebaTest extends BaseDeLaPrueba
         $this->espiar_sender();
         $this->preparar();
         [$client] = $this->negocio();
+        \App\Models\AdminSetting::set(\App\Services\Prueba\PruebaSettings::KEY_NOVEDADES_ALCANCE, 'todos');
 
         app(PruebaCicloService::class)->contratar($client);
 

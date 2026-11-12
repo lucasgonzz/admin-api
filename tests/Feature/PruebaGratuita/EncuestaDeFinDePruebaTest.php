@@ -23,6 +23,15 @@ use Illuminate\Support\Facades\Mail;
  */
 class EncuestaDeFinDePruebaTest extends BaseDeLaPrueba
 {
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        /* Estas pruebas miden las novedades prendidas para todos los negocios; el alcance `ensayo` (el default)
+           tiene su prueba aparte en AlcanceDeLasNovedadesTest. */
+        \App\Models\AdminSetting::set(\App\Services\Prueba\PruebaSettings::KEY_NOVEDADES_ALCANCE, 'todos');
+    }
+
     /**
      * Un negocio en prueba cuya fecha pasó hace unos minutos, con correo y su lead.
      *

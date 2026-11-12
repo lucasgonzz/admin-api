@@ -190,16 +190,21 @@ class PruebaPlantillasService
      * La plantilla de bienvenida que corresponde mandar HOY: la v2 si el setting no la apaga
      * (`prueba_bienvenida_version`, default `v2`) y Meta ya la aprobó; si no, la v1 de siempre.
      *
-     * @param bool $con_asistente true = la variante que presenta el número del asistente personal.
+     * Con un cliente, además respeta el alcance de las novedades (`prueba_novedades_alcance`): fuera del alcance
+     * sale siempre la v1.
+     *
+     * @param bool                    $con_asistente true = la variante que presenta el número del asistente personal.
+     * @param \App\Models\Client|null $client
      *
      * @return string
      */
-    public function bienvenida_vigente(bool $con_asistente): string
+    public function bienvenida_vigente(bool $con_asistente, ?\App\Models\Client $client = null): string
     {
         $v1 = $con_asistente ? self::BIENVENIDA_CON_ASISTENTE : self::BIENVENIDA;
         $v2 = $con_asistente ? self::BIENVENIDA_CON_ASISTENTE_V2 : self::BIENVENIDA_V2;
 
-        if (\App\Services\Prueba\PruebaSettings::bienvenida_version() !== 'v2') {
+        if (\App\Services\Prueba\PruebaSettings::bienvenida_version() !== 'v2'
+            || ($client !== null && ! \App\Services\Prueba\PruebaSettings::novedades_para($client))) {
             return $v1;
         }
 

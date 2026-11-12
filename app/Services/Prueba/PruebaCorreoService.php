@@ -115,7 +115,7 @@ class PruebaCorreoService
 
         $hosts = PruebaNombres::hosts_del_slug((string) $instancia->alias_slug);
         /* El video de bienvenida y recorrido (04), si está configurado, va en el mismo correo. */
-        $video = self::video_del_paso('ingreso');
+        $video = PruebaSettings::novedades_para($client) ? self::video_del_paso('ingreso') : null;
         $mail = new ComercioCityMail(new ComercioCityMailPayload([
             'subject' => 'Tu prueba de ComercioCity ya está lista',
             'title' => 'Tu prueba de siete días ya está lista',

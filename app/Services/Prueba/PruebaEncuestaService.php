@@ -112,6 +112,11 @@ class PruebaEncuestaService
             return ['estado' => 'apagada', 'whatsapp' => null, 'correo' => null, 'encuesta_id' => null];
         }
 
+        /* Con `prueba_novedades_alcance = ensayo` (el default), solo a los clientes de ensayo. */
+        if (! PruebaSettings::novedades_para($client)) {
+            return ['estado' => 'fuera_de_alcance', 'whatsapp' => null, 'correo' => null, 'encuesta_id' => null];
+        }
+
         $lead     = app(PruebaDelClienteService::class)->lead_del_cliente($client);
         $encuesta = $this->para_cliente($client, $lead, $motivo);
 
@@ -187,7 +192,7 @@ class PruebaEncuestaService
 
         $resultados = [];
         foreach ($clientes as $client) {
-            if ($this->ya_salio_por_los_dos_canales($client)) {
+            if (! PruebaSettings::novedades_para($client) || $this->ya_salio_por_los_dos_canales($client)) {
                 continue;
             }
 

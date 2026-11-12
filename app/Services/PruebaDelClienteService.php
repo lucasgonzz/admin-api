@@ -70,6 +70,12 @@ class PruebaDelClienteService
         'agente'          => 'Habló con su agente personal',
     ];
 
+    /**
+     * Los hitos que sumó la misión prueba-e2e-campana-imperio (11/11/2026). Mientras el alcance de las novedades
+     * sea `ensayo`, solo se le muestran y se le piden a un cliente de ensayo ({@see self::hitos()}).
+     */
+    const HITOS_NUEVOS = ['articulo_actualizado', 'venta_cc'];
+
     /** El hito de C2 que cierra la prueba. No es un paso: es el fin. */
     const HITO_VENCIDA = 'vencida';
 
@@ -359,13 +365,36 @@ class PruebaDelClienteService
      * @param Client    $client
      * @param Lead|null $lead
      * @param bool      $consultar_instancia false = solo locales (para no pegarle al cliente, p. ej. en un listado).
+     * @param bool      $completo            true = siempre el catálogo entero (lecturas internas). Por defecto, a un
+     *                                       cliente fuera del alcance de las novedades (`prueba_novedades_alcance`) no
+     *                                       se le cuentan los {@see self::HITOS_NUEVOS}: ve y recibe lo de siempre.
      *
      * `sin_soporte` son los hitos del catálogo que la instancia NO informa (una versión del sistema anterior a
      * ese hito no trae su clave): no se le pueden pedir al negocio porque nunca figurarían como hechos.
      *
      * @return array{fuente: string, hitos: array<string, string|null>, sin_soporte: array<int, string>, semilla_presente: bool|null, vence_at: string|null, vencida: bool|null, imagenes: array|null, cupo_imagenes_estado: string|null}
      */
-    public function hitos(Client $client, ?Lead $lead, bool $consultar_instancia = true): array
+    public function hitos(Client $client, ?Lead $lead, bool $consultar_instancia = true, bool $completo = false): array
+    {
+        $resultado = $this->hitos_completos($client, $lead, $consultar_instancia);
+
+        if (! $completo && ! Prueba\PruebaSettings::novedades_para($client)) {
+            foreach (self::HITOS_NUEVOS as $nuevo) {
+                unset($resultado['hitos'][$nuevo]);
+            }
+            /* Y tampoco se le piden: el próximo paso los saltea. */
+            $resultado['sin_soporte'] = array_values(array_unique(array_merge($resultado['sin_soporte'], self::HITOS_NUEVOS)));
+        }
+
+        return $resultado;
+    }
+
+    /**
+     * {@see self::hitos()} con el catálogo entero, sin mirar el alcance.
+     *
+     * @return array<string, mixed>
+     */
+    protected function hitos_completos(Client $client, ?Lead $lead, bool $consultar_instancia): array
     {
         $remoto = $consultar_instancia ? $this->estado_remoto($client) : null;
         $base   = $this->hitos_locales($lead);
