@@ -205,6 +205,29 @@ class PruebaPlantillasService
     const EJEMPLO_NOMBRE = 'Marcela';
 
     /**
+     * Las frases de los pasos que prometen un video «si querés» (12/11/2026). Por WhatsApp las contesta Martín; en la
+     * conversación del sistema de un ensayo no hay quien las cumpla: se sacan y, si el paso tiene video, va el video.
+     */
+    const PROMESAS_DE_VIDEO = [
+        'Si querés te paso un video de cómo se hace.',
+        'Te paso un video si lo necesitás.',
+    ];
+
+    /**
+     * El texto sin las promesas de video ({@see self::PROMESAS_DE_VIDEO}), con los espacios que quedan sueltos limpios.
+     *
+     * @param string $texto
+     *
+     * @return string
+     */
+    public static function sin_promesa_de_video(string $texto): string
+    {
+        $limpio = str_replace(self::PROMESAS_DE_VIDEO, '', $texto);
+
+        return trim((string) preg_replace('/ {2,}/', ' ', $limpio));
+    }
+
+    /**
      * Nombre de la plantilla del empujón de un hito.
      *
      * @param string $hito

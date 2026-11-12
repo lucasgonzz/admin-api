@@ -1452,6 +1452,9 @@ class PruebaWhatsappService
     protected function plantilla_al_sistema_del_ensayo(Client $client, ?Lead $lead, string $plantilla, ?string $hito, $numero_asistente): array
     {
         $texto = $this->plantillas->cuerpo_renderizado($plantilla, $this->primer_nombre($client, $lead, ''), $numero_asistente);
+        if ($hito !== null && strpos($plantilla, PruebaPlantillasService::PASO_PREFIJO) === 0) {
+            $texto = self::paso_con_su_video($texto, $hito);
+        }
         $envio = app(Prueba\PruebaEnsayoSinWhatsappService::class)->dejar($client, $texto);
 
         $this->registrar($client, $lead, $plantilla, $hito,
@@ -1469,6 +1472,30 @@ class PruebaWhatsappService
 
         return ['estado' => $envio['enviado'] ? 'enviado' : 'fallido', 'detalle' => $envio['motivo'],
             'whatsapp_message_id' => null, 'support_ticket_id' => $envio['support_ticket_id']];
+    }
+
+    /**
+     * El texto de un paso para la conversación del sistema (12/11/2026). La plantilla de WhatsApp es solo texto y
+     * algunas prometen «si querés te paso un video»: por el sistema la promesa se saca y, si el paso tiene video, va
+     * el MISMO que lleva el correo del paso (`PruebaCorreoService::video_del_paso()`, catálogo aprobado). La URL va
+     * suelta al final de su línea, como la mandan Martín y el respaldo: el chat de Soporte del sistema la muestra
+     * como reproductor (`Conversation.vue`, URL de `videos.comerciocity.store/landing-prueba/…mp4`).
+     *
+     * @param string $texto La plantilla ya resuelta.
+     * @param string $hito
+     *
+     * @return string
+     */
+    public static function paso_con_su_video(string $texto, string $hito): string
+    {
+        $texto = PruebaPlantillasService::sin_promesa_de_video($texto);
+        $video = Prueba\PruebaCorreoService::video_del_paso($hito);
+
+        if ($video === null) {
+            return $texto;
+        }
+
+        return $texto . "\n\n" . 'Te dejo un video de cómo se hace, «' . $video['titulo'] . '»: ' . $video['url'];
     }
 
     /**
