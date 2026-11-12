@@ -373,7 +373,43 @@ class SupportTourService
         }
 
         return $this->invitacion_del_turno($ticket, $entrante)
-            ?? $this->invitacion_anterior_al_aviso($ticket, $entrante);
+            ?? $this->invitacion_anterior_al_aviso($ticket, $entrante)
+            ?? ($this->es_pedido_propio($ticket, $entrante) ? $entrante : null);
+    }
+
+    /**
+     * La persona pidió el recorrido con sus palabras («mostrámelo con el robotito ese»), sin que hubiera una
+     * invitación pendiente (ticket 107, 12/11/2026). Ese pedido ES el consentimiento: no hace falta invitarla para
+     * que conteste «sí». El mensaje hace de invitación y de aceptación, como la pregunta escrita dentro de una guía.
+     */
+    private function es_pedido_propio(SupportTicket $ticket, SupportMessage $entrante): bool
+    {
+        if ($entrante->kind !== 'text' || ($ticket->source === 'erp' && ! self::entrada_erp_verificada($ticket, $entrante))) {
+            return false;
+        }
+
+        return self::pide_recorrido(self::normalizar_respuesta($entrante));
+    }
+
+    /**
+     * @param string $respuesta Ya normalizada (minúsculas, sin acentos).
+     */
+    public static function pide_recorrido(string $respuesta): bool
+    {
+        // Un mensaje que empieza con un sí contesta algo: lo resuelven las reglas de la invitación, que exigen que
+        // esté entregada y sea contigua. Y rechazarlo o preguntar qué es no es pedirlo.
+        if (preg_match('/^(?:si+|sip|dale|ok|okey|bueno|claro|obvio|de una|de acuerdo)\b/', $respuesta)
+            || preg_match('/\b(?:no|nunca|tampoco|sin)\b[^.!?]{0,40}\b(?:robotito|tour|recorrido)\b/', $respuesta)
+            || preg_match('/\b(?:que es|quien es|para que sirve|como funciona)\b[^.!?]{0,40}\b(?:robotito|tour)\b/', $respuesta)) {
+            return false;
+        }
+
+        return (bool) preg_match(
+            '/\b(?:mostrame|mostramelo|muestrame|muestramelo|mostras|mostrar|ensename|ensenamelo|ensenas|preparame|preparamelo|armame|armamelo'
+            . '|mandame|mandamelo|pasame|pasamelo|enviame|enviamelo|guiame|explicame|explicamelo|haceme|hacelo|hagamos|quiero|queria|quisiera'
+            . '|necesito|prefiero|dale)\b[^?]{0,80}\b(?:robotito|tour|recorrido guiado)\b/',
+            $respuesta
+        );
     }
 
     private function invitacion_del_turno(SupportTicket $ticket, SupportMessage $entrante): ?SupportMessage
@@ -445,9 +481,14 @@ class SupportTourService
         if (self::aceptacion_explicita($respuesta) || self::aceptacion_nombrando_a_robotito($respuesta)) {
             return true;
         }
+        if (preg_match('/[?¿]/u', preg_replace('~https?://\S+~u', '', self::quitar_invitacion($texto)))) {
+            return false;
+        }
+        if (self::aceptacion_insistente($respuesta)) {
+            return true;
+        }
 
-        return ! preg_match('/[?¿]/u', preg_replace('~https?://\S+~u', '', self::quitar_invitacion($texto)))
-            && preg_match('/^(?:si|dale|de una|de acuerdo|(?:ok|bueno)[,.! ]+dale)(?:[,.! ]+(?:si|dale|quiero|mandamelo|preparamelo|pasamelo|enviamelo|por favor|porfa|por fi|gracias|me (?:sirve|vendria bien|gustaria)|quiero que (?:me )?lo prepares))*[.!, ]*$/D', $respuesta);
+        return (bool) preg_match('/^(?:si|dale|de una|de acuerdo|(?:ok|bueno)[,.! ]+dale)(?:[,.! ]+(?:si|dale|quiero|mandamelo|preparamelo|pasamelo|enviamelo|por favor|porfa|por fi|gracias|me (?:sirve|vendria bien|gustaria)|quiero que (?:me )?lo prepares))*[.!, ]*$/D', $respuesta);
     }
 
     private function invitacion_anterior_al_aviso(SupportTicket $ticket, SupportMessage $entrante): ?SupportMessage
@@ -523,6 +564,26 @@ class SupportTourService
             . '[a-z ,]{0,60}\b(?:robotito|tour|recorrido)\b[a-z .,!]{0,40}$/D',
             $respuesta
         );
+    }
+
+    /**
+     * «sí, ya te dije que sí», «sí sí, dale nomás», «dale, hacelo»: un sí que no calza en la lista corta de arriba
+     * (ticket 107, 12/11/2026: esa respuesta daba `tour_consent_required` y el dueño había aceptado dos veces).
+     * Tiene que EMPEZAR con el sí, ser breve y no traer pregunta, negación ni condición. Solo vale si la invitación
+     * era la única pregunta del mensaje: lo decide quien llama.
+     *
+     * @param string $respuesta Ya normalizada (minúsculas, sin acentos).
+     */
+    private static function aceptacion_insistente(string $respuesta): bool
+    {
+        if (mb_strlen($respuesta) > 80
+            || preg_match('/[?¿]|\b(?:no|nunca|tampoco|todavia|despues|luego|mas tarde|otro dia|pero|aunque|antes|primero|salvo|si no)\b/', $respuesta)
+            // Sin acentos «sí» y «si» se escriben igual: «si me decís cuánto sale» es una condición.
+            || preg_match('/^si (?:me|te|se|lo|la|el|es|hay|podes|puedo|puede|queres|tenes|tengo|fuera|funciona|sirve)\b/', $respuesta)) {
+            return false;
+        }
+
+        return (bool) preg_match('/^(?:si+|sip|dale|claro|obvio|de una|de acuerdo)\b/', $respuesta);
     }
 
     private static function aceptacion_explicita(string $respuesta): bool
