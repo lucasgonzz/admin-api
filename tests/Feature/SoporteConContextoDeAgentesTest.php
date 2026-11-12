@@ -222,6 +222,57 @@ class SoporteConContextoDeAgentesTest extends TestCase
         $this->assertStringContainsString('"data":{}', (string) $respuesta->getContent(), 'Una etapa sin datos viaja como objeto JSON.');
     }
 
+    /** El contexto del circuito actual distingue los hitos reales de Lite y oculta el número personal también en la entrega. */
+    public function test_lite_flujo_dos_expone_entrega_y_pendientes_sin_el_telefono_personal(): void
+    {
+        $personal = '+5493415550199';
+        $client = $this->cliente('Entrega personal Lite');
+        $client->update(['asistente_phone' => $personal, 'asistente_whatsapp_activo' => true]);
+        $alta = $this->postJson('/api/claude/agent-implementations', ['client_id' => $client->id, 'paquete' => 'lite'], $this->headers);
+        $alta->assertCreated();
+        $id = (int) $alta->json('model.id');
+        $ruta = '/api/claude/agent-implementations/' . $id . '/stages/1';
+        $ticket = $this->ticket($client);
+
+        $this->postJson($ruta, ['status' => 'in_progress', 'data' => [
+            'version_ok' => true, 'extension_ok' => true,
+            'numero_personal_solicitado' => true, 'numero_personal_cargado' => true,
+            'asistente_whatsapp_activo' => true, 'agente_personal_probado' => true,
+            // Si alguien deja el número en una nota o en data, el contexto tampoco debe exponerlo.
+            'observacion' => 'La prueba se hizo desde ' . $personal,
+        ]], $this->headers)->assertOk();
+
+        $respuesta = $this->contexto($ticket);
+        $respuesta->assertJsonPath('ticket.implementation.agentes.paquete', 'lite')
+            ->assertJsonPath('ticket.implementation.agentes.flujo_version', 2)
+            ->assertJsonPath('ticket.implementation.agentes.camino', null)
+            ->assertJsonPath('ticket.implementation.agentes.conectado', false)
+            ->assertJsonPath('ticket.implementation.agentes.entrega_personal.requerida', true)
+            ->assertJsonPath('ticket.implementation.agentes.entrega_personal.completa', false)
+            ->assertJsonPath('ticket.implementation.agentes.entrega_personal.instancias.0.completa', true)
+            ->assertJsonPath('ticket.implementation.agentes.entrega_personal.instancias.1.completa', false)
+            ->assertJsonPath('ticket.implementation.agentes.entrega_personal.instancias.2.completa', false)
+            ->assertJsonPath('ticket.implementation.agentes.etapas.1.estado', 'skipped');
+        $pendientes = $respuesta->json('ticket.implementation.agentes.entrega_personal.pendientes');
+        $this->assertContains('onboarding_completado', $pendientes);
+        $this->assertContains('pdf_agentes_enviado', $pendientes);
+        $this->assertNotContains('agente_personal_probado', $pendientes);
+        $this->assertStringNotContainsString('5493415550199', json_encode($respuesta->json('ticket.implementation')));
+
+        $this->postJson($ruta, ['status' => 'completed', 'data' => [
+            'app_link_enviado' => true, 'acceso_sistema_verificado' => true,
+            'onboarding_completado' => true, 'pdf_agentes_enviado' => true,
+            'pdf_agentes_url' => 'https://admin.ejemplo.test/api/guias/agentes-ia-primeros-pasos.pdf?contacto=5493415550199',
+        ]], $this->headers)->assertOk();
+
+        $entregada = $this->contexto($ticket);
+        $entregada->assertJsonPath('ticket.implementation.agentes.entrega_personal.completa', true)
+            ->assertJsonPath('ticket.implementation.agentes.entrega_personal.pendientes', [])
+            ->assertJsonPath('ticket.implementation.agentes.entrega_personal.instancias.2.completa', true);
+        $this->assertStringNotContainsString('5493415550199', json_encode($entregada->json('ticket.implementation')));
+        $this->assertStringContainsString('[número]', $entregada->json('ticket.implementation.agentes.entrega_personal.pdf_agentes_url'));
+    }
+
     /**
      * A un empleado no le viajan los eventos (null, como la conversación de sistema y tienda); las etapas sí. Al
      * dueño le viajan.
