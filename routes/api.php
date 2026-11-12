@@ -385,6 +385,11 @@ Route::middleware('claude.task.key')
         Route::put('support-codex/settings', 'Api\ClaudeSupportCodexController@update_settings');
         Route::post('support-codex/health', 'Api\ClaudeSupportCodexController@health');
         Route::get('support-codex/pending', 'Api\ClaudeSupportCodexController@pending');
+        // Lectura del admin para soporte (misión acceso-soporte-al-admin-lectura, 11/11/2026): las tres son de
+        // solo lectura. admin-sql va por POST porque la consulta viaja en el cuerpo, no porque escriba.
+        Route::get('support-codex/client-versions', 'Api\ClaudeSupportAdminLecturaController@client_versions');
+        Route::get('support-codex/feature-lookup', 'Api\ClaudeSupportAdminLecturaController@feature_lookup');
+        Route::post('support-codex/admin-sql', 'Api\ClaudeSupportAdminLecturaController@admin_sql');
         Route::get('support-codex/erp-verification', 'Api\ClaudeSupportCodexController@erp_verification_candidates');
         Route::post('support-codex/erp-verification', 'Api\ClaudeSupportCodexController@erp_verification_confirm');
         Route::get('support-codex/local-missions', [\App\Http\Controllers\Api\LocalMisionesController::class, 'pendientes']);

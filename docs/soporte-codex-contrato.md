@@ -301,3 +301,76 @@ Política anterior modificada por pedido explícito de Lucas: «Gracias» tras �
 `POST support-codex/tickets/{id}/verify-scheduled-upgrade` recibe `agreement_id`, `upgrade_id`, `mission_thread_id`, `mission_hash`, `resultado` (`verificado` o `inconcluso`) y `evidencia` textual de reproducción de solo lectura. `verification_pending` requiere versión/frente/configuración confirmados y comprobación de HTTP. La reproducción verificada permite que el agente pida confirmación al cliente. El ticket sigue abierto y el envío conserva la ventana de WhatsApp. Con capacidad `verification_fallback`, el monitor puede adjuntar `motivo=verificacion_sin_resultado` a un inconcluso. Ese fallback conserva cualquier evidencia que haya llegado antes.
 
 El flag `SUPPORT_CODEX_SCHEDULED_UPGRADES_ENABLED` habilita el comando por minuto y la capacidad `scheduled_upgrade`. El valor por defecto es falso. El scheduler usa la cola `database` del admin y la preparación/reproducción se mantienen en el monitor de soporte.
+
+## Lectura del admin para soporte (11/11/2026)
+
+Misión cruzada `acceso-soporte-al-admin-lectura`. Tres rutas de **solo lectura**, con la clave de ingesta (`X-Claude-Task-Key`) y `Accept: application/json`. No piden reserva ni ticket: el monitor las llama desde un ticket con ejecución vigente, pero el admin no lo exige. Todo es aditivo: ninguna ruta ni campo anterior cambia. Un admin que todavía no las tiene contesta 404 y el monitor lo trata como `disponible: false`.
+
+Errores: los de todo `claude/*` — 422 `{error, errores, ayuda}` por parámetros inválidos, 404 `{error}` por un `client_id` que no existe, 405 por un verbo que la ruta no admite.
+
+### `GET support-codex/client-versions`
+
+Query: `client_id` (entero, opcional), `q` (texto de hasta 100 caracteres; busca en `name`, `company_name` y `slug`), `limit` (1–200, default 50; fuera de rango se recorta) y `after_id` (cursor). Sin filtros lista todos los clientes, por `id` ascendente.
+
+```json
+{"data":[{"client_id":1,"name":"…","company_name":"…","slug":"…","estado":"…","is_active":true,
+  "sistema":{"version":"4.3.50","version_id":12,"published_at":"…","ultima_publicada":"4.3.51",
+             "al_dia":false,"versiones_pendientes":1,"hosting_type":"vps",
+             "ultimo_upgrade":{"id":9,"status":"…","to_version":"4.3.50","finished_at":"…"}},
+  "tiene_ecommerce":true,
+  "ecommerce":[{"id":3,"domain":"…","status":"…","version":"1.2.0","ultima_publicada":"1.2.1","al_dia":false}]}],
+ "ultima_version_sistema":"4.3.51","ultima_version_ecommerce":"1.2.1","has_more":false,"next_after_id":null,"server_time":"…"}
+```
+
+- `sistema.version`, `version_id`, `published_at`, `al_dia` y `versiones_pendientes` son `null` si el cliente no tiene `current_version_id`. `versiones_pendientes` cuenta las versiones **publicadas** posteriores a la del cliente.
+- `sistema.hosting_type` es el del frente activo (`clients.active_client_api_id`), o `null` si no tiene. `ultimo_upgrade` es el de `id` más alto del cliente, o `null`.
+- `ecommerce` es `[]` si el cliente no tiene tienda. Solo tiendas de clientes, nunca de demos. `version` y `al_dia` son `null` si la tienda no tiene versión registrada (instalada por la vía vieja).
+- «Publicada» es `versions.status = published` / `ecommerce_versions.status = published`. «Última» y «al día» se calculan por orden semántico del número (`VersionNumberComparator`), no por `id` ni como texto.
+- Las fechas van en ISO 8601. `has_more` acompaña a `next_after_id` (que es `null` en la última página).
+
+### `GET support-codex/feature-lookup`
+
+Query: `q` (requerido, 2–100 caracteres), `client_id` (opcional), `sistema` (`empresa` | `tienda`, opcional; default los dos) y `limit` (1–50, default 20).
+
+Busca cada palabra de `q` con LIKE, sin distinguir mayúsculas; tienen que aparecer **todas**. Para `empresa` mira las novedades activas (`version_notifications.title/body`, origen `novedad`) y las versiones (`versions.title/description`, origen `version`); para `tienda`, las versiones de tienda (`ecommerce_versions.title/description`, origen `version`). Entran versiones en cualquier estado. Las más nuevas primero (por fecha de publicación; sin publicar, por fecha de alta).
+
+```json
+{"q":"…","resultados":[{"sistema":"empresa","version":"4.3.40","version_status":"published","publicada":true,
+   "published_at":"…","titulo":"…","texto":"…","origen":"novedad",
+   "cliente":{"tiene":true,"version_cliente":"4.3.50","motivo":"…"}}],
+ "hay_mas":false,
+ "cliente":null,
+ "aviso":"La disponibilidad es por versión; una extensión o el plan pueden condicionarla."}
+```
+
+- `texto` va sin HTML, en una línea, con hasta 600 caracteres.
+- `cliente` (arriba) es `null` sin `client_id`, o un ítem con la misma forma que los de `client-versions`.
+- `resultados[].cliente` está siempre. `tiene` es `true` si la versión está publicada y la del cliente es igual o posterior; `false` si no (una versión en borrador: «todavía no se publicó»); `null` si no se pasó `client_id`, si el cliente no tiene versión registrada o, para `tienda`, si no tiene tienda o su tienda no tiene versión registrada. `motivo` lo explica siempre.
+- Para `tienda` se compara contra la(s) tienda(s) del cliente: con varias, `tiene` es `true` solo si todas la tienen, y `version_cliente` es la más vieja de las registradas.
+- **La disponibilidad es por versión.** Que el cliente esté en la versión no dice si tiene la extensión o el plan que la habilitan.
+
+### `POST support-codex/admin-sql`
+
+Body: `{"sql": "SELECT …"}` (1–12000 caracteres). SQL de solo lectura sobre la base del admin. Es POST porque la consulta viaja en el cuerpo; no escribe nada.
+
+```json
+{"ok":true,"read_only":true,"columns":["id","name"],"rows":[{"id":1,"name":"…"}],"row_count":1,"truncated":false}
+```
+
+Hasta 200 filas (`truncated: true` si había más) y los textos cortados a 4000 caracteres (terminan en ` [recortado]`). Cada fila es un objeto por nombre de columna; si dos columnas se llaman igual (un JOIN con `*`), queda la última: poné alias.
+
+Barreras, todas del lado del admin (el monitor valida además por su cuenta):
+
+- Una sola sentencia: sin `;`, `--`, `/*`, `#`, `@`, `\0` ni comillas dobles. Las cadenas entre comillas simples se vacían antes de analizar.
+- Solo `SELECT`, `EXPLAIN SELECT`, `SHOW TABLES`, `SHOW [FULL] COLUMNS FROM tabla` y `DESCRIBE tabla`. Sin `SHOW CREATE TABLE`, `UNION`, `WITH`, `TABLE` ni `VALUES`.
+- Palabras prohibidas y lista positiva de funciones iguales a `validar_sql` de `herramientas/soporte-codex/diagnostico.py`. Como allá, un paréntesis solo puede ir pegado a una función de la lista o a `IN`, `EXISTS`, `NOT`, `OVER`, `AS`: `AND (a OR b)` y `FROM (SELECT …)` se rechazan.
+- Sin `base.tabla` ni `information_schema` / `mysql` / `performance_schema` / `sys`.
+- `*` dentro de un paréntesis solo como `COUNT(*)` (también rechaza una multiplicación entre paréntesis).
+- Nombres sensibles en el texto → rechazo: `password|passwd|secret|token|api.?key|private.?key|session.?id|authorization|credential|clave.fiscal|encrypted|cifrad|p256dh|env_manual_values`. Alcanza a nombres de tablas y columnas que lo contienen (`client_ai_token_usages`, `input_tokens`).
+- Tablas vedadas (como palabra en la consulta, también en `SHOW COLUMNS` / `DESCRIBE`): la lista, con el motivo de cada una, está en `config/claude_admin_sql.php`.
+- Ejecución en una conexión aparte: `SET SESSION TRANSACTION READ ONLY` + transacción de solo lectura + `max_execution_time` de 8 s; siempre rollback.
+- Redacción del resultado: toda columna cuyo nombre matchee el patrón sensible sale como `[dato reservado]`, recursivo por clave dentro de un valor JSON. En los textos se tapa además lo que sigue a «contraseña» / «clave» (`[oculta]`, la misma regla que el contexto del ticket), un `Bearer …` y los `clave=valor` de nombres sensibles.
+
+Rechazo: 422 `{error, codigo}` con `codigo` = `consulta_invalida` | `varias_sentencias` | `comillas_dobles` | `campo_sensible` | `tabla_vedada` | `operacion_no_permitida` | `solo_select` | `otra_base` | `comodin_en_parentesis` | `funcion_no_permitida`. Si MySQL la rechaza: 422 `{error, codigo: "consulta_fallida", sqlstate, codigo_mysql}` con un resumen fijo, sin el mensaje crudo del driver.
+
+Lo que se puede leer incluye datos comerciales y de contacto de clientes y leads: es para uso interno de soporte. Qué se le dice a un cliente lo siguen gobernando las reglas de Martín.
