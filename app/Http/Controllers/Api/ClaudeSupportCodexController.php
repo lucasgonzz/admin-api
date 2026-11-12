@@ -54,7 +54,7 @@ class ClaudeSupportCodexController extends Controller
 
     public function pending(Request $request, SupportCodexService $service)
     {
-        return response()->json($service->pending($request->boolean('supports_upgrade_agreement')) + ['local_missions' => true]);
+        return response()->json($service->pending($request->boolean('supports_upgrade_agreement'), $request->boolean('supports_mission_progress')) + ['local_missions' => true]);
     }
 
     public function erp_verification_candidates(Request $request, SupportCodexErpVerificationService $service)
@@ -100,6 +100,8 @@ class ClaudeSupportCodexController extends Controller
             'dispatch_recovery' => 'sometimes|boolean',
             'execution_id' => 'required_if:dispatch_recovery,true|uuid',
             'supports_upgrade_agreement' => 'sometimes|boolean',
+            'supports_mission_progress' => 'sometimes|boolean',
+            'expected_progress_hash' => ['sometimes', 'string', 'regex:/^[a-f0-9]{64}$/'],
             'supports_trial_import_quiet' => 'sometimes|boolean',
             // Rotación del hilo de Codex (misión cruzada ficha-del-cliente, 11/11/2026): con thread_id nuevo y execution_id.
             'rotate_thread' => 'sometimes|boolean',
@@ -234,6 +236,8 @@ class ClaudeSupportCodexController extends Controller
             'action' => 'required|in:responder,solicitar_confirmacion,cerrar,escalar,pedir_revision',
             'body' => 'required|string|max:3500',
             'usage_answer' => 'sometimes|boolean|prohibited_unless:action,responder',
+            'mission_progress_hash' => ['sometimes', 'string', 'regex:/^[a-f0-9]{64}$/', 'prohibited_unless:action,responder'],
+            'mission_progress_state' => 'required_with:mission_progress_hash|in:identificado,en_correccion,integrada|prohibited_unless:action,responder',
             'tour_invitation' => 'sometimes|required|array|prohibited_unless:action,responder',
             'tour_requested' => 'sometimes|boolean|prohibited_unless:action,responder',
             'tour_import_history_id' => 'sometimes|required|integer|min:1|max:' . \App\Services\SupportTourService::MAX_IMPORT_HISTORY_ID,
@@ -303,6 +307,19 @@ class ClaudeSupportCodexController extends Controller
             'mission_hash' => 'required|string|size:64|regex:/^[a-f0-9]{64}$/',
         ]);
         return response()->json($service->mission_started((int) $id, $data));
+    }
+
+    public function mission_progress(Request $request, $id, SupportCodexService $service)
+    {
+        $data = $request->validate([
+            'mission_thread_id' => 'required|string|max:150|regex:/^[a-zA-Z0-9_-]+$/',
+            'mission_hash' => 'required|string|size:64|regex:/^[a-f0-9]{64}$/',
+            'estado' => 'required|in:identificado,en_correccion',
+            'causa' => 'required|string|min:5|max:1000',
+            'evidencia' => 'required|string|min:5|max:2000',
+            'alternativa' => 'nullable|string|max:1500',
+        ]);
+        return response()->json($service->register_mission_progress((int) $id, $data));
     }
 
     public function mission_fix_evidence(Request $request, $id, SupportCodexService $service)
