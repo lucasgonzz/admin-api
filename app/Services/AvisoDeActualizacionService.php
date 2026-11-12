@@ -556,6 +556,14 @@ class AvisoDeActualizacionService
            telefono-personal-del-dueno, 2/11/2026). */
         $telefono = trim((string) $client->telefono_personal());
 
+        /* Cliente de ensayo (12/11/2026): no recibe nada por WhatsApp, para no gastar la reputación de la línea. El
+           mail ya salió; se anota y no se llama a Kapso. */
+        if (Prueba\PruebaEnsayoSinWhatsappService::es_ensayo($client)) {
+            $this->anotar_en_el_aviso($aviso, 'Cliente de ensayo: no se le manda WhatsApp (solo el mail).');
+
+            return;
+        }
+
         if ($telefono === '') {
             // No es un error del aviso: el mail salió. Es un dato que falta en la ficha.
             $this->anotar_en_el_aviso($aviso, 'El cliente no tiene teléfono cargado, así que no salió el WhatsApp.');
