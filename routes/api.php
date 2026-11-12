@@ -472,6 +472,7 @@ Route::middleware('claude.task.key')
             ->whereNumber('id');
         Route::post('support-codex/tickets/{id}/verify-scheduled-upgrade', 'Api\ClaudeSupportScheduledUpgradeController@verify')
             ->whereNumber('id');
+        Route::post('support-codex/tickets/{id}/mission-progress', 'Api\ClaudeSupportCodexController@mission_progress');
         Route::post('support-codex/tickets/{id}/mission-fix-evidence', 'Api\ClaudeSupportCodexController@mission_fix_evidence')
             ->whereNumber('id');
         Route::post('support-codex/tickets/{id}/diagnostic', 'Api\ClaudeSupportCodexController@diagnostic');

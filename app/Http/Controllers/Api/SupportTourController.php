@@ -11,6 +11,7 @@ use App\Services\SupportTourService;
 use App\Services\WhatsappSessionWindowService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 
 class SupportTourController extends Controller
 {
@@ -46,16 +47,24 @@ class SupportTourController extends Controller
     public function preparar(Request $request, $id, SupportCodexService $soporte, SupportDynamicTourService $tours)
     {
         $data = $request->validate(['expected_message_id' => 'required|integer|min:1']);
-        $resultado = $tours->preparar((int) $id, (int) $data['expected_message_id'], function (SupportTicket $ticket) use ($request, $data, $soporte) {
-            $soporte->assert_current($ticket, [
-                'lease_token' => (string) $request->header('X-Support-Lease-Token'),
-                'expected_message_id' => $data['expected_message_id'],
-                'action' => 'responder',
-            ]);
-            abort_if($ticket->source === 'whatsapp'
-                && ! app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone)['open'],
-                422, 'window_expired: Venció la ventana de WhatsApp.');
-        });
+        try {
+            $resultado = $tours->preparar((int) $id, (int) $data['expected_message_id'], function (SupportTicket $ticket) use ($request, $data, $soporte) {
+                $soporte->assert_current($ticket, [
+                    'lease_token' => (string) $request->header('X-Support-Lease-Token'),
+                    'expected_message_id' => $data['expected_message_id'],
+                    'action' => 'responder',
+                ]);
+                abort_if($ticket->source === 'whatsapp'
+                    && ! app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone)['open'],
+                    422, 'window_expired: Venció la ventana de WhatsApp.');
+            });
+        } catch (HttpExceptionInterface $corte) {
+            // El estado del ticket cortó antes de planificar (mensaje viejo, revisión humana, misión, ventana vencida):
+            // la respuesta sigue igual, pero el motivo queda en el log y en el contexto del ticket.
+            SupportDynamicTourService::registrar_fallo((int) $id, (int) $data['expected_message_id'],
+                'estado_del_ticket', mb_substr($corte->getMessage(), 0, 200));
+            throw $corte;
+        }
 
         return $this->respuesta($resultado);
     }

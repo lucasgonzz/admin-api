@@ -1,0 +1,455 @@
+{
+ "_origen": "empresa-api origin/develop: SupportTourService::catalogo_dinamico() para un dueño en prueba (generado con catalogo_fixture.py)",
+ "available": true,
+ "pasos": [
+  {
+   "clave": "indicacion",
+   "descripcion": "Mostrar una instrucción textual en la pantalla actual, sin resaltar un control. La tarjeta queda acoplada a un costado y la persona sigue usando el sistema. No navega: usala después de un paso que ya dejó a la persona en la pantalla o la solapa de la que habla."
+  },
+  {
+   "clave": "tutoriales.abrir",
+   "descripcion": "Señalar el enlace Tutoriales del Centro de Recursos."
+  },
+  {
+   "clave": "vista.alertas",
+   "descripcion": "Abrir Alertas y mostrar una indicación textual dentro de esa pantalla."
+  },
+  {
+   "clave": "vista.listado",
+   "descripcion": "Abrir Listado de artículos y mostrar una indicación textual."
+  },
+  {
+   "clave": "vista.ventas",
+   "descripcion": "Abrir Ventas y mostrar una indicación textual."
+  },
+  {
+   "clave": "vista.reportes",
+   "descripcion": "Abrir Reportes y mostrar una indicación textual."
+  },
+  {
+   "clave": "vista.tesoreria",
+   "descripcion": "Abrir Tesorería y mostrar una indicación textual."
+  },
+  {
+   "clave": "vista.gastos",
+   "descripcion": "Abrir Gastos y mostrar una indicación textual."
+  },
+  {
+   "clave": "vista.cheques",
+   "descripcion": "Abrir Cheques y mostrar una indicación textual."
+  },
+  {
+   "clave": "vista.agenda",
+   "descripcion": "Abrir Agenda y mostrar una indicación textual."
+  },
+  {
+   "clave": "vista.comprobantes",
+   "descripcion": "Abrir Comprobantes y mostrar una indicación textual."
+  },
+  {
+   "clave": "vista.abm",
+   "descripcion": "Abrir el ABM y mostrar una indicación textual."
+  },
+  {
+   "clave": "vista.clientes",
+   "descripcion": "Abrir Clientes y mostrar una indicación textual."
+  },
+  {
+   "clave": "vista.proveedores",
+   "descripcion": "Abrir Proveedores y mostrar una indicación textual."
+  },
+  {
+   "clave": "vista.presupuestos",
+   "descripcion": "Abrir Presupuestos y mostrar una indicación textual."
+  },
+  {
+   "clave": "abm.editar_recargo",
+   "descripcion": "Abrir ABM → Precios → Recargos y señalar la lista para que la persona elija qué recargo de venta editar."
+  },
+  {
+   "clave": "abm.porcentaje_recargo",
+   "descripcion": "Señalar Porcentaje en la edición del recargo predefinido. Usar después de abm.editar_recargo. La persona edita y guarda."
+  },
+  {
+   "clave": "abm.editar_descuento",
+   "descripcion": "Abrir ABM → Precios → Descuentos y señalar la lista para que la persona elija qué descuento de venta editar."
+  },
+  {
+   "clave": "abm.porcentaje_descuento",
+   "descripcion": "Señalar Porcentaje en la edición del descuento predefinido. Usar después de abm.editar_descuento. La persona edita y guarda."
+  },
+  {
+   "clave": "abm.grupo.articulos",
+   "descripcion": "Abrir el ABM y señalar el grupo «Articulos» para que la persona lo toque."
+  },
+  {
+   "clave": "abm.solapa.articulos.categorias",
+   "descripcion": "Abrir ABM → Articulos y señalar la solapa «Categorias» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.articulos.sub_categorias",
+   "descripcion": "Abrir ABM → Articulos y señalar la solapa «Sub Categorias» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.articulos.marcas",
+   "descripcion": "Abrir ABM → Articulos y señalar la solapa «Marcas» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.articulos.combos",
+   "descripcion": "Abrir ABM → Articulos y señalar la solapa «Combos» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.articulos.tipo_de_envases",
+   "descripcion": "Abrir ABM → Articulos y señalar la solapa «Tipo de envases» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.articulos.ubicaciones_de_articulo",
+   "descripcion": "Abrir ABM → Articulos y señalar la solapa «Ubicaciones de articulo» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.articulos.tipos_de_propiedad_de_articulo",
+   "descripcion": "Abrir ABM → Articulos y señalar la solapa «Tipos de Propiedad de Articulo» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.articulos.valores_de_propiedad_de_articulo",
+   "descripcion": "Abrir ABM → Articulos y señalar la solapa «Valores de Propiedad de Articulo» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.articulos.posiciones_de_columnas",
+   "descripcion": "Abrir ABM → Articulos y señalar la solapa «Posiciones de columnas» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.articulos.rangos_de_pre_importacion",
+   "descripcion": "Abrir ABM → Articulos y señalar la solapa «Rangos de pre importacion» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.articulos.disenos_de_etiquetas",
+   "descripcion": "Abrir ABM → Articulos y señalar la solapa «Diseños de etiquetas» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.grupo.precios",
+   "descripcion": "Abrir el ABM y señalar el grupo «Precios» para que la persona lo toque."
+  },
+  {
+   "clave": "abm.solapa.precios.listas_de_precios",
+   "descripcion": "Abrir ABM → Precios y señalar la solapa «Listas de precios» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.precios.descuentos",
+   "descripcion": "Abrir ABM → Precios y señalar la solapa «Descuentos» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.precios.recargos",
+   "descripcion": "Abrir ABM → Precios y señalar la solapa «Recargos» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.precios.rangos_de_precio",
+   "descripcion": "Abrir ABM → Precios y señalar la solapa «Rangos de precio» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.precios.grupos_de_articulos",
+   "descripcion": "Abrir ABM → Precios y señalar la solapa «Grupos de articulos» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.precios.descuentos_para_metodo_de_pago",
+   "descripcion": "Abrir ABM → Precios y señalar la solapa «Descuentos para Metodo de pago» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.precios.impuestos_sobre_ventas",
+   "descripcion": "Abrir ABM → Precios y señalar la solapa «Impuestos sobre ventas» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.grupo.ventas",
+   "descripcion": "Abrir el ABM y señalar el grupo «Ventas» para que la persona lo toque."
+  },
+  {
+   "clave": "abm.solapa.ventas.estados_de_venta",
+   "descripcion": "Abrir ABM → Ventas y señalar la solapa «Estados de venta» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.ventas.tipos_de_venta",
+   "descripcion": "Abrir ABM → Ventas y señalar la solapa «Tipos de venta» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.ventas.remitentes",
+   "descripcion": "Abrir ABM → Ventas y señalar la solapa «Remitentes» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.ventas.reputaciones",
+   "descripcion": "Abrir ABM → Ventas y señalar la solapa «Reputaciones» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.ventas.disenos_de_vender",
+   "descripcion": "Abrir ABM → Ventas y señalar la solapa «Diseños de Vender» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.grupo.cuenta_corriente",
+   "descripcion": "Abrir el ABM y señalar el grupo «Cuenta corriente» para que la persona lo toque."
+  },
+  {
+   "clave": "abm.solapa.cuenta_corriente.metodos_de_pago",
+   "descripcion": "Abrir ABM → Cuenta corriente y señalar la solapa «Metodos de Pago» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.cuenta_corriente.cuotas",
+   "descripcion": "Abrir ABM → Cuenta corriente y señalar la solapa «Cuotas» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.grupo.comisiones",
+   "descripcion": "Abrir el ABM y señalar el grupo «Comisiones» para que la persona lo toque."
+  },
+  {
+   "clave": "abm.solapa.comisiones.comisiones",
+   "descripcion": "Abrir ABM → Comisiones y señalar la solapa «Comisiones» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.comisiones.comisiones_por_venta_terminada",
+   "descripcion": "Abrir ABM → Comisiones y señalar la solapa «Comisiones por Venta Terminada» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.comisiones.comision_por_promocion",
+   "descripcion": "Abrir ABM → Comisiones y señalar la solapa «Comision por Promocion» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.grupo.tesoreria",
+   "descripcion": "Abrir el ABM y señalar el grupo «Tesoreria» para que la persona lo toque."
+  },
+  {
+   "clave": "abm.solapa.tesoreria.turno_caja",
+   "descripcion": "Abrir ABM → Tesoreria y señalar la solapa «Turno Caja» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.tesoreria.concepto_movimiento",
+   "descripcion": "Abrir ABM → Tesoreria y señalar la solapa «Concepto movimiento» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.tesoreria.cajas_por_defecto",
+   "descripcion": "Abrir ABM → Tesoreria y señalar la solapa «Cajas por defecto» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.tesoreria.bancos_de_cheques",
+   "descripcion": "Abrir ABM → Tesoreria y señalar la solapa «Bancos de cheques» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.tesoreria.impuestos_de_retencion",
+   "descripcion": "Abrir ABM → Tesoreria y señalar la solapa «Impuestos de retención» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.grupo.gastos",
+   "descripcion": "Abrir el ABM y señalar el grupo «Gastos» para que la persona lo toque."
+  },
+  {
+   "clave": "abm.solapa.gastos.sub_categorias_de_gasto",
+   "descripcion": "Abrir ABM → Gastos y señalar la solapa «Sub categorías de gasto» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.gastos.categorias_de_gasto",
+   "descripcion": "Abrir ABM → Gastos y señalar la solapa «Categorias de Gasto» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.grupo.facturacion",
+   "descripcion": "Abrir el ABM y señalar el grupo «Facturacion» para que la persona lo toque."
+  },
+  {
+   "clave": "abm.solapa.facturacion.puntos_de_venta_afip",
+   "descripcion": "Abrir ABM → Facturacion y señalar la solapa «Puntos de venta AFIP» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.facturacion.metodo_de_pago_seleccionado_para_facturacion",
+   "descripcion": "Abrir ABM → Facturacion y señalar la solapa «Metodo de pago seleccionado para Facturacion» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.grupo.inventario",
+   "descripcion": "Abrir el ABM y señalar el grupo «Inventario» para que la persona lo toque."
+  },
+  {
+   "clave": "abm.solapa.inventario.vinculaciones_de_inventario",
+   "descripcion": "Abrir ABM → Inventario y señalar la solapa «Vinculaciones de inventario» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.inventario.estados_de_movimiento_de_deposito",
+   "descripcion": "Abrir ABM → Inventario y señalar la solapa «Estados de Movimiento de deposito» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.grupo.produccion",
+   "descripcion": "Abrir el ABM y señalar el grupo «Produccion» para que la persona lo toque."
+  },
+  {
+   "clave": "abm.solapa.produccion.estados_de_produccion",
+   "descripcion": "Abrir ABM → Produccion y señalar la solapa «Estados de Produccion» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.produccion.grupos_de_estados_de_produccion",
+   "descripcion": "Abrir ABM → Produccion y señalar la solapa «Grupos de Estados de Produccion» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.produccion.tipo_de_rutas",
+   "descripcion": "Abrir ABM → Produccion y señalar la solapa «Tipo de rutas» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.grupo.impresion",
+   "descripcion": "Abrir el ABM y señalar el grupo «Impresion» para que la persona lo toque."
+  },
+  {
+   "clave": "abm.solapa.impresion.pdfs_de_ofertas_plantillas",
+   "descripcion": "Abrir ABM → Impresion y señalar la solapa «PDFs de ofertas (plantillas)» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.impresion.diseno_de_pdf",
+   "descripcion": "Abrir ABM → Impresion y señalar la solapa «Diseño de PDF» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.grupo.sucursales",
+   "descripcion": "Abrir el ABM y señalar el grupo «Sucursales» para que la persona lo toque."
+  },
+  {
+   "clave": "abm.solapa.sucursales.sucursales",
+   "descripcion": "Abrir ABM → Sucursales y señalar la solapa «Sucursales» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.sucursales.provincias",
+   "descripcion": "Abrir ABM → Sucursales y señalar la solapa «Provincias» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.sucursales.localidades",
+   "descripcion": "Abrir ABM → Sucursales y señalar la solapa «Localidades» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.grupo.tienda_online",
+   "descripcion": "Abrir el ABM y señalar el grupo «Tienda online» para que la persona lo toque."
+  },
+  {
+   "clave": "abm.solapa.tienda_online.banners",
+   "descripcion": "Abrir ABM → Tienda online y señalar la solapa «Banners» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.tienda_online.dia_de_entrega",
+   "descripcion": "Abrir ABM → Tienda online y señalar la solapa «Dia de entrega» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.tienda_online.zonas_de_envio",
+   "descripcion": "Abrir ABM → Tienda online y señalar la solapa «Formas de envío» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.tienda_online.metodos_de_pago",
+   "descripcion": "Abrir ABM → Tienda online y señalar la solapa «Metodos de pago» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.grupo.integraciones",
+   "descripcion": "Abrir el ABM y señalar el grupo «Integraciones» para que la persona lo toque."
+  },
+  {
+   "clave": "abm.solapa.integraciones.conectores_de_plataforma",
+   "descripcion": "Abrir ABM → Integraciones y señalar la solapa «Sistema» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "abm.solapa.integraciones.tienda_online",
+   "descripcion": "Abrir ABM → Integraciones y señalar la solapa «Tienda online» para que la persona la toque. Las indicaciones que sigan se muestran en esa solapa."
+  },
+  {
+   "clave": "caja.historial_aperturas",
+   "descripcion": "Señalar Aperturas en Tesorería. La persona elige la caja cuyo historial quiere abrir."
+  },
+  {
+   "clave": "caja.reabrir_apertura",
+   "descripcion": "Señalar Reabrir en el historial que abrió la persona. Solo aparece para la última apertura de una caja cerrada. Usar después de caja.historial_aperturas."
+  },
+  {
+   "clave": "listado.filtro",
+   "descripcion": "Señalar el botón de filtros del Listado."
+  },
+  {
+   "clave": "listado.nuevo_articulo",
+   "descripcion": "Señalar la parte principal de Crear para abrir una ficha nueva de artículo."
+  },
+  {
+   "clave": "ventas.filtro_fecha",
+   "descripcion": "Señalar el control de fechas e histórico en Ventas."
+  },
+  {
+   "clave": "vista.compras",
+   "descripcion": "Abrir la solapa Compras de Proveedores y mostrar una indicación textual."
+  },
+  {
+   "clave": "compras.filtro_fecha",
+   "descripcion": "Señalar el control de fechas e histórico de Compras."
+  },
+  {
+   "clave": "compras.nueva",
+   "descripcion": "Señalar el botón para abrir el formulario de una compra nueva."
+  },
+  {
+   "clave": "listado.crear",
+   "descripcion": "Señalar la flechita de Crear en Listado de artículos para desplegar el menú."
+  },
+  {
+   "clave": "listado.historial_importaciones",
+   "descripcion": "Señalar Historial de importaciones en el submenú Importación del Listado."
+  },
+  {
+   "clave": "listado.revertir_importacion",
+   "descripcion": "Señalar el botón Revertir o Reintentar de un historial de artículos validado por su ID. El cliente revisa la confirmación habitual.",
+   "requiere_destino": true
+  },
+  {
+   "clave": "listado.submenu_exportacion",
+   "descripcion": "Señalar Exportación dentro del menú Crear del Listado de artículos."
+  },
+  {
+   "clave": "listado.opcion_nueva_exportacion",
+   "descripcion": "Señalar Nueva exportación en Exportación del Listado. La persona elige si iniciar el Excel."
+  },
+  {
+   "clave": "listado.opcion_historial_exportaciones",
+   "descripcion": "Señalar Historial de exportaciones en Exportación del Listado para consultar o descargar Excel ya exportados."
+  },
+  {
+   "clave": "vista.vender",
+   "descripcion": "Abrir Vender y mostrar una indicación textual, conservando la venta en curso."
+  },
+  {
+   "clave": "vender.buscar_articulo",
+   "descripcion": "Señalar el botón del buscador de artículos por nombre en Vender."
+  },
+  {
+   "clave": "vender.campo_busqueda",
+   "descripcion": "Señalar el campo de búsqueda por nombre después de que la persona abra el buscador."
+  },
+  {
+   "clave": "vender.resultados_busqueda",
+   "descripcion": "Señalar los resultados después de buscar por nombre."
+  },
+  {
+   "clave": "vender.codigo_barras",
+   "descripcion": "Señalar el campo para escanear o escribir un código de barras en Vender."
+  },
+  {
+   "clave": "vender.total",
+   "descripcion": "Señalar el total de la venta para que la persona lo revise."
+  },
+  {
+   "clave": "vender.metodos_pago",
+   "descripcion": "Señalar el botón + junto a Mét. pago en Vender para abrir Múltiples métodos de pago. En una venta con artículos permite repartir el total."
+  },
+  {
+   "clave": "vender.reparto_pago",
+   "descripcion": "Señalar el reparto de importes del modal Múltiples métodos de pago, después de que la persona lo abra. Usar después de vender.metodos_pago."
+  },
+  {
+   "clave": "vender.recargos",
+   "descripcion": "Señalar los interruptores de recargos de venta existentes en el diseño activo."
+  },
+  {
+   "clave": "soporte.abrir",
+   "descripcion": "Señalar cómo abrir Soporte, o el encabezado si ya está abierto."
+  },
+  {
+   "clave": "soporte.conversacion",
+   "descripcion": "Señalar la conversación o el historial de Soporte después de abrirlo."
+  },
+  {
+   "clave": "soporte.escribir",
+   "descripcion": "Señalar el campo para escribir una consulta en Soporte."
+  }
+ ]
+}

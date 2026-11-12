@@ -10,6 +10,7 @@ use App\Models\Implementation;
 use App\Models\ImplementationStage;
 use App\Models\SupportCodexCase;
 use App\Models\SupportCodexMissionFixEvidence;
+use App\Models\SupportCodexMissionProgress;
 use App\Models\SupportCodexScheduledUpgrade;
 use App\Models\SupportCodexUpgradeAgreement;
 use App\Models\SupportCodexOperation;
@@ -49,7 +50,7 @@ class SupportCodexService
     /** `tipo` de `implementation-note` para la implementación de Agentes de IA (misión `implementacion-agentes-ia`). */
     const NOTE_TYPE_AGENTES = 'agentes';
 
-    public function pending(bool $supports_upgrade_agreement = false): array
+    public function pending(bool $supports_upgrade_agreement = false, bool $supports_mission_progress = false): array
     {
         $settings = SupportCodexSettings::to_array();
         $items = [];
@@ -75,7 +76,7 @@ class SupportCodexService
                 if ($case !== null && $case->lease_expires_at !== null && $case->lease_expires_at->isFuture()) {
                     continue;
                 }
-                $reason = $this->pending_reason($ticket, $case, $supports_upgrade_agreement);
+                $reason = $this->pending_reason($ticket, $case, $supports_upgrade_agreement, $supports_mission_progress);
                 if ($reason === null) {
                     continue;
                 }
@@ -158,9 +159,16 @@ class SupportCodexService
                 $case->state = trim((string) $case->mission) !== '' ? 'mission_pending' : 'ready';
                 $case->review_reason = null;
             }
-            $reason = $this->pending_reason($ticket, $case, ! empty($input['supports_upgrade_agreement']));
+            $reason = $this->pending_reason($ticket, $case, ! empty($input['supports_upgrade_agreement']), ! empty($input['supports_mission_progress']));
             if ($reason === null) {
                 $this->fail(409, 'not_pending', 'El ticket ya fue atendido o necesita revisión humana.');
+            }
+            if (isset($input['expected_progress_hash'])) {
+                $progress = SupportCodexMissionProgress::current_for($ticket, $case);
+                if ($reason !== 'mission_progress' || $progress === null
+                    || ! hash_equals($progress->progress_hash, (string) $input['expected_progress_hash'])) {
+                    $this->fail(409, 'mission_progress_changed', 'El avance pendiente cambió antes de tomarlo.');
+                }
             }
             $last = $this->last_real_message($id);
             if ($last === null || (int) $last->id !== (int) $input['expected_message_id']) {
@@ -347,12 +355,13 @@ class SupportCodexService
             'mission_autostart' => ! $this->es_cliente_de_ensayo($ticket),
             'mission_autostart_reason' => $this->es_cliente_de_ensayo($ticket) ? 'cliente_de_ensayo' : null,
             'mission_fix_evidence' => $fix_evidence === null ? null : $fix_evidence->payload,
+            'mission_progress' => $this->mission_progress_context($ticket, $case, $fix_evidence !== null),
             'upgrade_agreement' => app(SupportCodexUpgradeAgreementService::class)->context($fix_evidence),
             'review_reason' => $case ? $case->review_reason : null,
-            'reason' => $this->pending_reason($ticket, $case, true),
+            'reason' => $this->pending_reason($ticket, $case, true, true),
             // El helper debe verificar esta capacidad ANTES de pedir el modo nuevo: un admin
             // anterior ignoraría el campo y ejecutaría el resume que consume la consulta.
-            'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => $capacidades_de_prueba['prueba_import'], 'prueba_import_resolver' => $capacidades_de_prueba['prueba_import_resolver'],
+            'capabilities' => ['mission_progress' => true, 'continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => $capacidades_de_prueba['prueba_import'], 'prueba_import_resolver' => $capacidades_de_prueba['prueba_import_resolver'],
                 'soporte_import' => $soporte_activo, 'soporte_import_resolver' => $soporte_activo,
                 'soporte_import_stock_existente' => $soporte_activo,
                 // Misión cruzada importaciones-de-martin (11/11/2026): la planilla derivada del PDF del dueño, el Excel
@@ -368,6 +377,9 @@ class SupportCodexService
             'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
             'robotito_available' => $robotito_disponible,
+            // Por qué no salió el tour/prepare del ÚLTIMO mensaje de la persona ({code, reason, expected_message_id, at}),
+            // o null: el fallo de un mensaje anterior ya no describe este turno.
+            'last_tour_failure' => SupportDynamicTourService::ultimo_fallo((int) $ticket->id, $last !== null && $last->sender_type === 'user' ? (int) $last->id : null),
             'accepted_tour' => $last && ! $ticket->requiere_verificacion_mensajes
                 ? app(SupportTourService::class)->guion_aceptado($ticket, $last) : null,
             'accepted_tour_request' => $last && ! $ticket->requiere_verificacion_mensajes
@@ -866,6 +878,9 @@ class SupportCodexService
         if (! empty($input['usage_answer'])) {
             $hash_payload[] = ['usage_answer' => true];
         }
+        if (isset($input['mission_progress_hash'])) {
+            $hash_payload[] = ['mission_progress_hash' => $input['mission_progress_hash'], 'mission_progress_state' => $input['mission_progress_state']];
+        }
         $hash = hash('sha256', json_encode($hash_payload));
         // La operación se confirma en una transacción ANTES de enviar. Si el proceso cae
         // durante el HTTP, queda sending y requiere conciliación: jamás otro intento ciego.
@@ -885,6 +900,10 @@ class SupportCodexService
                 $this->fail(409, 'operation_conflict', 'La operación cancelada pertenece a una propuesta de actualización.');
             }
             $case = $this->assert_current($ticket, $input);
+            if (! isset($input['mission_progress_hash']) && $input['action'] !== 'pedir_revision'
+                && $this->pending_reason($ticket, $case, true, true) === 'mission_progress') {
+                $this->fail(422, 'mission_progress_required', 'Para avisar este avance, incluí su huella del contexto en mission_progress_hash.');
+            }
             $evidence = $proposal === null ? null : app(SupportCodexUpgradeAgreementService::class)->assert_valid_proposal($ticket, $case, $proposal);
             if ($ticket->requiere_verificacion_mensajes && (isset($input['tour_invitation']) || $input['tour_requested'])) {
                 $this->fail(422, 'verification_required', 'Este ticket exige aprobación. Prepará la respuesta escrita sin invitar a Robotito.');
@@ -920,7 +939,7 @@ class SupportCodexService
                     return null;
                 }
                 $this->assert_mission_allows_action($case, $input['action']);
-            } elseif ($attachment === null && $proposal === null && $this->can_close_on_reply($ticket, $case, $input)) {
+            } elseif (! isset($input['mission_progress_hash']) && $attachment === null && $proposal === null && $this->can_close_on_reply($ticket, $case, $input)) {
                 // La operación guarda la acción efectiva. El replay conserva el hash del pedido original.
                 $input['action'] = 'cerrar';
                 $input['confirmation_message_id'] = (int) $input['expected_message_id'];
@@ -952,6 +971,14 @@ class SupportCodexService
                 'message_id' => null, 'detail' => null, 'approval_payload' => null,
             ]);
             $operation->save();
+            if (isset($input['mission_progress_hash'])) {
+                $current_progress = SupportCodexMissionProgress::current_for($ticket, $case);
+                // Un UUID cancelado se puede reformular para B. A no salió y no debe quedar ligado al envío de B.
+                SupportCodexMissionProgress::where('support_codex_operation_id', $operation->id)
+                    ->where('id', '!=', $current_progress->id)->whereNull('announced_at')
+                    ->update(['support_codex_operation_id' => null]);
+                $current_progress->update(['support_codex_operation_id' => $operation->id]);
+            }
             if ($evidence !== null) {
                 app(SupportCodexUpgradeAgreementService::class)->record_proposal($operation, $evidence, $proposal, $input['body']);
             }
@@ -1020,7 +1047,7 @@ class SupportCodexService
             } elseif ($tour_requested && SupportTourService::version_admite_tour_personalizado($ticket) === false) {
                 $body = SupportTourService::con_invitacion($body, false, true);
             } elseif (! $tour_requested && $input['action'] === 'responder' && $attachment === null
-                && $proposal === null && ! isset($input['tour_invitation'])) {
+                && $proposal === null && ! isset($input['tour_invitation']) && ! isset($input['mission_progress_hash'])) {
                 $entrante = SupportMessage::find($input['expected_message_id']);
                 $recordatorio = $entrante === null ? null : app(SupportTourService::class)->recordatorio_de_invitacion($ticket, $entrante);
                 if ($recordatorio !== null) {
@@ -1081,6 +1108,7 @@ class SupportCodexService
                 $this->request_attention($ticket);
             } else {
                 $operation->status = 'sent';
+                SupportCodexMissionProgress::announced_by($operation);
                 $case->handled_message_id = (int) $input['expected_message_id'];
                 $case->last_reply_id = (int) $message->id;
                 $this->apply_action($ticket, $case, $input);
@@ -1171,6 +1199,7 @@ class SupportCodexService
             $input['body'] = 'De nada! ' . trim($input['body']);
         }
         if ($input['action'] === 'responder' && $attachment === null && ! isset($input['upgrade_proposal'])
+            && ! isset($input['mission_progress_hash'])
             && SupportTourService::version_habilita_oferta($ticket) === true) {
             $oferta = SupportTourService::preparar_oferta($ticket, SupportMessage::find($input['expected_message_id']),
                 trim($input['body']), ! empty($input['usage_answer']));
@@ -1222,6 +1251,16 @@ class SupportCodexService
     {
         $last = $this->last_real_message((int) $ticket->id);
         $pending = SupportCodexOperation::where('support_ticket_id', $ticket->id)->where('status', 'awaiting_approval')->first();
+        if ($pending !== null && isset($pending->approval_payload['mission_progress_hash'])) {
+            $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->first();
+            $progress = SupportCodexMissionProgress::current_for($ticket, $case);
+            $state = $progress === null ? null : (SupportCodexMissionFixEvidence::current_for($ticket, $case) !== null ? 'integrada' : $progress->payload['estado']);
+            if ($progress === null || ($pending->approval_payload['mission_progress_state'] ?? null) !== $state
+                || ! hash_equals($progress->progress_hash, $pending->approval_payload['mission_progress_hash'])) {
+                $this->cancel_approvals($ticket, 'El avance cambió; se descartó el aviso anterior sin enviarlo.');
+                return;
+            }
+        }
         if ($pending !== null && ($last === null || (int) $last->id !== (int) $pending->expected_message_id || $ticket->status !== 'open')) {
             $this->cancel_approvals($ticket, 'La conversación cambió; se descartó la respuesta anterior.');
         }
@@ -1247,6 +1286,8 @@ class SupportCodexService
             // Descartar es la decisión humana sobre ese entrante, no una orden de generar lo mismo otra vez.
             $case->handled_message_id = max((int) $case->handled_message_id, (int) $operation->expected_message_id);
             $case->save();
+            SupportCodexMissionProgress::where('support_codex_operation_id', $operation->id)
+                ->whereNull('announced_at')->update(['dismissed_at' => now()]);
             $this->cancel_approvals($ticket, 'Lucas descartó el borrador sin enviarlo.');
             SupportTicketUpdated::dispatch((int) $ticket->id);
         });
@@ -1254,6 +1295,7 @@ class SupportCodexService
 
     private function assert_approval_action(SupportTicket $ticket, SupportCodexCase $case, array $input): void
     {
+        $this->assert_mission_progress_reply($ticket, $case, $input);
         $this->assert_mission_allows_action($case, $input['action']);
         if ($input['action'] === 'cerrar') {
             $this->assert_upgrade_allows_closure($ticket, $case);
@@ -1430,6 +1472,7 @@ class SupportCodexService
             }
             if ($result !== null && ($result['delivery'] ?? '') === 'sent') {
                 $operation->status = 'sent';
+                SupportCodexMissionProgress::announced_by($operation);
                 $case->handled_message_id = (int) $operation->expected_message_id;
                 $case->last_reply_id = (int) $message->id;
                 $this->apply_action($ticket, $case, $input);
@@ -1683,6 +1726,7 @@ class SupportCodexService
             || ($check_unfinished && $this->has_unfinished_operation($ticket->id))) {
             $this->fail(409, 'manual_review', 'La atención está pausada y requiere revisión.');
         }
+        $this->assert_mission_progress_reply($ticket, $case, $input);
         if ($case->state === 'mission_pending' || ! $check_unfinished) {
             $this->assert_mission_allows_action($case, $input['action']);
         }
@@ -1822,6 +1866,67 @@ class SupportCodexService
             && app(PruebaImportacionService::class)->estado_en_ticket($ticket)['en_proceso'] === false;
     }
 
+    /** Registra hechos para una atención; no toma reservas ni envía un mensaje. */
+    public function register_mission_progress(int $id, array $input): array
+    {
+        $payload = [
+            'estado' => $input['estado'], 'causa' => trim($input['causa']),
+            'evidencia' => trim($input['evidencia']), 'alternativa' => isset($input['alternativa']) ? trim($input['alternativa']) : null,
+        ];
+        $hash = hash('sha256', json_encode($payload, JSON_THROW_ON_ERROR));
+        return DB::transaction(function () use ($id, $input, $payload, $hash) {
+            $ticket = SupportTicket::where('id', $id)->lockForUpdate()->findOrFail($id);
+            $case = SupportCodexCase::where('support_ticket_id', $id)->lockForUpdate()->first();
+            if ($ticket->status !== 'open' || $case === null || ($case->mission_lifecycle()['status'] ?? null) !== 'started') {
+                $this->fail(409, 'mission_not_started', 'El ticket no tiene una misión iniciada y abierta.');
+            }
+            if ($case->mission_thread_id !== $input['mission_thread_id'] || $case->thread_id === $input['mission_thread_id']
+                || ! hash_equals(hash('sha256', (string) $case->mission), $input['mission_hash'])) {
+                $this->fail(409, 'mission_changed', 'El avance no corresponde a la misión vigente.');
+            }
+            $progress = SupportCodexMissionProgress::firstOrCreate([
+                'support_ticket_id' => $id, 'mission_thread_id' => $input['mission_thread_id'],
+                'mission_hash' => $input['mission_hash'], 'progress_hash' => $hash,
+            ], ['payload' => $payload]);
+            $this->invalidate_stale_approval($ticket);
+            // Una revisión o una pausa humana se conservan. El avance queda disponible para cuando se reanude.
+            return ['registered' => true, 'progress_hash' => $progress->progress_hash,
+                'announced' => $progress->announced_at !== null, 'ticket' => $this->context($ticket, $case)];
+        });
+    }
+
+    private function mission_progress_context(SupportTicket $ticket, ?SupportCodexCase $case, bool $integrated): ?array
+    {
+        $progress = SupportCodexMissionProgress::current_for($ticket, $case);
+        if ($progress === null) {
+            return null;
+        }
+        return array_merge($progress->payload, ['hash' => $progress->progress_hash,
+            'estado_actual' => $integrated ? 'integrada' : $progress->payload['estado'],
+            'announced' => $progress->announced_at !== null, 'dismissed' => $progress->dismissed_at !== null]);
+    }
+
+    private function assert_mission_progress_reply(SupportTicket $ticket, SupportCodexCase $case, array $input): void
+    {
+        if (isset($input['mission_progress_state']) && ! isset($input['mission_progress_hash'])) {
+            $this->fail(422, 'invalid_progress_action', 'El estado de avance requiere su huella.');
+        }
+        if (! isset($input['mission_progress_hash'])) {
+            return;
+        }
+        $progress = SupportCodexMissionProgress::current_for($ticket, $case);
+        if ($input['action'] !== 'responder' || ! empty($input['tour_requested']) || isset($input['tour_invitation'])
+            || isset($input['attachment']) || isset($input['upgrade_proposal'])) {
+            $this->fail(422, 'invalid_progress_action', 'El aviso de avance solo admite una respuesta de texto.');
+        }
+        $state = $progress === null ? null : (SupportCodexMissionFixEvidence::current_for($ticket, $case) !== null ? 'integrada' : $progress->payload['estado']);
+        if ($progress === null || $progress->announced_at !== null || $progress->dismissed_at !== null
+            || ($input['mission_progress_state'] ?? null) !== $state
+            || ! hash_equals($progress->progress_hash, (string) $input['mission_progress_hash'])) {
+            $this->fail(409, 'mission_progress_changed', 'El avance cambió o la corrección ya está integrada; releé el contexto.');
+        }
+    }
+
     public function register_mission_fix_evidence(int $id, array $input): array
     {
         ksort($input['commits']);
@@ -1923,6 +2028,7 @@ class SupportCodexService
                 }
             }
             $operation->status = $input['outcome'] === 'sent' ? 'reconciled_sent' : 'reconciled_not_sent';
+            SupportCodexMissionProgress::announced_by($operation);
             $operation->reconciliation_outcome = $input['outcome'];
             $operation->reconciled_at = now();
             $operation->reconciled_by = $input['confirmed_by'];
@@ -1947,14 +2053,14 @@ class SupportCodexService
         });
     }
 
-    private function pending_reason(SupportTicket $ticket, ?SupportCodexCase $case, bool $supports_upgrade_agreement = false): ?string
+    private function pending_reason(SupportTicket $ticket, ?SupportCodexCase $case, bool $supports_upgrade_agreement = false, bool $supports_mission_progress = false): ?string
     {
         $last = $this->last_real_message($ticket->id);
         if ($last === null || ! $ticket->mensaje_confiable_para_codex($last)) {
             return null;
         }
 
-        return $this->pending_reason_for($ticket, $case, $last, $supports_upgrade_agreement);
+        return $this->pending_reason_for($ticket, $case, $last, $supports_upgrade_agreement, $supports_mission_progress);
     }
 
     /** El solicitante debe haber seleccionado el último mensaje real del ticket. */
@@ -2019,7 +2125,7 @@ class SupportCodexService
             || ! $ticket->claude_auto_reply || $this->has_unfinished_operation($ticket->id);
     }
 
-    private function pending_reason_for(SupportTicket $ticket, ?SupportCodexCase $case, SupportMessage $last, bool $supports_upgrade_agreement = false): ?string
+    private function pending_reason_for(SupportTicket $ticket, ?SupportCodexCase $case, SupportMessage $last, bool $supports_upgrade_agreement = false, bool $supports_mission_progress = false): ?string
     {
         if ($this->callado_para_codex($ticket, $case)) {
             return null;
@@ -2039,6 +2145,13 @@ class SupportCodexService
         }
         if ($last->sender_type === 'user' && ($case === null || (int) $last->id > (int) $case->handled_message_id)) {
             return 'inbound';
+        }
+        // Primero comunicar causa/alternativa con el estado actual. Después coordinar la instalación por su carril.
+        if ($supports_mission_progress && $case !== null && $this->puede_entregar($ticket)) {
+            $progress = SupportCodexMissionProgress::current_for($ticket, $case);
+            if ($progress !== null && $progress->announced_at === null && $progress->dismissed_at === null) {
+                return 'mission_progress';
+            }
         }
         if ($supports_upgrade_agreement && $case !== null
             && app(SupportCodexUpgradeAgreementService::class)->pending_offer($ticket, $case)
