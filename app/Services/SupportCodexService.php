@@ -1105,12 +1105,38 @@ class SupportCodexService
 
     private function puede_entregar(SupportTicket $ticket): bool
     {
-        return $ticket->source === 'erp'
+        return $ticket->source === 'erp' || $this->respuesta_solo_en_el_sistema($ticket)
             || app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone)['open'];
+    }
+
+    /**
+     * Un ticket de WhatsApp de un cliente de ENSAYO (`clients.es_ensayo`): la respuesta de Martín no sale por WhatsApp
+     * (Lucas, 12/11/2026: los WhatsApp del ensayo le bajan la reputación a la línea). Queda en la conversación y se
+     * ve en el sistema del negocio (Agentes → Soporte lee los tickets de WhatsApp del admin y muestra los mensajes
+     * con `synced_to_client_at`). No depende de la ventana de 24 h porque no se usa Meta.
+     *
+     * @param SupportTicket $ticket
+     *
+     * @return bool
+     */
+    private function respuesta_solo_en_el_sistema(SupportTicket $ticket): bool
+    {
+        $ticket->loadMissing('client');
+
+        return $ticket->source === 'whatsapp' && Prueba\PruebaEnsayoSinWhatsappService::es_ensayo($ticket->client);
     }
 
     private function entregar_respuesta(SupportTicket $ticket, SupportMessage $message): array
     {
+        if ($this->respuesta_solo_en_el_sistema($ticket)) {
+            // Cero llamadas a Kapso/Meta: la marca de sincronizado es lo que la hace visible en el sistema.
+            $message->synced_to_client_at = now();
+            $message->remote_delivery_status = null;
+            $message->save();
+
+            return ['delivery' => 'sent'];
+        }
+
         if ($ticket->source === 'whatsapp') {
             return app(SupportWhatsappOpenerService::class)->deliver_follow_up($ticket, $message, 'Martín, asistente técnico');
         }

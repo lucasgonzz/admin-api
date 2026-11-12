@@ -561,7 +561,9 @@ class AsistenteAvisosService
     ): string {
         /* El aviso de la importación de la prueba sale por el ticket de soporte, tenga o no el dueño una
          * conversación con el asistente: así lo ve Martín en el mismo hilo donde recibió el Excel. */
-        if ($aviso['tipo'] === self::TIPO_IMPORTACION_LISTA) {
+        /* Cliente de ensayo (12/11/2026): ningún aviso sale por el número del asistente. Va por el mismo camino de
+         * Soporte, que para el ensayo lo deja en la conversación del sistema del negocio. */
+        if ($aviso['tipo'] === self::TIPO_IMPORTACION_LISTA || Prueba\PruebaEnsayoSinWhatsappService::es_ensayo($client)) {
             return $this->avisar_importacion_por_soporte($client, $aviso, $spa_url);
         }
 

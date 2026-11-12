@@ -346,7 +346,8 @@ class PruebaRespaldoSoporteService
             return $this->no($envio['motivo'] === 'ventana_cerrada' ? 'ventana_cerrada' : 'no_corresponde', $envio['motivo']);
         }
 
-        $mensaje_id = SupportMessage::where('support_ticket_id', (int) $ticket->id)->where('sender_type', 'admin')
+        /* El ticket donde quedó el mensaje: el de un cliente de ensayo es su conversación del sistema (12/11/2026). */
+        $mensaje_id = SupportMessage::where('support_ticket_id', (int) $envio['support_ticket_id'])->where('sender_type', 'admin')
             ->where('is_trial_import_notice', true)->where('body', $texto)->orderByDesc('id')->value('id');
         $estado = $envio['enviado'] ? PruebaWhatsappEnvio::ESTADO_ENVIADO : PruebaWhatsappEnvio::ESTADO_FALLIDO;
 
@@ -444,12 +445,16 @@ class PruebaRespaldoSoporteService
      */
     protected function registrar(SupportTicket $ticket, string $plantilla, ?string $hito, string $estado, $mensaje_id, array $envio, string $detalle): void
     {
+        $ticket->loadMissing('client');
         PruebaWhatsappEnvio::create([
             'client_id'           => (int) $ticket->client_id,
+            // Un cliente de ensayo no recibe WhatsApp (12/11/2026): su respaldo quedó en el sistema.
+            'canal'               => PruebaEnsayoSinWhatsappService::es_ensayo($ticket->client)
+                ? PruebaWhatsappEnvio::CANAL_SISTEMA : PruebaWhatsappEnvio::CANAL_WHATSAPP,
             'plantilla'           => $plantilla,
             'hito'                => $hito,
             'estado'              => $estado,
-            'support_ticket_id'   => (int) $ticket->id,
+            'support_ticket_id'   => isset($envio['support_ticket_id']) ? (int) $envio['support_ticket_id'] : (int) $ticket->id,
             'support_message_id'  => $mensaje_id !== null ? (int) $mensaje_id : null,
             'whatsapp_message_id' => $envio['whatsapp_message_id'],
             'detalle'             => $detalle,
