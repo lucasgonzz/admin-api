@@ -287,6 +287,99 @@ class DocumentosPorSoporteDelSistemaTest extends BaseDeLaPrueba
     }
 
     /** @test */
+    public function martin_ve_las_preguntas_de_la_importacion_de_un_ticket_del_sistema_y_las_resuelve_igual_que_por_whatsapp(): void
+    {
+        $this->espiar_sender();
+        $this->admin();
+        $mensaje = $this->mandar_por_el_sistema([UploadedFile::fake()->createWithContent('articulos.xlsx', self::BYTES_XLSX)]);
+        $ticket  = $mensaje->ticket;
+        $uuid    = '9b2c4f1e-7a3d-4c55-9e0b-2f6d8a1c3e70';
+        $pendiente = ['analysis_uuid' => $uuid, 'filename' => 'articulos.xlsx', 'revision' => 2, 'tipo' => 'columnas', 'preguntas' => [
+            ['clave' => 'pregunta-1', 'texto' => '¿La columna Importe es costo o precio?', 'opciones' => [['valor' => 'costo', 'etiqueta' => 'Costo']]],
+        ]];
+
+        $this->fakear_http([
+            '*/admin-sync/ai-excel-import/prueba-pendientes*'            => Http::response(['pendientes' => [$pendiente]], 200),
+            '*/admin-sync/ai-excel-import/prueba-resolver/' . $uuid       => Http::response(['estado' => 'encolada'], 202),
+            '*/api/admin-sync/support/messages'                          => Http::response(['model' => ['id' => 1]], 201),
+        ]);
+        \App\Models\AdminSetting::set(\App\Services\SupportCodexSettings::KEY_ENABLED, '1');
+        \App\Models\AdminSetting::set(\App\Services\SupportCodexSettings::KEY_ACTIVATED_AT, now()->subHour()->toDateTimeString());
+        \App\Models\AdminSetting::set(\App\Services\SupportCodexSettings::KEY_ACTIVATED_AFTER_ID, 0);
+
+        /* El aviso de la importación llega a la conversación del sistema y NO tapa el mensaje que espera respuesta. */
+        $aviso = app(\App\Services\PruebaWhatsappService::class)->mandar_texto_por_ticket($this->client->fresh(), 'Ya leí "articulos.xlsx". Me falta un dato para terminar.', (int) $ticket->id);
+        $this->assertTrue($aviso['enviado']);
+
+        $base = '/api/claude/support-codex/tickets/' . $ticket->id;
+        $pendientes = $this->getJson('/api/claude/support-codex/pending', $this->headers_de_claude())->assertOk();
+        $this->assertContains((int) $ticket->id, array_column($pendientes->json('tickets'), 'id'), 'El ticket del sistema sigue pendiente para Martín.');
+
+        $reserva = $this->postJson($base . '/claim', ['worker_id' => 'martin', 'expected_message_id' => (int) $mensaje->id], $this->headers_de_claude())
+            ->assertOk()
+            ->assertJsonPath('ticket.canal', 'sistema')
+            ->assertJsonPath('ticket.expected_message_id', (int) $mensaje->id)
+            ->assertJsonPath('ticket.capabilities.prueba_import', true)
+            ->assertJsonPath('ticket.capabilities.prueba_import_resolver', true)
+            ->assertJsonPath('ticket.importaciones_prueba_pendientes', [$pendiente]);
+        $avisos = collect($reserva->json('ticket.messages'))->where('is_trial_import_notice', true);
+        $this->assertCount(1, $avisos, 'Martín ve el aviso en el hilo, marcado como aviso.');
+
+        /* La consulta de corridas pendientes va con el ticket del sistema y el dueño. */
+        $consulta = Http::recorded(function ($request) {
+            return strpos($request->url(), '/ai-excel-import/prueba-pendientes') !== false;
+        })->first()[0];
+        parse_str((string) parse_url($consulta->url(), PHP_URL_QUERY), $query);
+        $this->assertSame((string) $ticket->id, $query['support_ticket_id']);
+        $this->assertSame((string) $this->client->user_id, $query['user_id']);
+
+        /* Y la respuesta del negocio se resuelve por la misma ruta que en WhatsApp. */
+        $this->postJson($base . '/import-prueba-resolver', [
+            'analysis_uuid' => $uuid, 'revision' => 2, 'respuestas' => ['pregunta-1' => 'costo'],
+            'lease_token' => $reserva->json('lease_token'), 'expected_message_id' => (int) $mensaje->id,
+        ], $this->headers_de_claude())->assertStatus(202)->assertJsonPath('estado', 'encolada');
+    }
+
+    /** @test */
+    public function las_capacidades_de_importacion_de_la_prueba_dicen_lo_que_el_ticket_puede_usar(): void
+    {
+        $this->fakear_http(['*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response(['pendientes' => []], 200)]);
+        $leer = function (SupportTicket $ticket): array {
+            $capacidades = $this->getJson('/api/claude/support-codex/tickets/' . $ticket->id, $this->headers_de_claude())->assertOk()->json('ticket.capabilities');
+
+            return [$capacidades['prueba_import'], $capacidades['prueba_import_resolver']];
+        };
+        $ticket_de = function (int $usuario, array $extra = []) : SupportTicket {
+            $ticket = SupportTicket::create($extra + [
+                'client_id' => $this->client->id, 'client_user_id' => $usuario, 'status' => 'open',
+                'source' => 'erp', 'opened_at' => now(), 'agentes_erp' => true,
+            ]);
+            SupportMessage::create(['support_ticket_id' => $ticket->id, 'sender_type' => 'user', 'kind' => 'text', 'body' => 'Hola', 'delivered_at' => now(),
+                'erp_auto_reply' => [SupportMessage::MARCA_ERP_VERIFICADO_PARA_CODEX => true]]);
+
+            return $ticket;
+        };
+
+        /* El dueño en su sistema y el dueño por WhatsApp: el circuito entero. */
+        $this->assertSame([true, true], $leer($ticket_de((int) $this->client->user_id)));
+        $this->assertSame([true, true], $leer($this->ticket_del_cliente($this->client, true)));
+
+        /* Un empleado en el sistema: puede mandarse un Excel a mano, pero no hay circuito automático que resolver. */
+        $this->assertSame([true, false], $leer($ticket_de((int) $this->client->user_id + 1)));
+
+        /* Con la prueba vencida tampoco. */
+        $del_dueno = $ticket_de((int) $this->client->user_id);
+        $this->client->estado = \App\Services\Prueba\PruebaCicloService::CLIENTE_PRUEBA_VENCIDA;
+        $this->client->save();
+        $this->assertSame([true, false], $leer($del_dueno));
+
+        /* Un cliente que no está en prueba: como siempre (el monitor decide por client.estado). */
+        $this->client->estado = \App\Services\Prueba\PruebaCicloService::CLIENTE_ACTIVO;
+        $this->client->save();
+        $this->assertSame([true, true], $leer($del_dueno));
+    }
+
+    /** @test */
     public function si_el_sistema_no_confirma_el_aviso_no_queda_una_copia_en_el_hilo(): void
     {
         $this->espiar_sender();

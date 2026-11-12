@@ -573,6 +573,33 @@ class PruebaImportacionService
     }
 
     /**
+     * Las capacidades `prueba_import` y `prueba_import_resolver` del contexto de Martín, según lo que ESTE ticket
+     * puede usar de verdad (misión prueba-e2e-campana-imperio, 11/11/2026). Antes iban en `true` fijo.
+     *
+     *  - Cliente en prueba: `prueba_import` = la puerta de `import-excel` (ticket abierto); `prueba_import_resolver`
+     *    = el circuito automático (ticket de WhatsApp o conversación del sistema DEL DUEÑO, prueba sin vencer).
+     *  - Cliente que no está en prueba: quedan en `true`, como siempre. El monitor las lee como «el admin tiene la
+     *    ruta» y decide por `client.estado`; apagarlas ahí le haría informar un bloqueo que no existe.
+     *
+     * @param SupportTicket $ticket
+     *
+     * @return array{prueba_import: bool, prueba_import_resolver: bool}
+     */
+    public function capacidades_de_prueba(SupportTicket $ticket): array
+    {
+        $ticket->loadMissing('client');
+
+        if (! $this->pruebas->es_cliente_en_prueba($ticket->client)) {
+            return ['prueba_import' => true, 'prueba_import_resolver' => true];
+        }
+
+        return [
+            'prueba_import'          => $this->puerta($ticket) === null,
+            'prueba_import_resolver' => $this->automatizacion_disponible($ticket),
+        ];
+    }
+
+    /**
      * Si el ticket es la conversación de Soporte DEL SISTEMA del dueño (misión prueba-e2e-campana-imperio,
      * 11/11/2026): el negocio en prueba manda su Excel desde Agentes, Soporte, y la importación automática tiene
      * que andar igual que por WhatsApp. Mismo criterio que `PruebaRespaldoSoporteService`: canal sistema y el
