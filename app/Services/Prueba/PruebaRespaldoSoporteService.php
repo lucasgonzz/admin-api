@@ -62,6 +62,19 @@ class PruebaRespaldoSoporteService
     /** `prueba_whatsapp_envios.plantilla` de las respuestas del respaldo. */
     const PLANTILLA = 'respaldo_automatico';
 
+    /** `prueba_whatsapp_envios.plantilla` del acuse fijo de un archivo recibido fuera del horario de Martín. */
+    const PLANTILLA_ACUSE = 'respaldo_acuse_archivo';
+
+    /**
+     * Consultas sobre cargar o importar artículos, precios, listas, clientes o proveedores desde un archivo (misión
+     * prueba-e2e-campana-imperio, 12/11/2026). En la prueba eso NO se le explica al dueño: se lo cargamos nosotros.
+     * La respuesta es fija y no pasa por el modelo.
+     */
+    const PATRON_CARGA_DE_ARCHIVO = '/\bimport(ar|o|aci[oó]n|aciones)\b|(excel|xlsx?|\bpdf\b|planilla|archivo|cat[aá]logo|\blistas?\s+(de\s+|del\s+|de\s+los\s+|de\s+mis\s+)?(proveedor|proveedores|art[ií]culos|productos|mercader[ií]a))[^.!]{0,80}\b(cargar|cargo|cargue|cargarlo|cargarla|subir|subo|pasar|paso|migrar|meter)\b|\b(cargar|cargo|cargue|subir|subo|pasar|paso|migrar|meter)\b[^.!]{0,80}(excel|xlsx?|\bpdf\b|planilla|archivo|cat[aá]logo|\blistas?\s+(de\s+|del\s+|de\s+los\s+|de\s+mis\s+)?(proveedor|proveedores|art[ií]culos|productos|mercader[ií]a))/iu';
+
+    /** Código del video «Importá tu catálogo». */
+    const VIDEO_DE_IMPORTAR = '05';
+
     /** Respuestas automáticas por ticket y por día. */
     const TOPE_DIARIO = 3;
 
@@ -137,6 +150,20 @@ class PruebaRespaldoSoporteService
 
             $turno = $this->turno_del_lead($ticket);
             if ($this->tiene_adjunto_o_no_es_texto($turno)) {
+                /* Un Excel o un PDF mandado fuera del horario de Martín recibe un acuse fijo, sin modelo, una vez
+                   por ticket y por noche. Cualquier otro adjunto sigue esperando a una persona. */
+                if (self::fuera_del_horario_de_martin() && $this->turno_trae_un_documento($turno)) {
+                    if (PruebaWhatsappEnvio::where('support_ticket_id', (int) $ticket->id)->where('plantilla', self::PLANTILLA_ACUSE)
+                        ->where('dia', PruebaWhatsappService::hoy())->exists()) {
+                        return $this->no('adjunto');
+                    }
+
+                    return $this->mandar($ticket, $message_id, [
+                        'contenido' => 'Recibí tu archivo. Martín lo revisa y te lo carga desde las ' . self::hora_de_martin() . '; te avisa por acá.',
+                        'videos' => [], 'sin_cierre' => true,
+                    ], self::PLANTILLA_ACUSE);
+                }
+
                 return $this->no('adjunto');
             }
             if (preg_match(self::PATRON_COMERCIAL, implode("\n", $turno->pluck('body')->map(function ($body) {
@@ -146,6 +173,18 @@ class PruebaRespaldoSoporteService
             }
             if ($this->hay_importacion($ticket)) {
                 return $this->no('importacion_en_curso');
+            }
+
+            /* Cargar una lista desde un archivo no se le explica: se la cargamos nosotros. Respuesta fija, sin modelo. */
+            if (preg_match(self::PATRON_CARGA_DE_ARCHIVO, implode("\n", $turno->pluck('body')->map(function ($body) {
+                return (string) $body;
+            })->all())) === 1) {
+                return $this->mandar($ticket, $message_id, [
+                    'contenido' => 'Eso te lo cargamos nosotros, sin costo. Adjuntá el Excel o el PDF de tu proveedor '
+                        . ($ticket->source === 'erp' ? 'con el clip, acá abajo' : 'por acá') . ', y Martín lo toma apenas vuelve.',
+                    'videos' => ['prueba:' . self::VIDEO_DE_IMPORTAR],
+                    'intro_del_video' => 'Si preferís hacerlo vos, acá te muestra cómo',
+                ]);
             }
 
             try {
@@ -169,6 +208,47 @@ class PruebaRespaldoSoporteService
         } finally {
             $reserva->release();
         }
+    }
+
+    /**
+     * Si es la pausa nocturna de Martín: antes de la hora en que retoma (`SupportCodexHealthService::RESUME_HOUR`).
+     *
+     * @return bool
+     */
+    public static function fuera_del_horario_de_martin(): bool
+    {
+        return (int) \Carbon\Carbon::now(SupportCodexHealthService::TIMEZONE)->hour < SupportCodexHealthService::RESUME_HOUR;
+    }
+
+    /** «7 de la mañana»: la hora en que Martín retoma, dicha para el negocio. */
+    public static function hora_de_martin(): string
+    {
+        return SupportCodexHealthService::RESUME_HOUR . ' de la mañana';
+    }
+
+    /**
+     * Si el turno del negocio trae un documento (Excel o PDF) y ningún adjunto de otro tipo.
+     *
+     * @param \Illuminate\Support\Collection<int, SupportMessage> $turno
+     *
+     * @return bool
+     */
+    protected function turno_trae_un_documento($turno): bool
+    {
+        $documentos = 0;
+        foreach ($turno as $mensaje) {
+            foreach ($mensaje->attachments as $adjunto) {
+                $extension = strtolower((string) pathinfo((string) ($adjunto->original_name ?: $adjunto->path), PATHINFO_EXTENSION));
+                $mime      = strtolower(trim((string) $adjunto->mime));
+                if (! in_array($extension, ['xlsx', 'xls', 'pdf'], true)
+                    && ! in_array($mime, ['application/pdf', 'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'], true)) {
+                    return false;
+                }
+                $documentos++;
+            }
+        }
+
+        return $documentos > 0;
     }
 
     /**
@@ -238,7 +318,7 @@ class PruebaRespaldoSoporteService
      *
      * @return array{estado: string, detalle: string|null}
      */
-    protected function mandar(SupportTicket $ticket, int $message_id, array $respuesta): array
+    protected function mandar(SupportTicket $ticket, int $message_id, array $respuesta, string $plantilla = self::PLANTILLA): array
     {
         $catalogo = app(PruebaVideoCatalogoService::class)->videos();
         $video    = null;
@@ -251,7 +331,11 @@ class PruebaRespaldoSoporteService
 
         $texto = self::PREFIJO . trim((string) $respuesta['contenido']);
         if ($video !== null) {
-            $texto .= "\n" . $video['titulo'] . ': ' . $video['url'];
+            $texto .= "\n" . (isset($respuesta['intro_del_video']) ? (string) $respuesta['intro_del_video'] : $video['titulo']) . ': ' . $video['url'];
+        }
+        /* Fuera del horario de Martín, la respuesta dice cuándo sigue una atención completa. */
+        if (self::fuera_del_horario_de_martin() && empty($respuesta['sin_cierre'])) {
+            $texto .= "\n" . 'Martín te sigue desde las ' . self::hora_de_martin() . '.';
         }
 
         $envio = $ticket->source === 'erp'
@@ -266,7 +350,7 @@ class PruebaRespaldoSoporteService
             ->where('is_trial_import_notice', true)->where('body', $texto)->orderByDesc('id')->value('id');
         $estado = $envio['enviado'] ? PruebaWhatsappEnvio::ESTADO_ENVIADO : PruebaWhatsappEnvio::ESTADO_FALLIDO;
 
-        $this->registrar($ticket, self::PLANTILLA, null, $estado, $mensaje_id, $envio, 'entrante:' . $message_id);
+        $this->registrar($ticket, $plantilla, null, $estado, $mensaje_id, $envio, 'entrante:' . $message_id);
 
         /* El video que sumó la respuesta cuenta como entregado para `prueba.videos` (Martín no lo repite). */
         if ($video !== null && $envio['enviado'] && ! PruebaWhatsappEnvio::where('client_id', (int) $ticket->client_id)
