@@ -38,11 +38,30 @@ return [
      | Son el contrato con el monitor (`docs/soporte-codex-contrato.md`): no se cambian sin avisar.
      */
     /*
-     | Interruptor. Apagado (`CLAUDE_ADMIN_SQL_HABILITADO=false` en el .env), la ruta contesta 503
-     | `{error, codigo: "deshabilitado"}` sin validar ni ejecutar nada. Es la palanca para cortar el
-     | SQL del admin sin desplegar, si aparece otra fuga.
+     | Interruptor. 🔴 APAGADO POR DEFECTO: sin `CLAUDE_ADMIN_SQL_HABILITADO=true` en el .env, la
+     | ruta contesta 503 `{error, codigo: "deshabilitado"}` sin validar ni ejecutar nada.
+     |
+     | Por qué nace apagado: cuatro rondas de revisión le encontraron agujeros al validador, y las
+     | rejas de este lado (texto de la consulta, plan, origen de cada columna, redactor) son todas
+     | de la APLICACIÓN. La reja que no depende de que este código esté bien es de MySQL: un usuario
+     | de solo lectura, con permisos por tabla y por columna. Prenderlo queda condicionado a crear
+     | ese usuario (procedimiento en docs/soporte-codex-contrato.md, «Para habilitarlo en producción»).
+     |
+     | `filter_var`: `false`, `0`, `off`, `no` y vacío apagan; solo `true`, `1`, `on` y `yes` prenden.
      */
-    'habilitado' => (bool) env('CLAUDE_ADMIN_SQL_HABILITADO', true),
+    'habilitado' => filter_var(env('CLAUDE_ADMIN_SQL_HABILITADO', false), FILTER_VALIDATE_BOOLEAN),
+
+    /*
+     | Con qué usuario de MySQL corre la consulta.
+     |
+     | `conexion`: nombre de una conexión de config/database.php. Null = la conexión por defecto.
+     | `db_username` / `db_password`: si `db_username` está, reemplazan el usuario y la clave de esa
+     | conexión SOLO para esta consulta (host, puerto y base no cambian). Es la forma de usar un
+     | usuario dedicado de solo lectura sin tocar config/database.php.
+     */
+    'conexion'    => env('CLAUDE_ADMIN_SQL_CONEXION'),
+    'db_username' => env('CLAUDE_ADMIN_SQL_DB_USERNAME'),
+    'db_password' => env('CLAUDE_ADMIN_SQL_DB_PASSWORD'),
 
     'max_caracteres'      => 12000,
     'max_filas'           => 200,

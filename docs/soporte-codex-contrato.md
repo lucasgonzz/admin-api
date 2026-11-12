@@ -364,6 +364,8 @@ Para `empresa` mira las novedades activas (`version_notifications.title/body`, o
 
 ### `POST support-codex/admin-sql`
 
+🔴 **Sale APAGADO.** Con la configuración por defecto contesta 503 `{error, codigo: "deshabilitado"}`; se prende con `CLAUDE_ADMIN_SQL_HABILITADO=true` y está condicionado a un usuario de MySQL dedicado (ver «Para habilitarlo en producción», más abajo). El monitor tiene que tratar ese 503 como «herramienta no disponible», igual que un 404.
+
 Body: `{"sql": "SELECT …"}` (1–12000 caracteres). SQL de solo lectura sobre la base del admin. Es POST porque la consulta viaja en el cuerpo; no escribe nada. La consulta se ejecuta tal cual llegó (sin los espacios de los bordes).
 
 ```json
@@ -392,8 +394,8 @@ Antes de ejecutar, el admin mira además el PLAN de la consulta (`EXPLAIN` con `
 
 El redactor, sobre los textos que sí salen:
 
-- una clave de un valor JSON, a cualquier profundidad, sale `[dato reservado]` si su nombre es sensible, es una columna reservada o CONTIENE `pass`, `pwd`, `pin`, `clave`, `contrasen`, `token`, `secret`, `key` o `credential`;
-- en un texto se tapa: el contenido de las etiquetas XML/HTML de credenciales (`Token`, `Sign`, `Password`, `Clave` y las de nombre sensible, con o sin namespace, también escapadas); un `Bearer …`; el resto de la línea después de `nombre:` / `nombre=` cuando el nombre es sensible, reservado o contiene una de esas subcadenas; y **todo el resto de la línea** después de una etiqueta de clave (`contraseña`, `contrasena`, `clave`, `password`, `passwd`, `pass`, `pwd`, `pin`, `token` y sus plurales, aunque tenga texto pegado adelante), con `[oculta]`. Si la línea termina en la etiqueta, se tapa la siguiente;
+- una clave de un valor JSON, a cualquier profundidad, sale `[dato reservado]` si su nombre es sensible, es una columna reservada o CONTIENE `pass`, `pwd`, `pin`, `clave`, `contrasen`, `token`, `secret`, `key`, `credential`, `credencial`, `auth`, `cookie` o `session`;
+- en un texto se tapa: el contenido de las etiquetas XML/HTML de credenciales (`Token`, `Sign`, `Password`, `Clave`, las mismas etiquetas de clave del texto —`Auth`, `Cookie`, `Secret`…— y las de nombre sensible, con o sin namespace, también escapadas); un `Bearer …`; el resto de la línea después de `nombre:` / `nombre=` cuando el nombre es sensible, reservado o contiene una de esas subcadenas; y **todo el resto de la línea** después de una etiqueta de clave (`contraseña`, `contrasena`, `clave`, `password`, `passwd`, `pass`, `pwd`, `pin`, `token`, `credencial`, `credential`, `auth`, `authorization`, `cookie`, `session`, `apikey`, `secret`, `secreto` y sus plurales, aunque tenga texto pegado adelante), con `[oculta]`. Si la línea termina en la etiqueta, se tapa la siguiente línea que tenga algo, salteando las que estén en blanco. También la clave de una URL `esquema://usuario:clave@host`, un bloque `-----BEGIN … PRIVATE KEY-----` entero y un `Basic <base64>`. El texto se normaliza a NFC antes (si la extensión `intl` está);
 - un texto que no es UTF-8 válido, o sobre el que una regla falla, sale `[dato reservado]` entero: el redactor falla cerrado.
 
 Tapa de más a propósito: «Clave Fiscal nivel 3» pierde el resto de la línea.
@@ -401,20 +403,22 @@ Tapa de más a propósito: «Clave Fiscal nivel 3» pierde el resto de la línea
 #### Barreras de la consulta (primera reja; el monitor valida además por su cuenta)
 
 - Una sola sentencia: sin `;`, `--`, `/*`, `#` ni `@` **fuera de un texto entre comillas simples** (`email = 'a@b.com'` pasa), sin `\0` y sin comillas dobles fuera de un texto. Una comilla o un backtick sin cerrar se rechazan. Entre backticks solo se admite un nombre simple.
+- Sin llaves (`{ }`, la sintaxis de escape de ODBC) fuera de un texto.
 - **Fuera de un texto entre comillas, solo ASCII**: sin acentos, eñes ni otros símbolos en nombres de tablas, columnas o alias (MySQL pliega letras como la K de Kelvin o la İ turca a `k` / `i`). Adentro de un texto sí.
 - Sin literales hexadecimales o de bits (`0x…`, `X'…'`, `b'…'`) ni textos con juego de caracteres declarado (`N'…'`, `_utf8'…'`, `_binary`): 422 `literal_no_permitido`. Sin `BINARY` ni `COLLATE`.
-- Solo `SELECT`, `EXPLAIN SELECT`, `SHOW TABLES`, `SHOW [FULL] COLUMNS FROM tabla` y `DESCRIBE tabla`. Sin `SHOW CREATE TABLE`, `UNION`, `WITH`, `TABLE`, `VALUES` ni `FOR SHARE`.
+- Solo `SELECT`, `EXPLAIN SELECT`, `SHOW TABLES`, `SHOW [FULL] COLUMNS FROM tabla` y `DESCRIBE tabla`. Sin `SHOW CREATE TABLE`, `UNION`, `WITH`, `TABLE`, `VALUES`, `STRAIGHT_JOIN` ni `FOR SHARE`.
 - **Funciones habilitadas** (todas devuelven números o fechas, o uno de sus argumentos): `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `COALESCE`, `IFNULL`, `NULLIF`, `IF`, `LENGTH`, `CHAR_LENGTH`, `ROUND`, `ABS`, `CEIL`, `CEILING`, `FLOOR`, `DATE`, `YEAR`, `MONTH`, `DAY`, `DAYOFMONTH`, `HOUR`, `MINUTE`, `SECOND`, `NOW`, `CURDATE`, `CURRENT_DATE`, `CONVERT_TZ`, `DATE_ADD`, `DATE_SUB`, `DATEDIFF`, `TIMESTAMPDIFF`, `JSON_LENGTH`, `JSON_VALID`, `GREATEST`, `LEAST`.
 - **No habilitadas**, de la lista del monitor: `JSON_EXTRACT`, `JSON_UNQUOTE` y los operadores `->` / `->>` (422 `json_no_permitido`); `SUBSTRING`, `SUBSTR`, `LEFT`, `RIGHT`, `TRIM`, `LTRIM`, `RTRIM`, `CAST`, `CONVERT`, `CONCAT`, `CONCAT_WS`, `GROUP_CONCAT`, `LOWER`, `UPPER`, `DATE_FORMAT`, `STR_TO_DATE`, `DATABASE`, `VERSION` (422 `funcion_no_permitida`); `REPLACE` ya estaba prohibida como palabra. Para agrupar por mes: `YEAR(x), MONTH(x)`.
-- Un paréntesis solo puede ir pegado a una función habilitada, a `IN`, `EXISTS`, `NOT`, `OVER`, `AS` o, como agrupación, a `AND`, `OR`, `WHERE`, `ON`, `HAVING`, `WHEN`, `THEN`, `ELSE`.
+- Un paréntesis solo puede ir pegado a una función habilitada, a `IN`, `EXISTS`, `NOT`, `OVER`, `AS` o, como agrupación, a `AND`, `OR`, `WHERE`, `ON`, `HAVING`, `WHEN`, `THEN`, `ELSE`, `USING`.
 - **Una subconsulta solo se admite inmediatamente después de `IN` o de `EXISTS`.** Sin tablas derivadas (`FROM (SELECT …) t`, tampoco después de una coma), sin subconsultas en la lista del SELECT ni dentro de una función: 422 `subconsulta_no_permitida` (o `funcion_no_permitida` cuando el paréntesis va pegado a `FROM` / `JOIN` / `SELECT`).
-- Sin `base.tabla` ni `information_schema` / `mysql` / `performance_schema` / `sys`.
+- Sin `base.tabla` ni `information_schema` / `mysql` / `performance_schema` / `sys`. En `x.columna`, la `x` tiene que ser una tabla o un alias declarado en la propia consulta (después de `FROM`, de `JOIN` o de una coma del `FROM`); `x.y.z` no se admite nunca, y el nombre de una tabla nunca puede ir seguido de un punto: 422 `otra_base`.
+- **Sin orden posicional.** En `ORDER BY` y `GROUP BY` cada término tiene que empezar con el nombre de una columna, un alias o una función (`ORDER BY 3`, `ORDER BY 3 DESC`, `ORDER BY +3` y `ORDER BY 3+0` se rechazan). Si la lista del SELECT tiene `*`, cada término tiene que ser una columna explícita (`columna` o `alias.columna`, con `ASC` / `DESC`): 422 `orden_posicional`.
 - `*` dentro de un paréntesis solo como `COUNT(*)` o como multiplicación (`SUM(a * b)`).
 - Nombres sensibles en el texto → rechazo: `password|passwd|secret|token|api.?key|private.?key|session.?id|authorization|credential|clave.fiscal|encrypted|cifrad|p256dh|env_manual_values`. Es por subcadena: alcanza a `client_ai_token_usages` o `input_tokens`.
 - **Columnas reservadas** (`config/claude_admin_sql.php` → `columnas_reservadas`, con el motivo de cada una): si el nombre aparece como palabra en la consulta, rechazo. Son `request`, `response`, `raw`, `setup_data`, `ecommerce_setup_data`, `approval_payload`, `env_manual_values`, `data`, `detail`, `detalle`, `template_variables`, `variables`, `line`, `log`, `referencia_base64`, `datos`, `contexto_web`, `accion_payload`, `datos_de_soporte`, `artifacts`, `proof`, `calendar_snapshot`, `accepted_endpoint_hashes`, `clave`, `contrasena`, `contraseña`, `pin`. Son nombres globales. `data` está por las etapas de implementación (`implementation_stages.data` y pares guardan `admin_password` y tokens); el estado de una implementación se lee por `claude/implementations`.
 - **Tablas vedadas** (como palabra en la consulta, también en `SHOW COLUMNS` / `DESCRIBE`): `admin_settings`, `env_templates`, `env_change_batches`, `env_change_items`, `client_ssh_credentials`, `admin_push_subscriptions`, `admin_calendar_connections`, `personal_access_tokens`, `password_resets`, `sessions`, `jobs`, `failed_jobs`, `job_batches`, `recall_configs`, `whatsapp_config`, `mensualidad_invoice_pdf_access_tokens`, `recursos_links`, `recursos_sesiones`, `support_codex_task_grants`, `trial_instances`, `implementation_messages`, `ecommerce_implementation_messages` (22). Las dos últimas son las conversaciones de implementación: incluyen la entrega del acceso (usuario y contraseña del sistema del cliente) y se leen por `claude/implementations`.
 
-Ejecución: conexión `mysqli` aparte y descartable, con `SET SESSION TRANSACTION READ ONLY` + transacción de solo lectura + `max_execution_time` de 8 s; al terminar se cierra (lo que deshace la transacción). Una sola sentencia por llamada.
+Ejecución: no hay un camino que ejecute sin validar (el servicio solo expone `consultar()`, y rechaza por su cuenta un comentario SQL aunque el validador lo dejara pasar: una pista del optimizador desarmaría la reja del plan). Conexión `mysqli` aparte y descartable, con el usuario dedicado si está configurado, con `SET SESSION TRANSACTION READ ONLY` + transacción de solo lectura + `max_execution_time` de 8 s; al terminar se cierra (lo que deshace la transacción). Una sola sentencia por llamada.
 
 **Fail-closed por columna de texto.** Toda columna `json`, `text` (cualquier tamaño) o `blob` de una tabla no vedada está decidida a mano en `config/claude_admin_sql.php`: o no se sirve (patrón sensible o `columnas_reservadas`), o figura en `columnas_de_texto_revisadas` con el motivo por el que es legible. Un JSON es legible solo si, por lo que escribe el código, no guarda credenciales. Un test de build lo coteja contra el esquema real: una migración que agregue una columna de texto sin decidirla lo rompe. Las columnas `varchar` se protegen por nombre.
 
@@ -424,7 +428,7 @@ Ejecución: conexión `mysqli` aparte y descartable, con `SET SESSION TRANSACTIO
 
 | `codigo` | Cuándo |
 |---|---|
-| `consulta_invalida` | no es texto, vacía, más de 12000 caracteres, no es UTF-8, un carácter que no es ASCII fuera de un texto, comilla o backtick sin cerrar, o un backtick con algo que no es un nombre simple |
+| `consulta_invalida` | no es texto, vacía, más de 12000 caracteres, no es UTF-8, un carácter que no es ASCII o una llave fuera de un texto, comilla o backtick sin cerrar, o un backtick con algo que no es un nombre simple |
 | `varias_sentencias` | `;`, `--`, `/*`, `#` o `@` fuera de un texto, o un carácter nulo |
 | `comillas_dobles` | comillas dobles fuera de un texto |
 | `literal_no_permitido` | literal hexadecimal o de bits, o un texto con juego de caracteres declarado |
@@ -432,7 +436,8 @@ Ejecución: conexión `mysqli` aparte y descartable, con `SET SESSION TRANSACTIO
 | `tabla_vedada` | nombra una tabla vedada, o el resultado trae una columna de una |
 | `operacion_no_permitida` | una palabra prohibida (escrituras, `UNION`, `WITH`, `TABLE`, `VALUES`, `BINARY`, `COLLATE`, bases del sistema, `SHOW CREATE TABLE`) |
 | `solo_select` | no empieza con `SELECT` / `EXPLAIN SELECT` ni es una de las tres consultas de esquema |
-| `otra_base` | `base.tabla`, o el resultado trae datos de otra base |
+| `otra_base` | `base.tabla`, `x.y.z`, un calificador que no es una tabla o un alias de la consulta, o el resultado trae datos de otra base |
+| `orden_posicional` | un término de `ORDER BY` / `GROUP BY` que no empieza con un nombre, o que no es una columna explícita cuando el SELECT tiene `*` |
 | `comodin_en_parentesis` | `*` comodín dentro de un paréntesis |
 | `funcion_no_permitida` | una función fuera de la lista, o un paréntesis pegado a una palabra que no lo admite (`FROM (`, `JOIN (`, `SELECT (`) |
 | `json_no_permitido` | `->`, `->>` o una función que extrae una parte de un JSON |
@@ -443,13 +448,72 @@ Ejecución: conexión `mysqli` aparte y descartable, con `SET SESSION TRANSACTIO
 
 | `codigo` | Cuándo |
 |---|---|
-| `deshabilitado` | el interruptor está apagado (`CLAUDE_ADMIN_SQL_HABILITADO=false` en el `.env` del admin). No se valida ni se ejecuta nada. `{"error": "La consulta SQL del admin está deshabilitada.", "codigo": "deshabilitado"}` |
-| `no_disponible` | el servidor no puede atender: falta la extensión `mysqli` o la conexión por defecto no es MySQL. Nunca cae a otra forma de ejecutar |
+| `deshabilitado` | **el estado por defecto**: el interruptor está apagado (falta `CLAUDE_ADMIN_SQL_HABILITADO=true` en el `.env` del admin). No se valida ni se ejecuta nada. `{"error": "La consulta SQL del admin está deshabilitada.", "codigo": "deshabilitado"}` |
+| `no_disponible` | el servidor no puede atender: falta la extensión `mysqli`, la conexión configurada no existe o no es MySQL, o no se pudo conectar (por ejemplo, el usuario dedicado mal cargado). Nunca cae a otra forma de ejecutar ni al usuario de la aplicación |
+
+#### Para habilitarlo en producción
+
+**`admin-sql` sale APAGADO.** Con la configuración por defecto la ruta contesta 503 `{"error": "La consulta SQL del admin está deshabilitada.", "codigo": "deshabilitado"}` sin validar ni ejecutar nada. Las otras dos rutas (`client-versions` y `feature-lookup`) no dependen de este interruptor.
+
+Por qué no se habilita con el usuario de MySQL de la aplicación:
+
+- En cuatro rondas de revisión, cada revisor nuevo encontró una fuga distinta mirando solo el texto de la consulta: un alias, `JSON_EXTRACT` y `->>`, `SUBSTRING` después de «Contraseña: », una letra Unicode que MySQL pliega a `k`, bytes inválidos que hacían fallar al redactor, `base.tabla` detrás de `STRAIGHT_JOIN` o de llaves de ODBC, `ORDER BY 25`.
+- Todas se cerraron, pero la clase no: validar SQL con expresiones regulares es perseguir la gramática de MySQL, y la próxima forma no la conoce nadie todavía.
+- Las rejas del lado del resultado (sesión de solo lectura, plan con `derived_merge=off`, origen real de cada columna) son más firmes, pero son código de la aplicación y dependen unas de otras: el origen informado deja de ser confiable a través de una tabla derivada, y el plan depende de una variable de sesión.
+- El usuario de MySQL de la aplicación puede leer y escribir TODO, en esta base y en las que comparta el servidor. Si una reja falla, no hay otra detrás.
+- Queda además el riesgo de inferencia (preguntar con `LIKE`), que ninguna reja de la aplicación cierra sobre una columna que el usuario de MySQL puede leer.
+
+La reja que no depende de este código es de MySQL: **un usuario dedicado, de solo lectura, con permisos por tabla y por columna.** Con ese usuario, una consulta que nombre `api_key` o `admin_settings` falla en MySQL (error 1142 / 1143) aunque todas las rejas de arriba se equivoquen, y no hay nada que inferir.
+
+Procedimiento:
+
+1. **Crear el usuario**, sin ningún permiso global ni sobre otra base:
+
+   ```sql
+   CREATE USER 'admin_soporte_lectura'@'127.0.0.1' IDENTIFIED BY '<clave larga y propia>';
+   ```
+
+2. **Dar `SELECT` tabla por tabla, y columna por columna donde haga falta.** Nunca `GRANT SELECT ON base.*`. Para cada tabla de la base del admin:
+   - si está en `tablas_vedadas` de `config/claude_admin_sql.php`: ningún permiso;
+   - si ninguna de sus columnas es sensible: `GRANT SELECT ON base.tabla`;
+   - si tiene alguna columna sensible (su nombre matchea `patron_sensible`, o está en `columnas_reservadas`, o es `json` / `text` / `blob` y `tabla.columna` no figura en `columnas_de_texto_revisadas`): `GRANT SELECT (col1, col2, …)` solo con las demás.
+
+   Los `GRANT` se generan desde `information_schema`, para no escribirlos a mano. Esta consulta (corrida por un administrador, no por `admin-sql`) arma uno por tabla con las columnas que NO matchean el patrón; a la lista resultante hay que sacarle las tablas vedadas y, de cada tabla, las columnas reservadas y las de texto no revisadas, que salen del config:
+
+   ```sql
+   SELECT CONCAT('GRANT SELECT (', GROUP_CONCAT(CONCAT('`', column_name, '`') ORDER BY ordinal_position SEPARATOR ', '),
+                 ') ON `', table_schema, '`.`', table_name, '` TO ''admin_soporte_lectura''@''127.0.0.1'';') AS sentencia
+   FROM information_schema.columns
+   WHERE table_schema = '<base del admin>'
+     AND column_name NOT REGEXP 'password|passwd|secret|token|api.?key|private.?key|session.?id|authorization|credential|clave.fiscal|encrypted|cifrad|p256dh|env_manual_values'
+   GROUP BY table_schema, table_name;
+   ```
+
+   El cruce contra el config se hace con `php artisan tinker`: `config('claude_admin_sql.tablas_vedadas')`, `config('claude_admin_sql.columnas_reservadas')` y `config('claude_admin_sql.columnas_de_texto_revisadas')` dan las tres listas. La reja por origen de columna del servicio aplica exactamente esa misma regla, así que lo que el usuario puede leer y lo que el servicio deja salir tienen que coincidir.
+
+3. **Verificar con ese usuario**, desde la consola de MySQL: `SELECT api_key FROM clients` y `SELECT * FROM admin_settings` tienen que fallar por permisos; `SELECT id, name FROM clients` tiene que andar; `SHOW GRANTS FOR 'admin_soporte_lectura'@'127.0.0.1'` no tiene que mostrar ningún `ON *.*` ni otra base. Ojo: con permisos por columna, `SELECT * FROM clients` falla; hay que nombrar las columnas.
+
+4. **Configurar el `.env` del admin** y limpiar la caché de config:
+
+   ```
+   CLAUDE_ADMIN_SQL_DB_USERNAME=admin_soporte_lectura
+   CLAUDE_ADMIN_SQL_DB_PASSWORD=<la clave>
+   CLAUDE_ADMIN_SQL_HABILITADO=true
+   ```
+
+   `CLAUDE_ADMIN_SQL_DB_USERNAME` / `_PASSWORD` reemplazan el usuario y la clave de la conexión por defecto solo para esta consulta (host, puerto y base no cambian). Como alternativa, `CLAUDE_ADMIN_SQL_CONEXION=<nombre>` apunta a otra conexión de `config/database.php`. `CLAUDE_ADMIN_SQL_HABILITADO` solo prende con `true`, `1`, `on` o `yes`; cualquier otro valor, o su ausencia, lo deja apagado.
+
+5. **Cada migración** que agregue una tabla o una columna obliga a repetir el paso 2 para ella: el usuario dedicado no la ve hasta que se le da el permiso. Es el comportamiento buscado (fail-closed), y el test de build de las columnas de texto avisa del lado del config.
+
+Para apagarlo sin desplegar: `CLAUDE_ADMIN_SQL_HABILITADO=false` y limpiar la caché de config.
 
 #### Limitaciones y riesgo residual
 
 - No se puede recortar ni transformar un texto, ni leer una clave suelta de un JSON: salen enteros (hasta 4000 caracteres) o no salen.
 - No se puede filtrar ni ordenar por una columna reservada o de nombre sensible. Los conteos de tokens de IA (`client_ai_token_usages`, `input_tokens`) no se pueden consultar por SQL: su nombre matchea el patrón.
+- Con el usuario dedicado (permisos por columna), `SELECT *` sobre una tabla con columnas sin permiso falla en MySQL: hay que nombrar las columnas.
+- Las rejas del plan y del origen de columna no se sostienen solas (ver «Para habilitarlo en producción»): por eso el endpoint nace apagado.
+- `DATE(texto)` / `YEAR(texto)` leen una fecha escrita al principio de un texto; `EXPLAIN SELECT …` devuelve el plan tal cual.
 - **Inferencia.** Sobre una columna de texto legible se puede PREGUNTAR (`WHERE body LIKE '%…%'`, `IF(…)`, `LENGTH(…)`), y una expresión numérica sobre un texto devuelve su prefijo numérico (`'4321 es el PIN' + 0` → 4321). Con muchas preguntas se reconstruye un valor que el resultado muestra tapado. La redacción protege lo que se devuelve, no lo que se puede inferir; por eso lo que guarda credenciales por diseño está reservado o en tablas vedadas —incluidas las conversaciones de implementación—. El resto de los cuerpos de conversación queda legible con ese riesgo aceptado: cada consulta de Martín queda auditada en el ticket, y una contraseña escrita en el cuerpo de un mensaje sigue siendo un dato mal guardado.
 
 Lo que se puede leer incluye datos comerciales y de contacto de clientes y leads: es para uso interno de soporte. Qué se le dice a un cliente lo siguen gobernando las reglas de Martín.

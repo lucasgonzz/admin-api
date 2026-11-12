@@ -63,6 +63,10 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
 
         config(['services.claude_task_ingest.key' => self::CLAVE]);
 
+        /* 🔴 El endpoint nace APAGADO (`CLAUDE_ADMIN_SQL_HABILITADO`). Estos tests lo ejercitan, así
+           que lo prenden explícitamente; los que prueban el interruptor lo vuelven a apagar. */
+        config(['claude_admin_sql.habilitado' => true]);
+
         $this->borrar_fixtures();
 
         $this->slug      = self::PREFIJO . Str::lower(Str::random(10));
@@ -144,6 +148,50 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
 
         DB::table('mensualidad_invoices')->whereIn('client_id', $ids)->delete();
         DB::table('clients')->whereIn('id', $ids)->delete();
+    }
+
+    /**
+     * Corre `$callback` con una variable de entorno puesta (o quitada, con null) y la restaura.
+     *
+     * @param string      $nombre   Variable.
+     * @param string|null $valor    Valor, o null para que no exista.
+     * @param callable    $callback Lo que se corre.
+     *
+     * @return void
+     */
+    private function con_la_variable(string $nombre, $valor, callable $callback): void
+    {
+        $antes = [
+            'env'    => array_key_exists($nombre, $_ENV) ? $_ENV[$nombre] : null,
+            'server' => array_key_exists($nombre, $_SERVER) ? $_SERVER[$nombre] : null,
+            'getenv' => getenv($nombre),
+        ];
+
+        if ($valor === null) {
+            unset($_ENV[$nombre], $_SERVER[$nombre]);
+            putenv($nombre);
+        } else {
+            $_ENV[$nombre]    = $valor;
+            $_SERVER[$nombre] = $valor;
+            putenv($nombre . '=' . $valor);
+        }
+
+        try {
+            $callback();
+        } finally {
+            unset($_ENV[$nombre], $_SERVER[$nombre]);
+            putenv($nombre);
+
+            if ($antes['env'] !== null) {
+                $_ENV[$nombre] = $antes['env'];
+            }
+            if ($antes['server'] !== null) {
+                $_SERVER[$nombre] = $antes['server'];
+            }
+            if ($antes['getenv'] !== false) {
+                putenv($nombre . '=' . $antes['getenv']);
+            }
+        }
     }
 
     /**
@@ -472,7 +520,7 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
 
     public function test_el_redactor_tapa_las_etiquetas_xml_de_credenciales_en_cualquier_texto(): void
     {
-        $servicio = app(ClaudeAdminSqlService::class);
+        $servicio = app(ClaudeAdminSqlServiceParaTests::class);
 
         /* El mismo SOAP, guardado en una columna de nombre inocente: la segunda reja. */
         $fila = $servicio->redactar_fila([
@@ -486,13 +534,13 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
             $this->assertStringNotContainsString('CANARIO', (string) $valor, $columna);
         }
 
-        $this->assertStringContainsString('<ar:Token>[dato reservado]</ar:Token>', $fila['nota']);
-        $this->assertStringContainsString('<ar:Sign>[dato reservado]</ar:Sign>', $fila['nota']);
+        /* `Auth` también es una etiqueta de credenciales: se va el bloque entero, con su Token y su Sign. */
+        $this->assertStringContainsString('<ar:Auth>[dato reservado]</ar:Auth>', $fila['nota']);
         /* Lo que no es credencial queda como estaba. */
-        $this->assertStringContainsString('<ar:Cuit>20111111112</ar:Cuit>', $fila['nota']);
+        $this->assertStringContainsString('</ar:FECAESolicitar></soapenv:Body></soapenv:Envelope>', $fila['nota']);
         /* El XML escapado se tapa dos veces: la etiqueta, y además el resto de la línea después de
            «Token» (la regla de etiquetas de clave solo perdona un nombre de etiqueta pegado a `<`). */
-        $this->assertStringStartsWith('Falló: &lt;Auth&gt;&lt;Token', $fila['escapado']);
+        $this->assertStringStartsWith('Falló: &lt;Auth', $fila['escapado']);
         $this->assertStringContainsString('<Resultado>A</Resultado>', $fila['variado']);
         $this->assertStringContainsString('<password attr="x">[dato reservado]</password>', $fila['variado']);
         $this->assertStringContainsString('negrita', $fila['en_json']);
@@ -512,7 +560,7 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
 
     public function test_el_redactor_tapa_el_resto_de_la_linea_despues_de_una_etiqueta_de_clave(): void
     {
-        $servicio = app(ClaudeAdminSqlService::class);
+        $servicio = app(ClaudeAdminSqlServiceParaTests::class);
 
         /* Texto => lo que tiene que quedar legible. En todos, el centinela no sale. */
         $casos = [
@@ -568,7 +616,7 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
 
     public function test_las_claves_de_un_json_se_tapan_por_subcadena_de_etiqueta(): void
     {
-        $servicio = app(ClaudeAdminSqlService::class);
+        $servicio = app(ClaudeAdminSqlServiceParaTests::class);
 
         $json = json_encode([
             'pass'        => 'CENTINELA-1',
@@ -597,7 +645,7 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
 
     public function test_el_redactor_falla_cerrado_con_un_texto_que_no_es_utf8(): void
     {
-        $servicio = app(ClaudeAdminSqlService::class);
+        $servicio = app(ClaudeAdminSqlServiceParaTests::class);
 
         /* 🔴 Reproducido: «CONTRASEÑA: valor» seguido de un byte 0xFF hacía fallar las expresiones
            regulares con /u (devuelven null) y el respaldo por bytes no reconocía la Ñ. Un texto que
@@ -636,7 +684,7 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
         $funciones = array_values(array_diff(\App\Services\ClaudeAdminSqlValidator::FUNCIONES, ['IN', 'EXISTS', 'NOT', 'OVER', 'AS']));
         $this->assertGreaterThan(30, count($funciones));
 
-        $servicio  = app(ClaudeAdminSqlService::class);
+        $servicio  = app(ClaudeAdminSqlServiceParaTests::class);
         $corridas  = 0;
         $con_filas = 0;
 
@@ -745,7 +793,7 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
 
     public function test_la_reja_por_origen_tapa_una_columna_sensible_aunque_tenga_alias(): void
     {
-        $servicio = app(ClaudeAdminSqlService::class);
+        $servicio = app(ClaudeAdminSqlServiceParaTests::class);
         $id       = $this->client_id;
 
         /* 🔴 Directo al servicio, SIN validador: lo que rechaza o tapa acá es lo que MySQL informa
@@ -760,7 +808,7 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
             'SELECT setup_data AS x FROM clients WHERE id = ' . $id,
             'SELECT request AS x, response AS y FROM mensualidad_invoices WHERE client_id = ' . $id,
         ] as $sql) {
-            $resultado = $servicio->ejecutar_y_filtrar($sql);
+            $resultado = $servicio->sin_validar($sql);
             $cuerpo    = (string) json_encode($resultado, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
 
             $this->assertStringNotContainsString('CANARIO', $cuerpo, $sql);
@@ -778,12 +826,12 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
         }
 
         /* El alias común corre seguro: que no sea un test que solo ve fallos. */
-        $this->assertTrue($servicio->ejecutar_y_filtrar('SELECT api_key AS x FROM clients WHERE id = ' . $id)['ok']);
+        $this->assertTrue($servicio->sin_validar('SELECT api_key AS x FROM clients WHERE id = ' . $id)['ok']);
     }
 
     public function test_la_reja_por_origen_tapa_toda_expresion_de_texto(): void
     {
-        $servicio = app(ClaudeAdminSqlService::class);
+        $servicio = app(ClaudeAdminSqlServiceParaTests::class);
         $id       = $this->client_id;
 
         /* Sin validador. Cada expresión devuelve texto (o bytes): sale la máscara, sea lo que sea. */
@@ -799,7 +847,7 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
 
         foreach ($expresiones as $expresion) {
             $sql       = 'SELECT ' . $expresion . ' AS x FROM clients WHERE id = ' . $id;
-            $resultado = $servicio->ejecutar_y_filtrar($sql);
+            $resultado = $servicio->sin_validar($sql);
 
             $this->assertTrue($resultado['ok'], 'Tendría que correr (sin validador) y salir tapada: ' . $sql . ' → ' . json_encode($resultado));
             $this->assertSame([['x' => '[dato reservado]']], $resultado['rows'], $sql);
@@ -811,7 +859,7 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
         $this->assertSame('funcion_no_permitida', $servicio->consultar('SELECT STR_TO_DATE(name, \'%f\') AS x FROM clients')['codigo']);
 
         /* Y las expresiones numéricas y de fecha sí salen, como números y fechas. */
-        $resultado = $servicio->ejecutar_y_filtrar(
+        $resultado = $servicio->sin_validar(
             'SELECT COUNT(*) AS n, MAX(id) AS maximo, LENGTH(name) AS largo, DATE(created_at) AS dia, YEAR(created_at) AS anio, '
             . 'NOW() AS ahora, NULL AS nada, 1.5 AS decimal_, id + 1 AS suma, id > 0 AS verdadero '
             . 'FROM clients WHERE id = ' . $id . ' GROUP BY id, name, created_at'
@@ -832,7 +880,7 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
 
     public function test_la_reja_por_origen_rechaza_una_tabla_vedada_y_otra_base(): void
     {
-        $servicio = app(ClaudeAdminSqlService::class);
+        $servicio = app(ClaudeAdminSqlServiceParaTests::class);
 
         /* Sin validador. `orgtable` dice de qué tabla viene cada columna, con alias o sin él. */
         foreach ([
@@ -844,7 +892,7 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
             'SELECT id FROM jobs',
             'SELECT body FROM implementation_messages',
         ] as $sql) {
-            $resultado = $servicio->ejecutar_y_filtrar($sql);
+            $resultado = $servicio->sin_validar($sql);
 
             $this->assertFalse($resultado['ok'], $sql);
             /* Con la letra plegada, si este servidor no la pliega la tabla «no existe»: también vale. */
@@ -852,14 +900,14 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
             $this->assertArrayNotHasKey('rows', $resultado, $sql);
         }
 
-        $otra = $servicio->ejecutar_y_filtrar('SELECT table_name FROM information_schema.tables LIMIT 1');
+        $otra = $servicio->sin_validar('SELECT table_name FROM information_schema.tables LIMIT 1');
         $this->assertFalse($otra['ok']);
         $this->assertArrayNotHasKey('rows', $otra);
     }
 
     public function test_el_plan_rechaza_las_tablas_derivadas_y_el_union_aunque_el_validador_no_estuviera(): void
     {
-        $servicio = app(ClaudeAdminSqlService::class);
+        $servicio = app(ClaudeAdminSqlServiceParaTests::class);
         $id       = $this->client_id;
 
         /* 🔴 EL LÍMITE DE LA REJA POR ORIGEN, MEDIDO: a través de una tabla derivada MySQL informa
@@ -877,7 +925,7 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
             'WITH t AS (SELECT api_key AS name FROM clients) SELECT name FROM t',
             'SELECT name FROM (TABLE clients) AS t (id, uuid, name)',
         ] as $sql) {
-            $resultado = $servicio->ejecutar_y_filtrar($sql);
+            $resultado = $servicio->sin_validar($sql);
             $cuerpo    = (string) json_encode($resultado, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
 
             $this->assertFalse($resultado['ok'], 'El servicio tendría que rechazarla por su plan: ' . $sql . ' → ' . $cuerpo);
@@ -885,8 +933,8 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
             $this->assertStringNotContainsString('CANARIO', $cuerpo, $sql);
         }
 
-        $this->assertSame('subconsulta_no_permitida', $servicio->ejecutar_y_filtrar('SELECT name FROM (SELECT api_key AS name FROM clients WHERE id = ' . $id . ') clients')['codigo']);
-        $this->assertSame('subconsulta_no_permitida', $servicio->ejecutar_y_filtrar('SELECT name FROM clients WHERE id = -1 UNION SELECT api_key FROM clients')['codigo']);
+        $this->assertSame('subconsulta_no_permitida', $servicio->sin_validar('SELECT name FROM (SELECT api_key AS name FROM clients WHERE id = ' . $id . ') clients')['codigo']);
+        $this->assertSame('subconsulta_no_permitida', $servicio->sin_validar('SELECT name FROM clients WHERE id = -1 UNION SELECT api_key FROM clients')['codigo']);
 
         /* Lo que sí se admite: IN y EXISTS. */
         foreach ([
@@ -903,7 +951,7 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
 
     public function test_un_texto_solo_sale_como_columna_entera_y_la_coercion_a_numero_queda_como_residual(): void
     {
-        $servicio = app(ClaudeAdminSqlService::class);
+        $servicio = app(ClaudeAdminSqlServiceParaTests::class);
         $id       = $this->client_id;
 
         /* ⚠️ RESIDUAL CONOCIDO, FIJADO POR ESTE TEST. Una expresión numérica sobre un texto devuelve
@@ -961,7 +1009,7 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
 
     public function test_el_redactor_tapa_bearer_y_pares_clave_valor_de_un_log(): void
     {
-        $servicio = app(ClaudeAdminSqlService::class);
+        $servicio = app(ClaudeAdminSqlServiceParaTests::class);
 
         $fila = $servicio->redactar_fila([
             'texto'   => "MAIL_HOST=smtp.test\ncurl -H \"Authorization: Bearer abc.DEF-123\" y DB_PASSWORD=supersecreta",
@@ -996,7 +1044,7 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
 
     public function test_la_transaccion_es_de_solo_lectura_aunque_el_validador_no_estuviera(): void
     {
-        $servicio = app(ClaudeAdminSqlService::class);
+        $servicio = app(ClaudeAdminSqlServiceParaTests::class);
 
         /* 🔴 Directo al ejecutor, sin validador y sin la reja del plan (se la saltea marcándola
            como consulta de esquema): la reja acá es MySQL. */
@@ -1005,18 +1053,18 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
             'DELETE FROM clients WHERE id = ' . $this->client_id,
             'INSERT INTO versions (uuid, version, status) VALUES (\'' . Str::uuid() . '\', \'0.0.0\', \'draft\')',
         ] as $sql) {
-            $resultado = $servicio->ejecutar_y_filtrar($sql, true);
+            $resultado = $servicio->sin_validar($sql, true);
 
             $this->assertFalse($resultado['ok'], $sql);
             $this->assertSame('consulta_fallida', $resultado['codigo'], $sql);
             $this->assertSame(1792, $resultado['codigo_mysql'], 'MySQL tendría que rechazar con 1792 (READ ONLY transaction): ' . $sql);
 
             /* Y por el camino de un SELECT ni llega a MySQL: el plan de una escritura no se admite. */
-            $this->assertFalse($servicio->ejecutar_y_filtrar($sql)['ok'], $sql);
+            $this->assertFalse($servicio->sin_validar($sql)['ok'], $sql);
         }
 
         /* Varias sentencias: mysqli no las acepta en una sola llamada. */
-        $this->assertFalse($servicio->ejecutar_y_filtrar('SELECT 1; SELECT 2', true)['ok']);
+        $this->assertFalse($servicio->sin_validar('SELECT 1; SELECT 2', true)['ok']);
 
         $this->assertSame('Fixture de admin-sql', DB::table('clients')->where('id', $this->client_id)->value('name'));
         $this->assertSame(0, DB::table('versions')->where('version', '0.0.0')->count());
@@ -1024,7 +1072,7 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
 
     public function test_la_sesion_de_la_consulta_tiene_solo_lectura_y_tope_de_tiempo(): void
     {
-        $resultado = app(ClaudeAdminSqlService::class)->ejecutar_y_filtrar(
+        $resultado = app(ClaudeAdminSqlServiceParaTests::class)->sin_validar(
             'SELECT @@SESSION.transaction_read_only AS solo_lectura, @@SESSION.max_execution_time AS tope, '
             . '@@SESSION.optimizer_switch LIKE \'%derived_merge=off%\' AS sin_fusion, @@SESSION.character_set_results AS juego',
             true
@@ -1054,8 +1102,219 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
         config(['claude_admin_sql.habilitado' => true]);
 
         $this->consultar('SELECT id FROM clients WHERE id = ' . $this->client_id)->assertStatus(200);
-        /* Y por defecto está prendido. */
-        $this->assertTrue((require config_path('claude_admin_sql.php'))['habilitado']);
+    }
+
+    public function test_con_la_configuracion_por_defecto_el_endpoint_esta_deshabilitado(): void
+    {
+        /* 🔴 NACE APAGADO. Se relee el archivo de config tal como lo carga la aplicación, sin la
+           variable en el entorno: lo que valga ahí es lo que vale en un servidor que no la definió. */
+        $this->con_la_variable('CLAUDE_ADMIN_SQL_HABILITADO', null, function () {
+            $por_defecto = require config_path('claude_admin_sql.php');
+
+            $this->assertFalse($por_defecto['habilitado']);
+
+            config(['claude_admin_sql.habilitado' => $por_defecto['habilitado']]);
+
+            $respuesta = $this->consultar('SELECT id FROM clients WHERE id = ' . $this->client_id);
+
+            $respuesta->assertStatus(503);
+            $this->assertSame('deshabilitado', $respuesta->json('codigo'));
+            $this->assertArrayNotHasKey('rows', $respuesta->json());
+        });
+    }
+
+    public function test_el_interruptor_solo_se_prende_con_un_valor_afirmativo(): void
+    {
+        foreach (['off', 'no', '0', 'false', '', 'OFF', 'False', 'apagado', 'null', ' '] as $valor) {
+            $this->con_la_variable('CLAUDE_ADMIN_SQL_HABILITADO', $valor, function () use ($valor) {
+                $this->assertFalse((require config_path('claude_admin_sql.php'))['habilitado'], 'Tendría que apagar: [' . $valor . ']');
+            });
+        }
+
+        foreach (['true', '1', 'on', 'yes', 'TRUE', 'On'] as $valor) {
+            $this->con_la_variable('CLAUDE_ADMIN_SQL_HABILITADO', $valor, function () use ($valor) {
+                $this->assertTrue((require config_path('claude_admin_sql.php'))['habilitado'], 'Tendría que prender: [' . $valor . ']');
+            });
+        }
+    }
+
+    public function test_la_conexion_usa_el_usuario_dedicado_si_esta_configurado(): void
+    {
+        $servicio = app(ClaudeAdminSqlServiceParaTests::class);
+        $defecto  = (array) config('database.connections.' . config('database.default'));
+
+        /* Sin configurar nada: la conexión por defecto, tal cual. */
+        config(['claude_admin_sql.conexion' => null, 'claude_admin_sql.db_username' => null, 'claude_admin_sql.db_password' => null]);
+        $this->assertSame($defecto['username'], $servicio->parametros()['username']);
+        $this->assertSame($defecto['database'], $servicio->parametros()['database']);
+
+        /* Usuario y clave dedicados: reemplazan SOLO eso. */
+        config(['claude_admin_sql.db_username' => 'soporte_lectura', 'claude_admin_sql.db_password' => 'una-clave-de-prueba']);
+        $parametros = $servicio->parametros();
+        $this->assertSame('soporte_lectura', $parametros['username']);
+        $this->assertSame('una-clave-de-prueba', $parametros['password']);
+        $this->assertSame($defecto['host'], $parametros['host']);
+        $this->assertSame($defecto['database'], $parametros['database']);
+        $this->assertSame('mysql', $parametros['driver']);
+
+        /* Usuario sin clave: clave vacía, nunca la del usuario de la aplicación. */
+        config(['claude_admin_sql.db_username' => 'soporte_lectura', 'claude_admin_sql.db_password' => null]);
+        $this->assertSame('', $servicio->parametros()['password']);
+
+        /* Otra conexión de config/database.php, por nombre. */
+        config([
+            'claude_admin_sql.db_username' => null,
+            'claude_admin_sql.db_password' => null,
+            'claude_admin_sql.conexion'    => 'admin_solo_lectura',
+            'database.connections.admin_solo_lectura' => ['driver' => 'mysql', 'host' => 'otro.test', 'port' => '3307', 'database' => 'admin', 'username' => 'lector', 'password' => 'x'],
+        ]);
+        $this->assertSame('lector', $servicio->parametros()['username']);
+        $this->assertSame('otro.test', $servicio->parametros()['host']);
+
+        /* Una conexión que no existe: no disponible, sin caer a la por defecto. */
+        config(['claude_admin_sql.conexion' => 'no_existe']);
+        $this->assertNull($servicio->parametros());
+        $resultado = $servicio->consultar('SELECT id FROM clients');
+        $this->assertSame('no_disponible', $resultado['codigo']);
+        $this->assertSame(503, $resultado['http']);
+
+        /* 🔴 Y que de verdad se conecta con esos parámetros: con un usuario que no existe, no hay
+           conexión y no hay respaldo. (Falla el login contra el MySQL local; no sale a ningún lado.) */
+        config(['claude_admin_sql.conexion' => null, 'claude_admin_sql.db_username' => 'usuario_que_no_existe_zzz', 'claude_admin_sql.db_password' => 'x']);
+        $resultado = $servicio->consultar('SELECT id FROM clients');
+        $this->assertFalse($resultado['ok']);
+        $this->assertContains($resultado['codigo'], ['no_disponible', 'consulta_fallida']);
+        $this->assertArrayNotHasKey('rows', $resultado);
+
+        config(['claude_admin_sql.conexion' => null, 'claude_admin_sql.db_username' => null, 'claude_admin_sql.db_password' => null]);
+        $this->assertTrue($servicio->consultar('SELECT id FROM clients WHERE id = ' . $this->client_id)['ok']);
+    }
+
+    public function test_el_servicio_no_tiene_un_camino_publico_que_ejecute_sin_validar(): void
+    {
+        $publicos = [];
+        foreach ((new \ReflectionClass(ClaudeAdminSqlService::class))->getMethods(\ReflectionMethod::IS_PUBLIC) as $metodo) {
+            $publicos[] = $metodo->getName();
+        }
+        sort($publicos);
+
+        /* `consultar` valida siempre; `redactar` y `redactar_fila` no ejecutan nada. Si aparece otro
+           método público acá, hay que mirar que no ejecute SQL sin pasar por el validador. */
+        $this->assertSame(['__construct', 'consultar', 'redactar', 'redactar_fila'], $publicos);
+
+        /* Y el servicio rechaza los comentarios por su cuenta, aunque se saltee el validador: una
+           pista del optimizador prendería de nuevo la fusión de tablas derivadas y desarmaría la
+           reja del plan. */
+        $servicio = app(ClaudeAdminSqlServiceParaTests::class);
+
+        foreach ([
+            'SELECT /*+ SET_VAR(optimizer_switch=\'derived_merge=on\') */ name FROM (SELECT api_key AS name FROM clients) clients',
+            'SELECT /*+ MERGE(clients) */ name FROM (SELECT api_key AS name FROM clients) clients',
+            'SELECT id /* comentario */ FROM clients',
+            "SELECT id FROM clients -- comentario\n WHERE id = 1",
+            "SELECT id FROM clients # comentario\n WHERE id = 1",
+            'SELECT /*!80000 api_key AS */ name FROM clients',
+        ] as $sql) {
+            $resultado = $servicio->sin_validar($sql);
+
+            $this->assertFalse($resultado['ok'], $sql);
+            $this->assertSame('varias_sentencias', $resultado['codigo'], $sql);
+            $this->assertStringNotContainsString('CANARIO', (string) json_encode($resultado), $sql);
+        }
+
+        /* Un `#` o un `--` adentro de un texto no es un comentario. */
+        $this->assertTrue($servicio->sin_validar('SELECT id FROM clients WHERE name = \'a -- b # c /* d */\' OR id = ' . $this->client_id)['ok']);
+    }
+
+    public function test_ordenar_por_posicion_y_calificar_con_otra_base_se_rechazan_por_el_camino_completo(): void
+    {
+        foreach ([
+            'SELECT * FROM clients ORDER BY 25',
+            'SELECT * FROM clients ORDER BY 25 DESC',
+            'SELECT id, name FROM clients ORDER BY id, 2',
+            'SELECT * FROM clients ORDER BY +25',
+            'SELECT * FROM clients ORDER BY 25+0',
+            'SELECT * FROM clients GROUP BY 25',
+            'SELECT * FROM clients ORDER BY LENGTH(name)',
+        ] as $sql) {
+            $this->consultar($sql)->assertStatus(422)->assertJsonPath('codigo', 'orden_posicional');
+        }
+
+        $this->consultar('SELECT * FROM clients ORDER BY (25)')->assertStatus(422)->assertJsonPath('codigo', 'funcion_no_permitida');
+
+        $base = DB::getDatabaseName();
+
+        foreach ([
+            'SELECT a.id FROM clients a STRAIGHT_JOIN ' . $base . '.clients b' => 'operacion_no_permitida',
+            'SELECT a.id FROM {OJ ' . $base . '.clients b LEFT OUTER JOIN clients a ON a.id = b.id}' => 'consulta_invalida',
+            'SELECT a.id FROM clients a NATURAL JOIN ' . $base . '.versions b' => 'otra_base',
+            'SELECT a.id FROM clients a CROSS JOIN ' . $base . '.versions b' => 'otra_base',
+            'SELECT a.id FROM clients a, (' . $base . '.versions b)' => 'otra_base',
+            'SELECT ' . $base . '.clients.id FROM clients' => 'otra_base',
+        ] as $sql => $codigo) {
+            $this->consultar($sql)->assertStatus(422)->assertJsonPath('codigo', $codigo);
+        }
+
+        /* Lo legítimo: ordenar por columnas, con o sin `*`. */
+        $this->consultar('SELECT * FROM clients WHERE id = ' . $this->client_id . ' ORDER BY name, id DESC')->assertStatus(200);
+        $this->consultar('SELECT c.* FROM clients c WHERE c.id = ' . $this->client_id . ' ORDER BY c.name ASC')->assertStatus(200);
+        $this->consultar('SELECT estado, COUNT(*) AS n FROM clients GROUP BY estado ORDER BY n DESC, estado')->assertStatus(200);
+    }
+
+    public function test_el_redactor_tapa_la_linea_siguiente_urls_con_clave_claves_privadas_y_basic(): void
+    {
+        $servicio = app(ClaudeAdminSqlServiceParaTests::class);
+
+        $casos = [
+            /* La etiqueta termina la línea: se saltean las líneas en blanco. */
+            "Contraseña:\n\n\nCENTINELA\nGracias"                     => ['Contraseña', 'Gracias'],
+            "Te paso la clave\r\n\r\nCENTINELA\r\nSaludos"            => ['Te paso la clave', 'Saludos'],
+            "api_key =\n\n   CENTINELA\nfin"                          => ['api_key', 'fin'],
+            /* Forma NFD: «n» + tilde combinante. */
+            /* URL con usuario y clave. */
+            'mysql://admin:CENTINELA@db.test:3306/base'               => ['mysql://admin:', '@db.test:3306/base'],
+            'Subí por ftp://u123:CENTINELA@ftp.test y avisame'        => ['ftp://u123:', '@ftp.test'],
+            /* Clave privada en PEM, con y sin cierre. */
+            "antes\n-----BEGIN RSA PRIVATE KEY-----\nCENTINELA\nCENTINELA\n-----END RSA PRIVATE KEY-----\ndespués" => ['antes', 'después'],
+            "-----BEGIN PRIVATE KEY-----\nCENTINELA\nCENTINELA"       => [],
+            /* Basic y Bearer. */
+            'Authorization: Basic Q0VOVElORUxBOkNFTlRJTkVMQQ=='       => [],
+            'curl -H "X: Basic Q0VOVElORUxBOkNFTlRJTkVMQQ==" https://x.test' => ['curl -H'],
+            /* Etiquetas nuevas. */
+            'credenciales del panel: CENTINELA'                       => ['credenciales'],
+            'la credencial es CENTINELA'                              => ['la credencial'],
+            'auth CENTINELA'                                          => ['auth'],
+            'Cookie: laravel_session=CENTINELA'                       => ['Cookie'],
+            'session CENTINELA'                                       => ['session'],
+            'apikey CENTINELA'                                        => ['apikey'],
+            'el secret es CENTINELA'                                  => ['el secret'],
+            /* Las mismas etiquetas, como nombre de etiqueta XML. */
+            '<Credenciales>CENTINELA</Credenciales><Otro>visible</Otro>' => ['<Otro>visible</Otro>'],
+            '<auth><cookie>CENTINELA</cookie></auth> <b>visible</b>'  => ['<b>visible</b>'],
+            '<ns:Secret id="1">CENTINELA</ns:Secret>'                 => [],
+        ];
+
+        foreach ($casos as $texto => $quedan) {
+            $salida = $servicio->redactar($texto, 'body');
+
+            $this->assertIsString($salida, $texto);
+            $this->assertStringNotContainsString('CENTINELA', $salida, $texto);
+            $this->assertStringNotContainsString('Q0VOVElORUxB', $salida, $texto);
+
+            foreach ($quedan as $trozo) {
+                $this->assertStringContainsString($trozo, $salida, $texto);
+            }
+        }
+
+        /* Forma NFD («n» + tilde combinante): se normaliza a NFC si la extensión intl está. */
+        if (class_exists('Normalizer')) {
+            $this->assertStringNotContainsString('CENTINELA', $servicio->redactar("contrasen\u{0303}a: CENTINELA", 'body'));
+            $this->assertStringNotContainsString('CENTINELA', $servicio->redactar("la contrasen\u{0303}a del router es CENTINELA", 'body'));
+        }
+
+        /* Una URL sin clave y un «Basic» que no es una credencial no se tocan. */
+        $this->assertSame('Entrá a https://ejemplo.test/ruta?a=1', $servicio->redactar('Entrá a https://ejemplo.test/ruta?a=1', 'body'));
+        $this->assertSame('Plan Basic mensual', $servicio->redactar('Plan Basic mensual', 'body'));
     }
 
     public function test_si_la_conexion_por_defecto_no_es_mysql_contesta_503_no_disponible(): void
@@ -1065,7 +1324,7 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
         config(['database.connections.' . config('database.default') . '.driver' => 'sqlite']);
 
         try {
-            $resultado = app(ClaudeAdminSqlService::class)->consultar('SELECT id FROM clients');
+            $resultado = app(ClaudeAdminSqlServiceParaTests::class)->consultar('SELECT id FROM clients');
         } finally {
             config(['database.connections.' . config('database.default') . '.driver' => $original]);
         }
@@ -1214,7 +1473,7 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
         $nombre     = '~' . config('claude_admin_sql.patron_sensible') . '~i';
         /* «Sensible» = matchea el patrón O es una columna reservada. */
         $patron     = '~' . config('claude_admin_sql.patron_sensible') . '|^(?:' . implode('|', array_map('preg_quote', $reservadas)) . ')$~iu';
-        $servicio   = app(ClaudeAdminSqlService::class);
+        $servicio   = app(ClaudeAdminSqlServiceParaTests::class);
 
         $tablas_consultadas  = 0;
         $columnas_sensibles  = 0;
@@ -1277,5 +1536,36 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
         $this->assertGreaterThan(100, $tablas_consultadas);
         $this->assertGreaterThan(10, $columnas_sensibles);
         $this->assertGreaterThan(0, $rechazadas_por_nombre);
+    }
+}
+
+/**
+ * El servicio, con sus dos métodos protegidos a la vista. SOLO para los tests: es la forma de probar
+ * las rejas del lado del resultado (sesión de solo lectura, plan, origen de cada columna) sin que la
+ * aplicación tenga un camino público que ejecute SQL sin validar.
+ */
+class ClaudeAdminSqlServiceParaTests extends ClaudeAdminSqlService
+{
+    /**
+     * Ejecuta SIN pasar por el validador.
+     *
+     * @param string $sql        Sentencia.
+     * @param bool   $de_esquema True para tratarla como SHOW / DESCRIBE / EXPLAIN.
+     *
+     * @return array<string, mixed>
+     */
+    public function sin_validar($sql, $de_esquema = false)
+    {
+        return $this->ejecutar_y_filtrar($sql, $de_esquema);
+    }
+
+    /**
+     * Los parámetros con los que se abriría la conexión.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function parametros()
+    {
+        return $this->parametros_de_conexion();
     }
 }

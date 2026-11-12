@@ -76,7 +76,14 @@ class ClaudeAdminSqlService
      * Subcadenas que delatan una clave de JSON (o un `clave: valor` dentro de un texto) con una
      * credencial. Por subcadena y no por nombre exacto: `user_pin`, `clave_admin`, `pwd`.
      */
-    const ETIQUETAS_DE_CLAVE_JSON = 'pass|pwd|pin|clave|contrasen|contraseñ|token|secret|key|credential';
+    const ETIQUETAS_DE_CLAVE_JSON = 'pass|pwd|pin|clave|contrasen|contraseñ|token|secret|key|credential|credencial|auth|cookie|session';
+
+    /**
+     * Palabras que, sueltas en un texto, anuncian una clave: se tapa el resto de la línea. Las
+     * mismas valen como nombre de una etiqueta XML/HTML (`<Password>…</Password>`).
+     */
+    const ETIQUETAS_DE_TEXTO = 'contrase(?:ñ|n|\\?)as?|claves?|passwords?|passwd|pass|pwd|pins?|tokens?|credencial(?:es)?|credentials?'
+        . '|auth|authorization|cookies?|sessions?|apikeys?|secrets?|secretos?';
 
     /** @var ClaudeAdminSqlValidator */
     private $validador;
@@ -110,12 +117,43 @@ class ClaudeAdminSqlService
     }
 
     /**
+     * Los parámetros con los que se abre la conexión de solo lectura: los de la conexión
+     * configurada (`claude_admin_sql.conexion`, o la por defecto), con el usuario y la clave
+     * dedicados si están (`claude_admin_sql.db_username` / `db_password`).
+     *
+     * @return array<string, mixed>|null `driver`, `host`, `port`, `database`, `username`,
+     *                                   `password`, `unix_socket`; null si la conexión no existe.
+     */
+    protected function parametros_de_conexion()
+    {
+        $nombre = config('claude_admin_sql.conexion');
+        $nombre = is_string($nombre) && $nombre !== '' ? $nombre : (string) config('database.default');
+        $config = config('database.connections.' . $nombre);
+
+        if (! is_array($config)) {
+            return null;
+        }
+
+        $usuario = config('claude_admin_sql.db_username');
+
+        if (is_string($usuario) && $usuario !== '') {
+            $config['username'] = $usuario;
+            $config['password'] = (string) config('claude_admin_sql.db_password');
+        }
+
+        return $config;
+    }
+
+    /**
      * Corre una sentencia YA VALIDADA en solo lectura y aplica la reja por origen de columna.
      *
-     * 🔴 NO VALIDA EL TEXTO. Es pública para que los tests puedan mandarle lo que el validador
-     * rechazaría (`SELECT api_key AS x FROM clients`, `SELECT * FROM admin_settings`, un UPDATE) y
-     * comprobar que las rejas de este lado existen por sí solas. En la aplicación solo la llama
-     * `consultar()`.
+     * 🔴 ES `protected` A PROPÓSITO: NO HAY UN CAMINO PÚBLICO QUE EJECUTE SIN VALIDAR. La única
+     * entrada es `consultar()`. Los tests que necesitan probar las rejas de este lado por separado
+     * (qué pasa si el validador dejara pasar un alias, una tabla vedada, un UPDATE) lo hacen con
+     * una subclase declarada en el propio test, no con una puerta de la aplicación.
+     *
+     * Y aun así vuelve a rechazar los comentarios por su cuenta: una pista del optimizador
+     * (`/*+ SET_VAR(optimizer_switch='derived_merge=on') * /`) desarmaría la reja del plan.
      *
      * @param string $sql        Sentencia.
      * @param bool   $de_esquema True para `SHOW TABLES`, `SHOW COLUMNS`, `DESCRIBE` y `EXPLAIN`:
@@ -124,16 +162,24 @@ class ClaudeAdminSqlService
      *
      * @return array<string, mixed>
      */
-    public function ejecutar_y_filtrar($sql, $de_esquema = false)
+    protected function ejecutar_y_filtrar($sql, $de_esquema = false)
     {
         if (! extension_loaded('mysqli')) {
             return $this->no_disponible('La extensión mysqli de PHP no está cargada.');
         }
 
-        $config = (array) config('database.connections.' . config('database.default'));
+        $config = $this->parametros_de_conexion();
 
-        if (! isset($config['driver']) || $config['driver'] !== 'mysql') {
-            return $this->no_disponible('La conexión por defecto no es MySQL.');
+        if ($config === null || ! isset($config['driver']) || $config['driver'] !== 'mysql') {
+            return $this->no_disponible('La conexión configurada no existe o no es MySQL.');
+        }
+
+        if ($this->validador->tiene_un_comentario($sql)) {
+            return [
+                'ok'     => false,
+                'codigo' => 'varias_sentencias',
+                'error'  => 'No se permiten comentarios SQL (`/*`, `--`, `#`) fuera de un texto entre comillas simples.',
+            ];
         }
 
         $max_filas = (int) config('claude_admin_sql.max_filas', 200);
@@ -300,7 +346,8 @@ class ClaudeAdminSqlService
             throw new \RuntimeException('charset');
         }
 
-        $zona = config('database.connections.' . config('database.default') . '.timezone');
+        $parametros = $this->parametros_de_conexion();
+        $zona       = is_array($parametros) && isset($parametros['timezone']) ? $parametros['timezone'] : null;
         if (is_string($zona) && preg_match('/^[+\-]\d{2}:\d{2}$/', $zona)) {
             $mysqli->query("SET time_zone = '" . $zona . "'");
         }
@@ -338,9 +385,15 @@ class ClaudeAdminSqlService
      * `SELECT name FROM (SELECT api_key AS name FROM clients) clients` informa `orgtable = clients`
      * y `orgname = name`, indistinguible de la columna `clients.name` de verdad. Y un UNION informa
      * el nombre de la primera rama. El validador ya rechaza las dos formas mirando el texto; esto
-     * las rechaza mirando el PLAN, que no se puede disfrazar con una letra rara ni con un
-     * paréntesis de más. Con `derived_merge=off` toda tabla derivada (también un `WITH` y un
-     * `TABLE`) aparece como `DERIVED`.
+     * las rechaza mirando el PLAN. Con `derived_merge=off` toda tabla derivada (también un `WITH` y
+     * un `TABLE`) aparece como `DERIVED`.
+     *
+     * ⚠️ NO ES UNA REJA QUE SE SOSTENGA SOLA. Depende de una variable de sesión que una pista del
+     * optimizador escrita en un comentario puede cambiar para esa sentencia
+     * (`SELECT /*+ SET_VAR(optimizer_switch='derived_merge=on') * / …`), y de que EXPLAIN describa
+     * la consulta igual que se va a ejecutar. Por eso `ejecutar_y_filtrar()` rechaza los
+     * comentarios por su cuenta, y por eso lo que de verdad no depende de este código es el
+     * usuario de MySQL con permisos por columna (ver `claude_admin_sql.habilitado`).
      *
      * @param \mysqli $mysqli Conexión descartable, ya en solo lectura.
      * @param string  $sql    Sentencia.
@@ -764,7 +817,34 @@ class ClaudeAdminSqlService
         $mascara = $this->mascara();
         $patron  = (string) config('claude_admin_sql.patron_sensible');
 
+        /* Forma canónica (NFC): «contrasen» + tilde combinante + «a» es, para el que lee,
+           «contraseña»; sin normalizar, ninguna regla lo reconoce. Si `intl` no está, se sigue. */
+        if (class_exists('Normalizer')) {
+            $normal = \Normalizer::normalize($valor, \Normalizer::FORM_C);
+
+            if (is_string($normal)) {
+                $valor = $normal;
+            }
+        }
+
+        /* Una clave privada en PEM: el bloque entero (o hasta el final, si no tiene cierre). */
+        $valor = preg_replace('~-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\z)~isu', $mascara, $valor);
+        if ($valor === null) {
+            return $mascara;
+        }
+
+        /* `esquema://usuario:clave@host`: queda el usuario, se va la clave. */
+        $valor = preg_replace('~(://[^\s/:@]+:)[^\s/@]+@~u', '$1' . SupportImplementationContextService::MASCARA_DE_CLAVE . '@', $valor);
+        if ($valor === null) {
+            return $mascara;
+        }
+
         $valor = $this->tapar_etiquetas_de_credenciales($valor, $patron, $mascara);
+        if ($valor === null) {
+            return $mascara;
+        }
+
+        $valor = preg_replace('~(Basic\s+)[A-Za-z0-9+/=]{8,}~u', '$1' . $mascara, $valor);
         if ($valor === null) {
             return $mascara;
         }
@@ -783,7 +863,7 @@ class ClaudeAdminSqlService
         }
 
         $valor = preg_replace(
-            '~((?:[\p{L}\p{N}_.\-]*(?:' . implode('|', $nombres) . ')[\p{L}\p{N}_.\-]*)["\']?[ \t]*[:=][ \t]*(?:\r?\n[ \t]*)?)[^\r\n]*~iu',
+            '~((?:[\p{L}\p{N}_.\-]*(?:' . implode('|', $nombres) . ')[\p{L}\p{N}_.\-]*)["\']?[ \t]*[:=][ \t]*(?:(?:\r?\n[ \t]*)+)?)[^\r\n]*~iu',
             '$1' . $mascara,
             $valor
         );
@@ -823,7 +903,7 @@ class ClaudeAdminSqlService
             return $valor;
         }
 
-        $nombre = '(?:[\w.\-]+:)?(?:Token|Sign|Password|Clave'
+        $nombre = '(?:[\w.\-]+:)?(?:Token|Sign|Password|Clave|' . self::ETIQUETAS_DE_TEXTO
             . ($patron === '' ? '' : '|[\w.\-]*(?:' . $patron . ')[\w.\-]*')
             . ')';
 
@@ -846,9 +926,10 @@ class ClaudeAdminSqlService
 
     /**
      * Tapa TODO el resto de la línea después de una palabra que anuncia una clave: «contraseña»,
-     * «clave», «password», «passwd», «pass», «pwd», «pin», «token» (y sus plurales), sin distinguir
-     * mayúsculas ni la eñe. Si después de la etiqueta la línea termina (con o sin `:`), tapa la
-     * línea siguiente.
+     * «clave», «password», «passwd», «pass», «pwd», «pin», «token», «credencial», «auth»,
+     * «cookie», «session», «apikey», «secret» (y sus plurales; la lista es `ETIQUETAS_DE_TEXTO`),
+     * sin distinguir mayúsculas ni la eñe. Si después de la etiqueta la línea termina (con o sin
+     * `:`), tapa la siguiente línea que tenga algo, salteando las que estén en blanco.
      *
      * 🔴 TAPA DE MÁS A PROPÓSITO. `ocultar_claves` —la regla del contexto del ticket, que acá se
      * sigue aplicando— tapa solo la palabra que sigue a «contraseña» / «clave», salteando un
@@ -869,8 +950,10 @@ class ClaudeAdminSqlService
      */
     private function tapar_despues_de_una_etiqueta_de_clave($valor)
     {
-        $etiquetas = '(?:contrase(?:ñ|n|\?)as?|claves?|passwords?|passwd|pass|pwd|pins?|tokens?)';
-        $resto     = '([ \t]*[:=]?[ \t]*(?:\r?\n[ \t]*)?)[^\r\n]+';
+        $etiquetas = '(?:' . self::ETIQUETAS_DE_TEXTO . ')';
+        /* Si después de la etiqueta la línea termina, se saltean las líneas en blanco y se tapa la
+           primera que tenga algo. */
+        $resto     = '([ \t]*[:=]?[ \t]*(?:(?:\r?\n[ \t]*)+)?)[^\r\n]+';
 
         return preg_replace(
             '~(?<![</])(?<![\p{L}\p{N}_]:)(' . $etiquetas . ')(?![\p{L}\p{N}_])' . $resto . '~iu',

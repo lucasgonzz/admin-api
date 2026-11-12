@@ -165,7 +165,7 @@ class ValidadorDeSqlDeLecturaDelAdminTest extends TestCase
         $this->assert_admite('SELECT ROUND(total_mensualidad * 1.21, 2) FROM clients');
         $this->assert_admite('SELECT ROUND((precio_plan + 1) * (cantidad_empleados - 1), 2) FROM clients');
         $this->assert_admite('SELECT ROUND(2 * precio_plan * -1, 2) FROM clients');
-        $this->assert_admite('SELECT id FROM clients WHERE (c.precio_plan * 2) > 10');
+        $this->assert_admite('SELECT c.id FROM clients c WHERE (c.precio_plan * 2) > 10');
 
         foreach ([
             'SELECT id FROM clients WHERE EXISTS (SELECT * FROM versions)',
@@ -657,5 +657,136 @@ class ValidadorDeSqlDeLecturaDelAdminTest extends TestCase
         $this->assertSame('campo_sensible', $validador->validar('SELECT reservado FROM x')['codigo']);
         $this->assertSame('tabla_vedada', $validador->validar('SELECT id FROM prohibida')['codigo']);
         $this->assertSame('consulta_invalida', $validador->validar('SELECT id FROM clients WHERE id = 1000')['codigo']);
+    }
+
+    public function test_un_calificador_tiene_que_ser_una_tabla_o_un_alias_de_la_propia_consulta(): void
+    {
+        /* 🔴 Las dos que reprodujo la revisión por el camino completo, y sus parientes. */
+        $this->assert_rechaza('operacion_no_permitida', 'SELECT a.id FROM clients a STRAIGHT_JOIN admin_testing_s6.clients b');
+        $this->assert_rechaza('operacion_no_permitida', 'SELECT STRAIGHT_JOIN a.id FROM clients a');
+        $this->assert_rechaza('consulta_invalida', 'SELECT a.id FROM {OJ otra.tabla b LEFT OUTER JOIN clients a ON a.id = b.id}');
+        $this->assert_rechaza('consulta_invalida', 'SELECT a.id FROM { oj clients a LEFT OUTER JOIN versions b ON a.id = b.id }');
+
+        foreach ([
+            'SELECT a.id FROM clients a NATURAL JOIN otra.versions b',
+            'SELECT a.id FROM clients a CROSS JOIN otra.versions b',
+            'SELECT a.id FROM clients a LEFT JOIN otra.versions b ON b.id = a.id',
+            'SELECT a.id FROM clients a INNER JOIN otra.versions b ON b.id = a.id',
+            'SELECT a.id FROM clients a LEFT OUTER JOIN otra.versions b ON b.id = a.id',
+            'SELECT a.id FROM clients a, otra.versions b',
+            'SELECT a.id FROM clients a , otra . versions b',
+            /* Una tabla entre paréntesis, después de una coma: sigue siendo posición de tabla. */
+            'SELECT a.id FROM clients a, (otra.versions b)',
+            'SELECT a.id FROM clients a, ((otra.versions b))',
+            /* El alias se llama igual que la otra base: no alcanza para colar `otra.versions`. */
+            'SELECT otra.id FROM clients otra, (otra.versions b)',
+            'SELECT otra.id FROM clients otra JOIN otra.versions b ON b.id = otra.id',
+            /* Tres partes, en cualquier lugar. */
+            'SELECT otra.clients.id FROM clients',
+            'SELECT id FROM clients WHERE otra.clients.id = 1',
+            'SELECT c.id FROM clients c ORDER BY otra.clients.name',
+            /* Un calificador que no es de esta consulta. */
+            'SELECT x.id FROM clients c',
+            'SELECT c.id FROM clients c WHERE v.id = 1',
+            'SELECT c.id FROM clients c WHERE c.id IN (SELECT otra.id FROM versions v)',
+            'SELECT id FROM clients WHERE EXISTS (SELECT 1 FROM otra.versions)',
+        ] as $sql) {
+            $this->assert_rechaza('otra_base', $sql);
+        }
+
+        /* Lo legítimo: todas las formas de JOIN, con y sin alias, con y sin AS. */
+        foreach ([
+            'SELECT c.id, v.version FROM clients c JOIN versions v ON v.id = c.current_version_id',
+            'SELECT c.id, v.version FROM clients AS c LEFT JOIN versions AS v ON v.id = c.current_version_id',
+            'SELECT c.id FROM clients c INNER JOIN versions v ON v.id = c.current_version_id LEFT OUTER JOIN client_ecommerces e ON e.client_id = c.id',
+            'SELECT c.id FROM clients c CROSS JOIN versions v',
+            'SELECT c.id FROM clients c NATURAL JOIN versions v',
+            'SELECT clients.id, versions.version FROM clients, versions WHERE versions.id = clients.current_version_id',
+            'SELECT c.id FROM clients c JOIN versions v USING (id) WHERE c.id > 0 ORDER BY c.id',
+            'SELECT c.*, v.version FROM clients c LEFT JOIN versions v ON v.id = c.current_version_id WHERE c.precio_plan > 1.5',
+            'SELECT c.id FROM clients c WHERE EXISTS (SELECT 1 FROM client_ecommerces e WHERE e.client_id = c.id)',
+            'SELECT c.id FROM clients c WHERE c.id IN (SELECT e.client_id FROM client_ecommerces e JOIN ecommerce_versions ev ON ev.id = e.ecommerce_version_id)',
+        ] as $sql) {
+            $this->assert_admite($sql);
+        }
+    }
+
+    public function test_rechaza_ordenar_o_agrupar_por_posicion(): void
+    {
+        /* 🔴 `ORDER BY 25` ordena por la columna 25 de `clients` (api_key) sin nombrarla. */
+        foreach ([
+            'SELECT * FROM clients ORDER BY 25',
+            'SELECT * FROM clients ORDER BY 25 DESC',
+            'SELECT * FROM clients ORDER BY id, 25',
+            'SELECT * FROM clients ORDER BY +25',
+            'SELECT * FROM clients ORDER BY -25',
+            'SELECT * FROM clients ORDER BY 25+0',
+            'SELECT * FROM clients ORDER BY 25 , id',
+            'SELECT id, name FROM clients ORDER BY 2',
+            'SELECT id, name FROM clients ORDER BY name, 1 DESC',
+            'SELECT * FROM clients GROUP BY 25',
+            'SELECT estado, COUNT(*) FROM clients GROUP BY 1',
+            'SELECT estado, COUNT(*) FROM clients GROUP BY estado ORDER BY 2 DESC',
+            'SELECT id FROM clients ORDER BY \'25\'',
+            'SELECT id, COUNT(*) OVER (ORDER BY 25) FROM clients',
+            'SELECT id, COUNT(*) OVER (PARTITION BY estado ORDER BY 1) FROM clients',
+            'SELECT id FROM clients ORDER BY',
+            'select * from clients order by 25 limit 5',
+        ] as $sql) {
+            $this->assert_rechaza('orden_posicional', $sql);
+        }
+
+        /* Entre paréntesis lo rechaza antes la regla de paréntesis: `BY (` no se admite. */
+        $this->assert_rechaza('funcion_no_permitida', 'SELECT * FROM clients ORDER BY (25)');
+        $this->assert_rechaza('funcion_no_permitida', 'SELECT id FROM clients GROUP BY (1)');
+
+        /* Con `*` en el SELECT, cada término tiene que ser una columna explícita. */
+        foreach ([
+            'SELECT * FROM clients ORDER BY LENGTH(name)',
+            'SELECT * FROM clients ORDER BY id + 25',
+            'SELECT c.* FROM clients c ORDER BY IF(c.id > 0, c.name, c.slug)',
+            'SELECT * FROM clients GROUP BY YEAR(created_at)',
+            'SELECT * FROM clients ORDER BY name IS NULL',
+        ] as $sql) {
+            $this->assert_rechaza('orden_posicional', $sql);
+        }
+
+        foreach ([
+            'SELECT * FROM clients ORDER BY name',
+            'SELECT * FROM clients ORDER BY name DESC, id ASC LIMIT 10',
+            'SELECT c.*, v.version FROM clients c JOIN versions v ON v.id = c.current_version_id ORDER BY c.name, v.version desc',
+            'SELECT id, name FROM clients ORDER BY LENGTH(name) DESC, id',
+            'SELECT estado, COUNT(*) AS n FROM clients GROUP BY estado ORDER BY n DESC',
+            'SELECT YEAR(created_at) AS anio, COUNT(*) FROM clients GROUP BY YEAR(created_at), MONTH(created_at) ORDER BY anio',
+            'SELECT id, COUNT(*) OVER (PARTITION BY estado ORDER BY id) FROM clients',
+            'SELECT id FROM clients WHERE id IN (SELECT client_id FROM client_ecommerces GROUP BY client_id) ORDER BY id',
+        ] as $sql) {
+            $this->assert_admite($sql);
+        }
+    }
+
+    public function test_detecta_un_comentario_fuera_de_un_texto(): void
+    {
+        $validador = new ClaudeAdminSqlValidator();
+
+        foreach ([
+            'SELECT /*+ SET_VAR(optimizer_switch=\'derived_merge=on\') */ id FROM clients',
+            'SELECT id /* x */ FROM clients',
+            'SELECT id FROM clients -- x',
+            'SELECT id FROM clients # x',
+            'SELECT \'a\' /* \' */ , id',
+            null,
+            ['x'],
+        ] as $sql) {
+            $this->assertTrue($validador->tiene_un_comentario($sql), is_string($sql) ? $sql : gettype($sql));
+        }
+
+        foreach ([
+            'SELECT id FROM clients',
+            'SELECT id FROM clients WHERE name = \'a -- b # c /* d */\'',
+            'SELECT id FROM `clients` WHERE id - 1 > 0',
+        ] as $sql) {
+            $this->assertFalse($validador->tiene_un_comentario($sql), $sql);
+        }
     }
 }

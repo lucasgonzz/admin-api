@@ -114,7 +114,7 @@ class ClaudeAdminSqlValidator
      * derivadas, y `SELECT (` una subconsulta escalar: las tres devuelven columnas con un nombre
      * que elige el que consulta.
      */
-    const AGRUPADORES = ['AND', 'OR', 'NOT', 'WHERE', 'ON', 'HAVING', 'WHEN', 'THEN', 'ELSE'];
+    const AGRUPADORES = ['AND', 'OR', 'NOT', 'WHERE', 'ON', 'HAVING', 'WHEN', 'THEN', 'ELSE', 'USING'];
 
     /**
      * Modificadores de SELECT: lo que puede haber entre `SELECT` y un `*` comodín. Un `*` precedido
@@ -134,7 +134,7 @@ class ClaudeAdminSqlValidator
     const PROHIBIDAS = 'INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|REPLACE|GRANT|REVOKE|CALL|DO|SET|INTO|OUTFILE|DUMPFILE'
         . '|LOAD_FILE|SLEEP|BENCHMARK|GET_LOCK|RELEASE_LOCK|LOCK|UNLOCK|PROCEDURE|HANDLER|PREPARE|EXECUTE|DEALLOCATE'
         . '|KILL|SHUTDOWN|INSTALL|UNINSTALL|FLUSH|RESET|PURGE|INFORMATION_SCHEMA|PERFORMANCE_SCHEMA|MYSQL|SYS'
-        . '|UNION|WITH|TABLE|VALUES|SHARE|BINARY|COLLATE';
+        . '|UNION|WITH|TABLE|VALUES|SHARE|BINARY|COLLATE|STRAIGHT_JOIN';
 
     /** @var int Largo máximo de la consulta. */
     private $max_caracteres;
@@ -242,6 +242,12 @@ class ClaudeAdminSqlValidator
             return $this->rechazo('consulta_invalida', 'Fuera de un texto entre comillas simples solo se admiten caracteres ASCII: sin acentos, eñes ni otros símbolos en nombres de tablas, columnas o alias.');
         }
 
+        /* Las llaves son la sintaxis de escape de ODBC (`{OJ otra.tabla b LEFT OUTER JOIN …}`): otra
+           forma de introducir una tabla, que ninguna regla de más abajo reconoce. */
+        if (strpos($limpio, '{') !== false || strpos($limpio, '}') !== false) {
+            return $this->rechazo('consulta_invalida', 'No se admiten llaves ({ }) fuera de un texto entre comillas simples.');
+        }
+
         /* Un literal con algo pegado adelante (`N'…'`, `X'41'`, `b'01'`, `_utf8'…'`), un nombre que
            empieza con guion bajo (`_latin1 '…'`, `_binary`) o un literal hexadecimal o de bits
            (`0x41`, `0b01`): son formas de escribir un texto con otra codificación, o bytes sueltos. */
@@ -307,7 +313,7 @@ class ClaudeAdminSqlValidator
             return $this->rechazo('solo_select', 'Solo se permiten SELECT, EXPLAIN SELECT, SHOW TABLES, SHOW [FULL] COLUMNS FROM tabla y DESCRIBE tabla.');
         }
 
-        if (preg_match('~\b(?:FROM|JOIN)\s+\w+\s*\.~i', $limpio) || $this->califica_una_tabla_con_otra_base($limpio)) {
+        if (preg_match('~\b(?:FROM|JOIN)\s+\w+\s*\.~i', $limpio)) {
             return $this->rechazo('otra_base', 'La consulta debe usar únicamente tablas de la base del admin, sin `base.tabla`.');
         }
 
@@ -339,6 +345,14 @@ class ClaudeAdminSqlValidator
 
         if ($this->tiene_una_subconsulta_fuera_de_in_o_exists($limpio)) {
             return $this->rechazo('subconsulta_no_permitida', 'Una subconsulta solo se admite inmediatamente después de IN o de EXISTS. No se admiten tablas derivadas (`FROM (SELECT …) t`, también después de una coma) ni subconsultas en la lista del SELECT o dentro de una función.');
+        }
+
+        if ($this->usa_un_calificador_que_no_es_de_la_consulta($limpio)) {
+            return $this->rechazo('otra_base', 'La consulta debe usar únicamente tablas de la base del admin: no se admite `base.tabla`, y en `x.columna` la `x` tiene que ser una tabla o un alias de esta misma consulta.');
+        }
+
+        if ($this->ordena_o_agrupa_sin_nombrar_la_columna($limpio)) {
+            return $this->rechazo('orden_posicional', 'En ORDER BY y GROUP BY cada término tiene que empezar con el nombre de una columna (no se admite ordenar por posición: `ORDER BY 3`). Si la consulta usa `*`, tienen que ser columnas explícitas.');
         }
 
         /* `EXPLAIN SELECT …` devuelve el plan, no datos: del otro lado se trata como una consulta de
@@ -386,48 +400,258 @@ class ClaudeAdminSqlValidator
     }
 
     /**
-     * ¿El nombre de alguna tabla (después de FROM, de JOIN o de una coma del FROM) viene calificado
-     * con un punto? Cubre la sintaxis vieja `FROM a, otra_base.b` y sus subconsultas.
+     * ¿La sentencia tiene un comentario (`/*`, `--`, `#`) fuera de un texto entre comillas?
+     *
+     * Es pública porque `ClaudeAdminSqlService` la vuelve a preguntar por su cuenta justo antes de
+     * ejecutar: un comentario puede ser una PISTA para el optimizador
+     * (`/*+ SET_VAR(optimizer_switch='derived_merge=on') * /`), que es lo que desarma la reja del
+     * plan. Si la sentencia no se puede analizar, contesta que sí.
+     *
+     * @param mixed $sql Sentencia.
+     *
+     * @return bool
+     */
+    public function tiene_un_comentario($sql)
+    {
+        if (! is_string($sql)) {
+            return true;
+        }
+
+        $limpio = preg_replace("/`[^`]*`|'(?:\\\\.|''|[^'\\\\])*'/su", "''", $sql);
+
+        if ($limpio === null) {
+            return true;
+        }
+
+        foreach (['/*', '*/', '--', '#'] as $marca) {
+            if (strpos($limpio, $marca) !== false) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Las piezas de la consulta ya limpia: literales vaciados (`''`), palabras, números y signos.
+     *
+     * @param string $limpio Consulta sin literales ni backticks.
+     *
+     * @return array<int, string>
+     */
+    private function piezas($limpio)
+    {
+        if (! preg_match_all("~''|[A-Za-z_]\w*|\d+(?:\.\d+)?|\S~", (string) $limpio, $coincidencias)) {
+            return [];
+        }
+
+        return $coincidencias[0];
+    }
+
+    /**
+     * ¿Es una palabra (un identificador o una palabra reservada)?
+     *
+     * @param string $pieza Pieza.
+     *
+     * @return bool
+     */
+    private function es_palabra($pieza)
+    {
+        return preg_match('~^[A-Za-z_]\w*$~', (string) $pieza) === 1;
+    }
+
+    /**
+     * ¿La consulta califica algo con un nombre que no es una tabla o un alias DECLARADO en ella?
+     *
+     * 🔴 CIERRA LA CLASE «OTRA BASE», no los ejemplos. La regla anterior buscaba `FROM x.` y
+     * `JOIN x.`; `clients a STRAIGHT_JOIN otra_base.clients b` y `{OJ otra.t b LEFT OUTER JOIN …}`
+     * se le escapaban porque la tabla no venía después de una de esas dos palabras. Ahora:
+     *
+     *  1. en POSICIÓN DE TABLA (después de `FROM`, de `JOIN`, de una coma del FROM, y también
+     *     adentro de un paréntesis abierto en esa posición) el nombre nunca puede ir seguido de un
+     *     punto;
+     *  2. cada tabla y cada alias que aparece en posición de tabla queda DECLARADO;
+     *  3. en el resto de la consulta, todo `x.y` exige que `x` esté declarado, y `x.y.z` no se
+     *     admite nunca.
+     *
+     * Así, una base ajena solo podría nombrarse en una posición de tabla que esta función no
+     * reconozca Y con un alias declarado que se llame igual que esa base; `STRAIGHT_JOIN` y las
+     * llaves de ODBC, que son las otras dos formas de introducir una tabla, están prohibidas aparte.
      *
      * @param string $limpio Consulta sin literales ni backticks.
      *
      * @return bool
      */
-    private function califica_una_tabla_con_otra_base($limpio)
+    private function usa_un_calificador_que_no_es_de_la_consulta($limpio)
     {
-        preg_match_all('~[A-Za-z_]\w*|[(),.]~', $limpio, $coincidencias);
+        $piezas   = $this->piezas($limpio);
+        $cantidad = count($piezas);
 
-        $tokens       = $coincidencias[0];
-        $niveles      = [false];
-        $espera_tabla = false;
-        $cantidad     = count($tokens);
+        /* Lo que puede venir después del nombre de una tabla y NO es su alias. */
+        $no_es_alias = ['ON', 'WHERE', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'CROSS', 'NATURAL', 'OUTER', 'USING', 'GROUP', 'ORDER',
+            'HAVING', 'LIMIT', 'FOR', 'UNION', 'SET', 'STRAIGHT_JOIN', 'WINDOW', 'PARTITION', 'USE', 'IGNORE', 'FORCE', 'AS'];
 
-        for ($indice = 0; $indice < $cantidad; $indice++) {
-            $token     = $tokens[$indice];
-            $mayuscula = strtoupper($token);
+        $declarados = [];
+        $niveles    = [false];
+        $espera     = false;
+
+        for ($i = 0; $i < $cantidad; $i++) {
+            $pieza     = $piezas[$i];
+            $mayuscula = strtoupper($pieza);
             $ultimo    = count($niveles) - 1;
 
-            if ($token === '(') {
-                $niveles[]    = false;
-                $espera_tabla = false;
-            } elseif ($token === ')') {
+            if ($pieza === '(') {
+                /* Un paréntesis abierto en posición de tabla sigue en posición de tabla. */
+                $niveles[] = $espera;
+                continue;
+            }
+
+            if ($pieza === ')') {
                 if (count($niveles) > 1) {
                     array_pop($niveles);
                 }
-                $espera_tabla = false;
-            } elseif ($mayuscula === 'FROM' || $mayuscula === 'JOIN' || ($token === ',' && $niveles[$ultimo])) {
-                $niveles[$ultimo] = true;
-                $espera_tabla     = true;
-            } elseif (in_array($mayuscula, ['WHERE', 'GROUP', 'ORDER', 'HAVING', 'LIMIT', 'UNION'], true)) {
-                $niveles[$ultimo] = false;
-                $espera_tabla     = false;
-            } elseif ($espera_tabla) {
-                $espera_tabla = false;
+                $espera = false;
+                continue;
+            }
 
-                /* Al consumir el nombre, el próximo punto sería una calificación de base. */
-                if ($indice + 1 < $cantidad && $tokens[$indice + 1] === '.') {
-                    return true;
+            if ($mayuscula === 'FROM' || $mayuscula === 'JOIN' || ($pieza === ',' && $niveles[$ultimo])) {
+                $niveles[$ultimo] = true;
+                $espera           = true;
+                continue;
+            }
+
+            if (in_array($mayuscula, ['WHERE', 'GROUP', 'ORDER', 'HAVING', 'LIMIT', 'UNION', 'WINDOW', 'FOR'], true)) {
+                $niveles[$ultimo] = false;
+                $espera           = false;
+                continue;
+            }
+
+            if (! $espera) {
+                continue;
+            }
+
+            $espera = false;
+
+            if (! $this->es_palabra($pieza)) {
+                /* En posición de tabla tiene que haber un nombre. */
+                return true;
+            }
+
+            if ($i + 1 < $cantidad && $piezas[$i + 1] === '.') {
+                return true;
+            }
+
+            $declarados[] = strtolower($pieza);
+
+            $j = $i + 1;
+            if ($j < $cantidad && strtoupper($piezas[$j]) === 'AS') {
+                $j++;
+            }
+            if ($j < $cantidad && $this->es_palabra($piezas[$j]) && ! in_array(strtoupper($piezas[$j]), $no_es_alias, true)) {
+                $declarados[] = strtolower($piezas[$j]);
+            }
+        }
+
+        for ($i = 1; $i < $cantidad; $i++) {
+            if ($piezas[$i] !== '.') {
+                continue;
+            }
+
+            /* x.y.z */
+            if ($i >= 2 && $piezas[$i - 2] === '.') {
+                return true;
+            }
+
+            if ($this->es_palabra($piezas[$i - 1]) && ! in_array(strtolower($piezas[$i - 1]), $declarados, true)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * ¿Algún término de un `ORDER BY` o de un `GROUP BY` no empieza con un nombre?
+     *
+     * 🔴 `SELECT * FROM clients ORDER BY 25` ordena por la columna 25 —`api_key`— sin nombrarla, y
+     * el orden de las filas es información: con filtros sobre columnas legibles se reconstruye el
+     * valor. Un término posicional es un entero suelto, pero también `25 DESC`, `(25)`, `+25` o
+     * `25+0`; en vez de perseguir las formas, se exige que cada término EMPIECE con una palabra (el
+     * nombre de una columna, un alias o una función).
+     *
+     * Y si la lista del SELECT tiene un `*`, cada término tiene que ser una columna explícita
+     * (`columna` o `alias.columna`, con `ASC` / `DESC` opcional): con `*` no hay alias del SELECT a
+     * los que referirse, así que cualquier otra cosa es una expresión sobre columnas que no se ven.
+     *
+     * @param string $limpio Consulta sin literales ni backticks.
+     *
+     * @return bool
+     */
+    private function ordena_o_agrupa_sin_nombrar_la_columna($limpio)
+    {
+        $piezas   = $this->piezas($limpio);
+        $cantidad = count($piezas);
+
+        /* ¿Hay un `*` en la lista del SELECT de afuera (antes del primer FROM, fuera de paréntesis)? */
+        $con_asterisco = false;
+        $profundidad   = 0;
+        for ($i = 0; $i < $cantidad; $i++) {
+            if ($piezas[$i] === '(') {
+                $profundidad++;
+            } elseif ($piezas[$i] === ')') {
+                $profundidad = max(0, $profundidad - 1);
+            } elseif ($profundidad === 0 && strtoupper($piezas[$i]) === 'FROM') {
+                break;
+            } elseif ($profundidad === 0 && $piezas[$i] === '*') {
+                $con_asterisco = true;
+            }
+        }
+
+        $fin_de_clausula = ['LIMIT', 'HAVING', 'ORDER', 'GROUP', 'FOR', 'WINDOW', 'UNION', 'ROWS', 'RANGE'];
+
+        for ($i = 0; $i < $cantidad - 1; $i++) {
+            $mayuscula = strtoupper($piezas[$i]);
+
+            if (($mayuscula !== 'ORDER' && $mayuscula !== 'GROUP') || strtoupper($piezas[$i + 1]) !== 'BY') {
+                continue;
+            }
+
+            $termino     = [];
+            $profundidad = 0;
+            $j           = $i + 2;
+
+            while (true) {
+                $pieza = $j < $cantidad ? $piezas[$j] : null;
+                $corta = $pieza === null
+                    || ($profundidad === 0 && ($pieza === ',' || $pieza === ')' || in_array(strtoupper($pieza), $fin_de_clausula, true)));
+
+                if ($corta) {
+                    if ($termino === [] || ! $this->es_palabra($termino[0])) {
+                        return true;
+                    }
+
+                    if ($con_asterisco && preg_match('~^[A-Za-z_]\w*( \. [A-Za-z_]\w*)?( (ASC|DESC))?$~i', implode(' ', $termino)) !== 1) {
+                        return true;
+                    }
+
+                    $termino = [];
+
+                    if ($pieza !== ',') {
+                        break;
+                    }
+
+                    $j++;
+                    continue;
                 }
+
+                if ($pieza === '(') {
+                    $profundidad++;
+                } elseif ($pieza === ')') {
+                    $profundidad--;
+                }
+
+                $termino[] = $pieza;
+                $j++;
             }
         }
 
