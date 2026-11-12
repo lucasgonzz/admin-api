@@ -635,4 +635,202 @@ class VersionesYFuncionalidadesParaSoporteTest extends TestCase
         $this->assertSame('9000.1.0', $resultado['cliente']['version_cliente']);
         $this->assertStringContainsString('2 tiendas', $resultado['cliente']['motivo']);
     }
+
+    /* ------------------------------------------------------------------------------------------
+     | 4. feature-lookup: archivadas, palabras, resumen y tiendas instaladas
+     |----------------------------------------------------------------------------------------- */
+
+    public function test_una_version_archivada_que_se_publico_se_compara_por_numero_y_una_que_no_da_null(): void
+    {
+        $marca     = 'aguara' . Str::lower(Str::random(8));
+        $versiones = $this->versiones_del_sistema();
+
+        $archivada = $this->crear_version('9000.9.5', 'archived', '2020-10-10 10:00:00');
+        $nunca     = $this->crear_version('9000.9.6', 'archived', null);
+        $this->crear_novedad($archivada, 'Remitos ' . $marca, 'Salió y después se archivó la versión.');
+        $this->crear_novedad($nunca, 'Etiquetas ' . $marca, 'Se archivó sin publicarse.');
+
+        /* Cliente posterior a la archivada: la tiene, aunque hoy la versión no esté «publicada». */
+        $posterior  = $this->crear_cliente('Posterior', $versiones['ultima']->id);
+        $resultados = $this->getJson('/api/claude/support-codex/feature-lookup?q=' . $marca . '&client_id=' . $posterior->id, $this->headers())->assertStatus(200)->json('resultados');
+        $por_version = array_column($resultados, null, 'version');
+
+        $this->assertSame('archived', $por_version['9000.9.5']['version_status']);
+        $this->assertFalse($por_version['9000.9.5']['publicada']);
+        $this->assertStringStartsWith('2020-10-10T', $por_version['9000.9.5']['published_at']);
+        $this->assertTrue($por_version['9000.9.5']['cliente']['tiene']);
+        $this->assertStringContainsString('archivada', $por_version['9000.9.5']['cliente']['motivo']);
+
+        /* Archivada sin fecha de publicación: no se puede afirmar nada. Ni true ni false. */
+        $this->assertSame('archived', $por_version['9000.9.6']['version_status']);
+        $this->assertNull($por_version['9000.9.6']['published_at']);
+        $this->assertNull($por_version['9000.9.6']['cliente']['tiene']);
+        $this->assertSame('9000.10.0', $por_version['9000.9.6']['cliente']['version_cliente']);
+        $this->assertStringContainsString('no tiene fecha de publicación', $por_version['9000.9.6']['cliente']['motivo']);
+
+        /* Cliente anterior a la archivada: no la tiene, y es por número, no por el estado. */
+        $anterior   = $this->crear_cliente('Anterior', $versiones['vieja']->id);
+        $resultados = $this->getJson('/api/claude/support-codex/feature-lookup?q=' . $marca . '&client_id=' . $anterior->id, $this->headers())->assertStatus(200)->json('resultados');
+        $por_version = array_column($resultados, null, 'version');
+
+        $this->assertFalse($por_version['9000.9.5']['cliente']['tiene']);
+        $this->assertStringContainsString('le falta actualizar', $por_version['9000.9.5']['cliente']['motivo']);
+        $this->assertNull($por_version['9000.9.6']['cliente']['tiene']);
+    }
+
+    public function test_solo_un_borrador_da_el_false_categorico_de_todavia_no_se_publico(): void
+    {
+        $marca     = 'surubi' . Str::lower(Str::random(8));
+        $versiones = $this->versiones_del_sistema();
+        $this->crear_novedad($versiones['borrador'], 'Borrador ' . $marca, 'En desarrollo.');
+
+        $cliente   = $this->crear_cliente('Al día', $versiones['ultima']->id);
+        $resultado = $this->getJson('/api/claude/support-codex/feature-lookup?q=' . $marca . '&client_id=' . $cliente->id, $this->headers())->assertStatus(200)->json('resultados.0');
+
+        $this->assertSame('draft', $resultado['version_status']);
+        $this->assertFalse($resultado['cliente']['tiene']);
+        $this->assertStringContainsString('todavía no se publicó', $resultado['cliente']['motivo']);
+    }
+
+    public function test_la_busqueda_saca_palabras_vacias_plurales_y_no_distingue_acentos(): void
+    {
+        $servicio = app(\App\Services\ClaudeSupportAdminLecturaService::class);
+
+        $this->assertSame(['factura', 'electrónica'], $servicio->palabras('  ¿Cómo  es para las FACTURAS electrónicas? '));
+        /* La lista de vacías es corta a propósito: un verbo como «hago» se busca. */
+        $this->assertSame(['hago', 'factura'], $servicio->palabras('cómo hago facturas'));
+        $this->assertSame(['client', 'lista', 'precio'], $servicio->palabras('clientes con listas de precios'));
+        /* Hasta 4 letras no se toca el plural; dos letras fuera de la lista se buscan (QR, ML). */
+        $this->assertSame(['mes', 'tres', 'qr', 'ml'], $servicio->palabras('mes tres QR y ML a'));
+        $this->assertSame(['exportar'], $servicio->palabras('exportar exportar EXPORTAR'));
+        $this->assertSame([], $servicio->palabras('cómo es la de un para qué'));
+
+        $marca     = 'tero' . Str::lower(Str::random(8));
+        $versiones = $this->versiones_del_sistema();
+        $this->crear_novedad($versiones['vieja'], 'Factura electrónica ' . $marca, 'Ahora se emite desde el listado con código QR.');
+
+        /* Plural + sin acento + palabras vacías en el medio: encuentra la novedad en singular y con tilde. */
+        foreach ([
+            'facturas electronicas ' . $marca,
+            '¿qué es la de las FACTURAS ELECTRÓNICAS para ' . $marca . '?',
+            'qr ' . $marca,
+            'listados ' . $marca,
+        ] as $q) {
+            $resultados = $this->getJson('/api/claude/support-codex/feature-lookup?q=' . urlencode($q), $this->headers())->assertStatus(200)->json('resultados');
+
+            $this->assertCount(1, $resultados, $q);
+            $this->assertSame('Factura electrónica ' . $marca, $resultados[0]['titulo'], $q);
+        }
+
+        /* Sigue siendo AND: una palabra útil que no está deja la búsqueda en cero. */
+        $this->assertSame([], $this->getJson('/api/claude/support-codex/feature-lookup?q=' . urlencode('remitos ' . $marca), $this->headers())->assertStatus(200)->json('resultados'));
+    }
+
+    public function test_una_busqueda_sin_ninguna_palabra_util_devuelve_422_claro(): void
+    {
+        foreach (['de la', 'cómo es para qué', 'a o y', '¿? --'] as $q) {
+            $respuesta = $this->getJson('/api/claude/support-codex/feature-lookup?q=' . urlencode($q), $this->headers());
+
+            $respuesta->assertStatus(422);
+            $this->assertSame('busqueda_sin_palabras', $respuesta->json('codigo'), $q);
+            $this->assertStringContainsString('palabra útil', $respuesta->json('error'), $q);
+        }
+    }
+
+    public function test_el_resumen_del_cliente_se_calcula_sobre_todas_las_coincidencias_y_no_solo_la_pagina(): void
+    {
+        $marca     = 'chaja' . Str::lower(Str::random(8));
+        $versiones = $this->versiones_del_sistema();
+        $medio     = $this->crear_version('9000.9.5', 'published', '2020-10-10 10:00:00');
+
+        /* La misma función en dos versiones: salió en la 9000.9.0 y se mejoró en la 9000.10.0. */
+        $this->crear_novedad($versiones['vieja'], 'Exportación ' . $marca, 'Primera versión.');
+        $this->crear_novedad($versiones['ultima'], 'Mejoras en ' . $marca, 'Más columnas.');
+        $this->crear_novedad($versiones['borrador'], 'Futuro de ' . $marca, 'En desarrollo.');
+
+        /* Cliente entre medio: tiene la original, le falta la mejora. */
+        $cliente   = $this->crear_cliente('Entre Medio', $medio->id);
+        $respuesta = $this->getJson('/api/claude/support-codex/feature-lookup?q=' . $marca . '&client_id=' . $cliente->id, $this->headers())->assertStatus(200);
+
+        $this->assertSame(
+            'Si la misma función aparece en varias versiones, la que decide si el cliente la tiene es la más vieja publicada; las posteriores son mejoras.',
+            $respuesta->json('lectura')
+        );
+        $this->assertSame(
+            ['tiene_alguna' => true, 'version_mas_vieja_que_la_trae' => '9000.9.0', 'sistema' => 'empresa'],
+            $respuesta->json('resumen_cliente')
+        );
+        $this->assertSame([false, false, true], array_column(array_column($respuesta->json('resultados'), 'cliente'), 'tiene'));
+
+        /* 🔴 Con limit=1 la página trae solo el borrador (tiene: false). El resumen no cambia. */
+        $pagina = $this->getJson('/api/claude/support-codex/feature-lookup?q=' . $marca . '&limit=1&client_id=' . $cliente->id, $this->headers())->assertStatus(200);
+
+        $this->assertCount(1, $pagina->json('resultados'));
+        $this->assertSame('9000.11.0', $pagina->json('resultados.0.version'));
+        $this->assertFalse($pagina->json('resultados.0.cliente.tiene'));
+        $this->assertTrue($pagina->json('hay_mas'));
+        $this->assertSame(
+            ['tiene_alguna' => true, 'version_mas_vieja_que_la_trae' => '9000.9.0', 'sistema' => 'empresa'],
+            $pagina->json('resumen_cliente')
+        );
+
+        /* Cliente anterior a todas: no tiene ninguna, y la más vieja que la trae sigue siendo la misma. */
+        $viejo = $this->crear_cliente('Muy Viejo', $this->crear_version('9000.8.0', 'published', '2020-09-01 10:00:00')->id);
+        $this->assertSame(
+            ['tiene_alguna' => false, 'version_mas_vieja_que_la_trae' => '9000.9.0', 'sistema' => 'empresa'],
+            $this->getJson('/api/claude/support-codex/feature-lookup?q=' . $marca . '&client_id=' . $viejo->id, $this->headers())->assertStatus(200)->json('resumen_cliente')
+        );
+
+        /* Sin cliente: la clave está y vale null; `lectura` viaja igual. */
+        $sin_cliente = $this->getJson('/api/claude/support-codex/feature-lookup?q=' . $marca, $this->headers())->assertStatus(200);
+        $this->assertArrayHasKey('resumen_cliente', $sin_cliente->json());
+        $this->assertNull($sin_cliente->json('resumen_cliente'));
+        $this->assertNotEmpty($sin_cliente->json('lectura'));
+
+        /* Solo coincide un borrador: nadie la trae todavía. */
+        $solo_borrador = 'ñacurutu' . Str::lower(Str::random(8));
+        $this->crear_novedad($versiones['borrador'], 'Nueva ' . $solo_borrador, 'En desarrollo.');
+        $this->assertSame(
+            ['tiene_alguna' => false, 'version_mas_vieja_que_la_trae' => null, 'sistema' => null],
+            $this->getJson('/api/claude/support-codex/feature-lookup?q=' . urlencode($solo_borrador) . '&client_id=' . $cliente->id, $this->headers())->assertStatus(200)->json('resumen_cliente')
+        );
+    }
+
+    public function test_para_tienda_solo_deciden_las_tiendas_instaladas(): void
+    {
+        $marca     = 'mulita' . Str::lower(Str::random(8));
+        $versiones = $this->versiones_del_sistema();
+
+        $vieja = $this->crear_version_de_tienda('9000.1.0', EcommerceVersion::STATUS_PUBLISHED, 'Otra cosa', '2020-09-01 10:00:00');
+        $nueva = $this->crear_version_de_tienda('9000.2.0', EcommerceVersion::STATUS_PUBLISHED, 'Buscador ' . $marca, '2020-10-01 10:00:00');
+
+        /* Una tienda instalada en la versión nueva y otra a medio instalar en la vieja: la segunda no decide. */
+        $cliente = $this->crear_cliente('Una Instalada', $versiones['ultima']->id);
+        $this->crear_tienda($cliente, $nueva->id);
+        $a_medias         = $this->crear_tienda($cliente, $vieja->id);
+        $a_medias->status = 'installing';
+        $a_medias->save();
+
+        $respuesta = $this->getJson('/api/claude/support-codex/feature-lookup?q=' . $marca . '&sistema=tienda&client_id=' . $cliente->id, $this->headers())->assertStatus(200);
+        $resultado = $respuesta->json('resultados.0');
+
+        $this->assertTrue($resultado['cliente']['tiene']);
+        $this->assertSame('9000.2.0', $resultado['cliente']['version_cliente']);
+        $this->assertStringContainsString('1 tienda que no está instalada', $resultado['cliente']['motivo']);
+        $this->assertSame(['tiene_alguna' => true, 'version_mas_vieja_que_la_trae' => '9000.2.0', 'sistema' => 'tienda'], $respuesta->json('resumen_cliente'));
+        /* En el ítem del cliente siguen figurando las dos, con su estado. */
+        $this->assertSame(['active', 'installing'], array_column($respuesta->json('cliente.ecommerce'), 'status'));
+
+        /* Solo una tienda pendiente: no hay ninguna instalada, no se afirma nada. */
+        $pendiente      = $this->crear_cliente('Solo Pendiente', $versiones['ultima']->id);
+        $tienda         = $this->crear_tienda($pendiente, $nueva->id);
+        $tienda->status = 'pending';
+        $tienda->save();
+
+        $resultado = $this->getJson('/api/claude/support-codex/feature-lookup?q=' . $marca . '&sistema=tienda&client_id=' . $pendiente->id, $this->headers())->assertStatus(200)->json('resultados.0');
+
+        $this->assertNull($resultado['cliente']['tiene']);
+        $this->assertNull($resultado['cliente']['version_cliente']);
+        $this->assertStringContainsString('ninguna tienda instalada', $resultado['cliente']['motivo']);
+    }
 }

@@ -332,7 +332,13 @@ Query: `client_id` (entero, opcional), `q` (texto de hasta 100 caracteres; busca
 
 Query: `q` (requerido, 2–100 caracteres), `client_id` (opcional), `sistema` (`empresa` | `tienda`, opcional; default los dos) y `limit` (1–50, default 20).
 
-Busca cada palabra de `q` con LIKE, sin distinguir mayúsculas; tienen que aparecer **todas**. Para `empresa` mira las novedades activas (`version_notifications.title/body`, origen `novedad`) y las versiones (`versions.title/description`, origen `version`); para `tienda`, las versiones de tienda (`ecommerce_versions.title/description`, origen `version`). Entran versiones en cualquier estado. Las más nuevas primero (por fecha de publicación; sin publicar, por fecha de alta).
+Busca las palabras de `q` con LIKE, sin distinguir mayúsculas ni acentos (`electronica` encuentra «electrónica»); tienen que aparecer **todas**. Antes de buscar:
+
+- se sacan las palabras vacías: `como, cómo, con, de, del, la, el, los, las, para, por, que, qué, un, una, en, al, se, mi, su, es, lo, le, y, o, a` y toda palabra de una sola letra. Las de dos letras que no están en la lista se buscan (`QR`, `ML`, `MP`);
+- se saca el plural simple de las palabras de más de 4 letras (termina en `es` → sin `es`; si no, en `s` → sin `s`): «facturas electrónicas» encuentra «factura electrónica»;
+- si no queda ninguna palabra: 422 `{error, codigo: "busqueda_sin_palabras"}`.
+
+Para `empresa` mira las novedades activas (`version_notifications.title/body`, origen `novedad`) y las versiones (`versions.title/description`, origen `version`); para `tienda`, las versiones de tienda (`ecommerce_versions.title/description`, origen `version`). Entran versiones en cualquier estado. Las más nuevas primero (por fecha de publicación; sin publicar, por fecha de alta).
 
 ```json
 {"q":"…","resultados":[{"sistema":"empresa","version":"4.3.40","version_status":"published","publicada":true,
@@ -340,18 +346,25 @@ Busca cada palabra de `q` con LIKE, sin distinguir mayúsculas; tienen que apare
    "cliente":{"tiene":true,"version_cliente":"4.3.50","motivo":"…"}}],
  "hay_mas":false,
  "cliente":null,
+ "resumen_cliente":{"tiene_alguna":true,"version_mas_vieja_que_la_trae":"4.3.40","sistema":"empresa"},
+ "lectura":"Si la misma función aparece en varias versiones, la que decide si el cliente la tiene es la más vieja publicada; las posteriores son mejoras.",
  "aviso":"La disponibilidad es por versión; una extensión o el plan pueden condicionarla."}
 ```
 
-- `texto` va sin HTML, en una línea, con hasta 600 caracteres.
+- `texto` va sin HTML, en una línea, con hasta 600 caracteres. `hay_mas` dice si quedaron coincidencias afuera del `limit`.
 - `cliente` (arriba) es `null` sin `client_id`, o un ítem con la misma forma que los de `client-versions`.
-- `resultados[].cliente` está siempre. `tiene` es `true` si la versión está publicada y la del cliente es igual o posterior; `false` si no (una versión en borrador: «todavía no se publicó»); `null` si no se pasó `client_id`, si el cliente no tiene versión registrada o, para `tienda`, si no tiene tienda o su tienda no tiene versión registrada. `motivo` lo explica siempre.
-- Para `tienda` se compara contra la(s) tienda(s) del cliente: con varias, `tiene` es `true` solo si todas la tienen, y `version_cliente` es la más vieja de las registradas.
+- `resultados[].cliente` está siempre, y `motivo` lo explica siempre. `tiene` es:
+  - `true` si la versión **se publicó** y la del cliente es igual o posterior. «Se publicó» es `published`, o `archived` con `published_at`: archivar una versión no les saca la función a los clientes que ya pasaron por ella;
+  - `false` si la versión se publicó y la del cliente es anterior, o si la versión es un borrador (`draft`: «todavía no se publicó»);
+  - `null` si no se pasó `client_id`, si el cliente no tiene versión registrada, si la versión está archivada sin fecha de publicación o, para `tienda`, si el cliente no tiene una tienda instalada con versión registrada.
+- Para `tienda` deciden solo las tiendas **instaladas** (`client_ecommerces.status = active`); una `pending` o `installing` no cuenta y el motivo lo dice. Con varias instaladas, `tiene` es `true` solo si todas la tienen, y `version_cliente` es la más vieja de las registradas.
+- `resumen_cliente` es `null` sin `client_id`. Con cliente se calcula sobre **todas** las coincidencias, no solo sobre la página devuelta: `tiene_alguna` es `true` si en al menos una `tiene` es `true`; `version_mas_vieja_que_la_trae` es la versión más vieja, entre las coincidencias que se publicaron, por orden semántico (o `null` si ninguna se publicó); `sistema` dice de qué sistema es esa versión (`empresa` si hubo coincidencias de los dos, `tienda` si solo de tienda, `null` si no hay versión).
+- `lectura` viaja siempre: si la misma función aparece en varias versiones, decide la más vieja publicada.
 - **La disponibilidad es por versión.** Que el cliente esté en la versión no dice si tiene la extensión o el plan que la habilitan.
 
 ### `POST support-codex/admin-sql`
 
-Body: `{"sql": "SELECT …"}` (1–12000 caracteres). SQL de solo lectura sobre la base del admin. Es POST porque la consulta viaja en el cuerpo; no escribe nada.
+Body: `{"sql": "SELECT …"}` (1–12000 caracteres). SQL de solo lectura sobre la base del admin. Es POST porque la consulta viaja en el cuerpo; no escribe nada. La consulta se ejecuta tal cual llegó (sin los espacios de los bordes).
 
 ```json
 {"ok":true,"read_only":true,"columns":["id","name"],"rows":[{"id":1,"name":"…"}],"row_count":1,"truncated":false}
@@ -359,18 +372,43 @@ Body: `{"sql": "SELECT …"}` (1–12000 caracteres). SQL de solo lectura sobre 
 
 Hasta 200 filas (`truncated: true` si había más) y los textos cortados a 4000 caracteres (terminan en ` [recortado]`). Cada fila es un objeto por nombre de columna; si dos columnas se llaman igual (un JOIN con `*`), queda la última: poné alias.
 
-Barreras, todas del lado del admin (el monitor valida además por su cuenta):
+Barreras de la consulta, todas del lado del admin (el monitor valida además por su cuenta):
 
-- Una sola sentencia: sin `;`, `--`, `/*`, `#`, `@`, `\0` ni comillas dobles. Las cadenas entre comillas simples se vacían antes de analizar.
-- Solo `SELECT`, `EXPLAIN SELECT`, `SHOW TABLES`, `SHOW [FULL] COLUMNS FROM tabla` y `DESCRIBE tabla`. Sin `SHOW CREATE TABLE`, `UNION`, `WITH`, `TABLE` ni `VALUES`.
-- Palabras prohibidas y lista positiva de funciones iguales a `validar_sql` de `herramientas/soporte-codex/diagnostico.py`. Como allá, un paréntesis solo puede ir pegado a una función de la lista o a `IN`, `EXISTS`, `NOT`, `OVER`, `AS`: `AND (a OR b)` y `FROM (SELECT …)` se rechazan.
+- Una sola sentencia: sin `;`, `--`, `/*`, `#` ni `@` **fuera de un texto entre comillas simples** (`email = 'a@b.com'` pasa), sin `\0` y sin comillas dobles fuera de un texto. Las cadenas se vacían antes de analizar; una comilla o un backtick sin cerrar se rechazan. Entre backticks solo se admite un nombre simple (letras, números y guion bajo).
+- Solo `SELECT`, `EXPLAIN SELECT`, `SHOW TABLES`, `SHOW [FULL] COLUMNS FROM tabla` y `DESCRIBE tabla`. Sin `SHOW CREATE TABLE`, `UNION`, `WITH`, `TABLE`, `VALUES` ni `FOR SHARE`.
+- Palabras prohibidas y lista positiva de funciones iguales a `validar_sql` de `herramientas/soporte-codex/diagnostico.py`. Un paréntesis solo puede ir pegado a una función de la lista, a `IN`, `EXISTS`, `NOT`, `OVER`, `AS` o, como agrupación, a `AND`, `OR`, `WHERE`, `ON`, `HAVING`, `WHEN`, `THEN`, `ELSE`. `FROM (…)`, `JOIN (…)` y `SELECT (…)` se rechazan.
 - Sin `base.tabla` ni `information_schema` / `mysql` / `performance_schema` / `sys`.
-- `*` dentro de un paréntesis solo como `COUNT(*)` (también rechaza una multiplicación entre paréntesis).
-- Nombres sensibles en el texto → rechazo: `password|passwd|secret|token|api.?key|private.?key|session.?id|authorization|credential|clave.fiscal|encrypted|cifrad|p256dh|env_manual_values`. Alcanza a nombres de tablas y columnas que lo contienen (`client_ai_token_usages`, `input_tokens`).
-- Tablas vedadas (como palabra en la consulta, también en `SHOW COLUMNS` / `DESCRIBE`): la lista, con el motivo de cada una, está en `config/claude_admin_sql.php`.
-- Ejecución en una conexión aparte: `SET SESSION TRANSACTION READ ONLY` + transacción de solo lectura + `max_execution_time` de 8 s; siempre rollback.
-- Redacción del resultado: toda columna cuyo nombre matchee el patrón sensible sale como `[dato reservado]`, recursivo por clave dentro de un valor JSON. En los textos se tapa además lo que sigue a «contraseña» / «clave» (`[oculta]`, la misma regla que el contexto del ticket), un `Bearer …` y los `clave=valor` de nombres sensibles.
+- `*` dentro de un paréntesis solo como `COUNT(*)` o como multiplicación (`SUM(a * b)`, `ROUND(a * 1.21, 2)`); un comodín (`(SELECT * …)`, `(t.*)`, `COUNT(DISTINCT *)`) se rechaza.
+- Nombres sensibles en el texto → rechazo: `password|passwd|secret|token|api.?key|private.?key|session.?id|authorization|credential|clave.fiscal|encrypted|cifrad|p256dh|env_manual_values`. Es por subcadena: alcanza a nombres de tablas y columnas que lo contienen (`client_ai_token_usages`, `input_tokens`).
+- **Columnas reservadas** (`config/claude_admin_sql.php` → `columnas_reservadas`, con el motivo de cada una): si el nombre aparece como palabra en la consulta, rechazo. Son `request`, `response`, `raw`, `setup_data`, `ecommerce_setup_data`, `approval_payload`, `env_manual_values`, `line`, `log`, `referencia_base64`, `datos`, `contexto_web`, `accion_payload`, `datos_de_soporte`, `artifacts`, `proof`, `calendar_snapshot`, `accepted_endpoint_hashes`, `clave`, `contrasena`, `contraseña`, `pin`. Son nombres globales: valen en cualquier tabla.
+- **Tablas vedadas** (como palabra en la consulta, también en `SHOW COLUMNS` / `DESCRIBE`): `admin_settings`, `env_templates`, `env_change_batches`, `env_change_items`, `client_ssh_credentials`, `admin_push_subscriptions`, `admin_calendar_connections`, `personal_access_tokens`, `password_resets`, `sessions`, `jobs`, `failed_jobs`, `job_batches`, `recall_configs`, `whatsapp_config`, `mensualidad_invoice_pdf_access_tokens`, `recursos_links`, `recursos_sesiones`, `support_codex_task_grants`, `trial_instances`.
 
-Rechazo: 422 `{error, codigo}` con `codigo` = `consulta_invalida` | `varias_sentencias` | `comillas_dobles` | `campo_sensible` | `tabla_vedada` | `operacion_no_permitida` | `solo_select` | `otra_base` | `comodin_en_parentesis` | `funcion_no_permitida`. Si MySQL la rechaza: 422 `{error, codigo: "consulta_fallida", sqlstate, codigo_mysql}` con un resumen fijo, sin el mensaje crudo del driver.
+Ejecución: en una conexión aparte, con `SET SESSION TRANSACTION READ ONLY` + transacción de solo lectura + `max_execution_time` de 8 s; siempre rollback.
+
+Redacción del resultado:
+
+- toda columna cuyo nombre matchee el patrón sensible o sea una columna reservada sale como `[dato reservado]` (es lo que cubre `SELECT *`), y lo mismo toda clave de un valor JSON, a cualquier profundidad;
+- en los textos se tapa además el contenido de las etiquetas XML/HTML de credenciales (`Token`, `Sign`, `Password`, `Clave` y las de nombre sensible, con o sin namespace, también escapadas como `&lt;Token&gt;`), lo que sigue a «contraseña» / «clave» (`[oculta]`, la misma regla que el contexto del ticket), un `Bearer …` y los `clave=valor` de nombres sensibles.
+
+**Fail-closed por columna de texto.** Toda columna `json`, `text` (cualquier tamaño) o `blob` de una tabla no vedada está decidida a mano en `config/claude_admin_sql.php`: o no se sirve (patrón sensible o `columnas_reservadas`), o figura en `columnas_de_texto_revisadas` con el motivo por el que es legible. Un test de build lo coteja contra el esquema real: una migración que agregue una columna de texto sin decidirla lo rompe. Lo que sigue siendo por nombre son las columnas `varchar`.
+
+Rechazo: 422 `{error, codigo}` con `codigo` =
+
+| `codigo` | Cuándo |
+|---|---|
+| `consulta_invalida` | no es texto, vacía, más de 12000 caracteres, no es UTF-8, comilla o backtick sin cerrar, o un backtick con algo que no es un nombre simple |
+| `varias_sentencias` | `;`, `--`, `/*`, `#` o `@` fuera de un texto, o un carácter nulo |
+| `comillas_dobles` | comillas dobles fuera de un texto |
+| `campo_sensible` | nombra un campo sensible o una columna reservada |
+| `tabla_vedada` | nombra una tabla vedada |
+| `operacion_no_permitida` | una palabra prohibida (escrituras, `UNION`, `WITH`, `TABLE`, `VALUES`, bases del sistema, `SHOW CREATE TABLE`) |
+| `solo_select` | no empieza con `SELECT` / `EXPLAIN SELECT` ni es una de las tres consultas de esquema |
+| `otra_base` | `base.tabla` |
+| `comodin_en_parentesis` | `*` comodín dentro de un paréntesis |
+| `funcion_no_permitida` | una función fuera de la lista, o un paréntesis pegado a una palabra que no lo admite (`FROM (`, `JOIN (`, `SELECT (`) |
+
+Si MySQL la rechaza: 422 `{error, codigo: "consulta_fallida", sqlstate, codigo_mysql}` con un resumen fijo, sin el mensaje crudo del driver.
+
+Limitaciones conocidas: no se puede filtrar ni ordenar por una columna reservada o de nombre sensible; los conteos de tokens de IA (`client_ai_token_usages`, `input_tokens`) no se pueden consultar por SQL porque su nombre matchea el patrón; no hay tablas derivadas ni subconsultas en la lista del SELECT.
 
 Lo que se puede leer incluye datos comerciales y de contacto de clientes y leads: es para uso interno de soporte. Qué se le dice a un cliente lo siguen gobernando las reglas de Martín.

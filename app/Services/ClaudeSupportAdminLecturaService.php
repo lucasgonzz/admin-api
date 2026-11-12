@@ -42,6 +42,25 @@ class ClaudeSupportAdminLecturaService
     /** Filas que se traen como mucho de cada fuente antes de ordenar y cortar. */
     const TOPE_POR_FUENTE = 300;
 
+    /**
+     * El único estado de `client_ecommerces.status` con una tienda desplegada. Los otros dos que
+     * escribe `EcommerceInstallationService` son `pending` (dada de alta, sin instalar) e
+     * `installing` (corrida en curso o caída a mitad de camino).
+     */
+    const TIENDA_INSTALADA = 'active';
+
+    /**
+     * Palabras que no se buscan: no distinguen una novedad de otra y, con AND por palabra, una
+     * sola que no figure en el texto deja la búsqueda en cero.
+     */
+    const PALABRAS_VACIAS = [
+        'como', 'cómo', 'con', 'de', 'del', 'la', 'el', 'los', 'las', 'para', 'por', 'que', 'qué', 'un', 'una',
+        'en', 'al', 'se', 'mi', 'su', 'es', 'lo', 'le', 'y', 'o', 'a',
+    ];
+
+    /** Cómo leer varias coincidencias de la misma función. Viaja en toda respuesta de `feature-lookup`. */
+    const LECTURA = 'Si la misma función aparece en varias versiones, la que decide si el cliente la tiene es la más vieja publicada; las posteriores son mejoras.';
+
     /** El aviso que acompaña toda respuesta de disponibilidad. */
     const AVISO = 'La disponibilidad es por versión; una extensión o el plan pueden condicionarla.';
 
@@ -128,26 +147,31 @@ class ClaudeSupportAdminLecturaService
     /**
      * Busca una funcionalidad en las novedades y versiones del sistema y en las versiones de tienda.
      *
-     * @param string               $q       Texto buscado: cada palabra tiene que aparecer.
+     * @param string               $q       Texto buscado: cada palabra útil tiene que aparecer.
      * @param string|null          $sistema `empresa`, `tienda` o null (los dos).
      * @param int                  $limit   Cantidad máxima de resultados.
      * @param array<string, mixed>|null $cliente Ítem de `versiones_de_un_cliente`, o null.
      *
-     * @return array<string, mixed> `resultados` y `hay_mas`.
+     * @return array<string, mixed> `palabras` (las raíces que se buscaron; vacío = la búsqueda no
+     *                              tenía ninguna palabra útil y no se buscó nada), `resultados`,
+     *                              `hay_mas` y `resumen_cliente` (null si no se indicó cliente).
      */
     public function buscar_funcionalidad($q, $sistema, $limit, $cliente)
     {
         $palabras = $this->palabras($q);
-        $crudos   = [];
 
-        if ($palabras !== []) {
-            if ($sistema === null || $sistema === 'empresa') {
-                $crudos = array_merge($crudos, $this->novedades_que_coinciden($palabras), $this->versiones_que_coinciden($palabras));
-            }
+        if ($palabras === []) {
+            return ['palabras' => [], 'resultados' => [], 'hay_mas' => false, 'resumen_cliente' => null];
+        }
 
-            if ($sistema === null || $sistema === 'tienda') {
-                $crudos = array_merge($crudos, $this->versiones_de_tienda_que_coinciden($palabras));
-            }
+        $crudos = [];
+
+        if ($sistema === null || $sistema === 'empresa') {
+            $crudos = array_merge($crudos, $this->novedades_que_coinciden($palabras), $this->versiones_que_coinciden($palabras));
+        }
+
+        if ($sistema === null || $sistema === 'tienda') {
+            $crudos = array_merge($crudos, $this->versiones_de_tienda_que_coinciden($palabras));
         }
 
         /* Más nuevas primero: por fecha (publicación; si no se publicó, alta), y a igualdad por
@@ -163,15 +187,15 @@ class ClaudeSupportAdminLecturaService
                 return $por_version;
             }
 
-            return $a['_desempate'] <=> $b['_desempate'];
+            return strcmp($a['_desempate'], $b['_desempate']);
         });
 
-        $hay_mas    = count($crudos) > $limit;
-        $crudos     = array_slice($crudos, 0, $limit);
-        $resultados = [];
-
+        /* La disponibilidad se calcula sobre TODAS las coincidencias y no solo sobre la página:
+           el resumen tiene que decir si el cliente tiene la función aunque la versión que la trajo
+           haya quedado afuera del `limit`. */
+        $todos = [];
         foreach ($crudos as $crudo) {
-            $resultados[] = [
+            $todos[] = [
                 'sistema'        => $crudo['sistema'],
                 'version'        => $crudo['version'],
                 'version_status' => $crudo['version_status'],
@@ -184,16 +208,73 @@ class ClaudeSupportAdminLecturaService
             ];
         }
 
-        return ['resultados' => $resultados, 'hay_mas' => $hay_mas];
+        return [
+            'palabras'        => $palabras,
+            'resultados'      => array_slice($todos, 0, $limit),
+            'hay_mas'         => count($todos) > $limit,
+            'resumen_cliente' => $cliente === null ? null : $this->resumen_para_el_cliente($crudos, $todos),
+        ];
+    }
+
+    /**
+     * El resumen de TODAS las coincidencias para el cliente.
+     *
+     *  - `tiene_alguna`: true si en al menos una coincidencia `cliente.tiene` es true.
+     *  - `version_mas_vieja_que_la_trae`: la versión más vieja, entre las coincidencias que se
+     *    publicaron alguna vez, por orden semántico. Es la que decide: si la misma función aparece
+     *    en varias versiones, las posteriores son mejoras. Null si ninguna se publicó.
+     *  - `sistema`: de qué sistema es esa versión. Si la búsqueda trajo coincidencias de los dos
+     *    (no se filtró por `sistema`), manda `empresa`: las numeraciones no se comparan entre sí.
+     *
+     * @param array<int, array<string, mixed>> $crudos Coincidencias crudas, ya ordenadas.
+     * @param array<int, array<string, mixed>> $todos  Las mismas, con su `cliente` calculado.
+     *
+     * @return array<string, mixed>
+     */
+    private function resumen_para_el_cliente(array $crudos, array $todos)
+    {
+        $tiene_alguna = false;
+        foreach ($todos as $resultado) {
+            if ($resultado['cliente']['tiene'] === true) {
+                $tiene_alguna = true;
+                break;
+            }
+        }
+
+        $mas_vieja = ['empresa' => null, 'tienda' => null];
+        foreach ($crudos as $crudo) {
+            if (! $crudo['_comparable']) {
+                continue;
+            }
+
+            $sistema = $crudo['sistema'];
+            if ($mas_vieja[$sistema] === null || VersionNumberComparator::compare($crudo['version'], $mas_vieja[$sistema]) < 0) {
+                $mas_vieja[$sistema] = $crudo['version'];
+            }
+        }
+
+        $sistema = $mas_vieja['empresa'] !== null ? 'empresa' : ($mas_vieja['tienda'] !== null ? 'tienda' : null);
+
+        return [
+            'tiene_alguna'                  => $tiene_alguna,
+            'version_mas_vieja_que_la_trae' => $sistema === null ? null : $mas_vieja[$sistema],
+            'sistema'                       => $sistema,
+        ];
     }
 
     /**
      * ¿El cliente tiene la versión de este resultado?
      *
-     *  - `true`: la versión está publicada y la del cliente es igual o posterior.
-     *  - `false`: no la tiene, o la versión no está publicada (un borrador no lo tiene nadie).
+     *  - `true`: la versión se publicó y la del cliente es igual o posterior.
+     *  - `false`: la versión se publicó y la del cliente es anterior, o la versión es un borrador
+     *    (un borrador no lo tiene nadie).
      *  - `null`: no se puede saber — no se indicó cliente, el cliente no tiene versión registrada,
-     *    o (para tienda) no tiene tienda o su tienda no tiene versión registrada.
+     *    la versión está archivada sin haberse publicado nunca, o (para tienda) el cliente no tiene
+     *    una tienda instalada con versión registrada.
+     *
+     * 🔴 UNA VERSIÓN ARCHIVADA QUE SE PUBLICÓ CUENTA COMO PUBLICADA. Archivar una versión la saca
+     * de las opciones de upgrade; no les saca la funcionalidad a los clientes que ya pasaron por
+     * ella. Decir «no la tiene» por el estado de hoy de la versión sería falso.
      *
      * @param array<string, mixed>      $resultado Resultado crudo.
      * @param array<string, mixed>|null $cliente   Ítem del cliente, o null.
@@ -216,29 +297,37 @@ class ClaudeSupportAdminLecturaService
             return ['tiene' => null, 'version_cliente' => null, 'motivo' => 'El cliente no tiene versión registrada en el admin.'];
         }
 
-        if (! $resultado['publicada']) {
-            return ['tiene' => false, 'version_cliente' => $version_cliente, 'motivo' => $this->motivo_de_no_publicada($resultado)];
+        if (! $resultado['_comparable']) {
+            return $this->sin_version_comparable($resultado, $version_cliente);
         }
+
+        $aclaracion = $resultado['publicada'] ? '' : ' (versión hoy ' . $this->estado_legible($resultado['version_status']) . ', publicada en su momento)';
 
         if (VersionNumberComparator::compare($version_cliente, $resultado['version']) >= 0) {
             return [
                 'tiene'           => true,
                 'version_cliente' => $version_cliente,
-                'motivo'          => 'El cliente está en la ' . $version_cliente . ', igual o posterior a la ' . $resultado['version'] . '.',
+                'motivo'          => 'El cliente está en la ' . $version_cliente . ', igual o posterior a la ' . $resultado['version'] . $aclaracion . '.',
             ];
         }
 
         return [
             'tiene'           => false,
             'version_cliente' => $version_cliente,
-            'motivo'          => 'El cliente está en la ' . $version_cliente . ', anterior a la ' . $resultado['version'] . ': le falta actualizar.',
+            'motivo'          => 'El cliente está en la ' . $version_cliente . ', anterior a la ' . $resultado['version'] . $aclaracion . ': le falta actualizar.',
         ];
     }
 
     /**
-     * La misma pregunta, contra la(s) tienda(s) del cliente. Con varias tiendas, `tiene` es true
-     * solo si TODAS la tienen; `version_cliente` es la más vieja de las registradas, que es la que
-     * decide.
+     * La misma pregunta, contra la(s) tienda(s) del cliente.
+     *
+     * 🔴 SOLO DECIDEN LAS TIENDAS INSTALADAS (`status = active`). Una tienda `pending` o
+     * `installing` no tiene nada desplegado: su versión (si la tuviera) no dice qué ve el
+     * comprador, y contarla haría que una segunda tienda a medio instalar le «saque» la función a
+     * la que sí anda. El motivo dice cuántas se dejaron afuera.
+     *
+     * Con varias tiendas instaladas, `tiene` es true solo si TODAS la tienen; `version_cliente` es
+     * la más vieja de las registradas, que es la que decide.
      *
      * @param array<string, mixed> $resultado Resultado crudo (sistema tienda).
      * @param array<string, mixed> $cliente   Ítem del cliente.
@@ -247,10 +336,26 @@ class ClaudeSupportAdminLecturaService
      */
     private function disponibilidad_en_la_tienda(array $resultado, array $cliente)
     {
-        $tiendas = $cliente['ecommerce'];
+        $todas = $cliente['ecommerce'];
+
+        if ($todas === []) {
+            return ['tiene' => null, 'version_cliente' => null, 'motivo' => 'El cliente no tiene tienda.'];
+        }
+
+        $tiendas = [];
+        foreach ($todas as $tienda) {
+            if ($tienda['status'] === self::TIENDA_INSTALADA) {
+                $tiendas[] = $tienda;
+            }
+        }
+
+        $sin_instalar = count($todas) - count($tiendas);
+        $nota         = $sin_instalar === 0
+            ? ''
+            : ' No se cuenta' . ($sin_instalar === 1 ? ' 1 tienda que no está instalada' : 'n ' . $sin_instalar . ' tiendas que no están instaladas') . ' (estado distinto de active).';
 
         if ($tiendas === []) {
-            return ['tiene' => null, 'version_cliente' => null, 'motivo' => 'El cliente no tiene tienda.'];
+            return ['tiene' => null, 'version_cliente' => null, 'motivo' => 'El cliente no tiene ninguna tienda instalada (estado active).' . $nota];
         }
 
         $con_version = [];
@@ -266,7 +371,7 @@ class ClaudeSupportAdminLecturaService
         }
 
         if ($con_version === []) {
-            return ['tiene' => null, 'version_cliente' => null, 'motivo' => 'La tienda del cliente no tiene versión registrada en el admin.'];
+            return ['tiene' => null, 'version_cliente' => null, 'motivo' => 'La tienda del cliente no tiene versión registrada en el admin.' . $nota];
         }
 
         usort($con_version, function ($a, $b) {
@@ -275,19 +380,23 @@ class ClaudeSupportAdminLecturaService
 
         $mas_vieja = $con_version[0];
 
-        if (! $resultado['publicada']) {
-            return ['tiene' => false, 'version_cliente' => $mas_vieja, 'motivo' => $this->motivo_de_no_publicada($resultado)];
+        if (! $resultado['_comparable']) {
+            $respuesta            = $this->sin_version_comparable($resultado, $mas_vieja);
+            $respuesta['motivo'] .= $nota;
+
+            return $respuesta;
         }
 
-        $varias = count($tiendas) > 1;
+        $varias     = count($tiendas) > 1;
+        $aclaracion = $resultado['publicada'] ? '' : ' (versión hoy ' . $this->estado_legible($resultado['version_status']) . ', publicada en su momento)';
 
         if (VersionNumberComparator::compare($mas_vieja, $resultado['version']) < 0) {
             return [
                 'tiene'           => false,
                 'version_cliente' => $mas_vieja,
-                'motivo'          => $varias
-                    ? 'El cliente tiene ' . count($tiendas) . ' tiendas y al menos una está en la ' . $mas_vieja . ', anterior a la ' . $resultado['version'] . '.'
-                    : 'La tienda del cliente está en la ' . $mas_vieja . ', anterior a la ' . $resultado['version'] . ': le falta actualizar.',
+                'motivo'          => ($varias
+                    ? 'El cliente tiene ' . count($tiendas) . ' tiendas instaladas y al menos una está en la ' . $mas_vieja . ', anterior a la ' . $resultado['version'] . $aclaracion . '.'
+                    : 'La tienda del cliente está en la ' . $mas_vieja . ', anterior a la ' . $resultado['version'] . $aclaracion . ': le falta actualizar.') . $nota,
             ];
         }
 
@@ -295,33 +404,58 @@ class ClaudeSupportAdminLecturaService
             return [
                 'tiene'           => null,
                 'version_cliente' => $mas_vieja,
-                'motivo'          => 'El cliente tiene ' . count($tiendas) . ' tiendas y ' . $sin_version . ' no tiene versión registrada: no se puede afirmar que todas la tengan.',
+                'motivo'          => 'El cliente tiene ' . count($tiendas) . ' tiendas instaladas y ' . $sin_version . ' no tiene versión registrada: no se puede afirmar que todas la tengan.' . $nota,
             ];
         }
 
         return [
             'tiene'           => true,
             'version_cliente' => $mas_vieja,
-            'motivo'          => $varias
-                ? 'Las ' . count($tiendas) . ' tiendas del cliente están en la ' . $resultado['version'] . ' o posterior (la más vieja, en la ' . $mas_vieja . ').'
-                : 'La tienda del cliente está en la ' . $mas_vieja . ', igual o posterior a la ' . $resultado['version'] . '.',
+            'motivo'          => ($varias
+                ? 'Las ' . count($tiendas) . ' tiendas instaladas del cliente están en la ' . $resultado['version'] . ' o posterior (la más vieja, en la ' . $mas_vieja . ')' . $aclaracion . '.'
+                : 'La tienda del cliente está en la ' . $mas_vieja . ', igual o posterior a la ' . $resultado['version'] . $aclaracion . '.') . $nota,
         ];
     }
 
     /**
-     * Por qué una versión no publicada no la tiene nadie.
+     * La respuesta para una versión que no se puede comparar: un borrador (nadie lo tiene: false)
+     * o una versión archivada que nunca se publicó (no se sabe: null).
      *
-     * @param array<string, mixed> $resultado Resultado crudo.
+     * @param array<string, mixed> $resultado       Resultado crudo.
+     * @param string|null          $version_cliente Versión del cliente.
+     *
+     * @return array<string, mixed>
+     */
+    private function sin_version_comparable(array $resultado, $version_cliente)
+    {
+        if ($resultado['version_status'] === 'draft') {
+            return [
+                'tiene'           => false,
+                'version_cliente' => $version_cliente,
+                'motivo'          => 'La versión ' . $resultado['version'] . ' todavía no se publicó.',
+            ];
+        }
+
+        return [
+            'tiene'           => null,
+            'version_cliente' => $version_cliente,
+            'motivo'          => 'La versión ' . $resultado['version'] . ' está ' . $this->estado_legible($resultado['version_status'])
+                . ' y no tiene fecha de publicación: no se puede afirmar que algún cliente la haya recibido.',
+        ];
+    }
+
+    /**
+     * El estado de una versión, en castellano.
+     *
+     * @param string $status Estado de la versión.
      *
      * @return string
      */
-    private function motivo_de_no_publicada(array $resultado)
+    private function estado_legible($status)
     {
-        if ($resultado['version_status'] === 'draft') {
-            return 'La versión ' . $resultado['version'] . ' todavía no se publicó.';
-        }
+        $nombres = ['draft' => 'en borrador', 'published' => 'publicada', 'archived' => 'archivada'];
 
-        return 'La versión ' . $resultado['version'] . ' no está publicada (estado: ' . $resultado['version_status'] . ').';
+        return isset($nombres[$status]) ? $nombres[$status] : 'en estado ' . $status;
     }
 
     /**
@@ -658,7 +792,8 @@ class ClaudeSupportAdminLecturaService
     }
 
     /**
-     * Forma interna de un resultado, con las claves de orden (`_orden`, `_desempate`) que no salen.
+     * Forma interna de un resultado, con las claves internas (`_comparable`, `_orden`, `_desempate`)
+     * que no salen en la respuesta.
      *
      * @param string      $sistema    empresa | tienda.
      * @param string      $origen     novedad | version.
@@ -683,27 +818,57 @@ class ClaudeSupportAdminLecturaService
             'titulo'         => $titulo,
             'texto'          => $this->texto_corto($texto),
             'origen'         => $origen,
+            /* Se puede comparar contra la versión de un cliente si se publicó alguna vez: hoy
+               publicada, o archivada con fecha de publicación. */
+            '_comparable'    => (bool) $publicada || ((string) $fila->status === 'archived' && $fila->published_at !== null),
             '_orden'         => $fecha === null ? '' : (string) $fecha,
             '_desempate'     => $desempate,
         ];
     }
 
     /**
-     * Las palabras de la búsqueda, sin repetir y sin vacías.
+     * Las RAÍCES que se buscan, sacadas del texto del usuario:
+     *
+     *  1. en minúscula y sin signos de los bordes («¿facturas?» → «facturas»);
+     *  2. sin las palabras vacías: las de la lista y toda palabra de una sola letra. Con AND por
+     *     palabra, «cómo exportar el listado» exigiría que la novedad dijera «cómo» y «el». Las
+     *     de dos letras que NO están en la lista se buscan: «QR», «ML» y «MP» son funciones;
+     *  3. con el plural simple sacado, en palabras de más de 4 letras: termina en `es` → sin `es`;
+     *     si no, termina en `s` → sin `s`. «facturas electrónicas» busca `factura` y `electrónica`,
+     *     y «clientes» busca `client`, que encuentra «cliente» y «clientes». Como se busca con
+     *     LIKE por subcadena, una raíz de más siempre encuentra lo mismo o más, nunca menos.
+     *
+     * Los acentos no se tocan: los resuelve la collation de las columnas (`utf8mb4_unicode_ci`,
+     * para la que `electronica` = `electrónica`).
      *
      * @param string $q Texto buscado.
      *
-     * @return array<int, string>
+     * @return array<int, string> Vacío si no quedó ninguna palabra útil.
      */
-    private function palabras($q)
+    public function palabras($q)
     {
         $partes = preg_split('/\s+/u', trim((string) $q));
         $partes = $partes === false ? [] : $partes;
         $salida = [];
 
         foreach ($partes as $parte) {
-            if ($parte !== '' && ! in_array(mb_strtolower($parte, 'UTF-8'), $salida, true)) {
-                $salida[] = mb_strtolower($parte, 'UTF-8');
+            $palabra = preg_replace('/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/u', '', mb_strtolower($parte, 'UTF-8'));
+            $palabra = $palabra === null ? '' : $palabra;
+
+            if (mb_strlen($palabra, 'UTF-8') < 2 || in_array($palabra, self::PALABRAS_VACIAS, true)) {
+                continue;
+            }
+
+            if (mb_strlen($palabra, 'UTF-8') > 4) {
+                if (mb_substr($palabra, -2, null, 'UTF-8') === 'es') {
+                    $palabra = mb_substr($palabra, 0, -2, 'UTF-8');
+                } elseif (mb_substr($palabra, -1, null, 'UTF-8') === 's') {
+                    $palabra = mb_substr($palabra, 0, -1, 'UTF-8');
+                }
+            }
+
+            if (! in_array($palabra, $salida, true)) {
+                $salida[] = $palabra;
             }
         }
 

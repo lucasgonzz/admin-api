@@ -130,12 +130,21 @@ class ClaudeSupportAdminLecturaController extends Controller
             $cliente
         );
 
+        if ($busqueda['palabras'] === []) {
+            return $this->error_422(
+                'La búsqueda no tiene ninguna palabra útil: después de sacar las palabras vacías (de, la, para, cómo, …) no quedó nada que buscar. Nombrá la función: «factura electrónica», «lista de precios», «QR».',
+                ['codigo' => 'busqueda_sin_palabras']
+            );
+        }
+
         return response()->json([
-            'q'          => $q,
-            'resultados' => $busqueda['resultados'],
-            'hay_mas'    => $busqueda['hay_mas'],
-            'cliente'    => $cliente,
-            'aviso'      => ClaudeSupportAdminLecturaService::AVISO,
+            'q'               => $q,
+            'resultados'      => $busqueda['resultados'],
+            'hay_mas'         => $busqueda['hay_mas'],
+            'cliente'         => $cliente,
+            'resumen_cliente' => $busqueda['resumen_cliente'],
+            'lectura'         => ClaudeSupportAdminLecturaService::LECTURA,
+            'aviso'           => ClaudeSupportAdminLecturaService::AVISO,
         ], 200);
     }
 
