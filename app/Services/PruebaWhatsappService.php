@@ -71,6 +71,19 @@ class PruebaWhatsappService
     const MOTIVO_ULTIMO_DIA      = 'Faltan menos de 3 horas para que venza la prueba: no sale paso, sale la encuesta al vencer.';
     const MOTIVO_TOPE_DE_INGRESO = 'Todavía no entró y ya se le recordó dos veces: no se le mandan más pasos.';
 
+    /**
+     * El video del CENTRO DE RECURSOS de los pasos que no tienen video de la prueba (12/11/2026), para la conversación
+     * del sistema de un ensayo. Se resuelve contra `recursos_videos` al enviar: si no está publicado, no va nada.
+     */
+    const RECURSO_DEL_PASO = [
+        'articulo_creado' => 'T1.2',  // Crear un artículo: los tres códigos, el nombre y el proveedor
+        'cliente_creado'  => 'T4.1',  // Dar de alta un cliente con los datos de ARCA
+        'venta_cc'        => 'T2.25', // Mandar la venta a la cuenta corriente del cliente
+        'pago_cc'         => 'T4.10', // Registrar un pago contra el saldo
+        'gasto'           => 'T6.16', // Cargar un gasto: la sub categoría, cómo lo pagaste y de qué caja sale
+        'tienda_pedido'   => 'T9.8',  // Cómo entra un pedido, y revisarlo antes de confirmar
+    ];
+
     /** Zona horaria del tope diario. */
     const ZONA = 'America/Argentina/Buenos_Aires';
 
@@ -1492,7 +1505,12 @@ class PruebaWhatsappService
         $video = Prueba\PruebaCorreoService::video_del_paso($hito);
 
         if ($video === null) {
-            return $texto;
+            /* Sin video de la prueba: el del centro de recursos, si está publicado (`activo`) con su URL. */
+            $codigo  = isset(self::RECURSO_DEL_PASO[$hito]) ? self::RECURSO_DEL_PASO[$hito] : null;
+            $publicado = $codigo !== null && \App\Models\RecursosVideo::where('codigo', $codigo)->where('activo', true)
+                ->whereNotNull('url')->where('url', '!=', '')->exists();
+
+            return $publicado ? $texto . "\n\n" . 'Acá se ve cómo se hace: ' . SupportVideoResource::enlace($codigo) : $texto;
         }
 
         return $texto . "\n\n" . 'Te dejo un video de cómo se hace, «' . $video['titulo'] . '»: ' . $video['url'];

@@ -121,6 +121,54 @@ class PasoDelEnsayoConSuVideoTest extends BaseDeLaPrueba
         $this->assertStringEndsWith('desde Vender.', $cuerpo);
     }
 
+    /** Un video del centro de recursos en el catálogo. */
+    private function recurso(string $codigo, bool $activo): void
+    {
+        \App\Models\RecursosVideo::create([
+            'codigo' => $codigo, 'carpeta' => 1, 'carpeta_nombre' => 'Artículos', 'titulo' => 'Video ' . $codigo,
+            'url' => 'https://videos.example.test/' . $codigo . '.mp4', 'activo' => $activo,
+        ]);
+    }
+
+    /** @test */
+    public function un_paso_sin_video_de_la_prueba_lleva_el_recurso_publicado_del_centro(): void
+    {
+        $this->recurso('T1.2', true);
+        [$client, $lead] = $this->ensayo_con(['ingreso', 'importo']);
+
+        $this->assertSame('enviado', app(PruebaWhatsappService::class)->empujar($client, $lead)['estado']);
+
+        $cuerpo = $this->mensaje_del_sistema($client)->body;
+        $this->assertStringContainsString('cargá un artículo tuyo', $cuerpo);
+        $this->assertStringNotContainsString('te paso un video', $cuerpo);
+        $this->assertStringEndsWith("desde Vender.\n\nAcá se ve cómo se hace: https://recursos.comerciocity.com/?v=T1.2", $cuerpo);
+    }
+
+    /** @test */
+    public function un_recurso_despublicado_o_ausente_no_se_manda_ni_se_promete(): void
+    {
+        $this->recurso('T4.1', false);
+
+        foreach (['cliente_creado', 'venta_cc', 'pago_cc', 'gasto', 'tienda_pedido', 'articulo_creado'] as $hito) {
+            $texto = PruebaWhatsappService::paso_con_su_video(str_replace('{{1}}', 'Raúl', PruebaPlantillasService::cuerpo_de('cc_prueba_paso_' . $hito)), $hito);
+            $this->assertStringNotContainsString('recursos.comerciocity.com', $texto, $hito);
+            $this->assertStringNotContainsString('Acá se ve', $texto, $hito);
+            $this->assertStringNotContainsString('video', $texto, $hito);
+        }
+
+        /* Publicado, el mismo paso lo lleva. */
+        \App\Models\RecursosVideo::where('codigo', 'T4.1')->update(['activo' => true]);
+        $this->assertStringEndsWith('Acá se ve cómo se hace: https://recursos.comerciocity.com/?v=T4.1',
+            PruebaWhatsappService::paso_con_su_video(PruebaPlantillasService::cuerpo_de('cc_prueba_paso_cliente_creado'), 'cliente_creado'));
+    }
+
+    /** @test */
+    public function los_seis_pasos_sin_video_de_la_prueba_tienen_su_recurso_mapeado(): void
+    {
+        $sin_video = array_diff(\App\Services\PruebaDelClienteService::RECORRIDO, array_keys(\App\Services\Prueba\PruebaCorreoService::VIDEO_DEL_PASO));
+        $this->assertEqualsCanonicalizing(array_values($sin_video), array_keys(PruebaWhatsappService::RECURSO_DEL_PASO));
+    }
+
     /** @test */
     public function cada_paso_lleva_el_video_del_correo_y_ninguno_queda_prometiendo(): void
     {
