@@ -4,6 +4,8 @@ namespace App\Console\Commands;
 
 use App\Models\Client;
 use App\Models\PruebaEncuesta;
+use App\Models\PruebaWhatsappEnvio;
+use App\Services\PruebaPlantillasService;
 use App\Services\Prueba\PruebaCicloService;
 use App\Services\Prueba\PruebaEncuestaService;
 use App\Services\PruebaDelClienteService;
@@ -140,7 +142,8 @@ class PruebasEnsayoCommand extends Command
 
             if ($correr === 'dia5') {
                 $aviso   = $whatsapp->avisar_al_negocio_que_esta_por_terminar($client, $lead, $datos);
-                $filas[] = ['aviso de que termina', $aviso !== null ? $aviso['estado'] : 'sin WhatsApp (no corresponde, ya salió o sin plantilla)', $aviso !== null ? (string) $aviso['detalle'] : ''];
+                $filas[] = ['aviso de que termina', $aviso !== null ? $aviso['estado'] : 'sin mensaje (no corresponde, ya salió o sin plantilla)',
+                    $aviso !== null ? self::rotulo_del_canal($client, [PruebaPlantillasService::DIA_5]) . ': ' . (string) $aviso['detalle'] : ''];
             }
 
             if ($correr === 'empujar' || $correr === 'todo') {
@@ -162,7 +165,9 @@ class PruebasEnsayoCommand extends Command
                     $filas[] = ['vencimiento', (string) $client->estado, ''];
 
                     $encuesta = $encuestas->enviar_sin_romper($client, PruebaEncuesta::MOTIVO_VENCIDA);
-                    $filas[]  = ['encuesta', (string) $encuesta['estado'], 'WhatsApp: ' . ($encuesta['whatsapp'] !== null ? $encuesta['whatsapp'] : '-') . ' · correo: ' . ($encuesta['correo'] !== null ? $encuesta['correo'] : '-')];
+                    /* `whatsapp` es el estado del mensaje (no del canal): se rotula por donde salió de verdad. */
+                    $filas[]  = ['encuesta', (string) $encuesta['estado'], self::rotulo_del_canal($client, PruebaPlantillasService::ENCUESTAS) . ': '
+                        . ($encuesta['whatsapp'] !== null ? $encuesta['whatsapp'] : '-') . ' · correo: ' . ($encuesta['correo'] !== null ? $encuesta['correo'] : '-')];
 
                     if ($closer) {
                         $tomas   = $whatsapp->avisar_a_tomas($client, $lead, PruebaWhatsappService::TOMAS_VENCIDA);
@@ -214,6 +219,32 @@ class PruebasEnsayoCommand extends Command
         }
 
         return $momento->setTimezone((string) config('app.timezone', 'UTC'));
+    }
+
+    /**
+     * Por dónde salió de verdad el mensaje de estas plantillas (12/11/2026): `Soporte del sistema` o `WhatsApp`, según
+     * el último envío registrado (sin contar el correo). Sin envío registrado, por donde saldría: un ensayo, por el
+     * sistema.
+     *
+     * @param Client             $client
+     * @param array<int, string> $plantillas
+     *
+     * @return string
+     */
+    public static function rotulo_del_canal(Client $client, array $plantillas): string
+    {
+        $canal = PruebaWhatsappEnvio::query()
+            ->where('client_id', (int) $client->id)
+            ->whereIn('plantilla', $plantillas)
+            ->where('canal', '!=', PruebaWhatsappEnvio::CANAL_CORREO)
+            ->orderByDesc('id')
+            ->value('canal');
+
+        if ($canal === null) {
+            $canal = (bool) $client->es_ensayo ? PruebaWhatsappEnvio::CANAL_SISTEMA : PruebaWhatsappEnvio::CANAL_WHATSAPP;
+        }
+
+        return $canal === PruebaWhatsappEnvio::CANAL_SISTEMA ? 'Soporte del sistema' : 'WhatsApp';
     }
 
     /**
