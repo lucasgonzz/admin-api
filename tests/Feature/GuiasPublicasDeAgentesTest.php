@@ -19,9 +19,9 @@ class GuiasPublicasDeAgentesTest extends TestCase
      *
      * @return void
      */
-    public function test_las_tres_guias_salen_como_pdf_inline_sin_sesion(): void
+    public function test_las_guias_salen_como_pdf_inline_sin_sesion(): void
     {
-        foreach (['agentes-ia-numero-propio.pdf', 'agentes-ia-linea-nueva.pdf', 'agentes-ia-que-puede-hacer-pesca.pdf'] as $nombre) {
+        foreach (['agentes-ia-numero-propio.pdf', 'agentes-ia-linea-nueva.pdf', 'agentes-ia-que-puede-hacer-pesca.pdf', 'agentes-ia-primeros-pasos.pdf'] as $nombre) {
             $respuesta = $this->get('/api/guias/' . $nombre);
 
             $respuesta->assertStatus(200);

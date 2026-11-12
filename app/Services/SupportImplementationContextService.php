@@ -393,6 +393,9 @@ class SupportImplementationContextService
             return [
                 'id'                  => (int) $implementation->id,
                 'abierta'             => $this->esta_abierta($implementation->status),
+                'paquete'             => $implementation->paquete ?: AgentImplementation::PAQUETE_FULL,
+                'flujo_version'       => (int) ($implementation->flujo_version ?: 1),
+                'entrega_personal'    => $this->enmascarar_datos(app(AgentImplementationService::class)->entrega_personal($implementation)),
                 'camino'              => $implementation->camino === null ? null : (string) $implementation->camino,
                 'etapa_actual'        => $actual,
                 'nombre_etapa_actual' => AgentImplementation::stage_name($actual),

@@ -121,7 +121,10 @@ class SoporteConContextoDeAgentesTest extends TestCase
      */
     private function agentes(Client $client, string $camino = 'propio'): AgentImplementation
     {
-        return app(AgentImplementationService::class)->create($client, $camino)['implementation'];
+        $implementation = app(AgentImplementationService::class)->create($client, $camino)['implementation'];
+        // Los escenarios de este archivo representan implementaciones anteriores a la primera entrega común.
+        $implementation->update(['flujo_version' => 1]);
+        return $implementation->fresh();
     }
 
     /**

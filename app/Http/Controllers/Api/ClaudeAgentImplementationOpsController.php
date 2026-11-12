@@ -49,7 +49,7 @@ class ClaudeAgentImplementationOpsController extends Controller
     const PARAMS_SHOW = [];
 
     /** Lista blanca del alta. */
-    const PARAMS_STORE = ['client_id', 'camino'];
+    const PARAMS_STORE = ['client_id', 'camino', 'paquete'];
 
     /** Lista blanca del PATCH. */
     const PARAMS_UPDATE = ['camino', 'kapso_customer_id', 'phone_number_id', 'waba_id', 'business_portfolio_id', 'contact_phone', 'status'];
@@ -206,7 +206,8 @@ class ClaudeAgentImplementationOpsController extends Controller
 
         $invalid = $this->validar_o_422($request, [
             'client_id' => 'required|integer|min:1',
-            'camino'    => 'required|string|in:' . implode(',', AgentImplementation::CAMINOS),
+            'paquete'   => 'nullable|string|in:' . implode(',', AgentImplementation::PAQUETES),
+            'camino'    => 'nullable|string|in:' . implode(',', AgentImplementation::CAMINOS),
         ]);
         if ($invalid !== null) {
             return $invalid;
@@ -217,7 +218,7 @@ class ClaudeAgentImplementationOpsController extends Controller
             return $this->error_404('no existe el cliente ' . (int) $request->input('client_id'));
         }
 
-        $result = $this->service->create($client, (string) $request->input('camino'));
+        $result = $this->service->create($client, $this->texto_o_null($request->input('camino')), $request->input('paquete') ?: AgentImplementation::PAQUETE_FULL);
 
         if (! $result['created']) {
             return response()->json([
@@ -293,7 +294,13 @@ class ClaudeAgentImplementationOpsController extends Controller
             }
         }
 
-        return response()->json(['model' => $this->service->to_payload($this->service->update_fields($implementation, $fields))], 200);
+        try {
+            $updated = $this->service->update_fields($implementation, $fields);
+        } catch (\DomainException $exception) {
+            return $this->error_422($exception->getMessage(), ['motivo' => 'avance_no_permitido']);
+        }
+
+        return response()->json(['model' => $this->service->to_payload($updated)], 200);
     }
 
     /* ==============================================================================================
@@ -363,13 +370,17 @@ class ClaudeAgentImplementationOpsController extends Controller
             return $this->closed_response($implementation);
         }
 
-        $updated = $this->service->update_stage(
-            $implementation,
-            $stage_number,
-            (string) $request->input('status'),
-            is_array($data) ? $data : null,
-            $this->texto_o_null($request->input('nota'))
-        );
+        try {
+            $updated = $this->service->update_stage(
+                $implementation,
+                $stage_number,
+                (string) $request->input('status'),
+                is_array($data) ? $data : null,
+                $this->texto_o_null($request->input('nota'))
+            );
+        } catch (\DomainException $exception) {
+            return $this->error_422($exception->getMessage(), ['motivo' => 'avance_no_permitido']);
+        }
 
         return response()->json(['model' => $this->service->to_payload($updated)], 200);
     }

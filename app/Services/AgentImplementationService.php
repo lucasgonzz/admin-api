@@ -61,9 +61,9 @@ class AgentImplementationService
      *
      * @return array{created: bool, implementation: AgentImplementation|null, existing: AgentImplementation|null}
      */
-    public function create(Client $client, $camino)
+    public function create(Client $client, $camino, $paquete = AgentImplementation::PAQUETE_FULL)
     {
-        return DB::transaction(function () use ($client, $camino) {
+        return DB::transaction(function () use ($client, $camino, $paquete) {
             Client::where('id', $client->id)->lockForUpdate()->first();
 
             $existing = $this->find_open_for_client($client->id, true);
@@ -76,26 +76,30 @@ class AgentImplementationService
             $implementation = AgentImplementation::create([
                 'client_id'     => (int) $client->id,
                 'status'        => AgentImplementation::STATUS_IN_PROGRESS,
-                'camino'        => (string) $camino,
+                'camino'        => $camino === null ? null : (string) $camino,
+                'paquete'       => (string) $paquete,
+                'flujo_version' => AgentImplementation::FLUJO_ENTREGA_PERSONAL,
                 'current_stage' => AgentImplementation::FIRST_STAGE,
                 'started_at'    => $now,
             ]);
 
             for ($number = AgentImplementation::FIRST_STAGE; $number <= AgentImplementation::LAST_STAGE; $number++) {
                 $is_first = $number === AgentImplementation::FIRST_STAGE;
+                $solo_full = ! $is_first && $paquete === AgentImplementation::PAQUETE_LITE;
 
                 AgentImplementationStage::create([
                     'agent_implementation_id' => $implementation->id,
                     'stage_number'            => $number,
-                    'status'                  => $is_first ? AgentImplementationStage::STATUS_IN_PROGRESS : AgentImplementationStage::STATUS_PENDING,
-                    'data'                    => $is_first ? ['camino' => (string) $camino] : null,
+                    'status'                  => $solo_full ? AgentImplementationStage::STATUS_SKIPPED : ($is_first ? AgentImplementationStage::STATUS_IN_PROGRESS : AgentImplementationStage::STATUS_PENDING),
+                    'data'                    => $is_first ? ($camino === null ? null : ['camino' => (string) $camino]) : ($solo_full ? ['motivo' => 'paquete_lite'] : null),
                     'started_at'              => $is_first ? $now : null,
+                    'completed_at'            => $solo_full ? $now : null,
                 ]);
             }
 
             $this->add_event(
                 $implementation,
-                'Arrancó la implementación de Agentes de IA (camino ' . $camino . ').',
+                'Arrancó la implementación de Agentes de IA ' . ucfirst($paquete) . ($camino === null ? '' : ' (camino ' . $camino . ')') . '.',
                 AgentImplementation::FIRST_STAGE,
                 AgentImplementationEvent::KIND_AVANCE,
                 AgentImplementationEvent::SOURCE_CLAUDE
@@ -131,7 +135,8 @@ class AgentImplementationService
     public function update_stage(AgentImplementation $implementation, $stage_number, $status, $data = null, $nota = null, $source = AgentImplementationEvent::SOURCE_CLAUDE)
     {
         DB::transaction(function () use ($implementation, $stage_number, $status, $data, $nota, $source) {
-            AgentImplementation::where('id', $implementation->id)->lockForUpdate()->first();
+            $locked = AgentImplementation::where('id', $implementation->id)->lockForUpdate()->first();
+            $this->validar_avance($locked, (int) $stage_number, (string) $status, $data);
 
             $stage = AgentImplementationStage::where('agent_implementation_id', $implementation->id)
                 ->where('stage_number', (int) $stage_number)
@@ -198,6 +203,19 @@ class AgentImplementationService
     {
         DB::transaction(function () use ($implementation, $fields) {
             $locked = AgentImplementation::where('id', $implementation->id)->lockForUpdate()->first();
+
+            if (($fields['status'] ?? null) === AgentImplementation::STATUS_COMPLETED
+                && (int) $locked->flujo_version >= AgentImplementation::FLUJO_ENTREGA_PERSONAL) {
+                $entrega = $this->entrega_personal($locked);
+                if (! $entrega['completa']) {
+                    throw new \DomainException('Primero hay que entregar el asistente personal: ' . implode(', ', $entrega['pendientes']) . '. No se escribió nada.');
+                }
+                $abiertas = AgentImplementationStage::where('agent_implementation_id', $locked->id)
+                    ->whereNotIn('status', [AgentImplementationStage::STATUS_COMPLETED, AgentImplementationStage::STATUS_SKIPPED])->exists();
+                if ($abiertas) {
+                    throw new \DomainException('Hay etapas pendientes de la implementación. Completalas antes de cerrarla. No se escribió nada.');
+                }
+            }
 
             $changed_data = [];
             foreach (['camino', 'kapso_customer_id', 'phone_number_id', 'waba_id', 'business_portfolio_id', 'contact_phone'] as $column) {
@@ -290,7 +308,9 @@ class AgentImplementationService
     public function refresh_current_stage(AgentImplementation $implementation)
     {
         $stages  = AgentImplementationStage::where('agent_implementation_id', $implementation->id)->get(['stage_number', 'status']);
-        $current = AgentImplementation::compute_current_stage($stages);
+        $current = $implementation->paquete === AgentImplementation::PAQUETE_LITE
+            ? AgentImplementation::FIRST_STAGE
+            : AgentImplementation::compute_current_stage($stages);
 
         AgentImplementation::where('id', $implementation->id)->update(['current_stage' => $current]);
 
@@ -340,6 +360,9 @@ class AgentImplementationService
         return [
             'id'                    => (int) $implementation->id,
             'client_id'             => (int) $implementation->client_id,
+            'paquete'               => $implementation->paquete ?: AgentImplementation::PAQUETE_FULL,
+            'flujo_version'         => (int) ($implementation->flujo_version ?: 1),
+            'entrega_personal'      => $this->entrega_personal($implementation),
             'status'                => (string) $implementation->status,
             'camino'                => $implementation->camino === null ? null : (string) $implementation->camino,
             'current_stage'         => (int) $implementation->current_stage,
@@ -359,6 +382,86 @@ class AgentImplementationService
             'eventos'               => $events,
             'cliente'               => $client === null ? null : ['id' => (int) $client->id, 'name' => (string) $client->name],
         ];
+    }
+
+    /** Tres instancias de la primera entrega, sin confundir un link enviado con el onboarding terminado. */
+    public function entrega_personal(AgentImplementation $implementation, ?array $data = null)
+    {
+        if ($data === null) {
+            $stage = AgentImplementationStage::where('agent_implementation_id', $implementation->id)->where('stage_number', 1)->first();
+            $data = $stage !== null && is_array($stage->data) ? $stage->data : [];
+        }
+
+        $instancias = [];
+        $pendientes = [];
+        foreach (AgentImplementation::ENTREGA_PERSONAL as $clave => $config) {
+            $hitos = [];
+            $faltan = [];
+            foreach ($config['hitos'] as $key => $nombre) {
+                $completado = ($data[$key] ?? false) === true;
+                $hitos[] = ['clave' => $key, 'nombre' => $nombre, 'completado' => $completado];
+                if (! $completado) {
+                    $faltan[] = $key;
+                }
+            }
+            if ($clave === 'guia' && ! $this->es_url_de_guia($data['pdf_agentes_url'] ?? null)) {
+                $faltan[] = 'pdf_agentes_url';
+            }
+            $instancias[] = ['clave' => $clave, 'nombre' => $config['nombre'], 'completa' => count($faltan) === 0, 'hitos' => $hitos, 'pendientes' => $faltan];
+            $pendientes = array_merge($pendientes, $faltan);
+        }
+
+        return [
+            'requerida' => (int) $implementation->flujo_version >= AgentImplementation::FLUJO_ENTREGA_PERSONAL,
+            'completa' => count($pendientes) === 0,
+            'instancias' => $instancias,
+            'pendientes' => $pendientes,
+            'app_url' => 'https://ia.comerciocity.com',
+            'pdf_agentes_url' => $this->es_url_de_guia($data['pdf_agentes_url'] ?? null) ? $data['pdf_agentes_url'] : null,
+            'pdf_disponible_url' => url('/api/guias/agentes-ia-primeros-pasos.pdf'),
+        ];
+    }
+
+    /** La guarda vive bajo el mismo lock que la escritura: dos avances simultáneos no pueden saltearla. */
+    protected function validar_avance(AgentImplementation $implementation, $numero, $status, $data)
+    {
+        if ((int) $implementation->flujo_version < AgentImplementation::FLUJO_ENTREGA_PERSONAL) {
+            return;
+        }
+        if ($numero > 1) {
+            if ($implementation->paquete === AgentImplementation::PAQUETE_LITE) {
+                throw new \DomainException('El paquete Lite no implementa el agente que atiende a clientes por WhatsApp: las etapas 2 a 8 no aplican. No se escribió nada.');
+            }
+            if ($status !== AgentImplementationStage::STATUS_PENDING && ! $this->entrega_personal($implementation)['completa']) {
+                throw new \DomainException('Primero completá la configuración del asistente personal, el onboarding y la entrega del PDF antes de seguir con el agente de clientes. No se escribió nada.');
+            }
+            if ($status !== AgentImplementationStage::STATUS_PENDING && ! in_array($implementation->camino, AgentImplementation::CAMINOS, true)) {
+                throw new \DomainException('Antes de implementar el agente de clientes definí el camino nuevo o propio. La entrega del asistente personal no necesita esa elección. No se escribió nada.');
+            }
+            return;
+        }
+
+        $stage = AgentImplementationStage::where('agent_implementation_id', $implementation->id)->where('stage_number', 1)->first();
+        $merged = array_replace($stage !== null && is_array($stage->data) ? $stage->data : [], is_array($data) ? $data : []);
+        $entrega = $this->entrega_personal($implementation, $merged);
+        if ($status === AgentImplementationStage::STATUS_SKIPPED) {
+            throw new \DomainException('La entrega del asistente personal es obligatoria en Full y Lite y no se puede saltear. No se escribió nada.');
+        }
+        if ($status === AgentImplementationStage::STATUS_COMPLETED && ! $entrega['completa']) {
+            throw new \DomainException('Falta completar la primera entrega: ' . implode(', ', $entrega['pendientes']) . '. No se escribió nada.');
+        }
+        // El PDF se entrega después de dejar funcional el asistente y completar el contexto del negocio.
+        if (($merged['pdf_agentes_enviado'] ?? false) === true
+            && (! $entrega['instancias'][0]['completa'] || ! $entrega['instancias'][1]['completa'] || ! $this->es_url_de_guia($merged['pdf_agentes_url'] ?? null))) {
+            throw new \DomainException('Antes de registrar el PDF enviado, completá WhatsApp y onboarding y anotá la URL HTTPS del PDF. No se escribió nada.');
+        }
+    }
+
+    protected function es_url_de_guia($url)
+    {
+        return is_string($url) && filter_var($url, FILTER_VALIDATE_URL) !== false
+            && strtolower((string) parse_url($url, PHP_URL_SCHEME)) === 'https'
+            && preg_match('/\.pdf$/i', (string) parse_url($url, PHP_URL_PATH)) === 1;
     }
 
     /**

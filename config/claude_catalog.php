@@ -2789,7 +2789,7 @@ return [
             ],
         ],
         'GET api/claude/agent-implementations/{id}' => [
-            'para_que'     => 'El estado completo de UNA implementación de Agentes de IA ({model: impl}, misma forma que el listado). 404 si no existe.',
+            'para_que'     => 'El estado completo de UNA implementación de Agentes de IA ({model: impl}, misma forma que el listado). Suma paquete full|lite, flujo_version (1 histórico, 2 altas nuevas) y entrega_personal con tres instancias: WhatsApp del dueño, acceso/onboarding y PDF. Cada instancia tiene hitos booleanos y pendientes; no se inventa la entrega de registros históricos. 404 si no existe.',
             'escribe'      => false,
             'peligrosidad' => 'lectura',
             'frenos'       => [],
@@ -2798,7 +2798,7 @@ return [
             ],
         ],
         'POST api/claude/agent-implementations' => [
-            'para_que'     => 'Da de alta la implementación de Agentes de IA de un cliente con sus ocho etapas (Preparación, Entrenamiento, Conexión con Meta, Conexión al sistema, Plantillas, Agente y pruebas, Pago y verificación, En marcha): la 1 en curso con el camino en su data y el resto pending. Deja un evento de avance. Solo escribe filas del admin. 201 {model}.',
+            'para_que'     => 'Da de alta Agentes de IA Full (por defecto) o Lite con flujo_version=2. Ambos empiezan por entregar el asistente personal en Preparación: WhatsApp configurado y probado, acceso a ia.comerciocity.com y onboarding completado, y PDF de capacidades enviado. Conserva los números de etapas 1 a 8: Full continúa con entrenamiento, Meta y puesta en marcha; Lite deja 2 a 8 skipped con motivo paquete_lite. Camino puede definirse después de la primera entrega. Solo escribe filas del admin, no activa un paquete contratado ni cambia el teléfono del negocio. 201 {model}.',
             'escribe'      => true,
             'peligrosidad' => 'baja',
             'frenos'       => [
@@ -2808,7 +2808,8 @@ return [
             ],
             'parametros'   => [
                 ['nombre' => 'client_id', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'El cliente.'],
-                ['nombre' => 'camino', 'obligatorio' => true, 'validacion' => 'required|string|in:nuevo,propio', 'que_es' => 'nuevo = línea nueva sin historial; propio = el número que el negocio ya usa.'],
+                ['nombre' => 'paquete', 'obligatorio' => false, 'validacion' => 'nullable|string|in:full,lite — default full', 'que_es' => 'Lite incluye los agentes excepto el que atiende los WhatsApp de los clientes. No modifica AiPlan, precios ni el paquete contratado.'],
+                ['nombre' => 'camino', 'obligatorio' => false, 'validacion' => 'nullable|string|in:nuevo,propio', 'que_es' => 'nuevo = línea nueva sin historial; propio = número actual. Solo Full lo necesita antes de iniciar etapas 2 a 8, después de entregar el asistente personal.'],
             ],
         ],
         'PATCH api/claude/agent-implementations/{id}' => [
@@ -2818,6 +2819,7 @@ return [
             'frenos'       => [
                 'Lista blanca de parámetros: cualquier otra clave es 422.',
                 'status solo acepta completed o cancelled: abrir es el alta.',
+                'En flujo_version=2, completed exige entrega_personal completa y todas las etapas completed o skipped. Cancelar sigue disponible. El paquete de la implementación no se cambia por PATCH.',
                 'Una implementación ya cerrada (completed o cancelled) no cambia de status: 409 implementacion_cerrada sin escribir nada (mandar el mismo status que ya tiene no hace nada). Los demás campos se pueden corregir.',
                 'La bitácora no guarda los ids de Meta ni el teléfono de contacto: viaja al contexto de Martín. contact_phone sale enmascarado en el estado.',
             ],
@@ -2839,6 +2841,7 @@ return [
             'frenos'       => [
                 'Lista blanca de parámetros: cualquier otra clave es 422.',
                 'Etapa fuera de 1–8: 422 motivo etapa_fuera_de_rango, sin escribir nada.',
+                'En flujo_version=2 no se puede saltear Preparación ni completarla sin la entrega personal. Full no inicia 2 a 8 antes de entregar ni sin camino definido; Lite no admite avanzar esas etapas. 422 motivo avance_no_permitido.',
                 'Implementación cerrada (completed o cancelled): 409 implementacion_cerrada, sin escribir nada.',
                 'data tiene que ser un objeto (una lista es 422 data_no_es_objeto) y no puede traer whatsapp_ops (422 clave_reservada: es la memoria de la idempotencia de los envíos).',
             ],
@@ -2846,7 +2849,7 @@ return [
                 ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'La implementación.'],
                 ['nombre' => '{n} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; 1 a 8', 'que_es' => 'La etapa.'],
                 ['nombre' => 'status', 'obligatorio' => true, 'validacion' => 'required|string|in:pending,in_progress,completed,skipped', 'que_es' => 'El estado de la etapa.'],
-                ['nombre' => 'data', 'obligatorio' => false, 'validacion' => 'nullable|array (objeto JSON)', 'que_es' => 'Lo que se registra en la etapa (claves sugeridas en AgentImplementation::STAGES).'],
+                ['nombre' => 'data', 'obligatorio' => false, 'validacion' => 'nullable|array (objeto JSON)', 'que_es' => 'Preparación flujo2 exige true booleano en version_ok, extension_ok, numero_personal_solicitado, numero_personal_cargado, asistente_whatsapp_activo, agente_personal_probado, app_link_enviado, acceso_sistema_verificado, onboarding_completado y pdf_agentes_enviado; además pdf_agentes_url HTTPS terminada en .pdf. El PDF se registra después de WhatsApp y onboarding. Otras claves sugeridas en AgentImplementation::STAGES.'],
                 ['nombre' => 'nota', 'obligatorio' => false, 'validacion' => 'nullable|string|max:1000', 'que_es' => 'Una nota que queda como evento de la etapa.'],
             ],
         ],

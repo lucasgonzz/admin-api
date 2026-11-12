@@ -19,7 +19,7 @@ namespace App\Http\Controllers;
 class PublicGuideController extends Controller
 {
     /**
-     * Nombre público → archivo dentro de `resources/guias/`. Solo estos tres existen.
+     * Nombre público → archivo dentro de `resources/guias/`. Lista cerrada, incluida la entrega común Full/Lite.
      *
      * @var array<string, string>
      */
@@ -27,6 +27,7 @@ class PublicGuideController extends Controller
         'agentes-ia-numero-propio.pdf' => 'agentes-ia-numero-propio.pdf',
         'agentes-ia-linea-nueva.pdf'   => 'agentes-ia-linea-nueva.pdf',
         'agentes-ia-que-puede-hacer-pesca.pdf' => 'agentes-ia-que-puede-hacer-pesca.pdf',
+        'agentes-ia-primeros-pasos.pdf' => 'agentes-ia-primeros-pasos.pdf',
     ];
 
     /**

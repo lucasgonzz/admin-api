@@ -61,6 +61,40 @@ class AgentImplementation extends Model
     /** Última etapa (En marcha). */
     const LAST_STAGE = 8;
 
+    const PAQUETE_FULL = 'full';
+    const PAQUETE_LITE = 'lite';
+    const PAQUETES = [self::PAQUETE_FULL, self::PAQUETE_LITE];
+    const FLUJO_ENTREGA_PERSONAL = 2;
+
+    /** Las tres entregas comunes; su evidencia se registra en data de Preparación, sin renumerar el historial. */
+    const ENTREGA_PERSONAL = [
+        'whatsapp' => [
+            'nombre' => 'Configurar y probar el WhatsApp del dueño',
+            'hitos' => [
+                'version_ok' => 'Sistema actualizado',
+                'extension_ok' => 'Agentes de IA activos',
+                'numero_personal_solicitado' => 'Número personal solicitado',
+                'numero_personal_cargado' => 'Número personal configurado',
+                'asistente_whatsapp_activo' => 'Asistente por WhatsApp activo',
+                'agente_personal_probado' => 'Respuesta probada desde el WhatsApp del dueño',
+            ],
+        ],
+        'onboarding' => [
+            'nombre' => 'Acceso y contexto del negocio',
+            'hitos' => [
+                'app_link_enviado' => 'Acceso a ia.comerciocity.com enviado',
+                'acceso_sistema_verificado' => 'Asistente personal disponible en el sistema',
+                'onboarding_completado' => 'Conozcámonos respondido por el dueño',
+            ],
+        ],
+        'guia' => [
+            'nombre' => 'Entregar la guía de los agentes',
+            'hitos' => [
+                'pdf_agentes_enviado' => 'PDF con capacidades y ejemplos enviado',
+            ],
+        ],
+    ];
+
     /**
      * Las ocho etapas: nombre y las claves que se registran en `data` de cada una (todas opcionales; la
      * lista es la guía de qué anotar, no una validación: `data` acepta otras claves).
@@ -73,7 +107,7 @@ class AgentImplementation extends Model
     const STAGES = [
         1 => [
             'nombre'   => 'Preparación',
-            'registra' => ['camino', 'web_https', 'plan_kapso_ok', 'version_ok', 'extension_ok', 'guia_enviada'],
+            'registra' => ['camino', 'web_https', 'plan_kapso_ok', 'version_ok', 'extension_ok', 'guia_enviada', 'numero_personal_solicitado', 'numero_personal_cargado', 'asistente_whatsapp_activo', 'agente_personal_probado', 'app_link_enviado', 'onboarding_completado', 'acceso_sistema_verificado', 'pdf_agentes_enviado', 'pdf_agentes_url'],
         ],
         2 => [
             'nombre'   => 'Entrenamiento',
@@ -110,6 +144,8 @@ class AgentImplementation extends Model
      */
     protected $fillable = [
         'client_id',
+        'paquete',
+        'flujo_version',
         'status',
         'camino',
         'current_stage',
@@ -127,6 +163,7 @@ class AgentImplementation extends Model
      */
     protected $casts = [
         'client_id'     => 'integer',
+        'flujo_version' => 'integer',
         'current_stage' => 'integer',
         'started_at'    => 'datetime',
         'completed_at'  => 'datetime',

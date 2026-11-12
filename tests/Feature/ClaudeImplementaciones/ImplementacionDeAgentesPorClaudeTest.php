@@ -35,6 +35,9 @@ class ImplementacionDeAgentesPorClaudeTest extends BaseDeImplementaciones
         $respuesta = $this->postJson(self::RUTA, ['client_id' => $client_id, 'camino' => $camino], $this->headers());
         $respuesta->assertStatus(201);
 
+        // Estos casos cubren el historial del circuito original. Las altas actuales se prueban en EntregaPersonalDeAgentesTest.
+        AgentImplementation::where('id', (int) $respuesta->json('model.id'))->update(['flujo_version' => 1]);
+
         return (int) $respuesta->json('model.id');
     }
 
@@ -59,7 +62,7 @@ class ImplementacionDeAgentesPorClaudeTest extends BaseDeImplementaciones
     /**
      * Alta: 201 con las ocho etapas (la 1 en curso con el camino en su data), el cliente sin claves, y un
      * evento de avance. La segunda alta del mismo cliente es 409 con el id de la abierta; un cliente que no
-     * existe es 404; sin camino es 422. Cancelada la abierta, se puede abrir otra.
+     * existe es 404. Cancelada la abierta, se puede abrir otra; el camino se puede definir después.
      *
      * @return void
      */
@@ -96,7 +99,7 @@ class ImplementacionDeAgentesPorClaudeTest extends BaseDeImplementaciones
         $this->assertSame(1, AgentImplementation::where('client_id', $client->id)->count());
 
         $this->postJson(self::RUTA, ['client_id' => 999999999, 'camino' => 'nuevo'], $this->headers())->assertStatus(404);
-        $this->postJson(self::RUTA, ['client_id' => $client->id], $this->headers())->assertStatus(422);
+        // El camino ahora puede definirse después de entregar el asistente personal; se verifica en EntregaPersonalDeAgentesTest.
         $this->postJson(self::RUTA, ['client_id' => $client->id, 'camino' => 'otro'], $this->headers())->assertStatus(422);
         $this->postJson(self::RUTA, ['client_id' => $client->id, 'camino' => 'nuevo', 'forzar' => true], $this->headers())->assertStatus(422);
 
