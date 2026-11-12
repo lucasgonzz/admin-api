@@ -10,9 +10,9 @@ namespace App\Services;
  * tests unitarios, barrera por barrera.
  *
  * 🔴 NACIÓ COMO UN PORTE DE `validar_sql` DE `herramientas/soporte-codex/diagnostico.py` (repo de
- * conocimiento), que es la que valida el SQL contra el sistema de un cliente. La lista positiva de
- * funciones y la de palabras prohibidas son LAS MISMAS; si se toca una, se toca la otra. Lo que
- * esta ENDURECE, porque la base del admin guarda las claves de todos los clientes:
+ * conocimiento), que es la que valida el SQL contra el sistema de un cliente. La lista de palabras
+ * prohibidas es LA MISMA (más cinco) y la de funciones es un subconjunto. Lo que esta ENDURECE,
+ * porque la base del admin guarda las claves de todos los clientes:
  *
  *  - sin `UNION`, sin `WITH`, sin `TABLE`/`VALUES` y sin `SHOW CREATE TABLE`. Las cuatro primeras
  *    son formas de RENOMBRAR columnas sin nombrarlas (`SELECT 1,2 UNION SELECT * FROM clients`,
@@ -23,6 +23,9 @@ namespace App\Services;
  *  - un identificador entre backticks solo puede ser un nombre simple (`` `clients` ``). Un alias
  *    como `` `a'` `` haría que este validador viera un literal donde MySQL ve un nombre, y entre
  *    dos de esos se esconde `api_key AS k`;
+ *  - sin funciones que devuelvan un fragmento de su argumento (`SUBSTRING`, `LEFT`, `RIGHT`,
+ *    `TRIM`, `CAST`, `CONVERT`) ni que extraigan una parte de un JSON (`JSON_EXTRACT`,
+ *    `JSON_UNQUOTE`, `->`, `->>`): ver `FUNCIONES` y `FUNCIONES_QUITADAS`;
  *  - el patrón de nombres sensibles ampliado, la lista de tablas vedadas y la de columnas
  *    reservadas, las tres en `config/claude_admin_sql.php`.
  *
@@ -41,19 +44,46 @@ namespace App\Services;
 class ClaudeAdminSqlValidator
 {
     /**
-     * Lista positiva de lo que puede ir pegado a un `(`. Igual a `_FUNCIONES` de `diagnostico.py`.
+     * Lista positiva de lo que puede ir pegado a un `(`. Nació igual a `_FUNCIONES` de
+     * `diagnostico.py` y hoy es un SUBCONJUNTO: `FUNCIONES_QUITADAS` dice cuáles se sacaron.
+     *
+     * 🔴 EL CRITERIO PARA QUE UNA FUNCIÓN ESTÉ ACÁ: no puede devolver un FRAGMENTO de su
+     * argumento ni una transformación que separe una etiqueta de su valor. La redacción del
+     * resultado trabaja sobre el texto entero («Contraseña: X» → se tapa X) y sobre el JSON entero
+     * (por clave); una función que corta la cabeza del texto o extrae un escalar de un JSON
+     * devuelve el secreto solo, bajo un alias inocente, y ya no hay etiqueta ni clave que lo delate.
+     * Lo que queda: agregaciones, condicionales que devuelven un argumento ENTERO, `CONCAT` (que
+     * agrega, no corta), mayúsculas/minúsculas (el redactor no las distingue), `LTRIM`/`RTRIM`
+     * (solo sacan espacios), largos, números y fechas.
      *
      * ⚠️ `IN`, `EXISTS`, `NOT`, `OVER` y `AS` no son funciones: están porque la regla mira toda
      * palabra seguida de paréntesis.
      */
     const FUNCIONES = [
         'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'COALESCE', 'IFNULL', 'NULLIF', 'IF', 'CONCAT', 'CONCAT_WS',
-        'LOWER', 'UPPER', 'TRIM', 'LTRIM', 'RTRIM', 'LENGTH', 'CHAR_LENGTH', 'ROUND', 'ABS', 'CEIL', 'CEILING',
+        'LOWER', 'UPPER', 'LTRIM', 'RTRIM', 'LENGTH', 'CHAR_LENGTH', 'ROUND', 'ABS', 'CEIL', 'CEILING',
         'FLOOR', 'DATE', 'DATE_FORMAT', 'YEAR', 'MONTH', 'DAY', 'DAYOFMONTH', 'HOUR', 'MINUTE', 'SECOND', 'NOW',
-        'CURDATE', 'CURRENT_DATE', 'CONVERT_TZ', 'DATE_ADD', 'DATE_SUB', 'DATEDIFF', 'TIMESTAMPDIFF', 'CAST',
-        'CONVERT', 'JSON_EXTRACT', 'JSON_UNQUOTE', 'JSON_LENGTH', 'JSON_VALID', 'REPLACE', 'SUBSTRING', 'SUBSTR',
-        'LEFT', 'RIGHT', 'STR_TO_DATE', 'GREATEST', 'LEAST', 'GROUP_CONCAT', 'DATABASE', 'VERSION', 'IN', 'EXISTS',
-        'NOT', 'OVER', 'AS',
+        'CURDATE', 'CURRENT_DATE', 'CONVERT_TZ', 'DATE_ADD', 'DATE_SUB', 'DATEDIFF', 'TIMESTAMPDIFF',
+        'JSON_LENGTH', 'JSON_VALID', 'STR_TO_DATE', 'GREATEST', 'LEAST', 'GROUP_CONCAT', 'DATABASE', 'VERSION',
+        'IN', 'EXISTS', 'NOT', 'OVER', 'AS',
+    ];
+
+    /**
+     * Funciones de la lista del monitor que acá NO se admiten, con el motivo. Hay un test que
+     * exige que `FUNCIONES` + estas sea exactamente la lista del monitor: si allá agregan una,
+     * acá hay que decidir en cuál de las dos va.
+     */
+    const FUNCIONES_QUITADAS = [
+        'JSON_EXTRACT' => 'Extrae un escalar de un JSON: `JSON_EXTRACT(data, \'$.admin_password\')` devuelve la contraseña sola. Las columnas JSON se devuelven enteras.',
+        'JSON_UNQUOTE' => 'Es la otra mitad de `->>`: solo sirve para sacarle las comillas a un escalar extraído.',
+        'SUBSTRING'    => 'Devuelve un fragmento: `SUBSTRING(body, 14)` corta justo después de «Contraseña: » y deja el valor sin etiqueta.',
+        'SUBSTR'       => 'Sinónimo de `SUBSTRING`.',
+        'LEFT'         => 'Devuelve un fragmento; sobre un JSON lo corta por la mitad y deja de ser un JSON que se pueda redactar por clave.',
+        'RIGHT'        => 'Devuelve la cola: `RIGHT(body, 20)` es el valor sin su etiqueta.',
+        'TRIM'         => '`TRIM(LEADING \'Contraseña: \' FROM body)` saca la etiqueta. `LTRIM` y `RTRIM` solo sacan espacios y se quedan.',
+        'CAST'         => '`CAST(body AS CHAR CHARACTER SET ascii)` convierte «Contraseña» en «Contrase?a» y la etiqueta deja de reconocerse; `CAST(x AS CHAR(n))` corta un JSON por la mitad.',
+        'CONVERT'      => '`CONVERT(body USING ascii)`: mismo caso que `CAST`.',
+        'REPLACE'      => 'Ya estaba prohibida como palabra (es también una sentencia de escritura); como función borraría la etiqueta: `REPLACE(body, \'Contraseña: \', \'\')`.',
     ];
 
     /**
@@ -193,6 +223,13 @@ class ClaudeAdminSqlValidator
             return $this->rechazo('comillas_dobles', 'Escribí los textos entre comillas simples: las comillas dobles no se admiten.');
         }
 
+        /* `columna->'$.ruta'` y `columna->>'$.ruta'` son JSON_EXTRACT con otra letra: sacan un
+           escalar de un JSON y lo devuelven bajo el alias que se quiera. La ruta va dentro de un
+           literal (ya vaciado), así que el patrón sensible no la ve: se rechaza el operador. */
+        if (strpos($limpio, '->') !== false) {
+            return $this->rechazo('json_no_permitido', 'No se admiten los operadores `->` ni `->>` ni las funciones que extraen una parte de un JSON: las columnas JSON se devuelven enteras, con sus claves reservadas ya tapadas.');
+        }
+
         if ($this->patron_sensible !== '' && preg_match('~' . $this->patron_sensible . '~i', $limpio)) {
             return $this->rechazo('campo_sensible', 'La consulta nombra un campo o una tabla reservados (claves, tokens, secretos). Esos datos no se consultan.');
         }
@@ -240,6 +277,14 @@ class ClaudeAdminSqlValidator
         if (preg_match_all('~\b([A-Za-z_]\w*)\s*\(~', $limpio, $coincidencias)) {
             foreach ($coincidencias[1] as $funcion) {
                 $mayuscula = strtoupper($funcion);
+
+                if (in_array($mayuscula, ['JSON_EXTRACT', 'JSON_UNQUOTE', 'JSON_VALUE', 'JSON_SEARCH', 'JSON_KEYS', 'JSON_QUERY', 'JSON_TABLE'], true)) {
+                    return $this->rechazo('json_no_permitido', 'No se admite `' . $funcion . '(`: las columnas JSON se devuelven enteras, con sus claves reservadas ya tapadas; no se puede extraer una parte.');
+                }
+
+                if (isset(self::FUNCIONES_QUITADAS[$mayuscula])) {
+                    return $this->rechazo('funcion_no_permitida', 'No se admite `' . $funcion . '(`: las funciones que devuelven un fragmento o una transformación de un texto no están habilitadas (los textos se devuelven enteros, hasta 4000 caracteres).');
+                }
 
                 if (! in_array($mayuscula, self::FUNCIONES, true) && ! in_array($mayuscula, self::AGRUPADORES, true)) {
                     return $this->rechazo('funcion_no_permitida', 'La consulta usa `' . $funcion . '(`, que no está en la lista de funciones habilitadas (tampoco se admiten subconsultas en FROM, JOIN ni SELECT).');

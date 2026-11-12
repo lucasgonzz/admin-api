@@ -81,8 +81,11 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
                 'anidado'     => ['api_key' => 'CANARIO-anidado', 'ciudad' => 'Gualeguay'],
             ]),
             'contract_financiacion' => json_encode([
-                'cuotas'      => 3,
-                'db_password' => 'CANARIO-db-pass-2',
+                'cuotas'         => 3,
+                'db_password'    => 'CANARIO-db-pass-2',
+                'admin_password' => 'CANARIO con espacios adentro',
+                'user_setup'     => ['token' => 'CANARIO-token-setup'],
+                'employees'      => [['name' => 'Ana', 'password' => 'CANARIO-empleado']],
                 'anidado'     => [
                     'api_key' => 'CANARIO-anidado-2',
                     'ciudad'  => 'Gualeguay',
@@ -90,7 +93,7 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
                     'lista'   => [['Clave' => 'CANARIO-clave-json', 'visible' => 'sí']],
                 ],
             ]),
-            'cobranzas_observaciones' => 'Le pasamos el acceso: la contraseña es CANARIO-clave-1234 y paga los 10.',
+            'cobranzas_observaciones' => "Contraseña: CANARIO-al-principio\nLe pasamos el acceso: la contraseña es CANARIO-clave-1234 y paga los 10.\nEl password del wifi: CANARIO-wifi\nla contraseña del router es CANARIO-router\nTercera línea legible.",
             'created_at'      => now(),
             'updated_at'      => now(),
         ]);
@@ -483,8 +486,9 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
         $this->assertStringContainsString('<ar:Sign>[dato reservado]</ar:Sign>', $fila['nota']);
         /* Lo que no es credencial queda como estaba. */
         $this->assertStringContainsString('<ar:Cuit>20111111112</ar:Cuit>', $fila['nota']);
-        $this->assertStringContainsString('&lt;Token&gt;[dato reservado]&lt;/Token&gt;', $fila['escapado']);
-        $this->assertStringContainsString('y siguió', $fila['escapado']);
+        /* El XML escapado se tapa dos veces: la etiqueta, y además el resto de la línea después de
+           «Token» (la regla de etiquetas de clave solo perdona un nombre de etiqueta pegado a `<`). */
+        $this->assertStringStartsWith('Falló: &lt;Auth&gt;&lt;Token', $fila['escapado']);
         $this->assertStringContainsString('<Resultado>A</Resultado>', $fila['variado']);
         $this->assertStringContainsString('<password attr="x">[dato reservado]</password>', $fila['variado']);
         $this->assertStringContainsString('negrita', $fila['en_json']);
@@ -496,9 +500,159 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
 
         $respuesta->assertStatus(200);
         $this->assertSame(
-            'Le pasamos el acceso: la contraseña es [oculta] y paga los 10.',
+            "Contraseña: [oculta]\nLe pasamos el acceso: la contraseña [oculta]\nEl password [oculta]\nla contraseña [oculta]\nTercera línea legible.",
             $respuesta->json('rows.0.cobranzas_observaciones')
         );
+        $this->assertStringNotContainsString('CANARIO', $respuesta->getContent());
+    }
+
+    public function test_el_redactor_tapa_el_resto_de_la_linea_despues_de_una_etiqueta_de_clave(): void
+    {
+        $servicio = app(ClaudeAdminSqlService::class);
+
+        $casos = [
+            /* Los dos que reprodujo la revisión. */
+            'El password del wifi: CENTINELA'              => 'El password [oculta]',
+            'la contraseña del router es 1234CENTINELA'    => 'la contraseña [oculta]',
+            /* Etiquetas cortas y en inglés, sin distinguir mayúsculas ni la eñe. */
+            'PASS: CENTINELA'                              => 'PASS: [oculta]',
+            'pwd=CENTINELA'                                => 'pwd=[oculta]',
+            'su PIN de la tarjeta is CENTINELA'            => 'su PIN [oculta]',
+            'el token nuevo que le dimos ayer: CENTINELA'  => 'el token [oculta]',
+            'Contrasena CENTINELA'                         => 'Contrasena [oculta]',
+            'CONTRASEÑAS: CENTINELA y CENTINELA'           => 'CONTRASEÑAS: [oculta]',
+            'usuario: ana, clave: CENTINELA'               => 'usuario: ana, clave: [oculta]',
+            'passwd CENTINELA'                             => 'passwd [oculta]',
+            /* La etiqueta al final de la línea: el valor está en la siguiente. */
+            "Contraseña:\nCENTINELA\nGracias"              => "Contraseña:\n[oculta]\nGracias",
+            /* Y lo de las otras líneas no se toca. */
+            "Hola\nclave CENTINELA\nNos vemos el martes"   => "Hola\nclave [oculta]\nNos vemos el martes",
+        ];
+
+        foreach ($casos as $texto => $esperado) {
+            $salida = $servicio->redactar($texto, 'body');
+
+            $this->assertStringNotContainsString('CENTINELA', $salida, $texto);
+            $this->assertSame($esperado, $salida, $texto);
+        }
+
+        /* Una palabra que EMPIEZA con la etiqueta y sigue no dispara nada. */
+        foreach (['Compás de espera', 'pinturería del centro', 'passport listo', 'tokenizar no', 'pasó a la tarde'] as $inocente) {
+            $this->assertSame($inocente, $servicio->redactar($inocente, 'body'));
+        }
+
+        /* 🔴 Pero la etiqueta no necesita empezar la palabra: `CONCAT('x', body)` le pega una letra
+           adelante, y con un borde de palabra exigido el valor salía pelado. */
+        $this->assertSame('xContraseña: [oculta]', $servicio->redactar('xContraseña: CENTINELA', 'x'));
+        $this->assertSame('123clave [oculta]', $servicio->redactar('123clave CENTINELA', 'x'));
+        $this->assertSame('MI_PASSWORD [oculta]', $servicio->redactar('MI_PASSWORD es CENTINELA', 'x'));
+
+        /* Un JSON cortado o pegado a otro texto ya no se puede redactar por clave: el valor entre
+           comillas se va entero, con sus espacios. */
+        $roto = $servicio->redactar('x{"admin_password": "CENTINELA con espacios", "rubro": "kiosco"', 'body');
+        $this->assertStringNotContainsString('CENTINELA', $roto);
+        $this->assertStringNotContainsString('con espacios', $roto);
+    }
+
+    public function test_ninguna_funcion_habilitada_devuelve_un_secreto_de_un_cuerpo_ni_de_un_json(): void
+    {
+        /* 🔴 DEFENSA EN PROFUNDIDAD. La fixture tiene un cuerpo con «Contraseña: CANARIO…» (en la
+           primera línea y en otras tres) y un JSON legible con `admin_password`, `user_setup.token`
+           y `employees[0].password`. Se recorre TODA función habilitada con las formas simples de
+           llamarla sobre esas dos columnas. Cada consulta puede salir bien, ser rechazada o
+           fallar en MySQL: lo que no puede es devolver un canario. Si alguien agrega a la lista
+           una función que corta o extrae, este test lo denuncia. */
+        $columnas = ['cobranzas_observaciones', 'contract_financiacion'];
+        $formas   = [
+            'F(C)', 'F(C, 1)', 'F(C, 14)', 'F(C, 1, 20)', 'F(C, 14, 20)', 'F(C, C)', 'F(\'x\', C)', 'F(C, \'x\')', 'F(C, \'%Y\')',
+            'F(C, \'$.admin_password\')', 'F(1, C, C)', 'F(C SEPARATOR \'|\')', 'F(DISTINCT C)', 'F(C) OVER ()',
+            'F(LOWER(C))', 'UPPER(F(C))', 'CONCAT(\'x\', F(C))', 'F(CONCAT(C, \'x\'))', 'F(C + 0)', 'F(C, INTERVAL 1 DAY)',
+        ];
+
+        $funciones = array_values(array_diff(\App\Services\ClaudeAdminSqlValidator::FUNCIONES, ['IN', 'EXISTS', 'NOT', 'OVER', 'AS']));
+        $this->assertGreaterThan(40, count($funciones));
+
+        $servicio  = app(ClaudeAdminSqlService::class);
+        $corridas  = 0;
+        $con_filas = 0;
+
+        foreach ($funciones as $funcion) {
+            foreach ($columnas as $columna) {
+                foreach ($formas as $forma) {
+                    $expresion = str_replace(['F', 'C'], [$funcion, $columna], str_replace(['SEPARATOR', 'DISTINCT', 'OVER', 'LOWER', 'UPPER', 'CONCAT', 'INTERVAL', 'DAY'], ['{S}', '{D}', '{O}', '{L}', '{U}', '{K}', '{I}', '{Y}'], $forma));
+                    $expresion = str_replace(['{S}', '{D}', '{O}', '{L}', '{U}', '{K}', '{I}', '{Y}'], ['SEPARATOR', 'DISTINCT', 'OVER', 'LOWER', 'UPPER', 'CONCAT', 'INTERVAL', 'DAY'], $expresion);
+                    $sql       = 'SELECT ' . $expresion . ' AS x FROM clients WHERE id = ' . $this->client_id;
+
+                    /* Directo al servicio (validador + ejecución + redacción, lo mismo que hace el
+                       endpoint): por HTTP el limitador del grupo api corta a los 60 pedidos. */
+                    $resultado = $servicio->consultar($sql);
+                    $corridas++;
+
+                    $cuerpo = (string) json_encode($resultado, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+
+                    $this->assertNotSame('', $cuerpo, $sql);
+                    $this->assertFalse(stripos($cuerpo, 'CANARIO'), 'Devolvió un secreto: ' . $sql . ' → ' . $cuerpo);
+
+                    if ($resultado['ok'] && $resultado['row_count'] > 0) {
+                        $con_filas++;
+                    }
+                }
+            }
+        }
+
+        /* Que midió algo: muchas corrieron de verdad y devolvieron una fila. */
+        $this->assertGreaterThan(1500, $corridas);
+        $this->assertGreaterThan(200, $con_filas);
+    }
+
+    public function test_las_consultas_que_extraian_secretos_de_un_json_o_de_un_cuerpo_ya_no_los_devuelven(): void
+    {
+        /* Las de la revisión, tal cual, contra la base de verdad: rechazadas, y sin canario. */
+        $rechazadas = [
+            'SELECT data->>\'$.admin_password\' AS x FROM implementation_stages',
+            'SELECT JSON_EXTRACT(data, \'$.admin_password\') AS x FROM implementation_stages',
+            'SELECT JSON_UNQUOTE(JSON_EXTRACT(data, \'$.admin_password\')) AS x FROM implementation_stages',
+            'SELECT data->>\'$.user_setup.token\' AS x FROM implementation_stages',
+            'SELECT data->>\'$.employees[0].password\' AS x FROM implementation_stages',
+            'SELECT JSON_EXTRACT(data, \'$.*\') AS x FROM implementation_stages',
+            'SELECT GROUP_CONCAT(data->>\'$.admin_password\') AS x FROM implementation_stages',
+            'SELECT CONCAT(\'x\', JSON_EXTRACT(data, \'$.admin_password\')) AS x FROM implementation_stages',
+            'SELECT data FROM implementation_stages',
+            'SELECT contract_financiacion->>\'$.admin_password\' AS x FROM clients WHERE id = ' . $this->client_id,
+            'SELECT JSON_EXTRACT(contract_financiacion, \'$.admin_password\') AS x FROM clients WHERE id = ' . $this->client_id,
+            'SELECT JSON_UNQUOTE(JSON_EXTRACT(contract_financiacion, \'$.user_setup.token\')) AS x FROM clients WHERE id = ' . $this->client_id,
+            'SELECT contract_financiacion->>\'$.employees[0].password\' AS x FROM clients WHERE id = ' . $this->client_id,
+            'SELECT JSON_EXTRACT(contract_financiacion, \'$.*\') AS x FROM clients WHERE id = ' . $this->client_id,
+            'SELECT SUBSTRING(contract_financiacion, 120, 40) AS x FROM clients WHERE id = ' . $this->client_id,
+            'SELECT SUBSTRING(cobranzas_observaciones, 14) AS x FROM clients WHERE id = ' . $this->client_id,
+            'SELECT RIGHT(cobranzas_observaciones, 20) AS x FROM clients WHERE id = ' . $this->client_id,
+            'SELECT TRIM(LEADING \'Contraseña: \' FROM cobranzas_observaciones) AS x FROM clients WHERE id = ' . $this->client_id,
+            'SELECT CAST(cobranzas_observaciones AS CHAR CHARACTER SET ascii) AS x FROM clients WHERE id = ' . $this->client_id,
+            'SELECT CONVERT(cobranzas_observaciones USING ascii) AS x FROM clients WHERE id = ' . $this->client_id,
+        ];
+
+        foreach ($rechazadas as $sql) {
+            $respuesta = $this->consultar($sql);
+
+            $respuesta->assertStatus(422);
+            $this->assertContains($respuesta->json('codigo'), ['json_no_permitido', 'funcion_no_permitida', 'campo_sensible', 'operacion_no_permitida'], $sql);
+            $this->assertStringNotContainsString('CANARIO', $respuesta->getContent(), $sql);
+        }
+
+        /* Y las que siguen pasando devuelven el texto o el JSON ENTERO, tapado. */
+        foreach ([
+            'SELECT LOWER(cobranzas_observaciones) AS x, UPPER(cobranzas_observaciones) AS y FROM clients WHERE id = ' . $this->client_id,
+            'SELECT GROUP_CONCAT(cobranzas_observaciones) AS x, CONCAT(\'x\', contract_financiacion) AS y FROM clients WHERE id = ' . $this->client_id,
+            'SELECT CONCAT_WS(\'|\', id, cobranzas_observaciones, contract_financiacion) AS x FROM clients WHERE id = ' . $this->client_id,
+            'SELECT UPPER(contract_financiacion) AS x, LOWER(contract_financiacion) AS y FROM clients WHERE id = ' . $this->client_id,
+        ] as $sql) {
+            $respuesta = $this->consultar($sql);
+
+            $respuesta->assertStatus(200);
+            $this->assertSame(1, $respuesta->json('row_count'), $sql);
+            $this->assertStringNotContainsString('CANARIO', $respuesta->getContent(), $sql);
+            $this->assertStringNotContainsString('canario', $respuesta->getContent(), $sql);
+        }
     }
 
     public function test_el_redactor_tapa_bearer_y_pares_clave_valor_de_un_log(): void
@@ -506,12 +660,12 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
         $servicio = app(ClaudeAdminSqlService::class);
 
         $fila = $servicio->redactar_fila([
-            'texto'   => 'curl -H "Authorization: Bearer abc.DEF-123" y DB_PASSWORD=supersecreta MAIL_HOST=smtp.test',
+            'texto'   => "MAIL_HOST=smtp.test\ncurl -H \"Authorization: Bearer abc.DEF-123\" y DB_PASSWORD=supersecreta",
             'otra'    => 'APP_KEY no, pero META_ACCESS_TOKEN: EAAG123 sí',
             'numero'  => 15,
             'nulo'    => null,
             'token'   => 'se-va-entero',
-            'detalle' => ['secret' => 'x', 'visible' => 'y'],
+            'anidado' => ['secret' => 'x', 'visible' => 'y'],
             /* Columnas reservadas: se van enteras, sin mirar el valor y sin distinguir mayúsculas. */
             'line'    => 'php artisan migrate',
             'RAW'     => ['a' => 1],
@@ -529,7 +683,7 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
         $this->assertSame(15, $fila['numero']);
         $this->assertNull($fila['nulo']);
         $this->assertSame('[dato reservado]', $fila['token']);
-        $this->assertSame(['secret' => '[dato reservado]', 'visible' => 'y'], $fila['detalle']);
+        $this->assertSame(['secret' => '[dato reservado]', 'visible' => 'y'], $fila['anidado']);
     }
 
     /* ------------------------------------------------------------------------------------------

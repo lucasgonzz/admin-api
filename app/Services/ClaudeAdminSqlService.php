@@ -320,16 +320,70 @@ class ClaudeAdminSqlService
         $tapado = preg_replace('~(Bearer\s+)[A-Za-z0-9._\~+/\-]+~i', '$1' . $mascara, $valor);
         $tapado = $tapado === null ? $valor : $tapado;
 
+        /* El valor entre comillas se tapa ENTERO, con sus espacios: es el caso de un JSON cortado
+           por la mitad o pegado a otro texto, que ya no se puede decodificar y redactar por clave. */
         $con_claves = preg_replace(
-            '~((?:[A-Za-z0-9_]*(?:password|passwd|secret|token|api_?key|private_?key|authorization))["\']?\s*[:=]\s*)[^\s,}\]]+~i',
+            '~((?:[A-Za-z0-9_]*(?:password|passwd|secret|token|api_?key|private_?key|authorization))["\']?\s*[:=]\s*)(?:"[^"]*"?|\'[^\']*\'?|[^\s,}\]]+)~i',
             '$1' . $mascara,
             $tapado
         );
         $tapado = $con_claves === null ? $tapado : $con_claves;
 
         $oculto = SupportImplementationContextService::ocultar_claves($tapado);
+        $tapado = $oculto === null ? $tapado : $oculto;
 
-        return $oculto === null ? $tapado : $oculto;
+        return $this->tapar_despues_de_una_etiqueta_de_clave($tapado);
+    }
+
+    /**
+     * Tapa TODO el resto de la línea después de una palabra que anuncia una clave: «contraseña»,
+     * «clave», «password», «passwd», «pass», «pwd», «pin», «token» (y sus plurales), sin distinguir
+     * mayúsculas ni la eñe. Si después de la etiqueta la línea termina (con o sin `:`), tapa la
+     * línea siguiente.
+     *
+     * 🔴 TAPA DE MÁS A PROPÓSITO. `ocultar_claves` —la regla del contexto del ticket, que acá se
+     * sigue aplicando— tapa solo la palabra que sigue a «contraseña» / «clave», salteando un
+     * conector: con «la contraseña del router es 1234» tapa «del» y deja el valor, y «El password
+     * del wifi: X» no lo ve. No hay forma de saber cuántas palabras hay entre la etiqueta y el
+     * valor, así que se va la línea entera. El costo es que «Clave Fiscal nivel 3» o «tokens
+     * consumidos: 500» también pierden el resto de la línea; por SQL eso es aceptable.
+     *
+     * 🔴 LA ETIQUETA NO NECESITA EMPEZAR UNA PALABRA. `CONCAT('x', body)` devuelve
+     * «xContraseña: 1234»: si se exigiera un borde de palabra antes de la etiqueta, pegarle una
+     * letra adelante alcanzaría para que el valor saliera pelado (lo encontró el test que recorre
+     * todas las funciones habilitadas). El costo es tapar también después de «enclave» o «bypass».
+     * Sí se exige que la etiqueta TERMINE la palabra: «pinturería» o «tokenizar» no disparan nada.
+     *
+     * No toca un nombre de etiqueta XML (`<Token>`, `</ar:Token>`): de esos se ocupa
+     * `tapar_etiquetas_de_credenciales`, que deja el resto del documento legible.
+     *
+     * @param string $valor Texto.
+     *
+     * @return string
+     */
+    private function tapar_despues_de_una_etiqueta_de_clave($valor)
+    {
+        $etiquetas = '(?:contrase(?:ñ|n|\\?)as?|claves?|passwords?|passwd|pass|pwd|pins?|tokens?)';
+        $resto     = '([ \\t]*[:=]?[ \\t]*(?:\\r?\\n[ \\t]*)?)[^\\r\\n]+';
+
+        $tapado = preg_replace(
+            '~(?<![</])(?<![\\p{L}\\p{N}_]:)(' . $etiquetas . ')(?![\\p{L}\\p{N}_])' . $resto . '~iu',
+            '$1$2' . SupportImplementationContextService::MASCARA_DE_CLAVE,
+            $valor
+        );
+
+        if ($tapado !== null) {
+            return $tapado;
+        }
+
+        /* No es UTF-8 válido: la misma regla, por bytes. */
+        $tapado = preg_replace(
+            '~(?<![</])(?<![A-Za-z0-9_]:)(' . $etiquetas . ')(?![A-Za-z0-9_])' . $resto . '~i',
+            '$1$2' . SupportImplementationContextService::MASCARA_DE_CLAVE,
+            $valor
+        );
+
+        return $tapado === null ? $valor : $tapado;
     }
 
     /**

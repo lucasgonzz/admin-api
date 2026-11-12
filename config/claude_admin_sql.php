@@ -123,7 +123,12 @@ return [
         'proof'                    => '`support_codex_release_claims.proof`: la prueba del release (commits, tags y artefactos). Lo útil para soporte está en las columnas de estado de la misma fila.',
         'calendar_snapshot'        => '`lead_messages.calendar_snapshot`: la agenda de Google de Lucas tal como se le pasó a la IA, con reuniones que no son del lead.',
         'accepted_endpoint_hashes' => '`support_attention_notifications.accepted_endpoint_hashes`: huellas de los endpoints Web Push de los administradores.',
-        'clave'                    => 'Como clave de un JSON (`implementation_stages.data` y pares) puede ser una contraseña. Alcanza también a `demo_chat_progresos.clave`, que no es un secreto: se pierde esa columna a cambio de no depender de qué guarda cada JSON.',
+        'data'                     => '`implementation_stages.data`, `ecommerce_implementation_stages.data` y `agent_implementation_stages.data` guardan credenciales (`admin_password`, el token del user setup, contraseñas de empleados). Estaban como legibles «cubiertas por la redacción por clave», y un `JSON_EXTRACT` las sacaba peladas bajo un alias. Se reserva el nombre: alcanza también a `implementation_followup_events.data` y `pipeline_activities.data`, que son limpias y se pierden a cambio de no depender de qué JSON es cuál. El estado de una implementación se lee por `claude/implementations`.',
+        'detail'                   => '`support_codex_activities.detail`: JSON de formato libre que manda el monitor con lo que hizo Martín (puede incluir resultados de sus consultas). Alcanza a `implementation_followup_events.detail`.',
+        'detalle'                  => '`local_actividad_clientes.detalle` y `prueba_whatsapp_envios.detalle`: detalle de formato libre de una actividad o de un envío.',
+        'template_variables'       => '`lead_scheduled_messages.template_variables`: los valores con los que se completa una plantilla; van sin etiqueta (posicionales), así que si uno fuera un acceso ningún redactor de texto lo reconocería.',
+        'variables'                => '`client_templates.variables`: misma clase que `template_variables`.',
+        'clave'                    => 'Como clave de un JSON puede ser una contraseña. Alcanza también a `demo_chat_progresos.clave`, que no es un secreto: se pierde esa columna a cambio de no depender de qué guarda cada JSON.',
         'contrasena'               => 'Clave de JSON con una contraseña, escrita sin eñe.',
         'contraseña'               => 'Clave de JSON con una contraseña.',
         'pin'                      => 'Clave de JSON con un PIN.',
@@ -135,9 +140,13 @@ return [
      | que toda columna json/text/blob de una tabla no vedada esté acá, en `columnas_reservadas` o
      | matchee el patrón.
      |
+     | 🔴 CRITERIO PARA UNA COLUMNA JSON: es legible solo si, POR LO QUE ESCRIBE EL CÓDIGO, no
+     | guarda credenciales ni datos de formato libre. «La cubre la redacción por clave» NO es un
+     | motivo válido: la redacción es la segunda reja, no la primera.
+     |
      | Que una columna sea legible no la saca de la redacción: sus valores pasan igual por el
      | redactor (claves de JSON sensibles o reservadas, etiquetas XML de credenciales, `Bearer`,
-     | `clave=valor` y lo que sigue a «contraseña» / «clave»).
+     | `clave=valor` y el resto de la línea después de «contraseña», «clave», «password», «pin»…).
      |
      | Está armado por grupos porque el motivo se repite; el resultado es un mapa plano.
      */
@@ -160,7 +169,7 @@ return [
             'ventas.observacion', 'support_tickets.escalation_reason', 'support_codex_operations.reconciliation_evidence',
             'support_codex_operations.reconciliation_reason', 'support_codex_scheduled_upgrades.verification_evidence',
             'agent_proposals.razonamiento', 'agent_daily_reports.executive_summary', 'lead_messages.ai_reasoning',
-            'lead_messages.admin_notifications', 'implementation_followup_events.detail',
+            'lead_messages.admin_notifications',
         ], 'Nota u observación interna escrita por el equipo o por un agente. Texto operativo; sale con «contraseña»/«clave» tapadas.'),
         array_fill_keys([
             'versions.description', 'ecommerce_versions.description', 'ia_app_versions.description', 'version_notifications.body',
@@ -180,19 +189,19 @@ return [
             'lead_messages.whatsapp_send_error', 'lead_messages.partial_send_pending', 'lead_scheduled_messages.error_text',
             'leads.demo_mail_last_error', 'leads.demo_setup_last_error', 'leads.followup_mail_last_error',
             'leads.presentation_mail_last_error', 'leads.user_setup_last_error', 'mensualidad_invoices.error_message',
-            'prueba_whatsapp_envios.detalle', 'update_commands.failure_notes', 'update_seeders.failure_notes',
+            'update_commands.failure_notes', 'update_seeders.failure_notes',
             'client_assistant_messages.media_en_espera',
         ], 'Mensaje de error o de estado de un proceso (una línea de la excepción o del proveedor). Es lo primero que mira soporte; el redactor de texto tapa un Bearer o un `clave=valor` si el error los citara.'),
         array_fill_keys([
             'admin_column_preferences.properties', 'admin_tasks.todos', 'admins.cobranzas_preferencias',
-            'agent_daily_reports.metrics_snapshot', 'client_templates.variables', 'clients.contract_clausulas_particulares',
+            'agent_daily_reports.metrics_snapshot', 'clients.contract_clausulas_particulares',
             'clients.contract_financiacion', 'clients.contract_precios_sistemas', 'clients.contract_sistemas',
             'demo_chat_mensajes.guia', 'demo_chat_mensajes.revisiones', 'demo_chat_mensajes.videos',
             'demo_chat_progresos.segundos_vistos', 'implementation_followups.hitos', 'implementation_followups.hitos_no_aplican',
             'lead_messages.actions_override_log', 'lead_messages.applied_actions_summary', 'lead_messages.horarios_ofrecidos',
-            'lead_messages.pending_actions', 'lead_scheduled_messages.template_variables', 'leads.contract_clausulas_particulares',
+            'lead_messages.pending_actions', 'leads.contract_clausulas_particulares',
             'leads.contract_cotizacion_items', 'leads.contract_financiacion', 'leads.contract_precios_sistemas',
-            'leads.contract_sistemas', 'leads.demo_plan', 'local_actividad_clientes.detalle', 'local_oficina_slots.agentes',
+            'leads.contract_sistemas', 'leads.demo_plan', 'local_oficina_slots.agentes',
             'pipeline_stages.fields', 'pipelines.lost_reasons', 'recursos_progresos.vistos', 'recursos_videos.relacionados',
             'senas.aplicaciones', 'shared_product_facts.product', 'support_attention_notifications.dispatched_admin_ids',
             'support_codex_plans.pasos', 'support_codex_release_claims.develop', 'support_messages.erp_auto_reply',
@@ -200,12 +209,6 @@ return [
             'whatsapp_ad_referrals.source_url', 'whatsapp_ad_referrals.thumbnail_url', 'lead_eventos_meta.respuesta',
         ], 'JSON o texto con una estructura que arma el propio admin (preferencias, contrato, hitos, acciones, ids, conteos, URLs públicas). No recibe credenciales; sus claves pasan igual por la redacción recursiva.'),
         [
-            'implementation_stages.data'           => 'Datos de cada etapa de la implementación (respuestas del formulario, hitos, estado del user setup). La etapa de instalación guarda `admin_password` y el registro del user setup guarda un token: las dos claves matchean el patrón y salen redactadas, y `clave` / `contraseña` / `pin` están reservadas como clave de JSON. Lo demás es lo que soporte necesita para seguir una implementación, y ya se sirve por `claude/implementations`.',
-            'ecommerce_implementation_stages.data' => 'Mismo caso que `implementation_stages.data`, para la implementación de la tienda.',
-            'agent_implementation_stages.data'     => 'Mismo caso que `implementation_stages.data`, para la implementación de Agentes de IA.',
-            'implementation_followup_events.data'  => 'Datos de un evento del seguimiento proactivo (hitos medidos por SQL, textos enviados). Los arma el admin.',
-            'pipeline_activities.data'             => 'Datos de una actividad del pipeline comercial (cambio de etapa, campos). Los arma el admin.',
-            'support_codex_activities.detail'      => 'Registro de lo que hizo Martín en un ticket (herramienta, consulta, resultado resumido). Es la auditoría que soporte tiene que poder leer.',
             'support_codex_mission_fix_evidence.payload' => 'Evidencia de una corrección integrada: commits, bases verificadas, informe y pruebas, con formato validado por el controlador. Ya viaja en el contexto del ticket.',
         ]
     ),

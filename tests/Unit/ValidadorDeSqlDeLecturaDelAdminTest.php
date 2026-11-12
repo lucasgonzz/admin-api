@@ -254,7 +254,9 @@ class ValidadorDeSqlDeLecturaDelAdminTest extends TestCase
         $this->assert_rechaza('operacion_no_permitida', 'SET SESSION TRANSACTION READ WRITE');
         $this->assert_rechaza('operacion_no_permitida', 'SHOW CREATE TABLE clients');
         $this->assert_rechaza('solo_select', 'SHOW PROCESSLIST');
-        $this->assert_rechaza('solo_select', 'SHOW VARIABLES');
+        $this->assert_rechaza('solo_select', 'SHOW STATUS');
+        /* `variables` además es una columna reservada: se rechaza antes, por eso. */
+        $this->assert_rechaza('campo_sensible', 'SHOW VARIABLES');
         $this->assert_rechaza('solo_select', 'EXPLAIN ANALYZE SELECT id FROM clients');
         $this->assert_rechaza('solo_select', 'ANALYZE clients');
     }
@@ -372,19 +374,116 @@ class ValidadorDeSqlDeLecturaDelAdminTest extends TestCase
         $this->assert_rechaza('operacion_no_permitida', 'SELECT GET_LOCK(\'x\', 10)');
     }
 
-    public function test_la_lista_de_funciones_es_la_del_validador_del_monitor(): void
+    public function test_las_funciones_habilitadas_mas_las_quitadas_son_la_lista_del_monitor(): void
     {
         /* Copia literal de `_FUNCIONES` de herramientas/soporte-codex/diagnostico.py (repo de
-           conocimiento) al 11/11/2026. Si una de las dos listas cambia, este test lo denuncia de
-           este lado; del otro no hay quién. */
+           conocimiento) al 11/11/2026. Esta lista es un SUBCONJUNTO de aquella: lo que falta está
+           en FUNCIONES_QUITADAS, con el motivo. Si allá agregan una función, este test obliga a
+           decidir acá si entra o si se quita. */
         $del_monitor = explode(' ', 'COUNT SUM AVG MIN MAX COALESCE IFNULL NULLIF IF CONCAT CONCAT_WS LOWER UPPER TRIM LTRIM RTRIM LENGTH CHAR_LENGTH ROUND ABS CEIL CEILING FLOOR DATE DATE_FORMAT YEAR MONTH DAY DAYOFMONTH HOUR MINUTE SECOND NOW CURDATE CURRENT_DATE CONVERT_TZ DATE_ADD DATE_SUB DATEDIFF TIMESTAMPDIFF CAST CONVERT JSON_EXTRACT JSON_UNQUOTE JSON_LENGTH JSON_VALID REPLACE SUBSTRING SUBSTR LEFT RIGHT STR_TO_DATE GREATEST LEAST GROUP_CONCAT DATABASE VERSION IN EXISTS NOT OVER AS');
 
-        $propias = ClaudeAdminSqlValidator::FUNCIONES;
+        $propias  = ClaudeAdminSqlValidator::FUNCIONES;
+        $quitadas = array_keys(ClaudeAdminSqlValidator::FUNCIONES_QUITADAS);
 
+        $this->assertSame([], array_values(array_intersect($propias, $quitadas)), 'Una función no puede estar habilitada y quitada a la vez.');
+
+        $union = array_merge($propias, $quitadas);
         sort($del_monitor);
+        sort($union);
+
+        $this->assertSame($del_monitor, $union);
+
+        foreach (ClaudeAdminSqlValidator::FUNCIONES_QUITADAS as $funcion => $motivo) {
+            $this->assertGreaterThan(20, strlen(trim((string) $motivo)), 'La función quitada "' . $funcion . '" no dice por qué.');
+        }
+
+        /* La lista final, escrita: cambiarla es una decisión de seguridad, no un detalle. */
+        $esperadas = ['ABS', 'AS', 'AVG', 'CEIL', 'CEILING', 'CHAR_LENGTH', 'COALESCE', 'CONCAT', 'CONCAT_WS', 'CONVERT_TZ', 'COUNT',
+            'CURDATE', 'CURRENT_DATE', 'DATABASE', 'DATE', 'DATEDIFF', 'DATE_ADD', 'DATE_FORMAT', 'DATE_SUB', 'DAY', 'DAYOFMONTH',
+            'EXISTS', 'FLOOR', 'GREATEST', 'GROUP_CONCAT', 'HOUR', 'IF', 'IFNULL', 'IN', 'JSON_LENGTH', 'JSON_VALID', 'LEAST',
+            'LENGTH', 'LOWER', 'LTRIM', 'MAX', 'MIN', 'MINUTE', 'MONTH', 'NOT', 'NOW', 'NULLIF', 'OVER', 'ROUND', 'RTRIM', 'SECOND',
+            'STR_TO_DATE', 'SUM', 'TIMESTAMPDIFF', 'UPPER', 'VERSION', 'YEAR'];
+        sort($esperadas);
         sort($propias);
 
-        $this->assertSame($del_monitor, $propias);
+        $this->assertSame($esperadas, $propias);
+    }
+
+    public function test_rechaza_toda_forma_de_extraer_una_parte_de_un_json(): void
+    {
+        /* 🔴 Reproducido por la revisión: cada una devolvía la contraseña sola, bajo un alias. La
+           ruta va dentro de un literal, así que el patrón sensible no la ve. Se usa una columna
+           JSON que NO está reservada, para que lo que rechace sea la regla de JSON. */
+        foreach ([
+            'SELECT contract_financiacion->>\'$.admin_password\' AS x FROM clients',
+            'SELECT contract_financiacion->\'$.admin_password\' AS x FROM clients',
+            'SELECT contract_financiacion ->> \'$.user_setup.token\' FROM clients',
+            'SELECT contract_financiacion->>\'$.employees[0].password\' FROM clients',
+            'SELECT id FROM clients WHERE contract_financiacion->>\'$.admin_password\' LIKE \'a%\'',
+            'SELECT id FROM clients ORDER BY contract_financiacion->\'$.a\'',
+            'SELECT JSON_EXTRACT(contract_financiacion, \'$.admin_password\') AS x FROM clients',
+            'SELECT JSON_UNQUOTE(JSON_EXTRACT(contract_financiacion, \'$.admin_password\')) FROM clients',
+            'SELECT JSON_EXTRACT(contract_financiacion, \'$.*\') FROM clients',
+            'SELECT GROUP_CONCAT(JSON_EXTRACT(contract_financiacion, \'$.admin_password\')) FROM clients',
+            'SELECT CONCAT(\'x\', JSON_UNQUOTE(contract_financiacion)) FROM clients',
+            'SELECT JSON_VALUE(contract_financiacion, \'$.admin_password\') FROM clients',
+            'SELECT JSON_SEARCH(contract_financiacion, \'one\', \'a%\') FROM clients',
+            'SELECT JSON_KEYS(contract_financiacion) FROM clients',
+            'SELECT json_extract (contract_financiacion, \'$.a\') FROM clients',
+        ] as $sql) {
+            $this->assert_rechaza('json_no_permitido', $sql);
+        }
+
+        /* Y las tres columnas que guardan credenciales no se pueden ni nombrar. */
+        $this->assert_rechaza('campo_sensible', 'SELECT data FROM implementation_stages');
+        $this->assert_rechaza('campo_sensible', 'SELECT s.data FROM ecommerce_implementation_stages s');
+        $this->assert_rechaza('campo_sensible', 'SELECT JSON_LENGTH(data) FROM agent_implementation_stages');
+
+        /* Lo que sigue pudiéndose hacer con un JSON legible: traerlo entero, contarlo, validarlo. */
+        $this->assert_admite('SELECT contract_financiacion, JSON_LENGTH(contract_financiacion), JSON_VALID(contract_financiacion) FROM clients');
+        /* Y una flecha dentro de un texto no es un operador. */
+        $this->assert_admite('SELECT id FROM support_messages WHERE body LIKE \'%paso 1 -> paso 2%\'');
+    }
+
+    public function test_rechaza_las_funciones_que_devuelven_un_fragmento_o_separan_la_etiqueta_del_valor(): void
+    {
+        /* 🔴 El redactor tapa lo que sigue a «Contraseña: » mirando el texto ENTERO. Cada una de
+           estas devuelve el valor sin su etiqueta, o rompe la etiqueta. */
+        foreach ([
+            'SELECT SUBSTRING(body, 14) FROM implementation_messages',
+            'SELECT SUBSTRING(body FROM 14 FOR 20) FROM implementation_messages',
+            'SELECT SUBSTR(body, 14, 20) FROM implementation_messages',
+            'SELECT RIGHT(body, 20) FROM implementation_messages',
+            'SELECT LEFT(contract_financiacion, 120) FROM clients',
+            'SELECT TRIM(LEADING \'Contraseña: \' FROM body) FROM implementation_messages',
+            'SELECT TRIM(body) FROM implementation_messages',
+            'SELECT CAST(body AS CHAR) FROM implementation_messages',
+            'SELECT CAST(contract_financiacion AS CHAR(50)) FROM clients',
+            'SELECT CONVERT(body USING ascii) FROM implementation_messages',
+            'SELECT CONVERT(body, CHAR(10)) FROM implementation_messages',
+            'SELECT substring (body, 14) FROM implementation_messages',
+            'SELECT UPPER(RIGHT(body, 5)) FROM implementation_messages',
+        ] as $sql) {
+            $this->assert_rechaza('funcion_no_permitida', $sql);
+        }
+
+        /* Con `CHARACTER SET` cae antes, por la palabra SET: «Contraseña» no se puede volver «Contrase?a». */
+        $this->assert_rechaza('operacion_no_permitida', 'SELECT CAST(body AS CHAR CHARACTER SET ascii) FROM implementation_messages');
+
+        /* Ya estaban afuera: prohibida como palabra, o nunca estuvieron en la lista. */
+        $this->assert_rechaza('operacion_no_permitida', 'SELECT REPLACE(body, \'Contraseña: \', \'\') FROM implementation_messages');
+        foreach (['MID(body, 14)', 'REVERSE(body)', 'SUBSTRING_INDEX(body, \':\', -1)', 'REGEXP_SUBSTR(body, \'[0-9]+\')', 'REGEXP_REPLACE(body, \'a\', \'b\')',
+            'INSERT(body, 1, 12, \'\')', 'LPAD(body, 5, \'x\')', 'RPAD(body, 5, \'x\')', 'HEX(body)', 'TO_BASE64(body)', 'ASCII(body)', 'ORD(body)',
+            'LOCATE(\'a\', body)', 'INSTR(body, \'a\')', 'ELT(1, body)', 'MAKE_SET(1, body)', 'EXPORT_SET(1, body, body)', 'WEIGHT_STRING(body)',
+            'JSON_ARRAY(body)', 'JSON_OBJECT(\'a\', body)', 'JSON_QUOTE(body)', 'UNHEX(body)', 'MD5(body)', 'SHA2(body, 256)', 'COMPRESS(body)'] as $llamada) {
+            $resultado = $this->validar('SELECT ' . $llamada . ' FROM implementation_messages');
+
+            $this->assertFalse($resultado['ok'], 'Tendría que rechazar: ' . $llamada);
+            $this->assertContains($resultado['codigo'], ['funcion_no_permitida', 'operacion_no_permitida', 'json_no_permitido'], $llamada);
+        }
+
+        /* Lo que queda: no cortan ni separan. */
+        $this->assert_admite('SELECT LOWER(body), UPPER(body), LTRIM(body), RTRIM(body), LENGTH(body), CONCAT(id, body) FROM implementation_messages');
     }
 
     public function test_el_validador_acepta_una_config_propia(): void
