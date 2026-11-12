@@ -1006,7 +1006,11 @@ class SupportCodexService
                 if ($recordatorio !== null) {
                     $body = $recordatorio['body'];
                 } else {
-                    $oferta = SupportTourService::preparar_oferta($ticket, $entrante, $body, ! empty($input['usage_answer']));
+                    /* Si el agente invitó a Robotito a mano (sin `tour_requested`), la invitación se registra igual:
+                       si no, el «sí» de la persona no encuentra a qué invitación corresponde. */
+                    $a_mano = SupportTourService::invitacion_escrita_a_mano($body);
+                    $oferta = SupportTourService::preparar_oferta($ticket, $entrante, $a_mano !== null ? $a_mano : $body,
+                        ! empty($input['usage_answer']) || $a_mano !== null);
                     if ($oferta !== null) {
                         $body = $oferta;
                         $tour_requested = true;

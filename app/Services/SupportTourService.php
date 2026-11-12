@@ -146,6 +146,35 @@ class SupportTourService
         return $texto;
     }
 
+    /**
+     * Una invitación a Robotito que el agente escribió A MANO (misión prueba-e2e-campana-imperio, 11/11/2026,
+     * ticket 101): «…¿Querés que te prepare un tour con Robotito?» en el medio del texto o con otras palabras, sin
+     * el indicador `tour_requested`. Sin esto, esa invitación no queda registrada y el «sí» de la persona da
+     * `tour_consent_required`.
+     *
+     * Devuelve el mismo texto con la pregunta canónica en su renglón final, listo para `preparar_oferta()`, o null
+     * si el texto no invita a Robotito (o si no queda ninguna explicación además de la pregunta).
+     *
+     * @param string $texto
+     *
+     * @return string|null
+     */
+    public static function invitacion_escrita_a_mano(string $texto): ?string
+    {
+        if (self::tiene_invitacion($texto)) {
+            return $texto;
+        }
+
+        $patron = '/[ \t]*¿?[ \t]*(?:quer[eé]s|te gustar[ií]a|te parece|te sirve)\s+que\s+te\s+(?:lo\s+)?(?:prepare|arme|mande|muestre|haga|ense[ñn]e)\b[^?\n]{0,80}\brobotito\b[^?\n]{0,30}\?/iu';
+        if (preg_match($patron, $texto) !== 1) {
+            return null;
+        }
+
+        $explicacion = trim((string) preg_replace("/\n{3,}/", "\n\n", (string) preg_replace($patron, '', $texto, 1)));
+
+        return $explicacion === '' ? null : $explicacion . "\n\n" . self::INVITACION;
+    }
+
     public static function con_invitacion(
         string $texto,
         bool $desde_cuenta_propia,
@@ -413,7 +442,7 @@ class SupportTourService
     private static function respuesta_acepta_invitacion(string $texto, string $respuesta): bool
     {
         // Una respuesta breve solo es inequívoca si la invitación era la única pregunta.
-        if (self::aceptacion_explicita($respuesta)) {
+        if (self::aceptacion_explicita($respuesta) || self::aceptacion_nombrando_a_robotito($respuesta)) {
             return true;
         }
 
@@ -471,6 +500,29 @@ class SupportTourService
     private static function normalizar_respuesta(SupportMessage $entrante): string
     {
         return ltrim(Str::ascii(mb_strtolower(trim((string) $entrante->body))), '! ');
+    }
+
+    /**
+     * «sí dale, mostrame con el robotito ese»: un sí seguido de un pedido que nombra a Robotito, el tour o el
+     * recorrido (ticket 101, 11/11/2026). Tiene que EMPEZAR con el sí, no puede traer una pregunta ni una negación,
+     * y solo vale como respuesta a una invitación registrada y entregada: lo decide quien llama.
+     *
+     * @param string $respuesta Ya normalizada (minúsculas, sin acentos).
+     *
+     * @return bool
+     */
+    private static function aceptacion_nombrando_a_robotito(string $respuesta): bool
+    {
+        if (preg_match('/[?¿]|\b(?:no|nunca|todavia|despues|luego|mas tarde|otro dia|ahora no)\b/', $respuesta)) {
+            return false;
+        }
+
+        return (bool) preg_match(
+            '/^(?:(?:si+|dale|ok|okey|bueno|de una|claro|obvio|genial|por favor|porfa)[,.! ]+)+'
+            . '(?:mostrame|mostramelo|muestrame|ensename|ensenamelo|explicame|preparame|preparamelo|mandame|mandamelo|pasame|pasamelo|enviame|enviamelo|hacelo|hagamoslo|probemos|quiero)\b'
+            . '[a-z ,]{0,60}\b(?:robotito|tour|recorrido)\b[a-z .,!]{0,40}$/D',
+            $respuesta
+        );
     }
 
     private static function aceptacion_explicita(string $respuesta): bool
