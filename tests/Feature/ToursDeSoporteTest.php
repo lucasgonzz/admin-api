@@ -155,6 +155,28 @@ class ToursDeSoporteTest extends TestCase
         Http::assertSentCount(1);
     }
 
+    public function test_el_planificador_sabe_llegar_a_una_solapa_del_abm_y_el_guion_acepta_sus_claves(): void
+    {
+        // El defecto del ticket 104: cinco indicaciones de texto que pedían «abrí Precios» sobre otra pantalla.
+        $instrucciones = new \ReflectionMethod(\App\Services\SupportTourPlannerService::class, 'instrucciones');
+        $instrucciones->setAccessible(true);
+        $prompt = $instrucciones->invoke(new \App\Services\SupportTourPlannerService());
+        $this->assertStringContainsString('Una indicacion es solo texto: no señala nada y no lleva a la persona a ninguna pantalla ni solapa.', $prompt);
+        $this->assertStringContainsString('abm.grupo.<grupo>', $prompt);
+        $this->assertStringContainsString('abm.solapa.precios.impuestos_sobre_ventas señala Impuestos sobre ventas', $prompt);
+        $this->assertStringContainsString('Usá esas claves solo si están en pasos_disponibles', $prompt);
+
+        $pasos = [
+            ['clave' => 'abm.grupo.precios', 'texto' => 'Dentro de ABM, tocá Precios.'],
+            ['clave' => 'abm.solapa.precios.impuestos_sobre_ventas', 'texto' => 'Ahora tocá Impuestos sobre ventas.'],
+            ['clave' => 'indicacion', 'texto' => 'Abrí Ingresos Brutos y destildá Activo.'],
+            // La clave más larga que publica Empresa (67 caracteres).
+            ['clave' => 'abm.solapa.facturacion.metodo_de_pago_seleccionado_para_facturacion', 'texto' => 'Revisá esta solapa.'],
+        ];
+        $guion = SupportTourService::guion(['tema' => 'guia_dinamica', 'titulo' => 'Desactivar Ingresos Brutos', 'pasos' => $pasos]);
+        $this->assertSame($pasos, $guion['pasos']);
+    }
+
     public function test_martin_invita_sin_guion_y_solo_llama_deepseek_una_vez_despues_del_si(): void
     {
         config(['services.deepseek.api_key' => 'deepseek-prueba']);
