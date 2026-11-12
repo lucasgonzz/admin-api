@@ -192,7 +192,7 @@ class SupportClientContextService
         $cliente = DB::table('clients')
             ->leftJoin('versions', 'versions.id', '=', 'clients.current_version_id')
             ->where('clients.id', $client_id)
-            ->select(['clients.created_at', 'versions.version'])
+            ->select(['clients.created_at', 'versions.version', 'clients.estado'])
             ->first();
 
         $alta        = null;
@@ -202,6 +202,20 @@ class SupportClientContextService
 
         if ($cliente !== null) {
             $version = $this->texto_o_null(isset($cliente->version) ? $cliente->version : null);
+
+            /* Un negocio EN PRUEBA corre la versión de SU instancia (`trial_instances.version`), que puede ser
+               anterior a la última publicada que quedó en `clients.current_version_id` al darlo de alta. Para el
+               que ya contrató vale la ficha: sus actualizaciones mueven `current_version_id`. */
+            if (in_array((string) (isset($cliente->estado) ? $cliente->estado : ''), ['prueba', 'prueba_vencida'], true)) {
+                $de_la_instancia = DB::table('trial_instances')
+                    ->where('client_id', $client_id)
+                    ->where('estado', '!=', 'borrada')
+                    ->orderByDesc('id')
+                    ->value('version');
+                if ($this->texto_o_null($de_la_instancia) !== null) {
+                    $version = $this->texto_o_null($de_la_instancia);
+                }
+            }
 
             $creado = isset($cliente->created_at) ? $cliente->created_at : null;
             if ($creado !== null && $creado !== '') {

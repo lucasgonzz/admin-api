@@ -301,6 +301,13 @@ class AltaDePruebaService
             'current_version_id' => $latest_version ? $latest_version->id : null,
         ]);
 
+        /* Un alta con un correo de la lista `prueba_ensayo_correos` nace marcada como ensayo, ANTES de que se arme la
+           instancia y salga la bienvenida: así ya recibe la bienvenida con las reglas del alcance nuevo. */
+        if (PruebaSettings::es_correo_de_ensayo($email)) {
+            $client->es_ensayo = true;
+            $client->save();
+        }
+
         /* ClientApi 1: el frente de la prueba, aprovisionado (VPS, sitio `prueba-NN`). */
         $principal = ClientApi::create([
             'client_id'              => $client->id,

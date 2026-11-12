@@ -104,6 +104,10 @@ class PruebaContextoSoporteService
             'url'            => $slug ? 'https://' . PruebaNombres::hosts_del_slug($slug)['erp_spa'] : null,
             'url_ingreso'    => $slug && $token_vigente ? PruebaNombres::url_ingreso($slug, (string) $lead->demo_ingreso_token) : null,
             'instancia'      => $instancia ? ['nombre' => $instancia->nombre, 'estado' => $instancia->estado, 'dormida' => $instancia->esta_dormida()] : null,
+            /* La versión REAL de la instancia (`trial_instances.version`), no la última publicada. */
+            'version_instancia' => $instancia && trim((string) $instancia->version) !== '' ? (string) $instancia->version : null,
+            /* El WhatsApp de soporte que ve el negocio en su sistema. */
+            'whatsapp_soporte'  => PruebaSettings::whatsapp_soporte() !== '' ? PruebaSettings::whatsapp_soporte() : null,
             'lead_id'        => $lead ? (int) $lead->id : null,
             'hitos'          => $hitos,
         ];

@@ -120,7 +120,7 @@ class RecorridoYBarridosDeLaPruebaTest extends BaseDeLaPrueba
         $this->assertCount(1, $espia->textos, 'Un solo aviso al closer: el del negocio real.');
         $this->assertSame(1, PruebaWhatsappEnvio::where('client_id', $ensayo->id)->count(), 'Solo la bienvenida que ya tenía.');
 
-        /* Tampoco a pedido, ni la bienvenida por barrido. */
+        /* Tampoco a pedido. (El barrido de bienvenidas no la saltea, pero acá no tiene instancia que retomar.) */
         $this->assertSame(1, Artisan::call('prueba:empujar', ['--cliente' => $ensayo->id]));
         $this->assertStringContainsString('pruebas:ensayo', Artisan::output());
         PruebaWhatsappEnvio::where('client_id', $ensayo->id)->delete();

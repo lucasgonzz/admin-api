@@ -434,8 +434,10 @@ class PruebaWhatsappService
     public function retomar_bienvenidas(?int $cliente_id = null): void
     {
         foreach ($this->pruebas->clientes_en_prueba() as $client) {
-            /* Al cliente de ensayo lo maneja solo `pruebas:ensayo` (con su reloj): los barridos reales lo saltean. */
-            if (($cliente_id !== null && (int) $client->id !== $cliente_id) || (bool) $client->es_ensayo) {
+            /* Este barrido NO saltea a la cuenta de ensayo: un alta que nace marcada (`prueba_ensayo_correos`) depende
+               de él para completar su bienvenida (el WhatsApp del asistente y el correo salen cuando su sistema lo
+               habilita, y el envío que falló se reintenta acá). La bienvenida sale una sola vez y no mira el reloj. */
+            if ($cliente_id !== null && (int) $client->id !== $cliente_id) {
                 continue;
             }
 

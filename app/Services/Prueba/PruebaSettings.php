@@ -54,6 +54,12 @@ class PruebaSettings
     const ALCANCE_ENSAYO        = 'ensayo';
     const ALCANCE_TODOS         = 'todos';
 
+    /**
+     * Correos (separados por comas) cuyas altas nacen marcadas como ENSAYO (`clients.es_ensayo`), para ensayar el
+     * recorrido completo desde la bienvenida. Vacío (el default) = ninguna alta nace marcada.
+     */
+    const KEY_ENSAYO_CORREOS = 'prueba_ensayo_correos';
+
     /** 0 hasta que Lucas prenda el pool desde admin_settings: sin DNS ni plantilla, un mínimo > 0 solo fabrica fallidas. */
     const DEFAULT_POOL_MINIMO         = 0;
     const DEFAULT_MAX_ACTIVAS         = 25;
@@ -169,6 +175,28 @@ class PruebaSettings
         }
 
         return (bool) $client->es_ensayo || self::novedades_alcance() === self::ALCANCE_TODOS;
+    }
+
+    /**
+     * Si un alta con este correo tiene que nacer marcada como ensayo (`prueba_ensayo_correos`). Compara con el correo
+     * normalizado (sin espacios, en minúsculas).
+     *
+     * @param string|null $email
+     *
+     * @return bool
+     */
+    public static function es_correo_de_ensayo(?string $email): bool
+    {
+        $email = mb_strtolower(trim((string) $email));
+        if ($email === '') {
+            return false;
+        }
+
+        $lista = array_filter(array_map(function ($correo) {
+            return mb_strtolower(trim((string) $correo));
+        }, explode(',', (string) AdminSetting::get(self::KEY_ENSAYO_CORREOS, ''))));
+
+        return in_array($email, $lista, true);
     }
 
     public static function whatsapp_soporte(): string
