@@ -170,12 +170,34 @@ class PruebaVideoSoporteService
                 'codigo'       => $codigo,
                 'titulo'       => (string) $video['titulo'],
                 'url'          => $url,
-                'hito'         => isset(self::HITOS[$codigo]) ? self::HITOS[$codigo] : null,
+                'hito'         => self::hito_del_video($codigo, $client),
                 'entregado_at' => $momentos === [] ? null : $momentos[0]->toIso8601String(),
             ];
         }
 
         return $videos;
+    }
+
+    /**
+     * El hito que acompaña a un video PARA ESTE CLIENTE. Dentro del alcance de las novedades (misión
+     * prueba-e2e-campana-imperio, 11/11/2026) el 06 («Revisá y cambiá un precio») es el de actualizar un artículo,
+     * no el de crearlo; fuera del alcance vale el mapa de siempre ({@see self::HITOS}).
+     *
+     * @param string $codigo
+     * @param Client $client
+     *
+     * @return string|null
+     */
+    public static function hito_del_video(string $codigo, Client $client): ?string
+    {
+        if (PruebaSettings::novedades_para($client)) {
+            $hito = array_search($codigo, PruebaCorreoService::VIDEO_DEL_PASO, true);
+            if ($hito !== false) {
+                return (string) $hito;
+            }
+        }
+
+        return isset(self::HITOS[$codigo]) ? self::HITOS[$codigo] : null;
     }
 
     /**

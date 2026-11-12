@@ -380,6 +380,10 @@ Route::prefix('recursos')
 Route::middleware('claude.task.key')
     ->prefix('claude')
     ->group(function () {
+        /* La foto de las pruebas gratuitas para el informe diario (misión cruzada prueba-e2e-campana-imperio,
+           11/11/2026): solo lectura. */
+        Route::get('prueba/resumen', 'Api\ClaudePruebaController@resumen');
+
         // Atención desde la suscripción de Codex: endpoints aditivos, nunca un modelo genérico.
         Route::get('support-codex/settings', 'Api\ClaudeSupportCodexController@settings');
         Route::put('support-codex/settings', 'Api\ClaudeSupportCodexController@update_settings');

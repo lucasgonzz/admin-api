@@ -53,6 +53,21 @@ class PruebaWhatsappService
     const TOMAS_VENCIDA = 'vencida';
     const TOMAS_MANUAL = 'manual';
 
+    /**
+     * Marca (en `support_messages.erp_auto_reply`) de la copia de la bienvenida que se deja visible en Soporte del
+     * sistema del negocio cuando el WhatsApp no pudo salir. Ver {@see self::asegurar_bienvenida_en_el_sistema()}.
+     */
+    const MARCA_BIENVENIDA_SISTEMA = 'prueba_bienvenida_sistema';
+
+    /** Dentro del alcance de las novedades: cuántas veces sale, como mucho, el WhatsApp de un mismo paso. */
+    const TOPE_POR_PASO = 2;
+
+    /** El día que vence sí sale paso, salvo que falten menos de estas horas para el vencimiento. */
+    const HORAS_SIN_PASO_ANTES_DE_VENCER = 3;
+
+    const MOTIVO_ULTIMO_DIA      = 'Faltan menos de 3 horas para que venza la prueba: no sale paso, sale la encuesta al vencer.';
+    const MOTIVO_TOPE_DE_INGRESO = 'Todavía no entró y ya se le recordó dos veces: no se le mandan más pasos.';
+
     /** Zona horaria del tope diario. */
     const ZONA = 'America/Argentina/Buenos_Aires';
 
@@ -128,6 +143,10 @@ class PruebaWhatsappService
             if ($client === null) {
                 return ['accion' => 'aviso_tomas', 'estado' => 'sin_cliente'];
             }
+            /* Una cuenta de ensayo no le avisa al closer: eso solo lo hace `pruebas:ensayo --con-closer`. */
+            if ((bool) $client->es_ensayo) {
+                return ['accion' => 'aviso_tomas', 'estado' => 'ensayo'];
+            }
 
             return array_merge(['accion' => 'aviso_tomas'], $this->avisar_a_tomas($client, $lead, self::TOMAS_VENCIDA));
         }
@@ -179,6 +198,25 @@ class PruebaWhatsappService
         }
 
         try {
+            $resultado = $this->bienvenida_por_whatsapp($client, $lead);
+            $this->asegurar_bienvenida_en_el_sistema($client, $lead, $resultado);
+
+            return $resultado;
+        } finally {
+            $reserva->release();
+        }
+    }
+
+    /**
+     * La bienvenida por WhatsApp (plantilla por el ticket de soporte), con el candado ya tomado.
+     *
+     * @param Client    $client
+     * @param Lead|null $lead
+     *
+     * @return array{estado: string, detalle: string|null}
+     */
+    protected function bienvenida_por_whatsapp(Client $client, ?Lead $lead): array
+    {
             $enviadas = PruebaWhatsappEnvio::query()
                 ->where('client_id', (int) $client->id)
                 ->whereIn('plantilla', array_merge(PruebaPlantillasService::BIENVENIDAS, [PruebaPlantillasService::ASISTENTE_LISTO]))
@@ -186,11 +224,11 @@ class PruebaWhatsappService
                 ->pluck('plantilla');
 
             $ya = $enviadas->isNotEmpty();
-            $plantilla = $ya ? PruebaPlantillasService::ASISTENTE_LISTO : PruebaPlantillasService::BIENVENIDA_CON_ASISTENTE;
+            $plantilla = $ya ? PruebaPlantillasService::ASISTENTE_LISTO : $this->plantillas->bienvenida_vigente(true, $client);
             $instancia = $lead !== null ? Prueba\PruebaAsistenteService::instancia_vigente($client) : null;
             if ($instancia !== null) {
                 $falta_correo = $instancia->correo_bienvenida_at === null && filter_var((string) $client->email, FILTER_VALIDATE_EMAIL);
-                $falta_whatsapp = ! $enviadas->contains(PruebaPlantillasService::BIENVENIDA_CON_ASISTENTE)
+                $falta_whatsapp = $enviadas->intersect(PruebaPlantillasService::BIENVENIDAS_CON_ASISTENTE)->isEmpty()
                     && ! $enviadas->contains(PruebaPlantillasService::ASISTENTE_LISTO)
                     && $this->plantillas->estado_para_enviar($plantilla)['motivo'] === null;
 
@@ -201,7 +239,7 @@ class PruebaWhatsappService
                             app(Prueba\PruebaCorreoService::class)->enviar($client, $instancia, $asistente);
                         }
                         if ($falta_whatsapp) {
-                            return $this->con_video_de_bienvenida($client, $this->enviar_plantilla_por_ticket($client, $lead, $plantilla, null, true, $asistente['numero']));
+                            return $this->con_video_de_bienvenida($client, $this->enviar_plantilla_por_ticket($client, $lead, $plantilla, null, true, $this->variables_de_la_bienvenida($plantilla, $client, (string) $asistente['numero'])));
                         }
                     }
                 }
@@ -211,10 +249,156 @@ class PruebaWhatsappService
                 return ['estado' => 'ya_enviada', 'detalle' => null];
             }
 
-            return $this->con_video_de_bienvenida($client, $this->enviar_plantilla_por_ticket($client, $lead, PruebaPlantillasService::BIENVENIDA, null, true));
-        } finally {
-            $reserva->release();
+            $sin_asistente = $this->plantillas->bienvenida_vigente(false, $client);
+
+            return $this->con_video_de_bienvenida($client, $this->enviar_plantilla_por_ticket($client, $lead, $sin_asistente, null, true, $this->variables_de_la_bienvenida($sin_asistente, $client, null)));
+    }
+
+    /**
+     * Las variables que lleva cada bienvenida además del nombre: la v1 con asistente, su número; la v2, la dirección
+     * del sistema; la v2 con asistente, la dirección y el número.
+     *
+     * @param string      $plantilla
+     * @param Client      $client
+     * @param string|null $numero_asistente
+     *
+     * @return string|array<int, string>|null
+     */
+    protected function variables_de_la_bienvenida(string $plantilla, Client $client, ?string $numero_asistente)
+    {
+        $url = (string) Prueba\PruebaCorreoService::url_del_sistema($client);
+
+        if ($plantilla === PruebaPlantillasService::BIENVENIDA_V2) {
+            return $url;
         }
+        if ($plantilla === PruebaPlantillasService::BIENVENIDA_CON_ASISTENTE_V2) {
+            return [$url, (string) $numero_asistente];
+        }
+
+        return $numero_asistente;
+    }
+
+    /**
+     * El negocio tiene que ver la bienvenida en Soporte de SU SISTEMA aunque el WhatsApp no salga (misión
+     * prueba-e2e-campana-imperio, 11/11/2026). Lo que el sistema muestra es el ticket «Prueba gratuita» de
+     * WhatsApp, y de él solo los mensajes que salieron (con wamid) o que están marcados como sincronizados
+     * (`InboundAgentesController::filtrar_mensajes_visibles()`). Entonces:
+     *
+     *  - Si la plantilla salió, no hay nada que hacer: el mensaje ya se ve. Y si antes se había dejado una copia
+     *    para el sistema, se retira: la bienvenida no se duplica.
+     *  - Si quedó en cola (Meta todavía no aprobó la plantilla) o Meta la rechazó, se abre igual el ticket y se
+     *    deja UNA copia para el sistema: el texto de la bienvenida v2 y el video 04, marcada como sincronizada.
+     *    No sale nada por WhatsApp ni se registra en `prueba_whatsapp_envios`: la bienvenida por WhatsApp sigue
+     *    pendiente y sale cuando se pueda.
+     *
+     * Nunca cambia el resultado de la bienvenida ni la tumba.
+     *
+     * @param Client               $client
+     * @param Lead|null            $lead
+     * @param array<string, mixed> $resultado Lo que devolvió `bienvenida_por_whatsapp()`.
+     *
+     * @return void
+     */
+    protected function asegurar_bienvenida_en_el_sistema(Client $client, ?Lead $lead, array $resultado): void
+    {
+        try {
+            $estado = isset($resultado['estado']) ? (string) $resultado['estado'] : '';
+
+            if ($estado === 'enviado') {
+                $copia = $this->bienvenida_del_sistema($client);
+                if ($copia !== null) {
+                    $copia->delete();
+                }
+
+                return;
+            }
+
+            if (! in_array($estado, ['en_cola', 'fallido'], true) || ! Prueba\PruebaSettings::novedades_para($client)
+                || $this->bienvenida_del_sistema($client) !== null) {
+                return;
+            }
+
+            /* Si alguna bienvenida ya salió por WhatsApp (lo que falló fue otra cosa), ya la ve. */
+            $ya_salio = PruebaWhatsappEnvio::query()
+                ->where('client_id', (int) $client->id)
+                ->whereIn('plantilla', PruebaPlantillasService::BIENVENIDAS)
+                ->where('estado', PruebaWhatsappEnvio::ESTADO_ENVIADO)
+                ->exists();
+            if ($ya_salio) {
+                return;
+            }
+
+            $telefono = trim((string) $client->telefono_personal());
+            $contacto = $telefono === '' ? null : $this->directorio->resolve_for_client($client, $telefono);
+            $admin    = $this->remitente();
+            if ($contacto === null || $contacto['client_employee_id'] !== null || $admin === null) {
+                return;
+            }
+
+            $ticket = $this->opener->resolve_or_create_ticket($client, (string) $contacto['phone'], $admin, 'Prueba gratuita', 'sistema')['ticket'];
+            if ($ticket === null || $ticket->source !== 'whatsapp') {
+                return;
+            }
+
+            $url   = Prueba\PruebaCorreoService::url_del_sistema($client);
+            $texto = PruebaPlantillasService::cuerpo_de(PruebaPlantillasService::BIENVENIDA_V2);
+            if ($url === null) {
+                $texto = str_replace(PruebaPlantillasService::COMO_ENTRAR . ' ', '', $texto);
+            }
+            $texto = strtr($texto, [
+                '{{1}}' => $this->primer_nombre($client, $lead, (string) $contacto['label']),
+                '{{2}}' => (string) $url,
+            ]);
+
+            $catalogo = app(Prueba\PruebaVideoCatalogoService::class)->videos();
+            $clave    = 'prueba:' . Prueba\PruebaVideoSoporteService::CODIGO_BIENVENIDA;
+            if (isset($catalogo[$clave])) {
+                $texto .= "\n\n" . app(Prueba\PruebaVideoSoporteService::class)->texto_del_video($catalogo[$clave]);
+            }
+
+            $mensaje = SupportMessage::create([
+                'support_ticket_id'      => (int) $ticket->id,
+                'sender_type'            => 'admin',
+                'sender_admin_id'        => (int) $admin->id,
+                'kind'                   => 'text',
+                'body'                   => $texto,
+                'delivered_at'           => now(),
+                /* Sin wamid: no salió por WhatsApp. Lo que lo hace visible en el sistema es esta marca. */
+                'synced_to_client_at'    => now(),
+                'is_trial_import_notice' => true,
+                'erp_auto_reply'         => [self::MARCA_BIENVENIDA_SISTEMA => true],
+            ]);
+
+            try {
+                event(new SupportMessageReceived((int) $mensaje->id));
+            } catch (\Throwable $e) {
+                Log::channel('daily')->warning('PruebaWhatsapp: no se pudo emitir el evento del mensaje.', ['message_id' => $mensaje->id, 'error' => $e->getMessage()]);
+            }
+        } catch (\Throwable $e) {
+            Log::channel('daily')->warning('PruebaWhatsapp: no se pudo dejar la bienvenida visible en el sistema del negocio.', [
+                'client_id' => (int) $client->id,
+                'error'     => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * La copia de la bienvenida dejada para el sistema del negocio, si existe.
+     *
+     * @param Client $client
+     *
+     * @return SupportMessage|null
+     */
+    protected function bienvenida_del_sistema(Client $client): ?SupportMessage
+    {
+        return SupportMessage::query()
+            ->whereHas('ticket', function ($ticket) use ($client) {
+                $ticket->where('client_id', (int) $client->id);
+            })
+            ->where('sender_type', 'admin')
+            ->where('erp_auto_reply->' . self::MARCA_BIENVENIDA_SISTEMA, true)
+            ->orderByDesc('id')
+            ->first();
     }
 
     /**
@@ -250,7 +434,8 @@ class PruebaWhatsappService
     public function retomar_bienvenidas(?int $cliente_id = null): void
     {
         foreach ($this->pruebas->clientes_en_prueba() as $client) {
-            if ($cliente_id !== null && (int) $client->id !== $cliente_id) {
+            /* Al cliente de ensayo lo maneja solo `pruebas:ensayo` (con su reloj): los barridos reales lo saltean. */
+            if (($cliente_id !== null && (int) $client->id !== $cliente_id) || (bool) $client->es_ensayo) {
                 continue;
             }
 
@@ -288,6 +473,11 @@ class PruebaWhatsappService
         $resultados = [];
 
         foreach ($this->pruebas->clientes_en_prueba() as $client) {
+            /* Al cliente de ensayo lo maneja solo `pruebas:ensayo` (con su reloj): ni empujón ni aviso al closer. */
+            if ((bool) $client->es_ensayo) {
+                continue;
+            }
+
             try {
                 $lead  = $this->pruebas->lead_del_cliente($client);
                 $datos = $this->pruebas->datos($client);
@@ -338,12 +528,25 @@ class PruebaWhatsappService
             return ['estado' => 'bienvenida_' . $bienvenida['estado'], 'detalle' => $bienvenida['detalle']];
         }
 
+        /* Desde el día 5, el mensaje del día es el aviso de que la prueba está por terminar (una sola vez). */
+        $por_terminar = $this->avisar_al_negocio_que_esta_por_terminar($client, $lead, $datos);
+        if ($por_terminar !== null) {
+            return $por_terminar;
+        }
+
         if ($this->ya_se_le_mando_hoy($client)) {
             return ['estado' => 'ya_hoy', 'detalle' => 'Ya salió un mensaje de la prueba hoy.'];
         }
 
-        $telefono = trim((string) $client->telefono_personal());
-        if ($telefono !== '' && $this->ventanas->is_open($telefono)) {
+        $alcance = Prueba\PruebaSettings::novedades_para($client);
+
+        /* Dentro del alcance nuevo, el día que vence sí sale paso mientras la prueba siga en curso (la encuesta sale
+           recién al vencer), salvo que falten menos de tres horas para el vencimiento. */
+        if ($alcance && self::vence_muy_pronto($datos)) {
+            return ['estado' => 'ultimo_dia', 'detalle' => self::MOTIVO_ULTIMO_DIA];
+        }
+
+        if ($this->escribio_hace_poco($client, $alcance)) {
             return ['estado' => 'escribio_hace_poco', 'detalle' => 'El negocio escribió en las últimas 24 h: lo atiende Martín.'];
         }
 
@@ -355,22 +558,401 @@ class PruebaWhatsappService
             return ['estado' => 'vencida', 'detalle' => 'La instancia dice que la prueba venció: no se empuja más.'];
         }
 
-        $proximo = PruebaDelClienteService::proximo_hito_faltante($hitos['hitos']);
+        $eleccion = $this->elegir_paso($client, $hitos);
 
-        if ($proximo === null) {
-            return ['estado' => 'sin_hito_faltante', 'detalle' => 'Pasó por todos los hitos.'];
+        if ($eleccion['paso'] === null) {
+            /* Si ningún paso tiene la plantilla aprobada, el primero que tocaba le llega igual por correo (una vez). */
+            if ($eleccion['sin_plantilla'] !== null) {
+                $this->correo_del_paso($client, $lead, $eleccion['sin_plantilla']);
+            }
+
+            return ['estado' => $eleccion['estado'], 'detalle' => $eleccion['detalle']];
         }
 
-        $plantilla = PruebaPlantillasService::plantilla_del_paso($proximo);
-        $estado    = $this->plantillas->estado_para_enviar($plantilla);
+        $envio = $this->enviar_plantilla_por_ticket($client, $lead, $eleccion['plantilla'], $eleccion['paso'], false);
 
-        if ($estado['motivo'] !== null) {
-            return ['estado' => 'plantilla_no_disponible', 'detalle' => $plantilla . ': ' . $estado['motivo']];
+        if ($envio['estado'] === 'enviado') {
+            $this->correo_del_paso($client, $lead, $eleccion['paso']);
         }
 
-        $envio = $this->enviar_plantilla_por_ticket($client, $lead, $plantilla, $proximo, false);
+        return ['estado' => $envio['estado'] === 'enviado' ? 'enviado' : $envio['estado'], 'detalle' => $envio['detalle'] !== null ? $envio['detalle'] : $eleccion['plantilla']];
+    }
 
-        return ['estado' => $envio['estado'] === 'enviado' ? 'enviado' : $envio['estado'], 'detalle' => $envio['detalle'] !== null ? $envio['detalle'] : $plantilla];
+    /**
+     * Qué paso le toca hoy a este cliente y con qué plantilla. No manda nada: lo usan el empujón y la lectura para
+     * el informe diario ({@see self::que_sale_hoy()}), así las dos dicen lo mismo.
+     *
+     * Fuera del alcance de las novedades es la regla de siempre: el primer hito que falta, en el orden de siempre, y
+     * si su plantilla no está aprobada ese día no sale nada.
+     *
+     * Dentro del alcance (revisión del 11/11/2026), en el orden del recorrido nuevo:
+     *  1. Tope de {@see self::TOPE_POR_PASO} envíos por hito: un paso que ya se mandó dos veces y sigue sin cumplirse
+     *     se saltea. Si lo que no hizo es ENTRAR y ya van dos, no se le manda ningún paso más.
+     *  2. Si la plantilla del paso que toca no está aprobada, se pasa al siguiente que la tenga (nunca queda mudo).
+     *
+     * @param Client               $client
+     * @param array<string, mixed> $hitos  Lo que devuelve `PruebaDelClienteService::hitos()` para este cliente.
+     *
+     * @return array{paso: string|null, plantilla: string|null, estado: string, detalle: string|null, sin_plantilla: string|null}
+     *   `sin_plantilla` = dentro del alcance, el primer paso pendiente que se salteó por no tener plantilla aprobada,
+     *   cuando al final no quedó ninguno para mandar.
+     */
+    public function elegir_paso(Client $client, array $hitos): array
+    {
+        $orden  = $this->pruebas->orden_del_recorrido($client);
+        $omitir = isset($hitos['sin_soporte']) ? $hitos['sin_soporte'] : [];
+
+        if (! Prueba\PruebaSettings::novedades_para($client)) {
+            $proximo = PruebaDelClienteService::proximo_hito_faltante($hitos['hitos'], $omitir, $orden);
+            if ($proximo === null) {
+                return ['paso' => null, 'plantilla' => null, 'estado' => 'sin_hito_faltante', 'detalle' => 'Pasó por todos los hitos.', 'sin_plantilla' => null];
+            }
+
+            $plantilla = PruebaPlantillasService::plantilla_del_paso($proximo);
+            $estado    = $this->plantillas->estado_para_enviar($plantilla);
+            if ($estado['motivo'] !== null) {
+                return ['paso' => null, 'plantilla' => $plantilla, 'estado' => 'plantilla_no_disponible', 'detalle' => $plantilla . ': ' . $estado['motivo'], 'sin_plantilla' => $proximo];
+            }
+
+            return ['paso' => $proximo, 'plantilla' => $plantilla, 'estado' => 'enviar', 'detalle' => null, 'sin_plantilla' => null];
+        }
+
+        /* Cuántas veces salió ya el WhatsApp de cada paso (cualquiera de sus plantillas). */
+        $veces = PruebaWhatsappEnvio::query()
+            ->where('client_id', (int) $client->id)
+            ->where('canal', PruebaWhatsappEnvio::CANAL_WHATSAPP)
+            ->where('estado', PruebaWhatsappEnvio::ESTADO_ENVIADO)
+            ->where('plantilla', 'like', PruebaPlantillasService::PASO_PREFIJO . '%')
+            ->whereNotNull('hito')
+            ->pluck('hito')
+            ->countBy()
+            ->all();
+
+        $sin_plantilla = null;
+        $plantilla_que_falta = null;
+
+        foreach ($orden as $hito) {
+            if (in_array($hito, $omitir, true) || (isset($hitos['hitos'][$hito]) && $hitos['hitos'][$hito] !== null)) {
+                continue;
+            }
+
+            if ((isset($veces[$hito]) ? (int) $veces[$hito] : 0) >= self::TOPE_POR_PASO) {
+                if ($hito === 'ingreso') {
+                    return ['paso' => null, 'plantilla' => null, 'estado' => 'tope_de_ingreso', 'detalle' => self::MOTIVO_TOPE_DE_INGRESO, 'sin_plantilla' => null];
+                }
+
+                continue;
+            }
+
+            $plantilla = $this->plantillas->plantilla_del_paso_vigente($hito, $client);
+            if ($this->plantillas->estado_para_enviar($plantilla)['motivo'] !== null) {
+                if ($sin_plantilla === null) {
+                    $sin_plantilla       = $hito;
+                    $plantilla_que_falta = $plantilla;
+                }
+
+                continue;
+            }
+
+            return ['paso' => $hito, 'plantilla' => $plantilla, 'estado' => 'enviar', 'detalle' => null, 'sin_plantilla' => null];
+        }
+
+        if ($sin_plantilla !== null) {
+            return ['paso' => null, 'plantilla' => $plantilla_que_falta, 'estado' => 'plantilla_no_disponible',
+                'detalle' => 'Ningún paso pendiente tiene su plantilla aprobada (falta ' . $plantilla_que_falta . ').', 'sin_plantilla' => $sin_plantilla];
+        }
+
+        return ['paso' => null, 'plantilla' => null, 'estado' => 'sin_hito_faltante', 'detalle' => 'No queda ningún paso por pedir.', 'sin_plantilla' => null];
+    }
+
+    /**
+     * Si la prueba vence dentro de las próximas 24 horas: es su último día (el día N de N).
+     *
+     * @param array<string, mixed> $datos `PruebaDelClienteService::datos()`.
+     *
+     * @return bool
+     */
+    public static function vence_hoy(array $datos): bool
+    {
+        return $datos['vencida'] !== true && $datos['dia_actual'] !== null && (int) $datos['dia_actual'] >= (int) $datos['dias'];
+    }
+
+    /**
+     * Si faltan menos de {@see self::HORAS_SIN_PASO_ANTES_DE_VENCER} horas para que venza: a esa altura ya no sale
+     * paso.
+     *
+     * @param array<string, mixed> $datos `PruebaDelClienteService::datos()`.
+     *
+     * @return bool
+     */
+    public static function vence_muy_pronto(array $datos): bool
+    {
+        if ($datos['vencida'] === true || empty($datos['vence_at'])) {
+            return false;
+        }
+
+        return Carbon::now()->diffInSeconds(Carbon::parse((string) $datos['vence_at']), false) < self::HORAS_SIN_PASO_ANTES_DE_VENCER * 3600;
+    }
+
+    /**
+     * El paso que le tocaría hoy a este negocio por WhatsApp si hoy no saliera otra cosa (ni aviso ni tope diario):
+     * con las reglas del empujón, sin mandar nada. Lo usa el correo del aviso de que la prueba termina, que lo
+     * lleva debajo («Mientras tanto, lo próximo para probar…»). null si hoy no le toca ninguno.
+     *
+     * @param Client               $client
+     * @param Lead|null            $lead
+     * @param array<string, mixed> $datos
+     * @param array<string, mixed>|null $hitos Si ya se tienen (los del alcance del cliente).
+     *
+     * @return string|null
+     */
+    public function paso_que_tocaba(Client $client, ?Lead $lead, array $datos, ?array $hitos = null): ?string
+    {
+        $alcance = Prueba\PruebaSettings::novedades_para($client);
+
+        if (($alcance && self::vence_muy_pronto($datos)) || $this->escribio_hace_poco($client, $alcance)) {
+            return null;
+        }
+
+        $hitos = $hitos !== null ? $hitos : $this->pruebas->hitos($client, $lead, true);
+        if (isset($hitos['vencida']) && $hitos['vencida'] === true) {
+            return null;
+        }
+
+        return $this->elegir_paso($client, $hitos)['paso'];
+    }
+
+    /**
+     * Si el negocio escribió hace menos de 24 horas. Siempre mira la ventana de WhatsApp del dueño (la regla de
+     * siempre); con `$cualquier_canal` (dentro del alcance de las novedades) mira además cualquier mensaje suyo a
+     * Soporte, por WhatsApp o por el chat de su sistema: lo está guiando Martín.
+     *
+     * @param Client $client
+     * @param bool   $cualquier_canal
+     *
+     * @return bool
+     */
+    public function escribio_hace_poco(Client $client, bool $cualquier_canal): bool
+    {
+        $telefono = trim((string) $client->telefono_personal());
+        if ($telefono !== '' && $this->ventanas->is_open($telefono)) {
+            return true;
+        }
+
+        if (! $cualquier_canal) {
+            return false;
+        }
+
+        $entrantes = DB::table('support_messages')
+            ->join('support_tickets', 'support_tickets.id', '=', 'support_messages.support_ticket_id')
+            ->where('support_tickets.client_id', (int) $client->id)
+            ->where('support_messages.sender_type', 'user')
+            ->where('support_messages.created_at', '>=', Carbon::now()->subHours(24));
+        SupportMessage::apply_mensaje_real_conditions($entrantes, 'support_messages');
+
+        return $entrantes->exists();
+    }
+
+    /**
+     * Qué le sale HOY a este negocio, con las mismas reglas y en el mismo orden que el empujón diario y sin mandar
+     * nada (misión prueba-e2e-campana-imperio, 11/11/2026): es lo que lee el informe diario.
+     *
+     * @param Client               $client
+     * @param array<string, mixed> $datos `PruebaDelClienteService::datos()`.
+     * @param array<string, mixed> $hitos `PruebaDelClienteService::hitos()` de este cliente (ya con su alcance).
+     *
+     * @return array{paso: string|null, paso_en_el_correo: string|null, motivo_sin_paso: string|null, aviso_dia_5: bool, vence_hoy: bool, encuesta_pendiente: bool, plantilla: string|null, video_codigo: string|null}
+     *   `paso` = el paso que sale hoy por WhatsApp. `paso_en_el_correo` = el día del aviso de que termina, el paso que
+     *   va debajo del aviso en el correo (no cuenta como enviado). `vence_hoy` = vence dentro de 24 h (igual sale
+     *   paso, salvo que falten menos de 3 h).
+     */
+    public function que_sale_hoy(Client $client, array $datos, array $hitos): array
+    {
+        $alcance = Prueba\PruebaSettings::novedades_para($client);
+        $vencida = $datos['vencida'] === true || (isset($hitos['vencida']) && $hitos['vencida'] === true)
+            || (string) $client->estado === Prueba\PruebaCicloService::CLIENTE_PRUEBA_VENCIDA;
+        $en_prueba = Prueba\PruebaCicloService::esta_en_prueba($client);
+
+        $hoy = [
+            'paso' => null, 'paso_en_el_correo' => null, 'motivo_sin_paso' => null, 'aviso_dia_5' => false,
+            'vence_hoy' => $en_prueba && ! $vencida && self::vence_hoy($datos),
+            'encuesta_pendiente' => false, 'plantilla' => null, 'video_codigo' => null,
+        ];
+
+        /* La encuesta: sale al vencer, así que está pendiente el día que vence y mientras no haya salido. */
+        if ($alcance && Prueba\PruebaSettings::encuesta_activa()) {
+            $encuesta = \App\Models\PruebaEncuesta::where('client_id', (int) $client->id)->first();
+            $hoy['encuesta_pendiente'] = $hoy['vence_hoy'] || ($en_prueba && $vencida && ($encuesta === null || $encuesta->enviada_at === null));
+        }
+
+        if (! $en_prueba) {
+            $hoy['motivo_sin_paso'] = 'Ya no está en prueba.';
+
+            return $hoy;
+        }
+        if ($vencida) {
+            $hoy['motivo_sin_paso'] = 'La prueba venció: no se empuja más.';
+
+            return $hoy;
+        }
+
+        $con_bienvenida = PruebaWhatsappEnvio::query()
+            ->where('client_id', (int) $client->id)
+            ->whereIn('plantilla', array_merge(PruebaPlantillasService::BIENVENIDAS, [PruebaPlantillasService::ASISTENTE_LISTO]))
+            ->where('estado', PruebaWhatsappEnvio::ESTADO_ENVIADO)
+            ->exists();
+        if (! $con_bienvenida) {
+            $hoy['plantilla']       = $this->plantillas->bienvenida_vigente(false, $client);
+            $hoy['motivo_sin_paso'] = 'Primero sale la bienvenida.';
+
+            return $hoy;
+        }
+
+        if ($this->corresponde_el_aviso_de_que_termina($client, $datos)) {
+            $hoy['aviso_dia_5']     = true;
+            $hoy['plantilla']       = PruebaPlantillasService::DIA_5;
+            $hoy['motivo_sin_paso'] = 'Hoy sale el aviso de que la prueba termina (el WhatsApp del día es ese).';
+
+            /* El correo de hoy lleva, debajo del aviso, el paso que le tocaba (no cuenta para el tope de envíos). */
+            $correos = app(Prueba\PruebaCorreoService::class);
+            if (filter_var(trim((string) $client->email), FILTER_VALIDATE_EMAIL) && ! $correos->ya_salio($client, Prueba\PruebaCorreoService::CORREO_DIA_5)) {
+                $hoy['paso_en_el_correo'] = $this->paso_que_tocaba($client, null, $datos, $hitos);
+                if ($hoy['paso_en_el_correo'] !== null && isset(Prueba\PruebaCorreoService::VIDEO_DEL_PASO[$hoy['paso_en_el_correo']])) {
+                    $hoy['video_codigo'] = Prueba\PruebaCorreoService::VIDEO_DEL_PASO[$hoy['paso_en_el_correo']];
+                }
+            }
+
+            return $hoy;
+        }
+
+        if ($this->ya_se_le_mando_hoy($client)) {
+            $hoy['motivo_sin_paso'] = 'Ya salió un mensaje de la prueba hoy.';
+
+            return $hoy;
+        }
+
+        if ($alcance && self::vence_muy_pronto($datos)) {
+            $hoy['motivo_sin_paso'] = self::MOTIVO_ULTIMO_DIA;
+
+            return $hoy;
+        }
+
+        if ($this->escribio_hace_poco($client, $alcance)) {
+            $hoy['motivo_sin_paso'] = 'El negocio escribió en las últimas 24 h: lo atiende Martín.';
+
+            return $hoy;
+        }
+
+        $eleccion         = $this->elegir_paso($client, $hitos);
+        $hoy['paso']      = $eleccion['paso'];
+        $hoy['plantilla'] = $eleccion['plantilla'];
+        if ($eleccion['paso'] === null) {
+            $hoy['motivo_sin_paso'] = $eleccion['detalle'];
+        } elseif ($alcance && isset(Prueba\PruebaCorreoService::VIDEO_DEL_PASO[$eleccion['paso']])) {
+            $hoy['video_codigo'] = Prueba\PruebaCorreoService::VIDEO_DEL_PASO[$eleccion['paso']];
+        }
+
+        return $hoy;
+    }
+
+    /**
+     * El correo que acompaña al empujón de un paso, con el video que corresponde (misión
+     * prueba-e2e-campana-imperio, 11/11/2026). Uno por paso y por cliente; nunca cambia el resultado del empujón.
+     *
+     * @param Client    $client
+     * @param Lead|null $lead
+     * @param string    $hito
+     *
+     * @return void
+     */
+    protected function correo_del_paso(Client $client, ?Lead $lead, string $hito): void
+    {
+        if (! Prueba\PruebaSettings::novedades_para($client)) {
+            return;
+        }
+
+        try {
+            app(Prueba\PruebaCorreoService::class)->enviar_paso($client, $lead, $hito);
+        } catch (\Throwable $e) {
+            Log::channel('daily')->warning('PruebaWhatsapp: no salió el correo del paso.', [
+                'client_id' => (int) $client->id,
+                'hito'      => $hito,
+                'error'     => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Desde el día 5 de la prueba, le avisa AL NEGOCIO que está por terminar (misión prueba-e2e-campana-imperio,
+     * 11/11/2026): un correo y el WhatsApp `cc_prueba_dia_5`, cada uno una sola vez. El WhatsApp ocupa el lugar
+     * del empujón de ese día (sigue siendo uno por día) y sale aunque el negocio haya escrito hace poco: no es un
+     * empujón, es un aviso de fecha. El correo no depende del WhatsApp. El aviso a Tomás no cambia.
+     *
+     * @param Client               $client
+     * @param Lead|null            $lead
+     * @param array<string, mixed> $datos
+     *
+     * @return array{estado: string, detalle: string|null}|null null = no salió ningún WhatsApp acá: sigue el empujón normal.
+     */
+    public function avisar_al_negocio_que_esta_por_terminar(Client $client, ?Lead $lead, array $datos): ?array
+    {
+        if (! Prueba\PruebaSettings::novedades_para($client) || $datos['dia_actual'] === null || $datos['vencida'] === true
+            || (int) $datos['dia_actual'] < PruebaDelClienteService::DIA_DEL_AVISO_A_TOMAS) {
+            return null;
+        }
+
+        /* Los días que realmente faltan (`dias_restantes`): el mismo número que se le informa al closer. */
+        $restan = $datos['dias_restantes'] !== null ? (int) $datos['dias_restantes'] : (int) $datos['dias'] - (int) $datos['dia_actual'];
+        $falta  = $restan <= 1 ? '1 día' : $restan . ' días';
+
+        try {
+            /* El correo lleva el aviso y, debajo, el paso que le tocaba hoy con su video. Ese paso NO cuenta como
+               enviado: mañana sale por WhatsApp como siempre. Solo se calcula si el correo todavía no salió. */
+            $correos = app(Prueba\PruebaCorreoService::class);
+            if (! $correos->ya_salio($client, Prueba\PruebaCorreoService::CORREO_DIA_5)) {
+                $correos->enviar_por_terminar($client, $lead, $falta, $this->paso_que_tocaba($client, $lead, $datos));
+            }
+        } catch (\Throwable $e) {
+            Log::channel('daily')->warning('PruebaWhatsapp: no salió el correo de que la prueba está por terminar.', [
+                'client_id' => (int) $client->id,
+                'error'     => $e->getMessage(),
+            ]);
+        }
+
+        if (! $this->corresponde_el_aviso_de_que_termina($client, $datos)) {
+            return null;
+        }
+
+        $envio = $this->enviar_plantilla_por_ticket($client, $lead, PruebaPlantillasService::DIA_5, self::TOMAS_DIA_5, false, $falta);
+
+        return ['estado' => (string) $envio['estado'], 'detalle' => $envio['detalle'] !== null ? $envio['detalle'] : PruebaPlantillasService::DIA_5];
+    }
+
+    /**
+     * Si HOY corresponde mandar el WhatsApp de que la prueba termina: dentro del alcance, del día 5 en adelante, sin
+     * vencer, una sola vez, sin otro WhatsApp de la prueba hoy y con la plantilla aprobada. Sale aunque el negocio
+     * haya escrito hace poco.
+     *
+     * @param Client               $client
+     * @param array<string, mixed> $datos
+     *
+     * @return bool
+     */
+    public function corresponde_el_aviso_de_que_termina(Client $client, array $datos): bool
+    {
+        if (! Prueba\PruebaSettings::novedades_para($client) || $datos['dia_actual'] === null || $datos['vencida'] === true
+            || (int) $datos['dia_actual'] < PruebaDelClienteService::DIA_DEL_AVISO_A_TOMAS) {
+            return false;
+        }
+
+        $resuelto = PruebaWhatsappEnvio::query()
+            ->where('client_id', (int) $client->id)
+            ->where('plantilla', PruebaPlantillasService::DIA_5)
+            ->whereIn('estado', [PruebaWhatsappEnvio::ESTADO_ENVIADO, PruebaWhatsappEnvio::ESTADO_FALLIDO])
+            ->exists();
+
+        return ! $resuelto && ! $this->ya_se_le_mando_hoy($client)
+            && $this->plantillas->estado_para_enviar(PruebaPlantillasService::DIA_5)['motivo'] === null;
     }
 
     /**
@@ -386,6 +968,8 @@ class PruebaWhatsappService
             ->where('client_id', (int) $client->id)
             ->where('estado', PruebaWhatsappEnvio::ESTADO_ENVIADO)
             ->where('plantilla', '!=', PruebaWhatsappEnvio::PLANTILLA_AVISO_TOMAS)
+            /* Solo WhatsApps: un correo o un mensaje dejado en el sistema no gastan el tope del día. */
+            ->where('canal', PruebaWhatsappEnvio::CANAL_WHATSAPP)
             ->where('dia', self::hoy())
             ->exists();
     }
@@ -412,11 +996,13 @@ class PruebaWhatsappService
      * @param string      $plantilla  Nombre de la plantilla de Meta.
      * @param string|null $hito       El hito que empuja (null para la bienvenida).
      * @param bool        $encolar    true = si la plantilla no está aprobada, queda `en_cola` para reintentar.
-     * @param string|null $numero_asistente Número oficial para las plantillas que lo informan.
+     * @param string|array<int, string>|null $numero_asistente La segunda variable (`{{2}}`) de las plantillas que la
+     *                                      llevan: el número oficial del asistente, el enlace de la encuesta, los días
+     *                                      que quedan o la dirección del sistema. Una lista = `{{2}}` y `{{3}}`.
      *
      * @return array{estado: string, detalle: string|null, whatsapp_message_id?: string|null, support_ticket_id?: int|null}
      */
-    public function enviar_plantilla_por_ticket(Client $client, ?Lead $lead, string $plantilla, ?string $hito, bool $encolar, ?string $numero_asistente = null): array
+    public function enviar_plantilla_por_ticket(Client $client, ?Lead $lead, string $plantilla, ?string $hito, bool $encolar, $numero_asistente = null): array
     {
         $estado = $this->plantillas->estado_para_enviar($plantilla);
 
@@ -465,8 +1051,10 @@ class PruebaWhatsappService
         $idioma = trim((string) $fila->language_code) !== '' ? (string) $fila->language_code : PruebaPlantillasService::IDIOMA;
 
         $variables = [$this->opener->sanitize_template_variable($primer_nombre)];
-        if ($numero_asistente !== null) {
-            $variables[] = $this->opener->sanitize_template_variable($numero_asistente);
+        foreach (is_array($numero_asistente) ? array_values($numero_asistente) : [$numero_asistente] as $extra) {
+            if ($extra !== null) {
+                $variables[] = $this->opener->sanitize_template_variable((string) $extra);
+            }
         }
 
         $mensaje = DB::transaction(function () use ($ticket, $client, $contacto, $plantilla, $variables, $idioma, $admin, $primer_nombre, $numero_asistente) {
@@ -543,6 +1131,18 @@ class PruebaWhatsappService
      */
     public function mandar_texto_por_ticket(Client $client, string $texto, ?int $ticket_id = null): array
     {
+        /* El aviso vuelve por el MISMO canal por el que llegó el archivo (misión prueba-e2e-campana-imperio,
+         * 11/11/2026): si el ticket es la conversación de Soporte del sistema del dueño de una prueba, el mensaje
+         * se sincroniza a su sistema y no sale por WhatsApp. */
+        if ($ticket_id !== null) {
+            $del_sistema = SupportTicket::whereKey($ticket_id)->where('client_id', $client->id)
+                ->whereNull('client_employee_id')->where('source', 'erp')->where('status', SupportTicket::STATUS_ABIERTO)->first();
+
+            if ($del_sistema !== null) {
+                return $this->mandar_texto_al_sistema($client, $del_sistema, $texto);
+            }
+        }
+
         $ticket = null;
         if ($ticket_id !== null) {
             $ticket = SupportTicket::whereKey($ticket_id)->where('client_id', $client->id)
@@ -607,6 +1207,62 @@ class PruebaWhatsappService
             'whatsapp_message_id' => $wamid,
             'support_ticket_id'   => (int) $ticket->id,
         ];
+    }
+
+    /**
+     * Deja un aviso del equipo en la conversación de Soporte DEL SISTEMA del dueño de un negocio en prueba y lo
+     * sincroniza a su sistema (`admin-sync/support/messages`, el mismo camino que las respuestas de Martín). El
+     * mensaje lleva `is_trial_import_notice`: queda en el hilo sin tapar el entrante que espera respuesta.
+     *
+     * Si el sistema del negocio no lo confirma, el mensaje se borra (no llenar el hilo con copias en cada
+     * reintento) y se informa como no enviado.
+     *
+     * @param Client        $client
+     * @param SupportTicket $ticket Ticket abierto del canal sistema, sin empleado.
+     * @param string        $texto
+     *
+     * @return array{enviado: bool, motivo: string|null, whatsapp_message_id: string|null, support_ticket_id: int|null}
+     */
+    protected function mandar_texto_al_sistema(Client $client, SupportTicket $ticket, string $texto): array
+    {
+        $no = ['enviado' => false, 'motivo' => 'ticket_no_disponible', 'whatsapp_message_id' => null, 'support_ticket_id' => null];
+
+        if (! $this->pruebas->es_cliente_en_prueba($client) || (int) $client->user_id < 1
+            || (int) $ticket->client_user_id !== (int) $client->user_id) {
+            return $no;
+        }
+
+        $admin   = $this->remitente();
+        $mensaje = SupportMessage::create([
+            'support_ticket_id'      => (int) $ticket->id,
+            'sender_type'            => 'admin',
+            'sender_admin_id'        => $admin !== null ? (int) $admin->id : null,
+            'kind'                   => 'text',
+            'body'                   => $texto,
+            'delivered_at'           => now(),
+            'is_trial_import_notice' => true,
+        ]);
+
+        $sincronizado = false;
+        try {
+            $sincronizado = app(SupportClientSyncService::class)->sync_message_to_client($mensaje);
+        } catch (\Throwable $e) {
+            Log::channel('daily')->warning('PruebaWhatsapp: no se pudo sincronizar el aviso al sistema del negocio.', ['message_id' => $mensaje->id, 'error' => $e->getMessage()]);
+        }
+
+        if (! $sincronizado) {
+            $mensaje->delete();
+
+            return ['enviado' => false, 'motivo' => 'El sistema del negocio no confirmó el mensaje.', 'whatsapp_message_id' => null, 'support_ticket_id' => (int) $ticket->id];
+        }
+
+        try {
+            event(new SupportMessageReceived((int) $mensaje->id));
+        } catch (\Throwable $e) {
+            Log::channel('daily')->warning('PruebaWhatsapp: no se pudo emitir el evento del mensaje.', ['message_id' => $mensaje->id, 'error' => $e->getMessage()]);
+        }
+
+        return ['enviado' => true, 'motivo' => null, 'whatsapp_message_id' => null, 'support_ticket_id' => (int) $ticket->id];
     }
 
     /* ------------------------------------------------------------------------------------------

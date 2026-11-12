@@ -25,6 +25,14 @@ class PruebaWhatsappEnvio extends Model
     /** Meta rechazó el envío o no había a quién mandarle. */
     const ESTADO_FALLIDO = 'fallido';
 
+    /** Reservado antes de mandar: puede haber salido, así que nunca se reintenta. */
+    const ESTADO_ENVIANDO = 'enviando';
+
+    /** `canal` (misión prueba-e2e-campana-imperio, 11/11/2026): por dónde salió. Lo anterior es todo `whatsapp`. */
+    const CANAL_WHATSAPP = 'whatsapp';
+    const CANAL_CORREO   = 'correo';
+    const CANAL_SISTEMA  = 'sistema';
+
     /** `plantilla` de los avisos al closer (el motivo va en `hito`: `dia_5`, `vencida`, `manual`). */
     const PLANTILLA_AVISO_TOMAS = 'aviso_tomas';
 

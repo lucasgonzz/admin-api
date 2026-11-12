@@ -20,6 +20,16 @@ Route::get('/', function () {
 // Fuera de los grupos guest/auth a propósito: es pública por diseño.
 Route::get('/demo/{uuid}', 'DemoLandingController@show')->name('demo.landing');
 
+/* Encuesta de fin de prueba gratuita (misión cruzada prueba-e2e-campana-imperio, 11/11/2026): pública, el token
+   largo del enlace es la única credencial. El POST va sin CSRF a propósito (no hay sesión que proteger y un
+   formulario que quedó abierto no puede fallar por un token de sesión vencido). Una sola respuesta por token. */
+Route::get('/prueba/encuesta/{token}', 'PruebaEncuestaController@show')
+    ->middleware('throttle:60,1')
+    ->name('prueba.encuesta');
+Route::post('/prueba/encuesta/{token}', 'PruebaEncuestaController@store')
+    ->middleware('throttle:15,1')
+    ->withoutMiddleware([\App\Http\Middleware\VerifyCsrfToken::class]);
+
 Route::get('/recall', function () {
     $lead = \App\Models\Lead::find(254);
     $recall = app(\App\Services\RecallService::class);

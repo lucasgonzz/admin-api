@@ -155,6 +155,10 @@ class PruebaCicloService
             'c3'        => $resultado['estado'],
         ]);
 
+        /* La encuesta de fin de prueba también le llega al que contrató (misión prueba-e2e-campana-imperio,
+           11/11/2026). Nunca frena la contratación. */
+        app(PruebaEncuestaService::class)->enviar_sin_romper($client, \App\Models\PruebaEncuesta::MOTIVO_CONTRATO);
+
         return $resultado;
     }
 
@@ -287,7 +291,9 @@ class PruebaCicloService
     {
         $ahora = $ahora ?: Carbon::now();
 
+        /* Sin las cuentas de ensayo: a esas las vence solo `pruebas:ensayo`, con su reloj. */
         return Client::where('estado', self::CLIENTE_PRUEBA)
+            ->where('es_ensayo', false)
             ->whereNotNull('trial_ends_at')
             ->where('trial_ends_at', '<=', $ahora)
             ->orderBy('id')

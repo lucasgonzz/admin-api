@@ -300,6 +300,7 @@ class SupportCodexService
         $soporte_activo = $importador->puerta_activo($ticket) === null;
         $remitentes_verificados = $soporte_activo ? $importador->entrantes_del_dueno($ticket, $messages) : [];
         $robotito_disponible = SupportTourService::entrante_admite_robotito($ticket, $last);
+        $capacidades_de_prueba = $importador->capacidades_de_prueba($ticket);
         return [
             'id' => (int) $ticket->id,
             'status' => $ticket->status,
@@ -331,7 +332,7 @@ class SupportCodexService
             'reason' => $this->pending_reason($ticket, $case, true),
             // El helper debe verificar esta capacidad ANTES de pedir el modo nuevo: un admin
             // anterior ignoraría el campo y ejecutaría el resume que consume la consulta.
-            'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => true, 'prueba_import_resolver' => true,
+            'capabilities' => ['continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => $capacidades_de_prueba['prueba_import'], 'prueba_import_resolver' => $capacidades_de_prueba['prueba_import_resolver'],
                 'soporte_import' => $soporte_activo, 'soporte_import_resolver' => $soporte_activo,
                 'soporte_import_stock_existente' => $soporte_activo,
                 // Misión cruzada importaciones-de-martin (11/11/2026): la planilla derivada del PDF del dueño, el Excel
@@ -400,7 +401,7 @@ class SupportCodexService
                             'mime' => $attachment->mime,
                             'size' => $attachment->size,
                             'download_path' => '/api/claude/support-codex/tickets/' . $ticket->id . '/attachments/' . $attachment->id,
-                        ];
+                        ] + ($attachment->original_name !== null ? ['filename' => (string) $attachment->original_name] : []);
                     })->all(),
                 ];
             })->all(),
@@ -1005,7 +1006,11 @@ class SupportCodexService
                 if ($recordatorio !== null) {
                     $body = $recordatorio['body'];
                 } else {
-                    $oferta = SupportTourService::preparar_oferta($ticket, $entrante, $body, ! empty($input['usage_answer']));
+                    /* Si el agente invitó a Robotito a mano (sin `tour_requested`), la invitación se registra igual:
+                       si no, el «sí» de la persona no encuentra a qué invitación corresponde. */
+                    $a_mano = SupportTourService::invitacion_escrita_a_mano($body);
+                    $oferta = SupportTourService::preparar_oferta($ticket, $entrante, $a_mano !== null ? $a_mano : $body,
+                        ! empty($input['usage_answer']) || $a_mano !== null);
                     if ($oferta !== null) {
                         $body = $oferta;
                         $tour_requested = true;

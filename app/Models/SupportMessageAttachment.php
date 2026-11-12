@@ -74,12 +74,18 @@ class SupportMessageAttachment extends Model
     }
 
     /**
-     * Nombre de archivo legible: el basename del path guardado.
+     * Nombre de archivo legible: el original si se conoce; si no, el basename del path guardado.
      *
      * @return string|null
      */
     public function getDisplayFilenameAttribute(): ?string
     {
+        /* El nombre con el que el negocio lo subió por su sistema, si se guardó (misión prueba-e2e-campana-imperio). */
+        $original = trim((string) ($this->original_name ?? ''));
+        if ($original !== '') {
+            return $original;
+        }
+
         $path = trim((string) ($this->path ?? ''));
         if ($path === '') {
             return null;

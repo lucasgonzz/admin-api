@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Services\Prueba\PruebaCicloService;
+use App\Services\Prueba\PruebaEncuestaService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 
@@ -12,6 +13,11 @@ use Illuminate\Support\Facades\Log;
  * `prueba.vencida` que emite el ERP (C2): si el ERP no lo manda, el admin vence igual.
  *
  * Corre cada diez minutos. Cada cliente por separado: una falla del VPS en uno no frena a los demás.
+ *
+ * Después de vencer, le manda al negocio la encuesta de fin de prueba por WhatsApp y por correo (misión
+ * prueba-e2e-campana-imperio, 11/11/2026): `PruebaEncuestaService::barrer_vencidas()` recorre las que vencieron
+ * en las últimas 24 horas y todavía no la recibieron, así que también cubre la que venció por el evento
+ * `prueba.vencida` de la instancia y la plantilla que Meta aprobó tarde. Una falla ahí no cambia el resultado.
  */
 class PruebasVencerCommand extends Command
 {
@@ -38,6 +44,16 @@ class PruebasVencerCommand extends Command
         }
 
         $this->info('Vencidas: ' . $vencidos . '. Fallas: ' . $fallas . '.');
+
+        try {
+            foreach (app(PruebaEncuestaService::class)->barrer_vencidas() as $encuesta) {
+                $this->line('Encuesta: cliente ' . $encuesta['client_id'] . ' → ' . $encuesta['estado']
+                    . ' (WhatsApp: ' . ($encuesta['whatsapp'] !== null ? $encuesta['whatsapp'] : '-')
+                    . ', correo: ' . ($encuesta['correo'] !== null ? $encuesta['correo'] : '-') . ').');
+            }
+        } catch (\Throwable $e) {
+            Log::error('pruebas:vencer: falló el envío de las encuestas de fin de prueba.', ['error' => $e->getMessage()]);
+        }
 
         return $fallas > 0 ? 1 : 0;
     }

@@ -3,6 +3,7 @@
 namespace App\Services\Prueba;
 
 use App\Models\AdminSetting;
+use App\Models\Client;
 
 /**
  * Las pocas perillas de la prueba gratuita, todas en `admin_settings` con default escrito acá
@@ -37,6 +38,21 @@ class PruebaSettings
     /** Minutos sin respuesta antes del respaldo automático de soporte (ver respaldo_soporte_minutos()). */
     const KEY_RESPALDO_SOPORTE_MINUTOS = 'prueba_respaldo_soporte_minutos';
     const DEFAULT_RESPALDO_SOPORTE_MINUTOS = 3;
+
+    /** Encuesta de fin de prueba (misión prueba-e2e-campana-imperio, 11/11/2026): 1 = se manda al vencer y al contratar. */
+    const KEY_ENCUESTA_ACTIVA = 'prueba_encuesta_activa';
+
+    /** Qué bienvenida de WhatsApp se manda: `v2` (default; con respaldo a la v1 mientras Meta no la apruebe) o `v1`. */
+    const KEY_BIENVENIDA_VERSION = 'prueba_bienvenida_version';
+
+    /**
+     * A quién le llegan las NOVEDADES de la misión prueba-e2e-campana-imperio (encuesta, aviso de que la prueba
+     * termina, correo por paso, bienvenida v2, pasos de los hitos nuevos y la copia de la bienvenida en el sistema):
+     * `ensayo` (default) = solo a los clientes marcados `clients.es_ensayo`; `todos` = a todos los negocios en prueba.
+     */
+    const KEY_NOVEDADES_ALCANCE = 'prueba_novedades_alcance';
+    const ALCANCE_ENSAYO        = 'ensayo';
+    const ALCANCE_TODOS         = 'todos';
 
     /** 0 hasta que Lucas prenda el pool desde admin_settings: sin DNS ni plantilla, un mínimo > 0 solo fabrica fallidas. */
     const DEFAULT_POOL_MINIMO         = 0;
@@ -102,6 +118,57 @@ class PruebaSettings
         $minutos = (int) AdminSetting::get(self::KEY_RESPALDO_SOPORTE_MINUTOS, self::DEFAULT_RESPALDO_SOPORTE_MINUTOS);
 
         return $minutos < 1 ? self::DEFAULT_RESPALDO_SOPORTE_MINUTOS : min($minutos, 120);
+    }
+
+    /**
+     * Si la encuesta de fin de prueba se manda (`prueba_encuesta_activa`, default 1). Con 0 no se crea ni se
+     * manda ninguna; las que ya salieron se pueden seguir contestando.
+     *
+     * @return bool
+     */
+    public static function encuesta_activa(): bool
+    {
+        return (string) AdminSetting::get(self::KEY_ENCUESTA_ACTIVA, '1') !== '0';
+    }
+
+    /**
+     * La versión de la bienvenida por WhatsApp (`prueba_bienvenida_version`): `v2` salvo que el setting diga `v1`.
+     *
+     * @return string `v1` o `v2`.
+     */
+    public static function bienvenida_version(): string
+    {
+        return strtolower(trim((string) AdminSetting::get(self::KEY_BIENVENIDA_VERSION, 'v2'))) === 'v1' ? 'v1' : 'v2';
+    }
+
+    /**
+     * El alcance de las novedades (`prueba_novedades_alcance`): `todos` solo si el setting lo dice; cualquier otra
+     * cosa (o sin setting) es `ensayo`.
+     *
+     * @return string
+     */
+    public static function novedades_alcance(): string
+    {
+        return strtolower(trim((string) AdminSetting::get(self::KEY_NOVEDADES_ALCANCE, self::ALCANCE_ENSAYO))) === self::ALCANCE_TODOS
+            ? self::ALCANCE_TODOS
+            : self::ALCANCE_ENSAYO;
+    }
+
+    /**
+     * Si a este cliente le corresponden las novedades: con el alcance en `todos`, a cualquiera; con `ensayo`, solo
+     * al marcado como ensayo. Para el resto, la prueba se comporta exactamente como antes de la misión.
+     *
+     * @param Client|null $client
+     *
+     * @return bool
+     */
+    public static function novedades_para(?Client $client): bool
+    {
+        if ($client === null) {
+            return false;
+        }
+
+        return (bool) $client->es_ensayo || self::novedades_alcance() === self::ALCANCE_TODOS;
     }
 
     public static function whatsapp_soporte(): string
