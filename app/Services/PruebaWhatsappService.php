@@ -274,7 +274,7 @@ class PruebaWhatsappService
         if ($plantilla === PruebaPlantillasService::BIENVENIDA_V2) {
             return $url;
         }
-        if ($plantilla === PruebaPlantillasService::BIENVENIDA_CON_ASISTENTE_V2) {
+        if (in_array($plantilla, [PruebaPlantillasService::BIENVENIDA_CON_ASISTENTE_V2, PruebaPlantillasService::BIENVENIDA_CON_ASISTENTE_V3], true)) {
             return [$url, (string) $numero_asistente];
         }
 

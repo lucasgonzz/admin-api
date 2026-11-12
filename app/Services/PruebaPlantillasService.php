@@ -41,10 +41,16 @@ class PruebaPlantillasService
 
     const BIENVENIDA_CON_ASISTENTE_V2 = 'cc_prueba_bienvenida_asistente_v2';
 
-    const BIENVENIDAS = [self::BIENVENIDA, self::BIENVENIDA_CON_ASISTENTE, self::BIENVENIDA_V2, self::BIENVENIDA_CON_ASISTENTE_V2];
+    /**
+     * Variante CORTA de la bienvenida con asistente (12/11/2026), por si Meta no aprueba la v2 (larga, con tres
+     * variables). Mismas variables: `{{2}}` la dirección del sistema y `{{3}}` el número del asistente.
+     */
+    const BIENVENIDA_CON_ASISTENTE_V3 = 'cc_prueba_bienvenida_asistente_v3';
+
+    const BIENVENIDAS = [self::BIENVENIDA, self::BIENVENIDA_CON_ASISTENTE, self::BIENVENIDA_V2, self::BIENVENIDA_CON_ASISTENTE_V2, self::BIENVENIDA_CON_ASISTENTE_V3];
 
     /** Las bienvenidas que presentan el número del asistente personal. */
-    const BIENVENIDAS_CON_ASISTENTE = [self::BIENVENIDA_CON_ASISTENTE, self::BIENVENIDA_CON_ASISTENTE_V2];
+    const BIENVENIDAS_CON_ASISTENTE = [self::BIENVENIDA_CON_ASISTENTE, self::BIENVENIDA_CON_ASISTENTE_V2, self::BIENVENIDA_CON_ASISTENTE_V3];
 
     /** El pedido de la encuesta al que NO contrató, cuando la prueba terminó. `{{2}}` = el enlace. */
     const FIN_ENCUESTA = 'cc_prueba_fin_encuesta';
@@ -181,6 +187,13 @@ class PruebaPlantillasService
             'ejemplo_2' => 'https://ferreteria-lopez.comerciocity.com',
             'ejemplo_3' => '+54 9 11 1234-5678',
         ],
+        /* Variante corta de la anterior, por si Meta no la aprueba. `{{2}}` = la dirección; `{{3}}` = el número del asistente. */
+        self::BIENVENIDA_CON_ASISTENTE_V3 => [
+            'body' => 'Hola {{1}}, soy Martín, del equipo de ComercioCity. Tu prueba ya está lista con datos de ejemplo. ' . self::COMO_ENTRAR . ' Adentro, en Agentes, tenés a Soporte, que soy yo (pedime un recorrido guiado y te lo muestro en tu pantalla), y a tu Asistente personal, que también te atiende por WhatsApp en el {{3}}. Si querés que carguemos tu catálogo sin costo, mandame tu Excel o el PDF del proveedor.',
+            'uso'  => 'Prueba gratuita: bienvenida corta de Martín con cómo entrar, los agentes y el WhatsApp del asistente personal. Alternativa a cc_prueba_bienvenida_asistente_v2. {{2}} es la dirección del sistema y {{3}} el número del asistente.',
+            'ejemplo_2' => 'https://ferreteria-lopez.comerciocity.com',
+            'ejemplo_3' => '+54 9 11 1234-5678',
+        ],
         /* La plantilla aprobada dice «desde Artículos con el botón Nuevo», y esa pantalla se llama Listado. */
         'cc_prueba_paso_articulo_creado_v2' => [
             'body' => 'Hola {{1}}, un paso corto para probar el sistema: cargá un artículo tuyo desde Listado, con el botón Crear. Lleva un minuto y después lo vendés desde Vender. Si querés te paso un video de cómo se hace.',
@@ -259,7 +272,23 @@ class PruebaPlantillasService
             return $v1;
         }
 
-        return $this->estado_para_enviar($v2)['motivo'] === null ? $v2 : $v1;
+        if ($this->estado_para_enviar($v2)['motivo'] === null) {
+            return $v2;
+        }
+
+        if ($con_asistente) {
+            /* La variante corta, si existe y está aprobada. */
+            if ($this->estado_para_enviar(self::BIENVENIDA_CON_ASISTENTE_V3)['motivo'] === null) {
+                return self::BIENVENIDA_CON_ASISTENTE_V3;
+            }
+            /* Ninguna v2 con asistente aprobada: antes que la bienvenida vieja (que no explica los agentes ni cómo
+               entrar) va la v2 SIN asistente; el número del asistente sale después por `cc_prueba_asistente_listo`. */
+            if ($this->estado_para_enviar(self::BIENVENIDA_V2)['motivo'] === null) {
+                return self::BIENVENIDA_V2;
+            }
+        }
+
+        return $v1;
     }
 
     /**
