@@ -74,14 +74,14 @@ class AvisoDeQueLaPruebaTerminaTest extends BaseDeLaPrueba
         $this->assertSame('enviado', $resultado['estado'], (string) $resultado['detalle']);
         $this->assertCount(1, $espia->plantillas, 'El aviso es el único WhatsApp del día.');
         $this->assertSame(PruebaPlantillasService::DIA_5, $espia->plantillas[0]['template_name']);
-        $this->assertSame(['Marcela', '2 días'], $espia->plantillas[0]['variables']);
+        $this->assertSame(['Marcela', '3 días'], $espia->plantillas[0]['variables'], 'Los días que faltan de verdad: el mismo número que se le informa al closer.');
 
         $mensaje = \App\Models\SupportMessage::where('whatsapp_message_id', 'wamid.plantilla.1')->firstOrFail();
-        $this->assertStringContainsString('termina en 2 días', $mensaje->body, 'En el hilo queda lo mismo que recibió.');
+        $this->assertStringContainsString('termina en 3 días', $mensaje->body, 'En el hilo queda lo mismo que recibió.');
 
         Mail::assertSent(ComercioCityMail::class, 1);
         Mail::assertSent(ComercioCityMail::class, function (ComercioCityMail $mail) use ($client) {
-            return $mail->hasTo($client->email) && $mail->payload->subject === 'Tu prueba de ComercioCity termina en 2 días';
+            return $mail->hasTo($client->email) && $mail->payload->subject === 'Tu prueba de ComercioCity termina en 3 días';
         });
         $this->assertSame(1, PruebaWhatsappEnvio::where('client_id', $client->id)->where('canal', PruebaWhatsappEnvio::CANAL_CORREO)
             ->where('plantilla', 'correo_dia_5')->where('estado', PruebaWhatsappEnvio::ESTADO_ENVIADO)->count());
@@ -129,7 +129,7 @@ class AvisoDeQueLaPruebaTerminaTest extends BaseDeLaPrueba
         $this->assertCount(1, $espia->plantillas);
         $this->assertSame('cc_prueba_paso_importo', $espia->plantillas[0]['template_name']);
         Mail::assertSent(ComercioCityMail::class, function (ComercioCityMail $mail) {
-            return $mail->payload->subject === 'Tu prueba de ComercioCity termina en 1 día';
+            return $mail->payload->subject === 'Tu prueba de ComercioCity termina en 2 días';
         });
     }
 

@@ -115,9 +115,10 @@ class HitosNuevosYCorreoPorPasoTest extends BaseDeLaPrueba
     public function el_orden_de_los_pasos_es_el_del_programa_y_cada_paso_tiene_su_plantilla_y_su_correo(): void
     {
         $this->assertSame([
-            'ingreso', 'importo', 'articulo_creado', 'articulo_actualizado', 'venta', 'cliente_creado',
-            'venta_cc', 'pago_cc', 'compra', 'gasto', 'tienda_pedido', 'agente',
-        ], array_keys(PruebaDelClienteService::HITOS));
+            'ingreso', 'importo', 'articulo_creado', 'articulo_actualizado', 'venta', 'agente',
+            'tienda_pedido', 'venta_cc', 'pago_cc', 'compra', 'cliente_creado', 'gasto',
+        ], PruebaDelClienteService::RECORRIDO);
+        $this->assertEqualsCanonicalizing(array_keys(PruebaDelClienteService::HITOS), PruebaDelClienteService::RECORRIDO);
 
         foreach (array_keys(PruebaDelClienteService::HITOS) as $hito) {
             $this->assertArrayHasKey(PruebaPlantillasService::plantilla_del_paso($hito), PruebaPlantillasService::PLANTILLAS, $hito);
@@ -126,7 +127,7 @@ class HitosNuevosYCorreoPorPasoTest extends BaseDeLaPrueba
     }
 
     /** @test */
-    public function el_empujon_ofrece_actualizar_un_articulo_despues_de_crearlo_y_la_venta_en_cuenta_corriente_despues_del_cliente(): void
+    public function el_empujon_ofrece_actualizar_un_articulo_despues_de_crearlo_y_la_venta_en_cuenta_corriente_despues_de_la_tienda(): void
     {
         $espia = $this->espiar_sender();
         [$client, $lead] = $this->negocio(['ingreso', 'importo', 'articulo_creado']);
@@ -137,7 +138,7 @@ class HitosNuevosYCorreoPorPasoTest extends BaseDeLaPrueba
 
         PruebaWhatsappEnvio::where('client_id', $client->id)->update(['dia' => now(PruebaWhatsappService::ZONA)->subDay()->toDateString()]);
         $this->fakear_http(['*/admin-sync/prueba/estado' => Http::response(
-            $this->estado_de_la_instancia(['ingreso', 'importo', 'articulo_creado', 'articulo_actualizado', 'venta', 'cliente_creado']), 200
+            $this->estado_de_la_instancia(['ingreso', 'importo', 'articulo_creado', 'articulo_actualizado', 'venta', 'agente', 'tienda_pedido']), 200
         )]);
 
         $this->assertSame('enviado', $servicio->empujar($client, $lead)['estado']);
@@ -184,7 +185,9 @@ class HitosNuevosYCorreoPorPasoTest extends BaseDeLaPrueba
                 && $mail->payload->subject === 'Te cargamos tu catálogo sin costo'
                 && strpos($html, 'Hola Marcela, soy Martín') !== false
                 && strpos($html, PruebaVideoCatalogoService::URLS_APROBADAS['05']) !== false
-                && strpos($html, 'Importá tu catálogo') !== false;
+                && strpos($html, 'Te dejo un video que te puede servir:') !== false
+                && strpos($html, 'Importá tu catálogo') !== false
+                && strpos($html, 'entrá a tu sistema, abrí Agentes y elegí Soporte') !== false;
         });
 
         $registro = PruebaWhatsappEnvio::where('client_id', $client->id)->where('canal', PruebaWhatsappEnvio::CANAL_CORREO)->sole();
@@ -204,7 +207,7 @@ class HitosNuevosYCorreoPorPasoTest extends BaseDeLaPrueba
     {
         $espia = $this->espiar_sender();
         $this->videos_configurados();
-        [$client, $lead] = $this->negocio(['ingreso', 'importo', 'articulo_creado', 'articulo_actualizado', 'venta', 'cliente_creado', 'venta_cc', 'pago_cc', 'compra']);
+        [$client, $lead] = $this->negocio(['ingreso', 'importo', 'articulo_creado', 'articulo_actualizado', 'venta', 'agente', 'tienda_pedido', 'venta_cc', 'pago_cc', 'compra', 'cliente_creado']);
         FollowupTemplate::where('template_name', 'cc_prueba_paso_gasto')->update(['activa' => false, 'meta_status' => 'PENDING']);
 
         $resultado = app(PruebaWhatsappService::class)->empujar($client, $lead);
@@ -215,6 +218,8 @@ class HitosNuevosYCorreoPorPasoTest extends BaseDeLaPrueba
             $html = view($mail->build()->view, ['payload' => $mail->payload])->render();
 
             return $mail->payload->subject === 'Cargá un gasto y mirá la caja del día'
+                && strpos($html, 'Desde Tesorería, en Gastos,') !== false
+                && strpos($html, 'Te dejo un video') === false
                 && $mail->payload->links === []
                 && strpos($html, 'videos.comerciocity.store') === false;
         });

@@ -173,10 +173,8 @@ class AlcanceDeLasNovedadesTest extends BaseDeLaPrueba
         Mail::assertSent(ComercioCityMail::class, 2);
         $this->assertCount(12, app(PruebaDelClienteService::class)->resumen($client, $lead, true)['hitos_lista']);
 
-        /* Y al vencer, la encuesta. */
-        $client->trial_ends_at = now()->subMinutes(5);
-        $client->save();
-        Artisan::call('pruebas:vencer');
+        /* Y la encuesta, cuando se la manda el reloj de ensayo (el barrido real saltea a las cuentas de ensayo). */
+        $this->assertSame('enviada', app(\App\Services\Prueba\PruebaEncuestaService::class)->enviar($client, PruebaEncuesta::MOTIVO_VENCIDA)['estado']);
         $this->assertSame(1, PruebaEncuesta::where('client_id', $client->id)->count());
         $this->assertSame(PruebaPlantillasService::FIN_ENCUESTA, $espia->plantillas[2]['template_name']);
     }
@@ -188,6 +186,11 @@ class AlcanceDeLasNovedadesTest extends BaseDeLaPrueba
         AdminSetting::set(PruebaSettings::KEY_NOVEDADES_ALCANCE, 'todos');
         [$client, $lead] = $this->negocio(6, false);
         $this->la_instancia_contesta(['ingreso', 'importo', 'articulo_creado']);
+        \App\Models\TrialInstance::create([
+            'nombre' => 'prueba-' . \Illuminate\Support\Str::random(8), 'estado' => \App\Models\TrialInstance::ESTADO_ASIGNADA,
+            'erp_vps_path' => '/home/prueba/erp', 'ecommerce_vps_path' => '/home/prueba/tienda',
+            'client_id' => (int) $client->id, 'user_id' => (int) $client->user_id, 'alias_slug' => 'ferreteria-todos',
+        ]);
 
         $servicio = app(PruebaWhatsappService::class);
         $this->assertTrue(PruebaSettings::novedades_para($client));

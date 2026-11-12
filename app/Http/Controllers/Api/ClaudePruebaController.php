@@ -10,6 +10,7 @@ use App\Models\SupportMessage;
 use App\Models\TrialInstance;
 use App\Services\Prueba\PruebaCicloService;
 use App\Services\PruebaDelClienteService;
+use App\Services\PruebaWhatsappService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -110,8 +111,11 @@ class ClaudePruebaController extends Controller
         $lead      = $pruebas->lead_del_cliente($client);
         $en_prueba = PruebaCicloService::esta_en_prueba($client);
         $dias      = $pruebas->datos($client);
-        /* Lectura interna: el catálogo entero de hitos, sin mirar el alcance de las novedades. */
+        /* Lectura interna: el catálogo entero de hitos, sin mirar el alcance de las novedades. Lo que se le PIDE al
+           negocio (próximo paso, qué sale hoy) sí respeta su alcance y los hitos que su versión no informa. */
         $hitos     = $pruebas->hitos($client, $lead, $en_vivo && $en_prueba, true);
+        $del_alcance = $pruebas->aplicar_alcance($client, $hitos);
+        $hoy       = app(PruebaWhatsappService::class)->que_sale_hoy($client, $dias, $del_alcance);
         $instancia = TrialInstance::where('client_id', (int) $client->id)->orderByDesc('id')->first();
         $encuesta  = PruebaEncuesta::where('client_id', (int) $client->id)->first();
 
@@ -133,7 +137,7 @@ class ClaudePruebaController extends Controller
                     'plantilla'  => (string) $envio->plantilla,
                     'hito'       => $envio->hito,
                     'estado'     => (string) $envio->estado,
-                    'detalle'    => $envio->detalle,
+                    'detalle'    => self::sin_enlaces_de_encuesta($envio->detalle),
                     'enviado_at' => $envio->enviado_at !== null ? $envio->enviado_at->toIso8601String() : null,
                     'created_at' => $envio->created_at !== null ? $envio->created_at->toIso8601String() : null,
                 ];
@@ -165,11 +169,32 @@ class ClaudePruebaController extends Controller
             'hitos_hechos'   => $hechos,
             'hitos_total'    => count($hitos['hitos']),
             'hitos_sin_soporte' => $hitos['sin_soporte'],
-            'proximo_hito'   => $en_prueba ? PruebaDelClienteService::proximo_hito_faltante($hitos['hitos'], $hitos['sin_soporte']) : null,
+            'proximo_hito'   => $en_prueba
+                ? PruebaDelClienteService::proximo_hito_faltante($del_alcance['hitos'], $del_alcance['sin_soporte'], $pruebas->orden_del_recorrido($client))
+                : null,
+            /* Qué le sale HOY, con las mismas reglas que el empujón de las 10:00 y sin mandar nada. */
+            'hoy'            => $hoy,
             'envios'         => $envios,
             'ultimo_mensaje' => $this->ultimo_mensaje($client),
             'encuesta'       => $encuesta !== null ? $encuesta->resumen() : null,
         ];
+    }
+
+    /**
+     * Tapa cualquier enlace de encuesta (`/prueba/encuesta/<token>`): el token es lo único que abre la encuesta de
+     * un negocio y no tiene que viajar en una lectura.
+     *
+     * @param string|null $texto
+     *
+     * @return string|null
+     */
+    public static function sin_enlaces_de_encuesta(?string $texto): ?string
+    {
+        if ($texto === null) {
+            return null;
+        }
+
+        return (string) preg_replace('~/prueba/encuesta/[A-Za-z0-9]{8,}~', '/prueba/encuesta/[enlace]', $texto);
     }
 
     /**
@@ -203,7 +228,7 @@ class ClaudePruebaController extends Controller
             /* `user` = lo escribió el negocio; `admin` = el equipo (Martín o un aviso automático). */
             'de'         => $mensaje->sender_type === 'user' ? 'negocio' : 'equipo',
             'kind'       => (string) $mensaje->kind,
-            'texto'      => mb_substr(trim((string) $mensaje->body), 0, self::MAX_TEXTO),
+            'texto'      => mb_substr((string) self::sin_enlaces_de_encuesta(trim((string) $mensaje->body)), 0, self::MAX_TEXTO),
             'created_at' => $mensaje->created_at !== null ? Carbon::parse($mensaje->created_at)->toIso8601String() : null,
         ];
     }

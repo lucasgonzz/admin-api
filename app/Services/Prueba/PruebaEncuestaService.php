@@ -15,6 +15,7 @@ use App\Services\PruebaPlantillasService;
 use App\Services\PruebaWhatsappService;
 use Carbon\Carbon;
 use Illuminate\Database\QueryException;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
@@ -125,7 +126,7 @@ class PruebaEncuestaService
         }
 
         $url      = self::url($encuesta);
-        $whatsapp = $this->enviar_whatsapp($client, $lead, $url);
+        $whatsapp = $this->enviar_whatsapp($client, $lead, $url, self::plantilla_de($encuesta));
         $correo   = $this->enviar_correo($client, $lead, $encuesta, $url);
 
         $salio = in_array($whatsapp, ['enviado', 'ya_enviado'], true) || in_array($correo, ['enviado', 'ya_enviado'], true);
@@ -181,8 +182,10 @@ class PruebaEncuestaService
 
         $ahora = $ahora !== null ? $ahora : Carbon::now();
 
+        /* Sin las cuentas de ensayo: a esas les manda la encuesta solo `pruebas:ensayo`. */
         $clientes = Client::query()
             ->where('estado', PruebaCicloService::CLIENTE_PRUEBA_VENCIDA)
+            ->where('es_ensayo', false)
             ->where('is_active', true)
             ->whereNotNull('trial_ends_at')
             ->where('trial_ends_at', '>=', $ahora->copy()->subHours(self::HORAS_DE_BARRIDO))
@@ -258,18 +261,48 @@ class PruebaEncuestaService
                 return;
             }
 
-            AdminPushNotificationService::send_to_admin((int) $admin->id, $this->titulo_del_aviso($encuesta, $client), $this->texto_del_aviso($encuesta), [
-                'url' => rtrim(trim((string) config('services.admin_spa.url')), '/') . '/clientes',
-            ]);
+            $entregado = $this->empujar_notificacion((int) $admin->id, $this->titulo_del_aviso($encuesta, $client), $this->texto_del_aviso($encuesta), $this->url_de_la_ficha($encuesta));
 
-            $encuesta->avisada_at = now();
-            $encuesta->save();
+            /* `avisada_at` solo si algún dispositivo aceptó la notificación: si no, nadie se enteró. */
+            if ($entregado) {
+                $encuesta->avisada_at = now();
+                $encuesta->save();
+            }
         } catch (\Throwable $e) {
             Log::channel('daily')->warning('PruebaEncuestaService: no se pudo avisar a Lucas de una encuesta respondida.', [
                 'encuesta_id' => (int) $encuesta->id,
                 'error'       => $e->getMessage(),
             ]);
         }
+    }
+
+    /**
+     * Manda la notificación push. Aparte para poder medirla en los tests.
+     *
+     * @return bool true si al menos un dispositivo del admin la aceptó.
+     */
+    protected function empujar_notificacion(int $admin_id, string $titulo, string $texto, string $url): bool
+    {
+        $resultado = AdminPushNotificationService::send_to_admin_with_result($admin_id, $titulo, $texto, ['url' => $url]);
+
+        return ! empty($resultado['accepted_endpoint_hashes']);
+    }
+
+    /**
+     * A dónde lleva la notificación: la ficha del negocio, que tiene la pestaña «Prueba» con la encuesta. Con lead,
+     * la del lead (`/leads?lead_id=`, el enlace que el admin-spa ya sabe abrir); sin lead, el listado de clientes.
+     *
+     * @param PruebaEncuesta $encuesta
+     *
+     * @return string
+     */
+    public function url_de_la_ficha(PruebaEncuesta $encuesta): string
+    {
+        $base = rtrim(trim((string) config('services.admin_spa.url')), '/');
+
+        return $encuesta->lead_id !== null
+            ? $base . '/leads?lead_id=' . (int) $encuesta->lead_id . '&pestana=prueba'
+            : $base . '/clientes?cliente=' . (int) $encuesta->client_id . '&pestana=prueba';
     }
 
     /**
@@ -328,28 +361,52 @@ class PruebaEncuestaService
      *
      * @return string `enviado`, `ya_enviado`, `plantilla_no_disponible`, o el estado del envío.
      */
-    protected function enviar_whatsapp(Client $client, ?Lead $lead, string $url): string
+    protected function enviar_whatsapp(Client $client, ?Lead $lead, string $url, string $plantilla): string
     {
-        $ya = PruebaWhatsappEnvio::query()
-            ->where('client_id', (int) $client->id)
-            ->where('plantilla', PruebaPlantillasService::FIN_ENCUESTA)
-            ->whereIn('estado', [PruebaWhatsappEnvio::ESTADO_ENVIADO, PruebaWhatsappEnvio::ESTADO_FALLIDO])
-            ->pluck('estado');
-
-        if ($ya->contains(PruebaWhatsappEnvio::ESTADO_ENVIADO)) {
-            return 'ya_enviado';
-        }
-        if ($ya->isNotEmpty()) {
-            return 'fallido';
+        /* Un candado por cliente: el barrido, el reloj de ensayo y la contratación no la mandan dos veces a la vez. */
+        $reserva = Cache::lock('prueba-encuesta-' . $client->id, 120);
+        if (! $reserva->get()) {
+            return 'en_curso';
         }
 
-        if (app(PruebaPlantillasService::class)->estado_para_enviar(PruebaPlantillasService::FIN_ENCUESTA)['motivo'] !== null) {
-            return 'plantilla_no_disponible';
+        try {
+            $ya = PruebaWhatsappEnvio::query()
+                ->where('client_id', (int) $client->id)
+                ->whereIn('plantilla', PruebaPlantillasService::ENCUESTAS)
+                ->whereIn('estado', [PruebaWhatsappEnvio::ESTADO_ENVIADO, PruebaWhatsappEnvio::ESTADO_FALLIDO])
+                ->pluck('estado');
+
+            if ($ya->contains(PruebaWhatsappEnvio::ESTADO_ENVIADO)) {
+                return 'ya_enviado';
+            }
+            if ($ya->isNotEmpty()) {
+                return 'fallido';
+            }
+
+            if (app(PruebaPlantillasService::class)->estado_para_enviar($plantilla)['motivo'] !== null) {
+                return 'plantilla_no_disponible';
+            }
+
+            $envio = app(PruebaWhatsappService::class)->enviar_plantilla_por_ticket($client, $lead, $plantilla, self::HITO, false, $url);
+
+            return (string) $envio['estado'];
+        } finally {
+            $reserva->release();
         }
+    }
 
-        $envio = app(PruebaWhatsappService::class)->enviar_plantilla_por_ticket($client, $lead, PruebaPlantillasService::FIN_ENCUESTA, self::HITO, false, $url);
-
-        return (string) $envio['estado'];
+    /**
+     * La plantilla de WhatsApp de una encuesta: al que contrató no se le dice «terminó tu prueba».
+     *
+     * @param PruebaEncuesta $encuesta
+     *
+     * @return string
+     */
+    public static function plantilla_de(PruebaEncuesta $encuesta): string
+    {
+        return (string) $encuesta->motivo === PruebaEncuesta::MOTIVO_CONTRATO
+            ? PruebaPlantillasService::ENCUESTA_CONTRATO
+            : PruebaPlantillasService::FIN_ENCUESTA;
     }
 
     /**
@@ -375,7 +432,7 @@ class PruebaEncuestaService
             'cta'     => ['text' => 'Responder la encuesta', 'url' => $url],
             'closing' => $contrato
                 ? 'Gracias. Equipo de ComercioCity'
-                : 'Si querés seguir usando el sistema con todo lo que cargaste, respondé este correo o escribinos por WhatsApp. Equipo de ComercioCity',
+                : 'Si querés seguir usando el sistema con todo lo que cargaste, respondé este correo o escribime por WhatsApp. Equipo de ComercioCity',
         ]);
 
         return (string) app(PruebaCorreoService::class)->enviar_registrado($client, $lead, self::CORREO, $payload, self::HITO)['estado'];
@@ -388,7 +445,7 @@ class PruebaEncuestaService
     {
         $whatsapp = PruebaWhatsappEnvio::query()
             ->where('client_id', (int) $client->id)
-            ->where('plantilla', PruebaPlantillasService::FIN_ENCUESTA)
+            ->whereIn('plantilla', PruebaPlantillasService::ENCUESTAS)
             ->whereIn('estado', [PruebaWhatsappEnvio::ESTADO_ENVIADO, PruebaWhatsappEnvio::ESTADO_FALLIDO])
             ->exists();
 

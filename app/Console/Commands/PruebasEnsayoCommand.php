@@ -23,13 +23,15 @@ use Illuminate\Support\Facades\Log;
  *
  * 🔴 Guardas duras:
  *  - El cliente tiene que estar marcado como ensayo (`clients.es_ensayo`). Se marca con `--marcar`, que solo
- *    acepta un cliente en prueba (nunca uno que contrató), y se saca con `--desmarcar`.
+ *    acepta un cliente en prueba (nunca uno que contrató) y exige `--confirmar` con su nombre exacto, y se saca
+ *    con `--desmarcar`. Desde que está marcado, los barridos reales (`prueba:empujar`, `pruebas:vencer`, los avisos
+ *    al closer, la encuesta por barrido) lo saltean: solo este comando le manda cosas.
  *  - El cliente tiene que estar en prueba (`prueba`, o `prueba_vencida` para repetir el vencimiento).
  *  - No recorre a nadie más: nunca llama a los barridos de todos los clientes.
  *  - En un ensayo NO se avisa al closer, salvo `--con-closer`.
  *
  * Uso:
- *   php artisan pruebas:ensayo 79 --marcar
+ *   php artisan pruebas:ensayo 79 --marcar --confirmar="Ferretería de ensayo"
  *   php artisan pruebas:ensayo 79 --dia=2 --correr=empujar
  *   php artisan pruebas:ensayo 79 --dia=5 --hora=10:00 --correr=dia5
  *   php artisan pruebas:ensayo 79 --dia=8 --correr=vencer
@@ -49,7 +51,8 @@ class PruebasEnsayoCommand extends Command
         {--hora=10:00 : Hora de Argentina del día simulado (HH:MM)}
         {--correr=todo : empujar | dia5 | vencer | todo}
         {--con-closer : También avisa al closer (por defecto, en un ensayo no)}
-        {--marcar : Marca al cliente como ensayo y termina}
+        {--marcar : Marca al cliente como ensayo y termina (exige --confirmar)}
+        {--confirmar= : Con --marcar: el nombre exacto del cliente (clients.name)}
         {--desmarcar : Le saca la marca de ensayo y termina}';
 
     /**
@@ -223,6 +226,13 @@ class PruebasEnsayoCommand extends Command
     {
         if ($marcar && ! PruebaCicloService::esta_en_prueba($client)) {
             $this->error('Solo se marca como ensayo a un cliente en prueba; ' . $client->id . ' está ' . (string) $client->estado . '.');
+
+            return 1;
+        }
+
+        /* Marcar saca al negocio de los barridos reales: se confirma con el nombre exacto, como en las rutas de Claude. */
+        if ($marcar && (trim((string) $this->option('confirmar')) === '' || trim((string) $this->option('confirmar')) !== trim((string) $client->name))) {
+            $this->error('Para marcarlo repetí con --confirmar="<nombre exacto del cliente>" (clients.name). No se marcó nada.');
 
             return 1;
         }

@@ -76,6 +76,22 @@ class PruebaDelClienteService
      */
     const HITOS_NUEVOS = ['articulo_actualizado', 'venta_cc'];
 
+    /**
+     * El orden del RECORRIDO dentro del alcance de las novedades (revisión del 11/11/2026): en siete días tiene que
+     * tocar los tres sistemas (gestión, agentes y tienda), así que el agente y la tienda van antes que la cuenta
+     * corriente, las compras y los gastos. Fuera del alcance vale el orden de {@see self::HITOS} sin los nuevos, que
+     * es exactamente el de antes de la misión ({@see self::orden_del_recorrido()}).
+     *
+     * @var array<int, string>
+     */
+    const RECORRIDO = [
+        'ingreso', 'importo', 'articulo_creado', 'articulo_actualizado', 'venta', 'agente',
+        'tienda_pedido', 'venta_cc', 'pago_cc', 'compra', 'cliente_creado', 'gasto',
+    ];
+
+    /** Versión del sistema del negocio desde la que su instancia informa los {@see self::HITOS_NUEVOS}. */
+    const VERSION_DE_LOS_HITOS_NUEVOS = '4.3.52';
+
     /** El hito de C2 que cierra la prueba. No es un paso: es el fin. */
     const HITO_VENCIDA = 'vencida';
 
@@ -378,15 +394,82 @@ class PruebaDelClienteService
     {
         $resultado = $this->hitos_completos($client, $lead, $consultar_instancia);
 
-        if (! $completo && ! Prueba\PruebaSettings::novedades_para($client)) {
+        return $completo ? $resultado : $this->aplicar_alcance($client, $resultado);
+    }
+
+    /**
+     * Deja un resultado de {@see self::hitos()} como lo tiene que ver y recibir ESTE cliente: fuera del alcance de las
+     * novedades, sin los hitos nuevos (que además no se le piden); dentro, en el orden del recorrido nuevo.
+     *
+     * @param Client               $client
+     * @param array<string, mixed> $resultado El resultado completo.
+     *
+     * @return array<string, mixed>
+     */
+    public function aplicar_alcance(Client $client, array $resultado): array
+    {
+        if (! Prueba\PruebaSettings::novedades_para($client)) {
             foreach (self::HITOS_NUEVOS as $nuevo) {
                 unset($resultado['hitos'][$nuevo]);
             }
             /* Y tampoco se le piden: el próximo paso los saltea. */
             $resultado['sin_soporte'] = array_values(array_unique(array_merge($resultado['sin_soporte'], self::HITOS_NUEVOS)));
+
+            return $resultado;
         }
 
+        $ordenados = [];
+        foreach (self::RECORRIDO as $tipo) {
+            if (array_key_exists($tipo, $resultado['hitos'])) {
+                $ordenados[$tipo] = $resultado['hitos'][$tipo];
+            }
+        }
+        $resultado['hitos'] = $ordenados + $resultado['hitos'];
+
         return $resultado;
+    }
+
+    /**
+     * En qué orden se le piden los pasos a este cliente: el recorrido nuevo dentro del alcance de las novedades; el
+     * de siempre (los diez hitos de antes, en su orden) fuera.
+     *
+     * @param Client $client
+     *
+     * @return array<int, string>
+     */
+    public function orden_del_recorrido(Client $client): array
+    {
+        return Prueba\PruebaSettings::novedades_para($client)
+            ? self::RECORRIDO
+            : array_values(array_diff(array_keys(self::HITOS), self::HITOS_NUEVOS));
+    }
+
+    /**
+     * Los hitos nuevos que el sistema del negocio todavía NO informa, deducido de su versión (para cuando no se le
+     * consulta en vivo). Un hito nuevo que ya llegó por el canal de eventos se da por informado. Sin versión
+     * conocida no se descarta nada.
+     *
+     * @param Client                     $client
+     * @param array<string, string|null> $hitos
+     *
+     * @return array<int, string>
+     */
+    protected function sin_soporte_por_version(Client $client, array $hitos): array
+    {
+        $instancia = PruebaCicloService::instancia_de($client);
+        $version   = $instancia !== null && trim((string) $instancia->version) !== ''
+            ? (string) $instancia->version
+            : (string) optional($client->current_version)->version;
+        $version = (string) preg_replace('/^[vV]|\+[a-zA-Z0-9.-]+$/D', '', trim($version));
+
+        if (! VersionNumberComparator::isValid($version)
+            || VersionNumberComparator::compare($version, self::VERSION_DE_LOS_HITOS_NUEVOS) >= 0) {
+            return [];
+        }
+
+        return array_values(array_filter(self::HITOS_NUEVOS, function ($tipo) use ($hitos) {
+            return ! isset($hitos[$tipo]) || $hitos[$tipo] === null;
+        }));
     }
 
     /**
@@ -421,7 +504,7 @@ class PruebaDelClienteService
         return [
             'fuente'           => 'admin',
             'hitos'            => $base,
-            'sin_soporte'      => [],
+            'sin_soporte'      => $this->sin_soporte_por_version($client, $base),
             'semilla_presente' => null,
             'vence_at'         => null,
             'vencida'          => null,
@@ -435,12 +518,13 @@ class PruebaDelClienteService
      *
      * @param array<string, string|null> $hitos
      * @param array<int, string>         $omitir Hitos que no se ofrecen (los que la instancia no informa).
+     * @param array<int, string>|null    $orden  En qué orden se piden; null = el del catálogo.
      *
      * @return string|null
      */
-    public static function proximo_hito_faltante(array $hitos, array $omitir = []): ?string
+    public static function proximo_hito_faltante(array $hitos, array $omitir = [], ?array $orden = null): ?string
     {
-        foreach (array_keys(self::HITOS) as $tipo) {
+        foreach ($orden !== null ? $orden : array_keys(self::HITOS) as $tipo) {
             if (in_array($tipo, $omitir, true)) {
                 continue;
             }
@@ -489,11 +573,13 @@ class PruebaDelClienteService
         /* La instancia sabe mejor si venció (C3): si contesta, manda ella. */
         $vencida = $hitos['vencida'] !== null ? (bool) $hitos['vencida'] : (bool) $datos['vencida'];
 
-        $proximo = self::proximo_hito_faltante($hitos['hitos'], $hitos['sin_soporte']);
+        $proximo = self::proximo_hito_faltante($hitos['hitos'], $hitos['sin_soporte'], $this->orden_del_recorrido($client));
 
         $lista = [];
         foreach ($hitos['hitos'] as $tipo => $momento) {
-            $lista[] = ['tipo' => $tipo, 'label' => self::label_del_hito($tipo), 'at' => $momento];
+            /* `soportado` = false: la versión del sistema del negocio todavía no informa ese hito. */
+            $lista[] = ['tipo' => $tipo, 'label' => self::label_del_hito($tipo), 'at' => $momento,
+                'soportado' => ! in_array($tipo, $hitos['sin_soporte'], true)];
         }
 
         $envios = PruebaWhatsappEnvio::query()

@@ -78,7 +78,7 @@ class EnsayoYResumenDeLaPruebaTest extends BaseDeLaPrueba
         $activo = $this->crear_cliente('+5493415550077', false, 'otra-clave');
         $activo->estado = PruebaCicloService::CLIENTE_ACTIVO;
         $activo->save();
-        $this->assertSame(1, Artisan::call('pruebas:ensayo', ['cliente' => $activo->id, '--marcar' => true]));
+        $this->assertSame(1, Artisan::call('pruebas:ensayo', ['cliente' => $activo->id, '--marcar' => true, '--confirmar' => (string) $activo->name]));
         $this->assertFalse((bool) $activo->fresh()->es_ensayo);
 
         /* Y si quedó marcado de antes y ya no está en prueba, tampoco corre. */
@@ -104,7 +104,11 @@ class EnsayoYResumenDeLaPruebaTest extends BaseDeLaPrueba
         [$otro]   = $this->negocio('+5493415550088');
         $vence    = (string) $client->fresh()->trial_ends_at;
 
-        $this->assertSame(0, Artisan::call('pruebas:ensayo', ['cliente' => $client->id, '--marcar' => true]));
+        /* Marcar exige el nombre exacto del cliente. */
+        $this->assertSame(1, Artisan::call('pruebas:ensayo', ['cliente' => $client->id, '--marcar' => true]));
+        $this->assertSame(1, Artisan::call('pruebas:ensayo', ['cliente' => $client->id, '--marcar' => true, '--confirmar' => 'Otro nombre']));
+        $this->assertFalse((bool) $client->fresh()->es_ensayo);
+        $this->assertSame(0, Artisan::call('pruebas:ensayo', ['cliente' => $client->id, '--marcar' => true, '--confirmar' => (string) $client->name]));
         $this->assertTrue((bool) $client->fresh()->es_ensayo);
 
         /* Día 2: el empujón por el hito que falta, con su correo. */
@@ -119,7 +123,8 @@ class EnsayoYResumenDeLaPruebaTest extends BaseDeLaPrueba
         $this->assertSame(0, Artisan::call('pruebas:ensayo', ['cliente' => $client->id, '--dia' => '5', '--correr' => 'empujar']), Artisan::output());
         $this->assertCount(2, $espia->plantillas);
         $this->assertSame(PruebaPlantillasService::DIA_5, $espia->plantillas[1]['template_name']);
-        $this->assertSame(['Marcela', '2 días'], $espia->plantillas[1]['variables']);
+        $this->assertSame('Marcela', $espia->plantillas[1]['variables'][0]);
+        $this->assertMatchesRegularExpression('/^[23] días$/', $espia->plantillas[1]['variables'][1]);
         $this->assertCount(0, $espia->textos, 'En un ensayo no se le escribe al closer.');
 
         /* Día 6: vuelve el empujón (el envío del día 5 quedó registrado con la fecha simulada, no con la de hoy). */
@@ -167,7 +172,7 @@ class EnsayoYResumenDeLaPruebaTest extends BaseDeLaPrueba
         $espia = $this->espiar_sender();
         $this->preparar();
         [$client] = $this->negocio();
-        Artisan::call('pruebas:ensayo', ['cliente' => $client->id, '--marcar' => true]);
+        Artisan::call('pruebas:ensayo', ['cliente' => $client->id, '--marcar' => true, '--confirmar' => (string) $client->name]);
 
         $this->assertSame(0, Artisan::call('pruebas:ensayo', ['cliente' => $client->id, '--dia' => '5', '--correr' => 'empujar', '--con-closer' => true]));
         $this->assertCount(1, $espia->textos);

@@ -25,11 +25,11 @@ class PruebaEncuesta extends Model
      * @var array<string, string>
      */
     const PREGUNTAS = [
-        'implementacion_practica' => '¿Te resultó práctica la puesta en marcha?',
+        'implementacion_practica' => '¿Te resultó fácil empezar a usar el sistema?',
         'soporte_sirvio'          => '¿Te sirvió el soporte que tuviste?',
         'probo_gestion'           => '¿Llegaste a entender y probar el sistema de gestión?',
         'probo_tienda'            => '¿Llegaste a entender y probar la tienda online?',
-        'probo_agentes'           => '¿Llegaste a entender y probar los agentes de IA?',
+        'probo_agentes'           => '¿Llegaste a entender y probar los Agentes (Soporte y tu Asistente personal)?',
         'atencion_buena'          => '¿La atención fue buena?',
     ];
 

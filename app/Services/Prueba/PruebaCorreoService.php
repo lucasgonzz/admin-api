@@ -37,17 +37,17 @@ class PruebaCorreoService
         'importo' => [
             'asunto' => 'Te cargamos tu catálogo sin costo',
             'titulo' => 'Probá el sistema con tus artículos',
-            'texto'  => 'Para que la prueba sea con lo tuyo, te cargamos tus artículos sin costo. Mandame el Excel de tu lista o el catálogo de tu proveedor en PDF desde Agentes, Soporte, en tu sistema, o por WhatsApp, y lo dejamos listo.',
+            'texto'  => 'Para que la prueba sea con lo tuyo, te cargamos tus artículos sin costo. Mandame el Excel de tu lista o el catálogo de tu proveedor en PDF, por WhatsApp o desde Soporte, en tu sistema, y lo dejamos listo.',
         ],
         'articulo_creado' => [
             'asunto' => 'Un paso corto: cargá un artículo',
             'titulo' => 'Cargá tu primer artículo',
-            'texto'  => 'Desde Artículos, con el botón Nuevo, cargás un artículo tuyo en un minuto. Después lo vendés desde Vender.',
+            'texto'  => 'Desde Listado, con el botón Crear, cargás un artículo tuyo en un minuto. Después lo vendés desde Vender.',
         ],
         'articulo_actualizado' => [
             'asunto' => 'Probá cambiar un precio',
             'titulo' => 'Revisá y cambiá un precio',
-            'texto'  => 'Entrá a Artículos, abrí uno, revisá el costo y el margen, y guardá. El precio de venta se actualiza al instante.',
+            'texto'  => 'Entrá a Listado, abrí un artículo, cambiale el costo o el margen y guardá. El precio de venta se actualiza al instante.',
         ],
         'venta' => [
             'asunto' => 'Hacé tu primera venta de prueba',
@@ -57,32 +57,32 @@ class PruebaCorreoService
         'cliente_creado' => [
             'asunto' => 'Cargá un cliente para probar la cuenta corriente',
             'titulo' => 'Cargá un cliente',
-            'texto'  => 'Desde Clientes cargás un cliente tuyo. Después le vendés en cuenta corriente y ves el saldo al instante.',
+            'texto'  => 'Desde Clientes cargás un cliente tuyo. Después podés venderle en cuenta corriente y ver su saldo al instante.',
         ],
         'venta_cc' => [
             'asunto' => 'Probá una venta en cuenta corriente',
             'titulo' => 'Vendé en cuenta corriente',
-            'texto'  => 'En Vender elegís al cliente que cargaste, sumás los artículos y guardás como cuenta corriente. Después ves el saldo en su ficha.',
+            'texto'  => 'En Vender elegís un cliente, sumás los artículos y guardás como cuenta corriente. Después ves el saldo en la ficha del cliente, en Clientes.',
         ],
         'pago_cc' => [
             'asunto' => 'Registrá un pago de cuenta corriente',
             'titulo' => 'Cobrá una cuenta corriente',
-            'texto'  => 'Desde la ficha del cliente registrás un pago. Así ves cómo baja el saldo y queda el comprobante.',
+            'texto'  => 'En Clientes, desde la ficha del cliente, registrás un pago. Así ves cómo baja el saldo y queda el comprobante.',
         ],
         'compra' => [
             'asunto' => 'Cargá una compra a un proveedor',
             'titulo' => 'Cargá una compra',
-            'texto'  => 'Desde Compras cargás una compra a un proveedor: el stock sube solo y el costo queda actualizado. También podés cargarla con una foto de la factura.',
+            'texto'  => 'Desde Proveedores, en la solapa Compras, cargás una compra a un proveedor: el stock sube solo y el costo queda actualizado. También podés cargarla con una foto de la factura.',
         ],
         'gasto' => [
             'asunto' => 'Cargá un gasto y mirá la caja del día',
             'titulo' => 'Cargá un gasto',
-            'texto'  => 'Desde Gastos cargás un gasto en un minuto y ves el resultado real del día.',
+            'texto'  => 'Desde Tesorería, en Gastos, cargás un gasto en un minuto y ves el resultado real del día.',
         ],
         'tienda_pedido' => [
             'asunto' => 'Tu prueba incluye una tienda online',
             'titulo' => 'Probá tu tienda online',
-            'texto'  => 'Tu prueba incluye una tienda online conectada a tu sistema. Entrá desde el sistema, hacé un pedido de prueba y mirá cómo te llega.',
+            'texto'  => 'Tu prueba incluye una tienda online conectada a tu sistema. Entrá desde Tienda Online, hacé un pedido de prueba y mirá cómo te llega.',
         ],
         'agente' => [
             'asunto' => 'Probá tu asistente personal',
@@ -91,16 +91,21 @@ class PruebaCorreoService
         ],
     ];
 
-    /** El video del catálogo de la prueba (04 a 09) que acompaña a cada paso, cuando lo hay. */
+    /**
+     * El video del catálogo de la prueba (04 a 09) que acompaña a cada paso, cuando lo hay. El 06 («Revisá y cambiá
+     * un precio») es el de actualizar un artículo, no el de crearlo: crear un artículo no tiene video.
+     */
     const VIDEO_DEL_PASO = [
         'ingreso'              => '04',
         'importo'              => '05',
-        'articulo_creado'      => '06',
         'articulo_actualizado' => '06',
         'compra'               => '07',
         'venta'                => '08',
         'agente'               => '09',
     ];
+
+    /** La frase que presenta el video en un correo. Solo va si el paso tiene video. */
+    const FRASE_DEL_VIDEO = 'Te dejo un video que te puede servir:';
 
     /** Cuántas veces se intenta un mismo correo si el servidor lo rechaza. */
     const MAX_INTENTOS = 3;
@@ -115,14 +120,20 @@ class PruebaCorreoService
 
         $hosts = PruebaNombres::hosts_del_slug((string) $instancia->alias_slug);
         /* El video de bienvenida y recorrido (04), si está configurado, va en el mismo correo. */
-        $video = PruebaSettings::novedades_para($client) ? self::video_del_paso('ingreso') : null;
+        /* Dentro del alcance de las novedades, el correo explica además los agentes y lleva el video 04. */
+        $novedades = PruebaSettings::novedades_para($client);
+        $video     = $novedades ? self::video_del_paso('ingreso') : null;
+        $parrafos  = [
+            'Tu sistema está listo para que lo pruebes con datos de ejemplo.',
+            'Tu asistente personal te atiende por WhatsApp en el ' . $asistente['numero'] . '. ' . PruebaAsistenteService::USO,
+        ];
+        if ($novedades) {
+            $parrafos[] = 'Adentro del sistema, en Agentes, tenés dos ayudas: Soporte, que soy yo, Martín (te contesto y te paso los videos; pedime un recorrido guiado y te lo muestro en tu pantalla), y tu Asistente personal, al que le preguntás por tu negocio.';
+        }
         $mail = new ComercioCityMail(new ComercioCityMailPayload([
             'subject' => 'Tu prueba de ComercioCity ya está lista',
             'title' => 'Tu prueba de siete días ya está lista',
-            'paragraphs' => [
-                'Tu sistema está listo para que lo pruebes con datos de ejemplo.',
-                'Tu asistente personal te atiende por WhatsApp en el ' . $asistente['numero'] . '. ' . PruebaAsistenteService::USO,
-            ],
+            'paragraphs' => $parrafos,
             'cta' => ['text' => 'Entrar a mi sistema', 'url' => 'https://' . $hosts['erp_spa']],
             'links' => array_merge(
                 [['text' => 'Escribirle a mi asistente personal por WhatsApp', 'url' => $asistente['url']]],
@@ -244,18 +255,19 @@ class PruebaCorreoService
         $paso  = self::PASOS[$hito];
         $video = self::video_del_paso($hito);
 
+        /* Un paso sin video dice el paso y nada más. */
         $parrafos = [self::saludo($client, $lead) . ', soy Martín, del equipo de ComercioCity.', $paso['texto']];
         if ($video !== null) {
-            $parrafos[] = 'Te dejo un video corto que lo muestra paso a paso.';
+            $parrafos[] = self::FRASE_DEL_VIDEO;
         }
 
         $payload = new ComercioCityMailPayload([
             'subject'    => $paso['asunto'],
             'title'      => $paso['titulo'],
             'paragraphs' => $parrafos,
-            'links'      => $video !== null ? [['text' => 'Ver el video: «' . $video['titulo'] . '»', 'url' => $video['url']]] : [],
+            'links'      => $video !== null ? [['text' => '«' . $video['titulo'] . '»', 'url' => $video['url']]] : [],
             'cta'        => self::boton_del_sistema($client),
-            'closing'    => 'Cualquier duda, escribime desde Agentes, Soporte, en tu sistema. Equipo de ComercioCity',
+            'closing'    => 'Cualquier duda, entrá a tu sistema, abrí Agentes y elegí Soporte. Equipo de ComercioCity',
         ]);
 
         return $this->enviar_registrado($client, $lead, 'paso_' . $hito, $payload, $hito);
@@ -297,7 +309,7 @@ class PruebaCorreoService
             'paragraphs' => [
                 self::saludo($client, $lead) . ', soy Martín, del equipo de ComercioCity.',
                 'Te aviso con tiempo: tu prueba gratuita termina en ' . $falta . '.',
-                'Si te quedó algo por probar, entrá a tu sistema y abrí Agentes, Soporte: ahí te contesto, te paso los videos y te muestro cómo se hace en tu pantalla.',
+                'Si te quedó algo por probar, entrá a tu sistema, abrí Agentes y elegí Soporte: ahí te contesto, te paso los videos y, si me pedís un recorrido guiado, te lo muestro en tu pantalla.',
                 'Y si ya sabés que querés seguir, respondé este correo o escribime por WhatsApp y te cuento cómo. Todo lo que cargaste queda como está.',
             ],
             'cta'     => self::boton_del_sistema($client),
@@ -336,13 +348,29 @@ class PruebaCorreoService
      */
     public static function boton_del_sistema(Client $client): ?array
     {
+        $url = self::url_del_sistema($client);
+
+        return $url === null ? null : ['text' => 'Entrar a mi sistema', 'url' => $url];
+    }
+
+    /**
+     * La dirección del sistema del negocio en prueba (sin token de ingreso), o null si no tiene instancia con alias.
+     *
+     * @param Client $client
+     *
+     * @return string|null
+     */
+    public static function url_del_sistema(Client $client): ?string
+    {
         $instancia = PruebaCicloService::instancia_de($client);
         if ($instancia === null || trim((string) $instancia->alias_slug) === '') {
             return null;
         }
 
-        $hosts = PruebaNombres::hosts_del_slug((string) $instancia->alias_slug);
-
-        return ['text' => 'Entrar a mi sistema', 'url' => 'https://' . $hosts['erp_spa']];
+        try {
+            return 'https://' . PruebaNombres::hosts_del_slug((string) $instancia->alias_slug)['erp_spa'];
+        } catch (\Throwable $e) {
+            return null;
+        }
     }
 }

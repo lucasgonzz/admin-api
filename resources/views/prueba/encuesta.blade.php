@@ -118,7 +118,12 @@
 <div class="cabecera">Comercio<span>City</span></div>
 
 <main class="pagina">
-@if($respondida)
+@if(! empty($invalido))
+	<div class="tarjeta gracias" role="status">
+		<h1>Este enlace no es válido o ya venció</h1>
+		<p class="bajada" style="margin-bottom:0">Si querés contarnos cómo te fue con la prueba, escribinos por WhatsApp o desde Soporte, en tu sistema.</p>
+	</div>
+@elseif($respondida)
 	<div class="tarjeta gracias" role="status">
 		<p class="marca" aria-hidden="true">✓</p>
 		<h1>¡Gracias por contarnos!</h1>

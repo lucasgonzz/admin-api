@@ -291,7 +291,9 @@ class PruebaCicloService
     {
         $ahora = $ahora ?: Carbon::now();
 
+        /* Sin las cuentas de ensayo: a esas las vence solo `pruebas:ensayo`, con su reloj. */
         return Client::where('estado', self::CLIENTE_PRUEBA)
+            ->where('es_ensayo', false)
             ->whereNotNull('trial_ends_at')
             ->where('trial_ends_at', '<=', $ahora)
             ->orderBy('id')

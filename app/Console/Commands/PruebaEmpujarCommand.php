@@ -54,6 +54,12 @@ class PruebaEmpujarCommand extends Command
 
                 return 1;
             }
+            /* Al cliente de ensayo lo maneja solo `pruebas:ensayo`, con su reloj: acá no se lo empuja. */
+            if ((bool) $client->es_ensayo) {
+                $this->error('El cliente ' . $solo . ' es una cuenta de ensayo: usá pruebas:ensayo ' . $solo . ' --dia=N.');
+
+                return 1;
+            }
 
             $lead  = $pruebas->lead_del_cliente($client);
             $datos = $pruebas->datos($client);

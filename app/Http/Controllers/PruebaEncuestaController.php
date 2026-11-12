@@ -28,6 +28,9 @@ class PruebaEncuestaController extends Controller
     public function show($token)
     {
         $encuesta = $this->encuesta($token);
+        if ($encuesta === null) {
+            return $this->enlace_invalido();
+        }
 
         return $this->pagina($encuesta, [], []);
     }
@@ -43,6 +46,9 @@ class PruebaEncuestaController extends Controller
     public function store(Request $request, $token)
     {
         $encuesta = $this->encuesta($token);
+        if ($encuesta === null) {
+            return $this->enlace_invalido();
+        }
 
         if ($encuesta->respondida_at !== null) {
             return $this->pagina($encuesta, [], []);
@@ -82,23 +88,38 @@ class PruebaEncuestaController extends Controller
     }
 
     /**
-     * La encuesta del token, o 404.
+     * La encuesta del token, o null si el enlace no es válido.
      *
      * @param mixed $token
      *
-     * @return PruebaEncuesta
+     * @return PruebaEncuesta|null
      */
-    protected function encuesta($token): PruebaEncuesta
+    protected function encuesta($token): ?PruebaEncuesta
     {
         $token = is_string($token) ? $token : '';
 
         /* El largo se mira antes de ir a la base: un token es de 48 caracteres alfanuméricos. */
-        abort_unless(preg_match('/^[A-Za-z0-9]{40,64}$/', $token) === 1, 404);
+        if (preg_match('/^[A-Za-z0-9]{40,64}$/', $token) !== 1) {
+            return null;
+        }
 
-        $encuesta = PruebaEncuesta::where('token', $token)->first();
-        abort_if($encuesta === null, 404);
+        return PruebaEncuesta::where('token', $token)->first();
+    }
 
-        return $encuesta;
+    /**
+     * Un enlace que no existe: la misma página, con un mensaje amable, y 404 para quien mira el código.
+     *
+     * @return \Illuminate\Http\Response
+     */
+    protected function enlace_invalido()
+    {
+        return response()
+            ->view('prueba.encuesta', [
+                'invalido' => true, 'respondida' => false, 'negocio' => '', 'preguntas' => [],
+                'errores' => [], 'datos' => [], 'max' => PruebaEncuestaService::MAX_COMENTARIO,
+            ], 404)
+            ->header('Cache-Control', 'private, no-store')
+            ->header('X-Robots-Tag', 'noindex, nofollow');
     }
 
     /**

@@ -58,6 +58,12 @@ class BienvenidaV2YEnElSistemaTest extends BaseDeLaPrueba
         $client->inbound_api_key = 'firma-de-la-bienvenida';
         $client->save();
         $lead = $this->lead_en_prueba($client);
+        /* La v2 dice desde dónde se entra: necesita la instancia con su alias. */
+        \App\Models\TrialInstance::create([
+            'nombre' => 'prueba-' . \Illuminate\Support\Str::random(8), 'estado' => \App\Models\TrialInstance::ESTADO_ASIGNADA,
+            'erp_vps_path' => '/home/prueba/erp', 'ecommerce_vps_path' => '/home/prueba/tienda',
+            'client_id' => (int) $client->id, 'user_id' => (int) $client->user_id, 'alias_slug' => 'ferreteria-v2',
+        ]);
 
         $this->fakear_http(['*/admin-sync/prueba/estado' => Http::response([], 404)]);
 
@@ -125,14 +131,18 @@ class BienvenidaV2YEnElSistemaTest extends BaseDeLaPrueba
 
         $this->assertCount(1, $espia->plantillas);
         $this->assertSame(PruebaPlantillasService::BIENVENIDA_V2, $espia->plantillas[0]['template_name']);
-        $this->assertSame(['Marcela'], $espia->plantillas[0]['variables']);
+        $url = \App\Services\Prueba\PruebaCorreoService::url_del_sistema($client);
+        $this->assertStringStartsWith('https://', (string) $url);
+        $this->assertSame(['Marcela', $url], $espia->plantillas[0]['variables'], 'El nombre y la dirección del sistema.');
 
         $mensaje = SupportMessage::where('whatsapp_message_id', 'wamid.plantilla.1')->firstOrFail();
         $this->assertStringContainsString('Hola Marcela, soy Martín', $mensaje->body);
+        $this->assertStringContainsString('Entrás desde ' . $url . ' con tu correo y la contraseña que elegiste.', $mensaje->body, 'Dice cómo entrar.');
         $this->assertStringContainsString('en Agentes, tenés dos ayudas: Soporte, que soy yo', $mensaje->body);
-        $this->assertStringContainsString('tu Asistente personal', $mensaje->body);
-        $this->assertStringContainsString('recorrido guiado en tu pantalla', $mensaje->body);
-        $this->assertStringContainsString('por este chat o desde Soporte en tu sistema', $mensaje->body, 'Sirve para los dos canales.');
+        $this->assertStringContainsString('tu Asistente personal, al que le preguntás por tu negocio', $mensaje->body);
+        $this->assertStringContainsString('pedime un recorrido guiado y te lo muestro en tu pantalla', $mensaje->body);
+        $this->assertStringContainsString('por WhatsApp o desde Soporte, en tu sistema', $mensaje->body, 'Sirve para los dos canales.');
+        $this->assertStringNotContainsString('{{', $mensaje->body);
 
         $this->assertSame(1, PruebaWhatsappEnvio::where('client_id', $client->id)->count());
         $this->assertSame(PruebaPlantillasService::BIENVENIDA_V2, PruebaWhatsappEnvio::where('client_id', $client->id)->value('plantilla'));
@@ -169,7 +179,8 @@ class BienvenidaV2YEnElSistemaTest extends BaseDeLaPrueba
 
         foreach ([
             PruebaPlantillasService::BIENVENIDA_V2, PruebaPlantillasService::BIENVENIDA_CON_ASISTENTE_V2,
-            PruebaPlantillasService::DIA_5, PruebaPlantillasService::FIN_ENCUESTA,
+            PruebaPlantillasService::DIA_5, PruebaPlantillasService::FIN_ENCUESTA, PruebaPlantillasService::ENCUESTA_CONTRATO,
+            'cc_prueba_paso_articulo_actualizado', 'cc_prueba_paso_venta_cc', 'cc_prueba_paso_articulo_creado_v2',
         ] as $nueva) {
             $this->assertContains($nueva, $nombres);
         }
@@ -211,6 +222,8 @@ class BienvenidaV2YEnElSistemaTest extends BaseDeLaPrueba
         $this->assertSame('admin', $visibles[0]['sender_type']);
         $this->assertStringContainsString('Hola Marcela, soy Martín', $visibles[0]['body']);
         $this->assertStringContainsString('en Agentes, tenés dos ayudas', $visibles[0]['body']);
+        $this->assertStringContainsString('Entrás desde https://', $visibles[0]['body']);
+        $this->assertStringNotContainsString('{{', $visibles[0]['body']);
         $this->assertStringContainsString(PruebaVideoCatalogoService::URLS_APROBADAS['04'], $visibles[0]['body'], 'Con el video 04.');
 
         $ticket = SupportTicket::where('client_id', $client->id)->where('source', 'whatsapp')->sole();

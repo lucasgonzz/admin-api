@@ -44,7 +44,7 @@ class EncuestaDeFinDePruebaTest extends BaseDeLaPrueba
         Mail::fake();
         $this->crear_config_whatsapp();
         $this->admin();
-        $this->plantillas_de_la_prueba($plantilla_aprobada, [PruebaPlantillasService::FIN_ENCUESTA]);
+        $this->plantillas_de_la_prueba($plantilla_aprobada, PruebaPlantillasService::ENCUESTAS);
 
         $client = $this->cliente_en_prueba();
         $client->email         = 'duena@test.local';
@@ -78,6 +78,9 @@ class EncuestaDeFinDePruebaTest extends BaseDeLaPrueba
         $this->assertCount(1, $espia->plantillas);
         $this->assertSame(PruebaPlantillasService::FIN_ENCUESTA, $espia->plantillas[0]['template_name']);
         $this->assertSame(['Marcela', $url], $espia->plantillas[0]['variables']);
+        $en_el_hilo = \App\Models\SupportMessage::where('whatsapp_message_id', 'wamid.plantilla.1')->firstOrFail()->body;
+        $this->assertStringContainsString('Terminó tu prueba gratuita', $en_el_hilo);
+        $this->assertStringContainsString('Si querés seguir usando el sistema, escribime por acá.', $en_el_hilo);
 
         Mail::assertSent(ComercioCityMail::class, 1);
         Mail::assertSent(ComercioCityMail::class, function (ComercioCityMail $mail) use ($client, $url) {
@@ -165,7 +168,8 @@ class EncuestaDeFinDePruebaTest extends BaseDeLaPrueba
         $encuesta = PruebaEncuesta::where('client_id', $client->id)->firstOrFail();
         $this->assertSame(PruebaEncuesta::MOTIVO_CONTRATO, $encuesta->motivo);
         $this->assertCount(1, $espia->plantillas);
-        $this->assertSame(PruebaPlantillasService::FIN_ENCUESTA, $espia->plantillas[0]['template_name']);
+        $this->assertSame(PruebaPlantillasService::ENCUESTA_CONTRATO, $espia->plantillas[0]['template_name'], 'Al que contrató no se le dice «terminó tu prueba».');
+        $this->assertStringContainsString('Gracias por sumarte', \App\Models\SupportMessage::where('whatsapp_message_id', 'wamid.plantilla.1')->firstOrFail()->body);
         Mail::assertSent(ComercioCityMail::class, 1);
 
         $this->post('/prueba/encuesta/' . $encuesta->token, ['estrellas' => '5', 'atencion_buena' => 'si'])->assertRedirect();
@@ -181,10 +185,27 @@ class EncuestaDeFinDePruebaTest extends BaseDeLaPrueba
         Artisan::call('pruebas:vencer');
         $encuesta = PruebaEncuesta::where('client_id', $client->id)->firstOrFail();
         $ruta     = '/prueba/encuesta/' . $encuesta->token;
+        /* El push a Lucas, medido: un dispositivo lo acepta. */
+        $push = new class extends PruebaEncuestaService {
+            /** @var array<int, array<string, mixed>> */
+            public $enviados = [];
+
+            /** @var bool */
+            public $entrega = true;
+
+            protected function empujar_notificacion(int $admin_id, string $titulo, string $texto, string $url): bool
+            {
+                $this->enviados[] = compact('admin_id', 'titulo', 'texto', 'url');
+
+                return $this->entrega;
+            }
+        };
+        $this->app->instance(PruebaEncuestaService::class, $push);
 
         /* La página: las preguntas, las cinco estrellas y nada de terceros. */
         $pagina = $this->get($ruta)->assertOk();
-        $pagina->assertSee('¿Te resultó práctica la puesta en marcha?', false);
+        $pagina->assertSee('¿Te resultó fácil empezar a usar el sistema?', false);
+        $pagina->assertSee('los Agentes (Soporte y tu Asistente personal)', false);
         $pagina->assertSee('¿La atención fue buena?', false);
         $pagina->assertSee('name="estrellas"', false);
         $pagina->assertSee('name="comentario"', false);
@@ -222,6 +243,9 @@ class EncuestaDeFinDePruebaTest extends BaseDeLaPrueba
         $this->assertSame('Me costó encontrar la tienda.', $guardada->comentario);
         $this->assertFalse($guardada->contrato_al_responder);
         $this->assertNotNull($guardada->avisada_at, 'A Lucas se le avisó el resultado.');
+        $this->assertCount(1, $push->enviados);
+        $this->assertStringContainsString('puso 4 de 5', $push->enviados[0]['titulo']);
+        $this->assertStringContainsString('/leads?lead_id=' . (int) $guardada->lead_id, $push->enviados[0]['url'], 'El aviso abre la ficha del negocio, que tiene la pestaña Prueba.');
 
         $servicio = app(PruebaEncuestaService::class);
         $this->assertStringContainsString('puso 4 de 5', $servicio->titulo_del_aviso($guardada, $client));
@@ -242,11 +266,30 @@ class EncuestaDeFinDePruebaTest extends BaseDeLaPrueba
     }
 
     /** @test */
-    public function un_token_que_no_existe_da_404(): void
+    public function un_enlace_que_no_existe_muestra_una_pagina_amable(): void
     {
-        $this->get('/prueba/encuesta/' . str_repeat('a', 48))->assertStatus(404);
-        $this->post('/prueba/encuesta/' . str_repeat('a', 48), ['estrellas' => '5'])->assertStatus(404);
-        $this->get('/prueba/encuesta/corto')->assertStatus(404);
+        foreach (['/prueba/encuesta/' . str_repeat('a', 48), '/prueba/encuesta/corto'] as $ruta) {
+            $this->get($ruta)->assertStatus(404)
+                ->assertSee('Este enlace no es válido o ya venció', false)
+                ->assertDontSee('name="estrellas"', false);
+        }
+        $this->post('/prueba/encuesta/' . str_repeat('a', 48), ['estrellas' => '5'])->assertStatus(404)
+            ->assertSee('Este enlace no es válido o ya venció', false);
+    }
+
+    /** @test */
+    public function si_el_aviso_a_lucas_no_llega_a_ningun_dispositivo_no_se_da_por_avisado(): void
+    {
+        $this->espiar_sender();
+        $client = $this->negocio_por_vencer();
+        Artisan::call('pruebas:vencer');
+        $encuesta = PruebaEncuesta::where('client_id', $client->id)->firstOrFail();
+
+        /* Sin ningún dispositivo suscripto (el caso de esta base de pruebas), el push no se entrega a nadie. */
+        $this->post('/prueba/encuesta/' . $encuesta->token, ['estrellas' => '3'])->assertRedirect();
+
+        $this->assertNotNull($encuesta->fresh()->respondida_at);
+        $this->assertNull($encuesta->fresh()->avisada_at);
     }
 
     /** @test */
