@@ -2215,6 +2215,36 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         ];
     }
 
+    /** @dataProvider orientaciones_con_formato_persistido */
+    public function test_cierra_sin_perder_limites_ni_recorridos_al_normalizar_el_texto(
+        string $guidance,
+        string $line_ending,
+        array $answers
+    ): void {
+        $ticket = $this->ticket();
+        $result = $this->reply($ticket, $this->claim($ticket), ['body' => $guidance])->assertOk();
+        // Un mensaje histórico puede conservar el fin de línea aunque el envío nuevo
+        // recorte espacios. La validación debe leer ese formato guardado sin cambiarlo.
+        SupportMessage::findOrFail($result->json('operation.message_id'))->update(['body' => $guidance . $line_ending]);
+        foreach ($answers as $answer) {
+            $last = $this->inbound($ticket, $answer);
+        }
+        $this->reply($ticket, $this->claim($ticket), [
+            'action' => 'cerrar', 'confirmation_message_id' => $last->id, 'body' => 'De nada!',
+        ])->assertOk()->assertJsonPath('ticket.status', 'closed');
+        $this->assertSame([$guidance, 'De nada!'], $this->deliveries->bodies);
+    }
+
+    public function orientaciones_con_formato_persistido(): array
+    {
+        $guidance = "En tu sistema entrá a ABM → Tienda online → Banners → Nuevo.\n\nQuerés que te prepare un tour con Robotito?";
+        return [
+            'oferta con LF final' => [$guidance, "\n", ['Gracias']],
+            'oferta con CRLF final' => [$guidance, "\r\n", ['Ya lo hice', 'Gracias']],
+            'recorrido sin verbos' => ['ABM → Tienda online → Banners → Nuevo', '', ['Ya lo hice', 'Gracias']],
+        ];
+    }
+
     /** @dataProvider agradecimientos_naturales */
     public function test_agradecimiento_natural_cierra_despues_de_despedir_sin_duplicar(string $thanks): void
     {

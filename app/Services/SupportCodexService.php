@@ -2458,7 +2458,10 @@ class SupportCodexService
         }
         $instructions = $this->guidance_for_closure((string) $guidance->body);
         return $this->guidance_can_end_exchange($instructions)
-            && preg_match('/→|\b(?:entra|ingresa|abri|crea|carga|guarda|selecciona|marca|toca|apreta|busca|edita|cambia|activa|desactiva)\b/', $instructions);
+            // La flecha identifica un recorrido y Str::ascii la elimina: se consulta
+            // en el original, sin aflojar la guarda de preguntas o tareas pendientes.
+            && (strpos((string) $guidance->body, '→') !== false
+                || preg_match('/\b(?:entra|ingresa|abri|crea|carga|guarda|selecciona|marca|toca|apreta|busca|edita|cambia|activa|desactiva)\b/', $instructions));
     }
 
     /**
@@ -2494,7 +2497,7 @@ class SupportCodexService
     {
         // El enlace no es una pregunta. La invitación opcional de Robotito tampoco
         // convierte en pendiente una orientación ya entregada; las demás preguntas sí.
-        $guidance = preg_replace('~https?://\S+~', '', $body);
+        $guidance = trim(preg_replace('~https?://\S+~', '', $body));
         // Str::ascii también aplana los saltos de línea: se recorta antes para no
         // perder el límite que distingue la invitación de una pregunta en los pasos.
         $guidance = preg_replace('/(?:^|[\r\n])\h*quer[eé]s que te prepare un tour con robotito\?\h*$/iuD', '', $guidance);
