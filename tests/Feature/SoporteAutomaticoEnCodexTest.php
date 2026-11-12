@@ -917,6 +917,75 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         Event::assertDispatched(SupportTicketUpdated::class);
     }
 
+    /**
+     * Misión ensayo-sin-mision-automatica (12/11/2026): el ticket de un cliente de ensayo prepara la misión igual
+     * (queda escrita en el ticket), pero el contexto le dice al monitor que no la arranque solo.
+     */
+    public function test_cliente_de_ensayo_prepara_la_mision_sin_inicio_automatico(): void
+    {
+        $ticket = $this->ticket();
+        $ticket->client->es_ensayo = true;
+        $ticket->client->save();
+        $case = $this->prepare_mission($ticket);
+        $this->getJson($this->base . '/tickets/' . $ticket->id, $this->headers)->assertOk()
+            ->assertJsonPath('ticket.client.es_ensayo', true)
+            ->assertJsonPath('ticket.mission_autostart', false)
+            ->assertJsonPath('ticket.mission_autostart_reason', 'cliente_de_ensayo')
+            ->assertJsonPath('ticket.mission', 'Corregir la barra del listado que tapa la foto ampliada.')
+            ->assertJsonPath('ticket.mission_lifecycle.status', 'pending')
+            // El inicio manual (Lucas) sigue disponible: la capacidad no cambia.
+            ->assertJsonPath('ticket.capabilities.mission_started', true);
+        $this->assertSame('mission_pending', $case->fresh()->state);
+        $this->assertNull($case->fresh()->mission_thread_id);
+        $this->assertSame('open', $ticket->fresh()->status);
+    }
+
+    /**
+     * Un cliente de ensayo no recibe WhatsApp (12/11/2026): la respuesta de Martín en su ticket de WhatsApp no llama a
+     * Kapso/Meta. Queda en la conversación marcada como sincronizada, que es lo que la muestra en Agentes → Soporte
+     * del sistema del negocio, y la operación queda enviada.
+     */
+    public function test_respuesta_de_martin_a_un_cliente_de_ensayo_por_whatsapp_queda_solo_en_el_sistema(): void
+    {
+        $ticket = $this->ticket();
+        $ticket->client->es_ensayo = true;
+        $ticket->client->save();
+        $claim = $this->claim($ticket);
+
+        $this->reply($ticket, $claim)->assertOk();
+
+        $this->assertSame([], $this->deliveries->bodies, 'Ningún envío por WhatsApp al cliente de ensayo.');
+        $respuesta = SupportMessage::where('support_ticket_id', $ticket->id)->where('sender_type', 'admin')->orderByDesc('id')->firstOrFail();
+        $this->assertSame('Probá abrir Ventas.', $respuesta->body);
+        $this->assertNotNull($respuesta->synced_to_client_at);
+        $this->assertNull($respuesta->whatsapp_message_id);
+        $this->assertSame('sent', SupportCodexOperation::where('message_id', $respuesta->id)->value('status'));
+        $this->assertNotSame('manual_review', SupportCodexCase::where('support_ticket_id', $ticket->id)->value('state'));
+    }
+
+    /** Un cliente que no es de ensayo sigue recibiendo la respuesta de Martín por WhatsApp. */
+    public function test_respuesta_de_martin_a_un_cliente_normal_sigue_saliendo_por_whatsapp(): void
+    {
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+
+        $this->reply($ticket, $claim)->assertOk();
+
+        $this->assertSame(['Probá abrir Ventas.'], $this->deliveries->bodies);
+    }
+
+    /** Un cliente normal conserva el inicio automático, como antes de la marca. */
+    public function test_cliente_normal_conserva_el_inicio_automatico_de_la_mision(): void
+    {
+        $ticket = $this->ticket();
+        $this->prepare_mission($ticket);
+        $this->getJson($this->base . '/tickets/' . $ticket->id, $this->headers)->assertOk()
+            ->assertJsonPath('ticket.client.es_ensayo', false)
+            ->assertJsonPath('ticket.mission_autostart', true)
+            ->assertJsonPath('ticket.mission_autostart_reason', null)
+            ->assertJsonPath('ticket.mission_lifecycle.status', 'pending');
+    }
+
     public function test_registro_exige_diagnostico_vigente_y_no_reemplaza_otra_tarea(): void
     {
         $ticket = $this->ticket();

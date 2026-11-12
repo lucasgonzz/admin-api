@@ -116,22 +116,29 @@ class EnsayoYResumenDeLaPruebaTest extends BaseDeLaPrueba
         $salida = Artisan::output();
         $this->assertSame(0, $codigo, $salida);
         $this->assertStringContainsString('día 2 de 7', $salida);
-        $this->assertCount(1, $espia->plantillas);
-        $this->assertSame('cc_prueba_paso_importo', $espia->plantillas[0]['template_name']);
+        /* Desde el 12/11/2026 el ensayo no recibe WhatsApp: cada mensaje queda en la conversación del sistema y se
+           registra con canal sistema. */
+        $del_sistema = function () use ($client) {
+            return PruebaWhatsappEnvio::where('client_id', $client->id)->where('canal', PruebaWhatsappEnvio::CANAL_SISTEMA)
+                ->where('estado', PruebaWhatsappEnvio::ESTADO_ENVIADO)->orderBy('id')->get();
+        };
+        $this->assertCount(0, $espia->plantillas);
+        $this->assertSame(['cc_prueba_paso_importo'], $del_sistema()->pluck('plantilla')->all());
 
         /* Día 5: el aviso de que termina ocupa el lugar del empujón. Sin aviso al closer. */
         $this->assertSame(0, Artisan::call('pruebas:ensayo', ['cliente' => $client->id, '--dia' => '5', '--correr' => 'empujar']), Artisan::output());
-        $this->assertCount(2, $espia->plantillas);
-        $this->assertSame(PruebaPlantillasService::DIA_5, $espia->plantillas[1]['template_name']);
-        $this->assertSame('Marcela', $espia->plantillas[1]['variables'][0]);
-        $this->assertMatchesRegularExpression('/^[23] días$/', $espia->plantillas[1]['variables'][1]);
+        $this->assertCount(0, $espia->plantillas);
+        $this->assertSame(PruebaPlantillasService::DIA_5, $del_sistema()[1]->plantilla);
+        $aviso = SupportMessage::findOrFail((int) $del_sistema()[1]->support_message_id);
+        $this->assertStringContainsString('Marcela', $aviso->body);
+        $this->assertMatchesRegularExpression('/[23] días/', $aviso->body);
         $this->assertCount(0, $espia->textos, 'En un ensayo no se le escribe al closer.');
 
         /* Día 6: vuelve el empujón (el envío del día 5 quedó registrado con la fecha simulada, no con la de hoy). */
         $this->assertSame(0, Artisan::call('pruebas:ensayo', ['cliente' => $client->id, '--dia' => '6', '--correr' => 'empujar']), Artisan::output());
-        $this->assertCount(3, $espia->plantillas);
-        $this->assertSame('cc_prueba_paso_articulo_creado', $espia->plantillas[2]['template_name'], 'El paso ya mandado no se repite: sale el que sigue.');
-        $dias = PruebaWhatsappEnvio::where('client_id', $client->id)->where('canal', PruebaWhatsappEnvio::CANAL_WHATSAPP)
+        $this->assertCount(0, $espia->plantillas);
+        $this->assertSame('cc_prueba_paso_articulo_creado', $del_sistema()[2]->plantilla, 'El paso ya mandado no se repite: sale el que sigue.');
+        $dias = PruebaWhatsappEnvio::where('client_id', $client->id)->where('canal', PruebaWhatsappEnvio::CANAL_SISTEMA)
             ->where('plantilla', '!=', PruebaPlantillasService::BIENVENIDA)->orderBy('id')->pluck('dia')->all();
         $this->assertCount(3, array_unique($dias), 'Tres envíos en tres días simulados distintos.');
 
@@ -143,7 +150,8 @@ class EnsayoYResumenDeLaPruebaTest extends BaseDeLaPrueba
         /* Día 8: vence y sale la encuesta por los dos canales. */
         $this->assertSame(0, Artisan::call('pruebas:ensayo', ['cliente' => $client->id, '--dia' => '8', '--correr' => 'vencer']), Artisan::output());
         $this->assertSame(PruebaCicloService::CLIENTE_PRUEBA_VENCIDA, $client->fresh()->estado);
-        $this->assertSame(PruebaPlantillasService::FIN_ENCUESTA, $espia->plantillas[3]['template_name']);
+        $this->assertSame(PruebaPlantillasService::FIN_ENCUESTA, $del_sistema()[3]->plantilla);
+        $this->assertCount(0, $espia->plantillas, 'Cero WhatsApp al cliente de ensayo en todo el ensayo.');
         $encuesta = PruebaEncuesta::where('client_id', $client->id)->sole();
         $this->assertSame(PruebaEncuesta::MOTIVO_VENCIDA, $encuesta->motivo);
         $this->assertNotNull($encuesta->enviada_at);

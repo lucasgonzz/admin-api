@@ -19,7 +19,9 @@ use Illuminate\Support\Facades\Log;
  * la prueba está por terminar y los correos), y el vencimiento con la encuesta.
  *
  * No mueve ninguna fecha de la base: fija el reloj del proceso (`Carbon::setTestNow`) mientras corre y lo
- * suelta al terminar. Lo que manda es REAL (WhatsApp, correo, dormir la instancia): por eso las guardas.
+ * suelta al terminar. Lo que hace es REAL (correo, dormir la instancia): por eso las guardas. Desde el 12/11/2026 un
+ * cliente de ensayo NO recibe WhatsApp: deja los mensajes en la conversación del sistema del negocio
+ * (Agentes → Soporte) y manda los correos; no usa WhatsApp (`Prueba\PruebaEnsayoSinWhatsappService`).
  *
  * 🔴 Guardas duras:
  *  - El cliente tiene que estar marcado como ensayo (`clients.es_ensayo`). Se marca con `--marcar`, que solo
@@ -58,7 +60,7 @@ class PruebasEnsayoCommand extends Command
     /**
      * @var string
      */
-    protected $description = 'Simula el día N de la prueba gratuita de UN cliente de ensayo y corre sus pasos del ciclo';
+    protected $description = 'Simula el día N de la prueba gratuita de UN cliente de ensayo y corre sus pasos del ciclo: deja los mensajes en la conversación del sistema del negocio y manda los correos; no usa WhatsApp';
 
     /**
      * @param PruebaWhatsappService   $whatsapp
@@ -82,7 +84,7 @@ class PruebasEnsayoCommand extends Command
         }
 
         if (! (bool) $client->es_ensayo) {
-            $this->error('El cliente ' . $client->id . ' (' . $client->resolve_display_name() . ') no está marcado como ensayo. Este comando manda mensajes reales: marcá primero la cuenta de ensayo con --marcar.');
+            $this->error('El cliente ' . $client->id . ' (' . $client->resolve_display_name() . ') no está marcado como ensayo. Este comando hace envíos reales (correos y mensajes en el sistema del negocio): marcá primero la cuenta de ensayo con --marcar.');
 
             return 1;
         }

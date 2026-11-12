@@ -162,21 +162,28 @@ class AlcanceDeLasNovedadesTest extends BaseDeLaPrueba
         $servicio = app(PruebaWhatsappService::class);
 
         /* Día 5: el aviso de que termina, con su correo. */
+        /* Desde el 12/11/2026 el ensayo no recibe WhatsApp: lo que sale queda en el sistema con canal sistema. */
+        $del_sistema = function () use ($client) {
+            return PruebaWhatsappEnvio::where('client_id', $client->id)->where('canal', PruebaWhatsappEnvio::CANAL_SISTEMA)
+                ->where('estado', PruebaWhatsappEnvio::ESTADO_ENVIADO)->orderBy('id')->pluck('plantilla')->all();
+        };
         $this->assertSame('enviado', $servicio->empujar($client, $lead)['estado']);
-        $this->assertSame(PruebaPlantillasService::DIA_5, $espia->plantillas[0]['template_name']);
+        $this->assertSame([PruebaPlantillasService::DIA_5], $del_sistema());
         Mail::assertSent(ComercioCityMail::class, 1);
 
         /* Al día siguiente: el paso nuevo, con su correo. */
         PruebaWhatsappEnvio::where('client_id', $client->id)->update(['dia' => now(PruebaWhatsappService::ZONA)->subDay()->toDateString()]);
         $this->assertSame('enviado', $servicio->empujar($client, $lead)['estado']);
-        $this->assertSame('cc_prueba_paso_articulo_actualizado', $espia->plantillas[1]['template_name']);
+        $this->assertSame([PruebaPlantillasService::DIA_5, 'cc_prueba_paso_articulo_actualizado'], $del_sistema());
+        $this->assertSame([], $espia->plantillas);
         Mail::assertSent(ComercioCityMail::class, 2);
         $this->assertCount(12, app(PruebaDelClienteService::class)->resumen($client, $lead, true)['hitos_lista']);
 
         /* Y la encuesta, cuando se la manda el reloj de ensayo (el barrido real saltea a las cuentas de ensayo). */
         $this->assertSame('enviada', app(\App\Services\Prueba\PruebaEncuestaService::class)->enviar($client, PruebaEncuesta::MOTIVO_VENCIDA)['estado']);
         $this->assertSame(1, PruebaEncuesta::where('client_id', $client->id)->count());
-        $this->assertSame(PruebaPlantillasService::FIN_ENCUESTA, $espia->plantillas[2]['template_name']);
+        $this->assertSame([PruebaPlantillasService::DIA_5, 'cc_prueba_paso_articulo_actualizado', PruebaPlantillasService::FIN_ENCUESTA], $del_sistema());
+        $this->assertSame([], $espia->plantillas);
     }
 
     /** @test */

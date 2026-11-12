@@ -288,6 +288,17 @@ class SupportCodexService
             ->where('id', '>', $case->handled_message_id)->where('id', '<', $last->id)->exists();
     }
 
+    /**
+     * Si el ticket es de un cliente marcado como ENSAYO (`clients.es_ensayo`).
+     *
+     * @param SupportTicket $ticket Ticket con la relación `client` cargada o cargable.
+     * @return bool true solo si el cliente existe y está marcado; un ticket sin cliente no es de ensayo.
+     */
+    private function es_cliente_de_ensayo(SupportTicket $ticket): bool
+    {
+        return $ticket->client !== null && (bool) $ticket->client->es_ensayo;
+    }
+
     public function context(SupportTicket $ticket, SupportCodexCase $case = null): array
     {
         $ticket->loadMissing('client', 'client_employee');
@@ -325,6 +336,9 @@ class SupportCodexService
                 'slug' => $ticket->client ? $ticket->client->slug : null,
                 // `prueba` si el negocio está en prueba gratuita (misión prueba-martin-importacion, 3/11/2026); si no, null.
                 'estado' => app(PruebaDelClienteService::class)->es_cliente_en_prueba($ticket->client) ? (string) $ticket->client->estado : null,
+                // Cliente de ENSAYO (`clients.es_ensayo`): un negocio de prueba que maneja una sesión haciendo de
+                // cliente. Misión ensayo-sin-mision-automatica (12/11/2026): sus misiones no arrancan solas.
+                'es_ensayo' => $this->es_cliente_de_ensayo($ticket),
             ],
             'contact_name' => $ticket->es_erp_sin_identidad_verificada() ? null : $ticket->resolve_contact_display_name(),
             'contact_role' => $ticket->es_contacto_empleado() ? 'employee' : 'owner',
@@ -334,6 +348,12 @@ class SupportCodexService
             'thread_id' => $case ? $case->thread_id : null,
             'mission' => $case ? $case->mission : null,
             'mission_lifecycle' => $case ? $case->mission_lifecycle() : null,
+            // Si el monitor puede abrir SOLO la tarea de una misión de error de este ticket. Un cliente de ensayo
+            // ya tiene una sesión corrigiendo lo que encuentra: la misión queda escrita en el ticket para que esa
+            // sesión la lea, pero el monitor no crea el hilo de Codex (tickets 102 y 107 del 11/11/2026). El
+            // inicio manual de Lucas no cambia. Un monitor que no conoce el campo sigue como antes.
+            'mission_autostart' => ! $this->es_cliente_de_ensayo($ticket),
+            'mission_autostart_reason' => $this->es_cliente_de_ensayo($ticket) ? 'cliente_de_ensayo' : null,
             'mission_fix_evidence' => $fix_evidence === null ? null : $fix_evidence->payload,
             'mission_progress' => $this->mission_progress_context($ticket, $case, $fix_evidence !== null),
             'upgrade_agreement' => app(SupportCodexUpgradeAgreementService::class)->context($fix_evidence),
@@ -1113,12 +1133,38 @@ class SupportCodexService
 
     private function puede_entregar(SupportTicket $ticket): bool
     {
-        return $ticket->source === 'erp'
+        return $ticket->source === 'erp' || $this->respuesta_solo_en_el_sistema($ticket)
             || app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone)['open'];
+    }
+
+    /**
+     * Un ticket de WhatsApp de un cliente de ENSAYO (`clients.es_ensayo`): la respuesta de Martín no sale por WhatsApp
+     * (Lucas, 12/11/2026: los WhatsApp del ensayo le bajan la reputación a la línea). Queda en la conversación y se
+     * ve en el sistema del negocio (Agentes → Soporte lee los tickets de WhatsApp del admin y muestra los mensajes
+     * con `synced_to_client_at`). No depende de la ventana de 24 h porque no se usa Meta.
+     *
+     * @param SupportTicket $ticket
+     *
+     * @return bool
+     */
+    private function respuesta_solo_en_el_sistema(SupportTicket $ticket): bool
+    {
+        $ticket->loadMissing('client');
+
+        return $ticket->source === 'whatsapp' && Prueba\PruebaEnsayoSinWhatsappService::es_ensayo($ticket->client);
     }
 
     private function entregar_respuesta(SupportTicket $ticket, SupportMessage $message): array
     {
+        if ($this->respuesta_solo_en_el_sistema($ticket)) {
+            // Cero llamadas a Kapso/Meta: la marca de sincronizado es lo que la hace visible en el sistema.
+            $message->synced_to_client_at = now();
+            $message->remote_delivery_status = null;
+            $message->save();
+
+            return ['delivery' => 'sent'];
+        }
+
         if ($ticket->source === 'whatsapp') {
             return app(SupportWhatsappOpenerService::class)->deliver_follow_up($ticket, $message, 'Martín, asistente técnico');
         }

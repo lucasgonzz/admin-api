@@ -161,6 +161,38 @@ class RespaldoNocturnoDeLaPruebaTest extends BaseDeLaPrueba
         $this->assertStringNotContainsString('desde las 7 de la mañana', $texto, 'De día no se promete la hora.');
     }
 
+    /**
+     * Un cliente de ensayo que escribe por WhatsApp de noche (12/11/2026): el respaldo no le contesta por WhatsApp, deja
+     * la respuesta en la conversación del sistema del negocio y la registra con `canal = sistema`.
+     *
+     * @test
+     */
+    public function el_respaldo_a_un_cliente_de_ensayo_por_whatsapp_queda_en_el_sistema_sin_whatsapp(): void
+    {
+        $this->red();
+        $client = $this->cliente_en_prueba();
+        $client->es_ensayo = true;
+        $client->save();
+        $ticket = $this->ticket_del_cliente($client, false);
+        $entrante = SupportMessage::create([
+            'support_ticket_id' => $ticket->id, 'sender_type' => 'user', 'kind' => 'text', 'body' => '¿Cómo importo mis clientes?',
+            'delivered_at' => now(), 'whatsapp_message_id' => 'wamid.entrante.' . Str::random(6),
+        ]);
+        $ticket->last_client_message_at = now();
+        $ticket->save();
+
+        $this->assertSame('enviado', $this->responder($ticket, $entrante)['estado']);
+
+        $this->assertSame([], $this->espia->textos);
+        $this->assertSame([], $this->espia->plantillas);
+        $sistema = SupportTicket::where('client_id', $client->id)->where('source', 'erp')->firstOrFail();
+        $this->assertStringStartsWith('Respuesta automática:', $this->respuesta_en($sistema));
+        $envio = PruebaWhatsappEnvio::where('client_id', $client->id)->where('plantilla', PruebaRespaldoSoporteService::PLANTILLA)->firstOrFail();
+        $this->assertSame(PruebaWhatsappEnvio::CANAL_SISTEMA, $envio->canal);
+        $this->assertSame((int) $sistema->id, (int) $envio->support_ticket_id);
+        $this->assertNotNull($envio->support_message_id);
+    }
+
     /** @test */
     public function una_duda_comun_de_noche_la_contesta_el_modelo_con_la_regla_sin_jerga_y_cierra_con_la_hora_de_martin(): void
     {
