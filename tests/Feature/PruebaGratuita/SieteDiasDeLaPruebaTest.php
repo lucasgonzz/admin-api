@@ -189,6 +189,47 @@ class SieteDiasDeLaPruebaTest extends BaseDeLaPrueba
     }
 
     /** @test */
+    public function un_negocio_lento_que_solo_crea_un_articulo_igual_escucha_de_los_agentes_y_de_la_tienda(): void
+    {
+        [$client, $lead, $espia] = $this->alta_de_la_prueba();
+
+        /* Entra el día del alta, crea un artículo el día 2 y no hace nada más. Ningún paso se le repite. */
+        $esperado = [
+            1 => 'importo', 2 => 'articulo_creado', 3 => 'articulo_actualizado', 4 => 'venta',
+            5 => null, 6 => 'agente', 7 => 'tienda_pedido',
+        ];
+        foreach ($esperado as $dia => $paso) {
+            $hechos    = $dia <= 2 ? ['ingreso'] : ['ingreso', 'articulo_creado'];
+            $resultado = $this->manana_del_dia($dia, $client, $lead, $hechos);
+            $this->assertSame('enviado', $resultado['estado'], 'Día ' . $dia . ': ' . (string) $resultado['detalle']);
+        }
+
+        Carbon::setTestNow($this->alta->copy()->addDays(7)->addMinutes(5));
+        Artisan::call('pruebas:vencer');
+
+        $this->assertSame([
+            'cc_prueba_bienvenida',
+            'cc_prueba_paso_importo',
+            'cc_prueba_paso_articulo_creado_v2',
+            'cc_prueba_paso_articulo_actualizado',
+            'cc_prueba_paso_venta',
+            'cc_prueba_dia_5',
+            'cc_prueba_paso_agente',
+            'cc_prueba_paso_tienda_pedido',
+            'cc_prueba_fin_encuesta',
+        ], $this->secuencia($espia), 'Sin ningún mensaje repetido, y nombrando los tres sistemas.');
+
+        /* El correo del aviso llevó el paso del agente con su video. */
+        Mail::assertSent(ComercioCityMail::class, function (ComercioCityMail $mail) {
+            $html = view($mail->build()->view, ['payload' => $mail->payload])->render();
+
+            return strpos((string) $mail->payload->subject, 'termina en') !== false
+                && strpos($html, 'Mientras tanto, lo próximo para probar:') !== false
+                && strpos($html, PruebaVideoCatalogoService::URLS_APROBADAS['09']) !== false;
+        });
+    }
+
+    /** @test */
     public function un_negocio_que_no_entra_nunca_recibe_dos_recordatorios_el_aviso_y_la_encuesta(): void
     {
         [$client, $lead, $espia] = $this->alta_de_la_prueba();

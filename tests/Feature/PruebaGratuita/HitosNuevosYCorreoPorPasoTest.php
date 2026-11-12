@@ -195,11 +195,13 @@ class HitosNuevosYCorreoPorPasoTest extends BaseDeLaPrueba
         $this->assertSame('importo', $registro->hito);
         $this->assertSame(PruebaWhatsappEnvio::ESTADO_ENVIADO, $registro->estado);
 
-        /* Al día siguiente el paso sigue faltando: el WhatsApp se repite, el correo no. */
+        /* Al día siguiente el paso sigue faltando: no se repite ni el WhatsApp ni su correo; sale el paso que sigue. */
         PruebaWhatsappEnvio::where('client_id', $client->id)->update(['dia' => now(PruebaWhatsappService::ZONA)->subDay()->toDateString()]);
         $this->assertSame('enviado', $servicio->empujar($client, $lead)['estado']);
         $this->assertCount(2, $espia->plantillas);
-        Mail::assertSent(ComercioCityMail::class, 1);
+        $this->assertSame('cc_prueba_paso_articulo_creado', $espia->plantillas[1]['template_name']);
+        $this->assertSame(1, PruebaWhatsappEnvio::where('client_id', $client->id)->where('plantilla', 'correo_paso_importo')->count());
+        Mail::assertSent(ComercioCityMail::class, 2);
     }
 
     /** @test */

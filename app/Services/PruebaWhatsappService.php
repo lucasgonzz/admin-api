@@ -60,7 +60,10 @@ class PruebaWhatsappService
     const MARCA_BIENVENIDA_SISTEMA = 'prueba_bienvenida_sistema';
 
     /** Dentro del alcance de las novedades: cuántas veces sale, como mucho, el WhatsApp de un mismo paso. */
-    const TOPE_POR_PASO = 2;
+    const TOPE_POR_PASO = 1;
+
+    /** `ingreso` (si nunca entró) se recuerda hasta dos veces: sin entrar no hay nada más que proponerle. */
+    const TOPE_DE_INGRESO = 2;
 
     /** El día que vence sí sale paso, salvo que falten menos de estas horas para el vencimiento. */
     const HORAS_SIN_PASO_ANTES_DE_VENCER = 3;
@@ -588,8 +591,10 @@ class PruebaWhatsappService
      * si su plantilla no está aprobada ese día no sale nada.
      *
      * Dentro del alcance (revisión del 11/11/2026), en el orden del recorrido nuevo:
-     *  1. Tope de {@see self::TOPE_POR_PASO} envíos por hito: un paso que ya se mandó dos veces y sigue sin cumplirse
-     *     se saltea. Si lo que no hizo es ENTRAR y ya van dos, no se le manda ningún paso más.
+     *  1. Tope de UN envío por paso ({@see self::TOPE_POR_PASO}): un paso ya mandado y sin cumplir no se repite; al día
+     *     siguiente sale el siguiente que falte. La excepción es ENTRAR, que se recuerda hasta dos veces
+     *     ({@see self::TOPE_DE_INGRESO}); si ya van dos y no entró, no se le manda ningún paso más. Cuando ya se le
+     *     nombró todo lo que falta, no sale paso: la lista no se reinicia.
      *  2. Si la plantilla del paso que toca no está aprobada, se pasa al siguiente que la tenga (nunca queda mudo).
      *
      * @param Client               $client
@@ -638,7 +643,7 @@ class PruebaWhatsappService
                 continue;
             }
 
-            if ((isset($veces[$hito]) ? (int) $veces[$hito] : 0) >= self::TOPE_POR_PASO) {
+            if ((isset($veces[$hito]) ? (int) $veces[$hito] : 0) >= ($hito === 'ingreso' ? self::TOPE_DE_INGRESO : self::TOPE_POR_PASO)) {
                 if ($hito === 'ingreso') {
                     return ['paso' => null, 'plantilla' => null, 'estado' => 'tope_de_ingreso', 'detalle' => self::MOTIVO_TOPE_DE_INGRESO, 'sin_plantilla' => null];
                 }
@@ -664,7 +669,7 @@ class PruebaWhatsappService
                 'detalle' => 'Ningún paso pendiente tiene su plantilla aprobada (falta ' . $plantilla_que_falta . ').', 'sin_plantilla' => $sin_plantilla];
         }
 
-        return ['paso' => null, 'plantilla' => null, 'estado' => 'sin_hito_faltante', 'detalle' => 'No queda ningún paso por pedir.', 'sin_plantilla' => null];
+        return ['paso' => null, 'plantilla' => null, 'estado' => 'sin_hito_faltante', 'detalle' => 'No queda ningún paso sin mandar: ya cumplió o ya se le nombró todo.', 'sin_plantilla' => null];
     }
 
     /**

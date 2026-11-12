@@ -154,7 +154,7 @@ class RecorridoYBarridosDeLaPruebaTest extends BaseDeLaPrueba
      |----------------------------------------------------------------------------------------- */
 
     /** @test */
-    public function regla_1_un_paso_sale_como_mucho_dos_veces_y_despues_se_pasa_al_siguiente(): void
+    public function regla_1_un_paso_no_se_repite_al_dia_siguiente_sale_el_que_sigue_y_la_lista_no_se_reinicia(): void
     {
         $espia = $this->espiar_sender();
         $this->todo_aprobado();
@@ -162,11 +162,23 @@ class RecorridoYBarridosDeLaPruebaTest extends BaseDeLaPrueba
         $this->la_instancia_contesta(['ingreso']);
         $servicio = app(PruebaWhatsappService::class);
 
-        foreach (['cc_prueba_paso_importo', 'cc_prueba_paso_importo', 'cc_prueba_paso_articulo_creado_v2', 'cc_prueba_paso_articulo_creado_v2', 'cc_prueba_paso_articulo_actualizado'] as $indice => $esperada) {
+        $recorrido = [
+            'cc_prueba_paso_importo', 'cc_prueba_paso_articulo_creado_v2', 'cc_prueba_paso_articulo_actualizado', 'cc_prueba_paso_venta',
+            'cc_prueba_paso_agente', 'cc_prueba_paso_tienda_pedido', 'cc_prueba_paso_venta_cc', 'cc_prueba_paso_pago_cc',
+            'cc_prueba_paso_compra', 'cc_prueba_paso_cliente_creado', 'cc_prueba_paso_gasto',
+        ];
+        foreach ($recorrido as $indice => $esperada) {
             $this->assertSame('enviado', $servicio->empujar($client, $lead)['estado']);
             $this->assertSame($esperada, $espia->plantillas[$indice]['template_name'], 'Envío ' . ($indice + 1));
             $this->al_dia_siguiente($client);
         }
+
+        /* Ya se le nombró todo: no sale paso, la lista no vuelve a empezar. */
+        $this->assertSame('sin_hito_faltante', $servicio->empujar($client, $lead)['estado']);
+        $this->assertCount(count($recorrido), $espia->plantillas);
+        $hoy = $this->hoy_de($client)['hoy'];
+        $this->assertNull($hoy['paso']);
+        $this->assertStringContainsString('ya se le nombró todo', (string) $hoy['motivo_sin_paso']);
 
         $this->assertSame('articulo_creado', PruebaWhatsappEnvio::where('client_id', $client->id)->where('plantilla', 'cc_prueba_paso_articulo_creado_v2')->value('hito'),
             'La variante corregida cuenta para el mismo paso.');

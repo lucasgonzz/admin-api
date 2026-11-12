@@ -130,7 +130,7 @@ class EnsayoYResumenDeLaPruebaTest extends BaseDeLaPrueba
         /* Día 6: vuelve el empujón (el envío del día 5 quedó registrado con la fecha simulada, no con la de hoy). */
         $this->assertSame(0, Artisan::call('pruebas:ensayo', ['cliente' => $client->id, '--dia' => '6', '--correr' => 'empujar']), Artisan::output());
         $this->assertCount(3, $espia->plantillas);
-        $this->assertSame('cc_prueba_paso_importo', $espia->plantillas[2]['template_name']);
+        $this->assertSame('cc_prueba_paso_articulo_creado', $espia->plantillas[2]['template_name'], 'El paso ya mandado no se repite: sale el que sigue.');
         $dias = PruebaWhatsappEnvio::where('client_id', $client->id)->where('canal', PruebaWhatsappEnvio::CANAL_WHATSAPP)
             ->where('plantilla', '!=', PruebaPlantillasService::BIENVENIDA)->orderBy('id')->pluck('dia')->all();
         $this->assertCount(3, array_unique($dias), 'Tres envíos en tres días simulados distintos.');
