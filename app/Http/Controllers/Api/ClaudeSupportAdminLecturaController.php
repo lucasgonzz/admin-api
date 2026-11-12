@@ -157,6 +157,13 @@ class ClaudeSupportAdminLecturaController extends Controller
      */
     public function admin_sql(Request $request)
     {
+        if (! config('claude_admin_sql.habilitado', true)) {
+            return response()->json([
+                'error'  => 'La consulta SQL del admin está deshabilitada.',
+                'codigo' => 'deshabilitado',
+            ], 503);
+        }
+
         $sql = $request->input('sql');
 
         if (! is_string($sql)) {
@@ -172,6 +179,11 @@ class ClaudeSupportAdminLecturaController extends Controller
                 if (array_key_exists($clave, $resultado)) {
                     $extra[$clave] = $resultado[$clave];
                 }
+            }
+
+            /* 503: el servidor no puede atender (falta mysqli). No es un error del que consulta. */
+            if (isset($resultado['http']) && (int) $resultado['http'] === 503) {
+                return response()->json(array_merge(['error' => $resultado['error']], $extra), 503);
             }
 
             return $this->error_422($resultado['error'], $extra);

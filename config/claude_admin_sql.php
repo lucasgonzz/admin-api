@@ -37,6 +37,13 @@ return [
      | Largo máximo de la consulta, filas devueltas, largo de cada texto y tiempo de ejecución.
      | Son el contrato con el monitor (`docs/soporte-codex-contrato.md`): no se cambian sin avisar.
      */
+    /*
+     | Interruptor. Apagado (`CLAUDE_ADMIN_SQL_HABILITADO=false` en el .env), la ruta contesta 503
+     | `{error, codigo: "deshabilitado"}` sin validar ni ejecutar nada. Es la palanca para cortar el
+     | SQL del admin sin desplegar, si aparece otra fuga.
+     */
+    'habilitado' => (bool) env('CLAUDE_ADMIN_SQL_HABILITADO', true),
+
     'max_caracteres'      => 12000,
     'max_filas'           => 200,
     'max_caracteres_valor' => 4000,

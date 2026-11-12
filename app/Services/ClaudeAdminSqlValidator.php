@@ -38,8 +38,11 @@ namespace App\Services;
  *  - `*` dentro de un paréntesis se admite cuando es una multiplicación (`SUM(a * b)`).
  *
  * ⚠️ Lo que NO hace: no garantiza que la consulta sea SQL válido (eso lo dice MySQL) ni es la
- * única barrera. `ClaudeAdminSqlService` la corre en una transacción READ ONLY y redacta el
- * resultado; el monitor valida además por su cuenta antes de mandarla.
+ * reja principal. Tres rondas de revisión le encontraron un agujero cada una: validar el TEXTO de
+ * una consulta con expresiones regulares no alcanza. La reja que decide qué sale es la de
+ * `ClaudeAdminSqlService`, que mira el RESULTADO columna por columna (de qué tabla y columna real
+ * viene cada una). Este validador es la primera reja, y lo que le toca cerrar a él solo es lo que
+ * aquella no puede ver: las tablas derivadas (ver `tiene_una_subconsulta_fuera_de_in_o_exists()`).
  */
 class ClaudeAdminSqlValidator
 {
@@ -56,15 +59,20 @@ class ClaudeAdminSqlValidator
      * agrega, no corta), mayúsculas/minúsculas (el redactor no las distingue), `LTRIM`/`RTRIM`
      * (solo sacan espacios), largos, números y fechas.
      *
+     * 🔴 Y DESDE LA REJA POR ORIGEN, ADEMÁS: UNA FUNCIÓN QUE SOLO DEVUELVE TEXTO NO SIRVE. El
+     * servicio tapa toda expresión de tipo texto, así que `CONCAT`, `UPPER` o `DATE_FORMAT`
+     * devolverían siempre la máscara. Se sacan para que el rechazo sea claro en vez de una columna
+     * entera de `[dato reservado]`. Quedan las que devuelven números o fechas, y las condicionales
+     * (`IF`, `COALESCE`…), que sirven cuando sus argumentos son números o fechas.
+     *
      * ⚠️ `IN`, `EXISTS`, `NOT`, `OVER` y `AS` no son funciones: están porque la regla mira toda
      * palabra seguida de paréntesis.
      */
     const FUNCIONES = [
-        'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'COALESCE', 'IFNULL', 'NULLIF', 'IF', 'CONCAT', 'CONCAT_WS',
-        'LOWER', 'UPPER', 'LTRIM', 'RTRIM', 'LENGTH', 'CHAR_LENGTH', 'ROUND', 'ABS', 'CEIL', 'CEILING',
-        'FLOOR', 'DATE', 'DATE_FORMAT', 'YEAR', 'MONTH', 'DAY', 'DAYOFMONTH', 'HOUR', 'MINUTE', 'SECOND', 'NOW',
-        'CURDATE', 'CURRENT_DATE', 'CONVERT_TZ', 'DATE_ADD', 'DATE_SUB', 'DATEDIFF', 'TIMESTAMPDIFF',
-        'JSON_LENGTH', 'JSON_VALID', 'STR_TO_DATE', 'GREATEST', 'LEAST', 'GROUP_CONCAT', 'DATABASE', 'VERSION',
+        'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'COALESCE', 'IFNULL', 'NULLIF', 'IF', 'LENGTH', 'CHAR_LENGTH',
+        'ROUND', 'ABS', 'CEIL', 'CEILING', 'FLOOR', 'DATE', 'YEAR', 'MONTH', 'DAY', 'DAYOFMONTH', 'HOUR', 'MINUTE',
+        'SECOND', 'NOW', 'CURDATE', 'CURRENT_DATE', 'CONVERT_TZ', 'DATE_ADD', 'DATE_SUB', 'DATEDIFF', 'TIMESTAMPDIFF',
+        'JSON_LENGTH', 'JSON_VALID', 'GREATEST', 'LEAST',
         'IN', 'EXISTS', 'NOT', 'OVER', 'AS',
     ];
 
@@ -83,6 +91,17 @@ class ClaudeAdminSqlValidator
         'TRIM'         => '`TRIM(LEADING \'Contraseña: \' FROM body)` saca la etiqueta. `LTRIM` y `RTRIM` solo sacan espacios y se quedan.',
         'CAST'         => '`CAST(body AS CHAR CHARACTER SET ascii)` convierte «Contraseña» en «Contrase?a» y la etiqueta deja de reconocerse; `CAST(x AS CHAR(n))` corta un JSON por la mitad.',
         'CONVERT'      => '`CONVERT(body USING ascii)`: mismo caso que `CAST`.',
+        'CONCAT'       => 'Solo devuelve texto, y una expresión de texto ya no sale (el servicio la tapa por tipo). Además pegaba un prefijo a una etiqueta (`xContraseña: …`) y degradaba un JSON a texto.',
+        'CONCAT_WS'    => 'Mismo caso que `CONCAT`.',
+        'GROUP_CONCAT' => 'Mismo caso que `CONCAT`; además corta el resultado en `group_concat_max_len`.',
+        'LOWER'        => 'Solo devuelve texto: una expresión de texto ya no sale.',
+        'UPPER'        => 'Solo devuelve texto; `BINARY UPPER(x)` con un byte inválido hacía fallar al redactor.',
+        'LTRIM'        => 'Solo devuelve texto: una expresión de texto ya no sale.',
+        'RTRIM'        => 'Solo devuelve texto: una expresión de texto ya no sale.',
+        'DATE_FORMAT'  => 'Devuelve texto con un formato que elige el que consulta: `DATE_FORMAT(STR_TO_DATE(x, …), \'%f\')` sacaba dígitos de un texto.',
+        'STR_TO_DATE'  => '`STR_TO_DATE(body, \'El PIN es %f\')` convierte en fecha —un tipo que sí sale— hasta seis dígitos que siguen a una etiqueta.',
+        'DATABASE'     => 'Solo devuelve texto y no hace falta: la base es la del admin.',
+        'VERSION'      => 'Solo devuelve texto y no hace falta.',
         'REPLACE'      => 'Ya estaba prohibida como palabra (es también una sentencia de escritura); como función borraría la etiqueta: `REPLACE(body, \'Contraseña: \', \'\')`.',
     ];
 
@@ -108,12 +127,14 @@ class ClaudeAdminSqlValidator
 
     /**
      * Palabras que no pueden aparecer en un SELECT. Las de `_PROHIBIDOS` de `diagnostico.py` más
-     * `UNION`, `WITH`, `TABLE`, `VALUES` y `SHARE` (ver el docblock de la clase).
+     * `UNION`, `WITH`, `TABLE`, `VALUES`, `SHARE`, `BINARY` y `COLLATE` (ver el docblock de la clase).
+     * `BINARY` y `COLLATE` cambian cómo se comparan o se codifican los textos: con `BINARY` un
+     * texto sale como bytes y deja de ser UTF-8 que el redactor pueda leer.
      */
     const PROHIBIDAS = 'INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|REPLACE|GRANT|REVOKE|CALL|DO|SET|INTO|OUTFILE|DUMPFILE'
         . '|LOAD_FILE|SLEEP|BENCHMARK|GET_LOCK|RELEASE_LOCK|LOCK|UNLOCK|PROCEDURE|HANDLER|PREPARE|EXECUTE|DEALLOCATE'
         . '|KILL|SHUTDOWN|INSTALL|UNINSTALL|FLUSH|RESET|PURGE|INFORMATION_SCHEMA|PERFORMANCE_SCHEMA|MYSQL|SYS'
-        . '|UNION|WITH|TABLE|VALUES|SHARE';
+        . '|UNION|WITH|TABLE|VALUES|SHARE|BINARY|COLLATE';
 
     /** @var int Largo máximo de la consulta. */
     private $max_caracteres;
@@ -155,8 +176,9 @@ class ClaudeAdminSqlValidator
      *
      * @param mixed $sql La consulta tal como llegó.
      *
-     * @return array<string, mixed> `['ok' => true, 'sql' => string]` (la consulta tal cual llegó,
-     *                              sin los espacios de los bordes: es la que se ejecuta) o
+     * @return array<string, mixed> `['ok' => true, 'sql' => string, 'clase' => 'select' | 'esquema']`
+     *                              (la consulta tal cual llegó, sin los espacios de los bordes: es
+     *                              la que se ejecuta; `esquema` = SHOW / DESCRIBE / EXPLAIN) o
      *                              `['ok' => false, 'codigo' => string, 'error' => string]`.
      */
     public function validar($sql)
@@ -210,6 +232,25 @@ class ClaudeAdminSqlValidator
             return $this->rechazo('consulta_invalida', 'La consulta tiene una comilla simple o un backtick sin cerrar.');
         }
 
+        /* 🔴 FUERA DE UN LITERAL, SOLO ASCII IMPRIMIBLE. MySQL compara los identificadores con una
+           collation que PLIEGA letras: `api_Key` con la K de Kelvin (U+212A) o `apİ_key` con la İ
+           turca (U+0130) son, para MySQL, la columna `api_key`, y para una expresión regular son
+           otro texto. Lo mismo `admİn_settİngs` e `İNFORMATİON_SCHEMA`. Ningún nombre de tabla o de
+           columna del admin necesita otra cosa que ASCII; los textos entre comillas sí admiten ñ y
+           acentos, y a esta altura ya están vaciados. */
+        if (preg_match('/[^\x09\x0A\x0D\x20-\x7E]/', $limpio) !== 0) {
+            return $this->rechazo('consulta_invalida', 'Fuera de un texto entre comillas simples solo se admiten caracteres ASCII: sin acentos, eñes ni otros símbolos en nombres de tablas, columnas o alias.');
+        }
+
+        /* Un literal con algo pegado adelante (`N'…'`, `X'41'`, `b'01'`, `_utf8'…'`), un nombre que
+           empieza con guion bajo (`_latin1 '…'`, `_binary`) o un literal hexadecimal o de bits
+           (`0x41`, `0b01`): son formas de escribir un texto con otra codificación, o bytes sueltos. */
+        if (preg_match('/[A-Za-z0-9_]\'\'/', $limpio) !== 0
+            || preg_match('/(?<![A-Za-z0-9_])_[A-Za-z0-9_]+/', $limpio) !== 0
+            || preg_match('/(?<![A-Za-z0-9_])0[xXbB][0-9A-Fa-f]+/', $limpio) !== 0) {
+            return $this->rechazo('literal_no_permitido', 'No se admiten literales hexadecimales o de bits (0x…, X\'…\', b\'…\'), ni textos con un juego de caracteres declarado (N\'…\', _utf8\'…\', _binary). Escribí el texto entre comillas simples, con un espacio antes.');
+        }
+
         /* Recién ahora, sin literales: `email = 'a@b.com'` pasa y `SELECT @@version` no. Un
            comentario o un `;` que estén ANTES de la comilla que pretende esconderlos sobreviven al
            vaciado, así que no se puede usar una comilla dentro de un comentario para tapar código. */
@@ -247,15 +288,15 @@ class ClaudeAdminSqlValidator
         }
 
         if (preg_match('~^SHOW\s+TABLES\s*$~i', $limpio)) {
-            return ['ok' => true, 'sql' => $sql];
+            return ['ok' => true, 'sql' => $sql, 'clase' => 'esquema'];
         }
 
-        if (preg_match('~^SHOW\s+(?:FULL\s+)?COLUMNS\s+(?:FROM|IN)\s+[a-zA-Z_]\w*\s*$~i', $limpio)) {
-            return ['ok' => true, 'sql' => $sql];
+        if (preg_match('~^SHOW\s+(?:FULL\s+)?COLUMNS\s+(?:FROM|IN)\s+[a-zA-Z]\w*\s*$~i', $limpio)) {
+            return ['ok' => true, 'sql' => $sql, 'clase' => 'esquema'];
         }
 
-        if (preg_match('~^(?:DESCRIBE|DESC)\s+[a-zA-Z_]\w*\s*$~i', $limpio)) {
-            return ['ok' => true, 'sql' => $sql];
+        if (preg_match('~^(?:DESCRIBE|DESC)\s+[a-zA-Z]\w*\s*$~i', $limpio)) {
+            return ['ok' => true, 'sql' => $sql, 'clase' => 'esquema'];
         }
 
         if (preg_match('~\b(?:' . self::PROHIBIDAS . ')\b~i', $limpio)) {
@@ -296,7 +337,52 @@ class ClaudeAdminSqlValidator
             return $this->rechazo('funcion_no_permitida', 'No se permiten funciones de otras bases.');
         }
 
-        return ['ok' => true, 'sql' => $sql];
+        if ($this->tiene_una_subconsulta_fuera_de_in_o_exists($limpio)) {
+            return $this->rechazo('subconsulta_no_permitida', 'Una subconsulta solo se admite inmediatamente después de IN o de EXISTS. No se admiten tablas derivadas (`FROM (SELECT …) t`, también después de una coma) ni subconsultas en la lista del SELECT o dentro de una función.');
+        }
+
+        /* `EXPLAIN SELECT …` devuelve el plan, no datos: del otro lado se trata como una consulta de
+           esquema. */
+        return ['ok' => true, 'sql' => $sql, 'clase' => preg_match('~^EXPLAIN\b~i', $limpio) ? 'esquema' : 'select'];
+    }
+
+    /**
+     * ¿Hay un `(SELECT` que no venga inmediatamente después de `IN` o de `EXISTS`?
+     *
+     * 🔴 ES LO QUE CIERRA DE VERDAD LAS TABLAS DERIVADAS Y LAS SUBCONSULTAS ESCALARES. La regla de
+     * funciones mira la palabra pegada al paréntesis, así que `FROM a, (SELECT …) t`,
+     * `SELECT x, (SELECT …)`, `((SELECT …))` y `COALESCE((SELECT …))` —un paréntesis después de una
+     * coma o de otro paréntesis— se le escapaban. Y a través de una tabla derivada MySQL informa
+     * como nombre de origen de una columna el ALIAS que le puso la subconsulta
+     * (`(SELECT api_key AS name FROM clients) clients` → `clients.name`), que es justo en lo que
+     * confía la reja por origen de `ClaudeAdminSqlService`.
+     *
+     * @param string $limpio Consulta sin literales ni backticks.
+     *
+     * @return bool
+     */
+    private function tiene_una_subconsulta_fuera_de_in_o_exists($limpio)
+    {
+        if (! preg_match_all("~''|[A-Za-z_]\w*|\d+(?:\.\d+)?|\S~", (string) $limpio, $coincidencias)) {
+            return false;
+        }
+
+        $tokens   = $coincidencias[0];
+        $cantidad = count($tokens);
+
+        for ($i = 0; $i < $cantidad - 1; $i++) {
+            if ($tokens[$i] !== '(' || strtoupper($tokens[$i + 1]) !== 'SELECT') {
+                continue;
+            }
+
+            $anterior = $i > 0 ? strtoupper($tokens[$i - 1]) : '';
+
+            if ($anterior !== 'IN' && $anterior !== 'EXISTS') {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

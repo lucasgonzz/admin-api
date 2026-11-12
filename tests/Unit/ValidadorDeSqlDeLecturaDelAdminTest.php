@@ -69,7 +69,7 @@ class ValidadorDeSqlDeLecturaDelAdminTest extends TestCase
         $this->assert_admite('SELECT COUNT(*) AS total, estado FROM clients GROUP BY estado');
         $this->assert_admite('SELECT id FROM versions WHERE status IN (\'published\', \'draft\') AND title LIKE \'%stock%\'');
         $this->assert_admite('SELECT c.id FROM clients c WHERE EXISTS (SELECT 1 FROM client_ecommerces e WHERE e.client_id = c.id)');
-        $this->assert_admite('  select DATE_FORMAT(created_at, \'%Y-%m\') as mes, count(*) from support_tickets group by mes  ');
+        $this->assert_admite('  select YEAR(created_at) as anio, count(*) from support_tickets group by anio  ');
         $this->assert_admite('EXPLAIN SELECT id FROM clients WHERE slug = \'x\'');
         $this->assert_admite('SHOW TABLES');
         $this->assert_admite('SHOW COLUMNS FROM clients');
@@ -133,7 +133,8 @@ class ValidadorDeSqlDeLecturaDelAdminTest extends TestCase
 
         /* Comillas dobles fuera de un literal: no se admiten (con ANSI_QUOTES serían nombres). */
         $this->assert_rechaza('comillas_dobles', 'SELECT "api_key" FROM clients');
-        $this->assert_rechaza('comillas_dobles', 'SELECT 1 AS "a\'", api_key, 2 AS "\'b" FROM clients');
+        /* Acá el validador ve un literal pegado a una letra, y lo rechaza por eso. */
+        $this->assert_rechaza('literal_no_permitido', 'SELECT 1 AS "a\'", api_key, 2 AS "\'b" FROM clients');
         $this->assert_admite('SELECT id FROM leads WHERE notes = \'dijo "hola"\'');
     }
 
@@ -192,6 +193,13 @@ class ValidadorDeSqlDeLecturaDelAdminTest extends TestCase
         }
 
         foreach ($reservadas as $columna) {
+            if (preg_match('/[^\x20-\x7E]/', $columna)) {
+                /* `contraseña`: es una clave de JSON. Como nombre en la consulta no llega ni a
+                   mirarse: fuera de un literal solo se admite ASCII. */
+                $this->assert_rechaza('consulta_invalida', 'SELECT ' . $columna . ' FROM clients');
+                continue;
+            }
+
             foreach ([
                 'SELECT ' . $columna . ' FROM clients',
                 'SELECT ' . mb_strtoupper($columna, 'UTF-8') . ' AS x FROM clients',
@@ -414,16 +422,150 @@ class ValidadorDeSqlDeLecturaDelAdminTest extends TestCase
             $this->assertGreaterThan(20, strlen(trim((string) $motivo)), 'La función quitada "' . $funcion . '" no dice por qué.');
         }
 
-        /* La lista final, escrita: cambiarla es una decisión de seguridad, no un detalle. */
-        $esperadas = ['ABS', 'AS', 'AVG', 'CEIL', 'CEILING', 'CHAR_LENGTH', 'COALESCE', 'CONCAT', 'CONCAT_WS', 'CONVERT_TZ', 'COUNT',
-            'CURDATE', 'CURRENT_DATE', 'DATABASE', 'DATE', 'DATEDIFF', 'DATE_ADD', 'DATE_FORMAT', 'DATE_SUB', 'DAY', 'DAYOFMONTH',
-            'EXISTS', 'FLOOR', 'GREATEST', 'GROUP_CONCAT', 'HOUR', 'IF', 'IFNULL', 'IN', 'JSON_LENGTH', 'JSON_VALID', 'LEAST',
-            'LENGTH', 'LOWER', 'LTRIM', 'MAX', 'MIN', 'MINUTE', 'MONTH', 'NOT', 'NOW', 'NULLIF', 'OVER', 'ROUND', 'RTRIM', 'SECOND',
-            'STR_TO_DATE', 'SUM', 'TIMESTAMPDIFF', 'UPPER', 'VERSION', 'YEAR'];
+        /* La lista final, escrita: cambiarla es una decisión de seguridad, no un detalle. Ninguna
+           devuelve solo texto: una expresión de texto no sale. */
+        $esperadas = ['ABS', 'AS', 'AVG', 'CEIL', 'CEILING', 'CHAR_LENGTH', 'COALESCE', 'CONVERT_TZ', 'COUNT', 'CURDATE', 'CURRENT_DATE',
+            'DATE', 'DATEDIFF', 'DATE_ADD', 'DATE_SUB', 'DAY', 'DAYOFMONTH', 'EXISTS', 'FLOOR', 'GREATEST', 'HOUR', 'IF', 'IFNULL', 'IN',
+            'JSON_LENGTH', 'JSON_VALID', 'LEAST', 'LENGTH', 'MAX', 'MIN', 'MINUTE', 'MONTH', 'NOT', 'NOW', 'NULLIF', 'OVER', 'ROUND',
+            'SECOND', 'SUM', 'TIMESTAMPDIFF', 'YEAR'];
         sort($esperadas);
         sort($propias);
 
         $this->assertSame($esperadas, $propias);
+    }
+
+    public function test_rechaza_las_funciones_que_solo_devuelven_texto(): void
+    {
+        foreach ([
+            'SELECT CONCAT(name, slug) FROM clients',
+            'SELECT CONCAT_WS(\'-\', id, name) FROM clients',
+            'SELECT GROUP_CONCAT(name) FROM clients',
+            'SELECT LOWER(name), UPPER(name) FROM clients',
+            'SELECT LTRIM(name) FROM clients',
+            'SELECT RTRIM(name) FROM clients',
+            'SELECT DATE_FORMAT(created_at, \'%Y-%m\') FROM clients',
+            'SELECT STR_TO_DATE(notes, \'El PIN es %f\') FROM leads',
+            'SELECT DATE_FORMAT(STR_TO_DATE(notes, \'Contraseña: %f\'), \'%f\') FROM leads',
+            'SELECT DATABASE()',
+            'SELECT VERSION()',
+            'SELECT id FROM clients WHERE LOWER(name) = \'x\'',
+        ] as $sql) {
+            $this->assert_rechaza('funcion_no_permitida', $sql);
+        }
+
+        /* Lo que queda devuelve números o fechas. */
+        $this->assert_admite('SELECT LENGTH(body), CHAR_LENGTH(body), body FROM support_messages');
+        $this->assert_admite('SELECT YEAR(created_at), MONTH(created_at), COUNT(*) FROM support_tickets GROUP BY YEAR(created_at), MONTH(created_at)');
+        $this->assert_admite('SELECT id, DATEDIFF(NOW(), created_at), DATE(created_at), ROUND(precio_plan * 1.21, 2) FROM clients');
+        $this->assert_admite('SELECT IF(is_active = 1, id, 0), COALESCE(current_version_id, 0) FROM clients');
+    }
+
+    public function test_fuera_de_un_literal_solo_se_admite_ascii(): void
+    {
+        /* 🔴 Reproducido por la revisión: MySQL pliega estas letras y lee `api_key`, `admin_settings`,
+           `INFORMATION_SCHEMA`. Para una expresión regular son otro texto. */
+        foreach ([
+            "SELECT api_\u{212A}ey AS x FROM clients",                  // K de Kelvin
+            "SELECT ap\u{0130}_key AS x FROM clients",                  // İ turca
+            "SELECT * FROM adm\u{0130}n_sett\u{0130}ngs",
+            "SELECT table_name FROM \u{0130}NFORMAT\u{0130}ON_SCHEMA.tables",
+            "SELECT `api_\u{212A}ey` FROM clients",
+            "SELECT id AS a\u{00F1}o FROM clients",                     // un alias con eñe
+            "SELECT id FROM clients WHERE name = \u{2018}x\u{2019}",    // comillas tipográficas
+            "SELECT id\u{00A0}FROM clients",                            // espacio duro
+            "SELECT id FROM clients WHERE contrase\u{00F1}a = 1",
+            "SELECT id FROM clients \u{FF35}NION SELECT 1",             // U de ancho completo
+            "SELECT id FROM clients\x08",                               // un carácter de control
+            "SELECT id FROM clients WHERE id = 1\x1F",
+        ] as $sql) {
+            $this->assert_rechaza('consulta_invalida', $sql);
+        }
+
+        /* Adentro de un literal sí: es un dato. */
+        $this->assert_admite("SELECT id FROM leads WHERE name LIKE '%\u{00F1}and\u{00FA}%' OR name = 'Mart\u{00ED}n \u{212A}'");
+        /* Y los saltos de línea y el tabulador, para escribir la consulta en varias líneas. */
+        $this->assert_admite("SELECT id,\n\tname\r\nFROM clients\nWHERE id = 1");
+    }
+
+    public function test_rechaza_binary_collate_literales_hexadecimales_e_introductores_de_juego_de_caracteres(): void
+    {
+        foreach ([
+            'SELECT BINARY name FROM clients',
+            'SELECT id FROM clients WHERE BINARY name = \'x\'',
+            'SELECT name COLLATE utf8mb4_bin FROM clients',
+            'SELECT id FROM clients ORDER BY name COLLATE utf8mb4_bin',
+        ] as $sql) {
+            $this->assert_rechaza('operacion_no_permitida', $sql);
+        }
+
+        foreach ([
+            'SELECT id FROM clients WHERE name = 0x61',
+            'SELECT 0xFF',
+            'SELECT id FROM clients WHERE id = 0b101',
+            'SELECT id FROM clients WHERE name = X\'61\'',
+            'SELECT id FROM clients WHERE name = x\'61\'',
+            'SELECT id FROM clients WHERE name = b\'0110\'',
+            'SELECT id FROM clients WHERE name = N\'x\'',
+            'SELECT id FROM clients WHERE name = _utf8\'x\'',
+            'SELECT id FROM clients WHERE name = _latin1 \'x\'',
+            'SELECT id FROM clients WHERE name = _binary \'x\'',
+            'SELECT id FROM clients WHERE name = _utf8mb4 0x61',
+            'SELECT _id FROM clients',
+        ] as $sql) {
+            $this->assert_rechaza('literal_no_permitido', $sql);
+        }
+
+        /* Un número común, un nombre con guion bajo en el medio y un literal con espacio antes pasan. */
+        $this->assert_admite('SELECT id, current_version_id FROM clients WHERE id = 10 AND name = \'0x61\' AND precio_plan > 0.5');
+    }
+
+    public function test_una_subconsulta_solo_se_admite_despues_de_in_o_de_exists(): void
+    {
+        /* 🔴 Las cuatro que se escapaban de la regla de funciones (un paréntesis después de una coma
+           o de otro paréntesis), más las de siempre. */
+        foreach ([
+            'SELECT c.id FROM clients c, (SELECT id, slug FROM versions) t',
+            'SELECT id, (SELECT MAX(version) FROM versions) FROM clients',
+            'SELECT id FROM clients WHERE id = ((SELECT MAX(id) FROM versions))',
+            'SELECT COALESCE((SELECT id FROM versions LIMIT 1), 0) FROM clients',
+            'SELECT id FROM clients WHERE id IN ((SELECT id FROM versions))',
+            'SELECT IF(1 = 1, (SELECT id FROM versions LIMIT 1), 0) FROM clients',
+            'SELECT id FROM clients ORDER BY 1, (SELECT id FROM versions LIMIT 1)',
+            'SELECT id FROM clients WHERE id > 0 AND 1 = 1 + (SELECT 1)',
+        ] as $sql) {
+            $this->assert_rechaza('subconsulta_no_permitida', $sql);
+        }
+
+        /* Las que ya rechazaba otra regla siguen rechazadas (con el código de esa regla). */
+        foreach ([
+            'SELECT t.id FROM (SELECT id FROM clients) t',
+            'SELECT c.id FROM clients c JOIN (SELECT id FROM versions) v ON v.id = c.id',
+            'SELECT (SELECT name FROM versions LIMIT 1) FROM clients',
+            'SELECT id FROM clients WHERE id = (SELECT MAX(id) FROM versions)',
+            'SELECT id FROM clients WHERE id = ANY (SELECT id FROM versions)',
+            'SELECT name FROM (SELECT api_key AS name FROM clients) clients',
+            'SELECT name FROM (SELECT DISTINCT slug AS name FROM clients) clients',
+        ] as $sql) {
+            $resultado = $this->validar($sql);
+
+            $this->assertFalse($resultado['ok'], 'Tendría que rechazar: ' . $sql);
+            $this->assertContains($resultado['codigo'], ['subconsulta_no_permitida', 'funcion_no_permitida', 'campo_sensible'], $sql);
+        }
+
+        $this->assert_admite('SELECT id FROM clients WHERE id IN (SELECT client_id FROM client_ecommerces)');
+        $this->assert_admite('SELECT id FROM clients WHERE id NOT IN (SELECT client_id FROM client_ecommerces) AND EXISTS (SELECT 1 FROM versions)');
+        $this->assert_admite('SELECT c.id FROM clients c WHERE NOT EXISTS (SELECT 1 FROM client_ecommerces e WHERE e.client_id = c.id)');
+        $this->assert_admite('select id from clients where id in ( select client_id from client_ecommerces )');
+    }
+
+    public function test_la_validacion_dice_si_la_sentencia_es_un_select_o_una_consulta_de_esquema(): void
+    {
+        $this->assertSame('select', $this->validar('SELECT id FROM clients')['clase']);
+        $this->assertSame('select', $this->validar('  select COUNT(*) from clients ')['clase']);
+
+        foreach (['SHOW TABLES', 'SHOW COLUMNS FROM clients', 'SHOW FULL COLUMNS IN versions', 'DESCRIBE clients', 'desc versions', 'EXPLAIN SELECT id FROM clients', 'explain select 1'] as $sql) {
+            $this->assertSame('esquema', $this->validar($sql)['clase'], $sql);
+        }
     }
 
     public function test_rechaza_toda_forma_de_extraer_una_parte_de_un_json(): void
@@ -441,8 +583,8 @@ class ValidadorDeSqlDeLecturaDelAdminTest extends TestCase
             'SELECT JSON_EXTRACT(contract_financiacion, \'$.admin_password\') AS x FROM clients',
             'SELECT JSON_UNQUOTE(JSON_EXTRACT(contract_financiacion, \'$.admin_password\')) FROM clients',
             'SELECT JSON_EXTRACT(contract_financiacion, \'$.*\') FROM clients',
-            'SELECT GROUP_CONCAT(JSON_EXTRACT(contract_financiacion, \'$.admin_password\')) FROM clients',
-            'SELECT CONCAT(\'x\', JSON_UNQUOTE(contract_financiacion)) FROM clients',
+            'SELECT MAX(JSON_EXTRACT(contract_financiacion, \'$.admin_password\')) FROM clients',
+            'SELECT COALESCE(JSON_UNQUOTE(contract_financiacion), 1) FROM clients',
             'SELECT JSON_VALUE(contract_financiacion, \'$.admin_password\') FROM clients',
             'SELECT JSON_SEARCH(contract_financiacion, \'one\', \'a%\') FROM clients',
             'SELECT JSON_KEYS(contract_financiacion) FROM clients',
@@ -499,8 +641,8 @@ class ValidadorDeSqlDeLecturaDelAdminTest extends TestCase
             $this->assertContains($resultado['codigo'], ['funcion_no_permitida', 'operacion_no_permitida', 'json_no_permitido'], $llamada);
         }
 
-        /* Lo que queda: no cortan ni separan. */
-        $this->assert_admite('SELECT LOWER(body), UPPER(body), LTRIM(body), RTRIM(body), LENGTH(body), CONCAT(id, body) FROM support_messages');
+        /* Lo que queda no devuelve texto: ver test_rechaza_las_funciones_que_solo_devuelven_texto. */
+        $this->assert_admite('SELECT LENGTH(body), body FROM support_messages');
     }
 
     public function test_el_validador_acepta_una_config_propia(): void

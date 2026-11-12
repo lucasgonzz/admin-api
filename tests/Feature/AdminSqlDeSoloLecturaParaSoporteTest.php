@@ -286,7 +286,11 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
 
     public function test_corta_los_textos_largos_a_4000_caracteres(): void
     {
-        $respuesta = $this->consultar('SELECT CONCAT(\'' . str_repeat('ñ', 2500) . '\', \'' . str_repeat('a', 2500) . '\') AS largo');
+        DB::table('clients')->where('id', $this->client_id)->update([
+            'ai_plan_sync_message' => str_repeat('ñ', 2500) . str_repeat('a', 2500),
+        ]);
+
+        $respuesta = $this->consultar('SELECT ai_plan_sync_message AS largo FROM clients WHERE id = ' . $this->client_id);
 
         $respuesta->assertStatus(200);
 
@@ -510,67 +514,127 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
     {
         $servicio = app(ClaudeAdminSqlService::class);
 
+        /* Texto => lo que tiene que quedar legible. En todos, el centinela no sale. */
         $casos = [
             /* Los dos que reprodujo la revisión. */
-            'El password del wifi: CENTINELA'              => 'El password [oculta]',
-            'la contraseña del router es 1234CENTINELA'    => 'la contraseña [oculta]',
+            'El password del wifi: CENTINELA'              => ['El password'],
+            'la contraseña del router es 1234CENTINELA'    => ['la contraseña'],
             /* Etiquetas cortas y en inglés, sin distinguir mayúsculas ni la eñe. */
-            'PASS: CENTINELA'                              => 'PASS: [oculta]',
-            'pwd=CENTINELA'                                => 'pwd=[oculta]',
-            'su PIN de la tarjeta is CENTINELA'            => 'su PIN [oculta]',
-            'el token nuevo que le dimos ayer: CENTINELA'  => 'el token [oculta]',
-            'Contrasena CENTINELA'                         => 'Contrasena [oculta]',
-            'CONTRASEÑAS: CENTINELA y CENTINELA'           => 'CONTRASEÑAS: [oculta]',
-            'usuario: ana, clave: CENTINELA'               => 'usuario: ana, clave: [oculta]',
-            'passwd CENTINELA'                             => 'passwd [oculta]',
+            'PASS: CENTINELA'                              => ['PASS'],
+            'pwd=CENTINELA'                                => ['pwd'],
+            'su PIN de la tarjeta is CENTINELA'            => ['su PIN'],
+            'el token nuevo que le dimos ayer: CENTINELA'  => ['el token'],
+            'Contrasena CENTINELA'                         => ['Contrasena'],
+            'CONTRASEÑAS: CENTINELA y CENTINELA'           => ['CONTRASEÑAS'],
+            'usuario: ana, clave: CENTINELA'               => ['usuario: ana, clave'],
+            'passwd CENTINELA'                             => ['passwd'],
             /* La etiqueta al final de la línea: el valor está en la siguiente. */
-            "Contraseña:\nCENTINELA\nGracias"              => "Contraseña:\n[oculta]\nGracias",
+            "Contraseña:\nCENTINELA\nGracias"              => ['Contraseña', 'Gracias'],
             /* Y lo de las otras líneas no se toca. */
-            "Hola\nclave CENTINELA\nNos vemos el martes"   => "Hola\nclave [oculta]\nNos vemos el martes",
+            "Hola\nclave CENTINELA\nNos vemos el martes"   => ["Hola\nclave", "\nNos vemos el martes"],
+            /* 🔴 La etiqueta no necesita empezar la palabra: un prefijo pegado no la esconde. */
+            'xContraseña: CENTINELA'                       => ['xContraseña'],
+            '123clave CENTINELA'                           => ['123clave'],
+            'MI_PASSWORD es CENTINELA'                     => ['MI_PASSWORD'],
+            /* `nombre: valor` con un nombre sensible, reservado o con una etiqueta adentro. */
+            'api-key: CENTINELA'                           => ['api-key'],
+            '"session_id": "CENTINELA"'                    => ['session_id'],
+            'setup_data = CENTINELA'                       => ['setup_data'],
+            'clave_fiscal: CENTINELA'                      => ['clave_fiscal'],
+            'user_pin: CENTINELA y pin_code=CENTINELA'     => ['user_pin'],
+            /* Un JSON cortado o pegado a otro texto ya no se puede redactar por clave. */
+            'x{"admin_password": "CENTINELA con espacios", "rubro": "CENTINELA"' => ['admin_password'],
+            'x{"credentials": {"a": "CENTINELA"}}'         => ['credentials'],
         ];
 
-        foreach ($casos as $texto => $esperado) {
+        foreach ($casos as $texto => $quedan) {
             $salida = $servicio->redactar($texto, 'body');
 
+            $this->assertIsString($salida, $texto);
             $this->assertStringNotContainsString('CENTINELA', $salida, $texto);
-            $this->assertSame($esperado, $salida, $texto);
+            $this->assertStringNotContainsString('con espacios', $salida, $texto);
+            $this->assertMatchesRegularExpression('/\[oculta\]|\[dato reservado\]/', $salida, $texto);
+
+            foreach ($quedan as $trozo) {
+                $this->assertStringContainsString($trozo, $salida, $texto);
+            }
         }
 
         /* Una palabra que EMPIEZA con la etiqueta y sigue no dispara nada. */
         foreach (['Compás de espera', 'pinturería del centro', 'passport listo', 'tokenizar no', 'pasó a la tarde'] as $inocente) {
             $this->assertSame($inocente, $servicio->redactar($inocente, 'body'));
         }
-
-        /* 🔴 Pero la etiqueta no necesita empezar la palabra: `CONCAT('x', body)` le pega una letra
-           adelante, y con un borde de palabra exigido el valor salía pelado. */
-        $this->assertSame('xContraseña: [oculta]', $servicio->redactar('xContraseña: CENTINELA', 'x'));
-        $this->assertSame('123clave [oculta]', $servicio->redactar('123clave CENTINELA', 'x'));
-        $this->assertSame('MI_PASSWORD [oculta]', $servicio->redactar('MI_PASSWORD es CENTINELA', 'x'));
-
-        /* Un JSON cortado o pegado a otro texto ya no se puede redactar por clave: el valor entre
-           comillas se va entero, con sus espacios. */
-        $roto = $servicio->redactar('x{"admin_password": "CENTINELA con espacios", "rubro": "kiosco"', 'body');
-        $this->assertStringNotContainsString('CENTINELA', $roto);
-        $this->assertStringNotContainsString('con espacios', $roto);
     }
 
-    public function test_ninguna_funcion_habilitada_devuelve_un_secreto_de_un_cuerpo_ni_de_un_json(): void
+    public function test_las_claves_de_un_json_se_tapan_por_subcadena_de_etiqueta(): void
     {
-        /* 🔴 DEFENSA EN PROFUNDIDAD. La fixture tiene un cuerpo con «Contraseña: CANARIO…» (en la
-           primera línea y en otras tres) y un JSON legible con `admin_password`, `user_setup.token`
-           y `employees[0].password`. Se recorre TODA función habilitada con las formas simples de
-           llamarla sobre esas dos columnas. Cada consulta puede salir bien, ser rechazada o
-           fallar en MySQL: lo que no puede es devolver un canario. Si alguien agrega a la lista
-           una función que corta o extrae, este test lo denuncia. */
+        $servicio = app(ClaudeAdminSqlService::class);
+
+        $json = json_encode([
+            'pass'        => 'CENTINELA-1',
+            'pwd'         => 'CENTINELA-2',
+            'user_pin'    => 'CENTINELA-3',
+            'clave_admin' => 'CENTINELA-4',
+            'pin_code'    => 'CENTINELA-5',
+            'api-key'     => 'CENTINELA-6',
+            'Credentials' => ['x' => 'CENTINELA-7'],
+            'contrasenia' => 'CENTINELA-8',
+            'rubro'       => 'kiosco',
+            'anidado'     => ['lista' => [['secretKey' => 'CENTINELA-9', 'ciudad' => 'Gualeguay']]],
+        ]);
+
+        $salida = $servicio->redactar($json, 'contract_financiacion');
+        $datos  = json_decode($salida, true);
+
+        $this->assertStringNotContainsString('CENTINELA', $salida);
+        $this->assertSame('kiosco', $datos['rubro']);
+        $this->assertSame('Gualeguay', $datos['anidado']['lista'][0]['ciudad']);
+
+        foreach (['pass', 'pwd', 'user_pin', 'clave_admin', 'pin_code', 'api-key', 'Credentials', 'contrasenia'] as $clave) {
+            $this->assertSame('[dato reservado]', $datos[$clave], $clave);
+        }
+    }
+
+    public function test_el_redactor_falla_cerrado_con_un_texto_que_no_es_utf8(): void
+    {
+        $servicio = app(ClaudeAdminSqlService::class);
+
+        /* 🔴 Reproducido: «CONTRASEÑA: valor» seguido de un byte 0xFF hacía fallar las expresiones
+           regulares con /u (devuelven null) y el respaldo por bytes no reconocía la Ñ. Un texto que
+           no es UTF-8 válido no se puede leer: no sale. */
+        foreach ([
+            "CONTRASEÑA: CENTINELA\xFF",
+            "\xFFContraseña: CENTINELA",
+            "password: CENTINELA \xC3\x28",
+            "\xFF",
+        ] as $roto) {
+            $this->assertSame('[dato reservado]', $servicio->redactar($roto, 'body'), bin2hex($roto));
+        }
+
+        /* Y adentro de un arreglo, igual. */
+        $this->assertSame(['a' => '[dato reservado]', 'b' => 'bien'], $servicio->redactar(['a' => "clave: CENTINELA\xFF", 'b' => 'bien'], 'x'));
+    }
+
+    public function test_ninguna_funcion_habilitada_devuelve_un_texto_ni_un_secreto(): void
+    {
+        /* 🔴 DEFENSA EN PROFUNDIDAD. La fixture tiene un cuerpo con «Contraseña: CANARIO…» y un JSON
+           con `admin_password`, `user_setup.token` y `employees[0].password`. Se recorre TODA función
+           habilitada con las formas simples de llamarla sobre esas dos columnas. Cada consulta puede
+           salir bien, ser rechazada o fallar en MySQL. Lo que no puede:
+             - devolver un canario;
+             - devolver un TEXTO: una expresión solo sale si es un número, una fecha o NULL.
+           Si alguien agrega a la lista una función que corta, extrae o transforma, este test lo
+           denuncia. Va directo al servicio (validador + plan + origen + redactor, lo mismo que el
+           endpoint): por HTTP el limitador del grupo api corta a los 60 pedidos. */
         $columnas = ['cobranzas_observaciones', 'contract_financiacion'];
         $formas   = [
-            'F(C)', 'F(C, 1)', 'F(C, 14)', 'F(C, 1, 20)', 'F(C, 14, 20)', 'F(C, C)', 'F(\'x\', C)', 'F(C, \'x\')', 'F(C, \'%Y\')',
-            'F(C, \'$.admin_password\')', 'F(1, C, C)', 'F(C SEPARATOR \'|\')', 'F(DISTINCT C)', 'F(C) OVER ()',
-            'F(LOWER(C))', 'UPPER(F(C))', 'CONCAT(\'x\', F(C))', 'F(CONCAT(C, \'x\'))', 'F(C + 0)', 'F(C, INTERVAL 1 DAY)',
+            '{F}({C})', '{F}({C}, 1)', '{F}({C}, 14)', '{F}({C}, 1, 20)', '{F}({C}, {C})', '{F}(1, {C})', '{F}({C}, id)', '{F}(id, {C}, {C})',
+            '{F}(DISTINCT {C})', '{F}({C}) OVER ()', '{F}({C} + 0)', '{F}({C}, INTERVAL 1 DAY)', '{F}({F}({C}))', '{F}(id > 0, {C}, {C})',
+            '{F}({C} IS NULL, 1, {C})',
         ];
 
         $funciones = array_values(array_diff(\App\Services\ClaudeAdminSqlValidator::FUNCIONES, ['IN', 'EXISTS', 'NOT', 'OVER', 'AS']));
-        $this->assertGreaterThan(40, count($funciones));
+        $this->assertGreaterThan(30, count($funciones));
 
         $servicio  = app(ClaudeAdminSqlService::class);
         $corridas  = 0;
@@ -579,12 +643,9 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
         foreach ($funciones as $funcion) {
             foreach ($columnas as $columna) {
                 foreach ($formas as $forma) {
-                    $expresion = str_replace(['F', 'C'], [$funcion, $columna], str_replace(['SEPARATOR', 'DISTINCT', 'OVER', 'LOWER', 'UPPER', 'CONCAT', 'INTERVAL', 'DAY'], ['{S}', '{D}', '{O}', '{L}', '{U}', '{K}', '{I}', '{Y}'], $forma));
-                    $expresion = str_replace(['{S}', '{D}', '{O}', '{L}', '{U}', '{K}', '{I}', '{Y}'], ['SEPARATOR', 'DISTINCT', 'OVER', 'LOWER', 'UPPER', 'CONCAT', 'INTERVAL', 'DAY'], $expresion);
+                    $expresion = strtr($forma, ['{F}' => $funcion, '{C}' => $columna]);
                     $sql       = 'SELECT ' . $expresion . ' AS x FROM clients WHERE id = ' . $this->client_id;
 
-                    /* Directo al servicio (validador + ejecución + redacción, lo mismo que hace el
-                       endpoint): por HTTP el limitador del grupo api corta a los 60 pedidos. */
                     $resultado = $servicio->consultar($sql);
                     $corridas++;
 
@@ -593,7 +654,21 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
                     $this->assertNotSame('', $cuerpo, $sql);
                     $this->assertFalse(stripos($cuerpo, 'CANARIO'), 'Devolvió un secreto: ' . $sql . ' → ' . $cuerpo);
 
-                    if ($resultado['ok'] && $resultado['row_count'] > 0) {
+                    if (! $resultado['ok']) {
+                        continue;
+                    }
+
+                    foreach ($resultado['rows'] as $fila) {
+                        foreach ($fila as $valor) {
+                            $this->assertTrue(
+                                $valor === null || is_int($valor) || is_float($valor) || $valor === '[dato reservado]'
+                                    || (is_string($valor) && preg_match('/^-?\d+(\.\d+)?$|^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}:\d{2}(\.\d+)?)?$|^-?\d+:\d{2}:\d{2}(\.\d+)?$/', $valor) === 1),
+                                'Una expresión devolvió un texto: ' . $sql . ' → ' . $cuerpo
+                            );
+                        }
+                    }
+
+                    if ($resultado['row_count'] > 0) {
                         $con_filas++;
                     }
                 }
@@ -601,13 +676,15 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
         }
 
         /* Que midió algo: muchas corrieron de verdad y devolvieron una fila. */
-        $this->assertGreaterThan(1500, $corridas);
-        $this->assertGreaterThan(200, $con_filas);
+        $this->assertGreaterThan(900, $corridas);
+        $this->assertGreaterThan(100, $con_filas);
     }
 
     public function test_las_consultas_que_extraian_secretos_de_un_json_o_de_un_cuerpo_ya_no_los_devuelven(): void
     {
-        /* Las de la revisión, tal cual, contra la base de verdad: rechazadas, y sin canario. */
+        $id = $this->client_id;
+
+        /* Las de las tres rondas de revisión, tal cual, contra la base de verdad: rechazadas. */
         $rechazadas = [
             'SELECT data->>\'$.admin_password\' AS x FROM implementation_stages',
             'SELECT JSON_EXTRACT(data, \'$.admin_password\') AS x FROM implementation_stages',
@@ -618,41 +695,268 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
             'SELECT GROUP_CONCAT(data->>\'$.admin_password\') AS x FROM implementation_stages',
             'SELECT CONCAT(\'x\', JSON_EXTRACT(data, \'$.admin_password\')) AS x FROM implementation_stages',
             'SELECT data FROM implementation_stages',
-            'SELECT contract_financiacion->>\'$.admin_password\' AS x FROM clients WHERE id = ' . $this->client_id,
-            'SELECT JSON_EXTRACT(contract_financiacion, \'$.admin_password\') AS x FROM clients WHERE id = ' . $this->client_id,
-            'SELECT JSON_UNQUOTE(JSON_EXTRACT(contract_financiacion, \'$.user_setup.token\')) AS x FROM clients WHERE id = ' . $this->client_id,
-            'SELECT contract_financiacion->>\'$.employees[0].password\' AS x FROM clients WHERE id = ' . $this->client_id,
-            'SELECT JSON_EXTRACT(contract_financiacion, \'$.*\') AS x FROM clients WHERE id = ' . $this->client_id,
-            'SELECT SUBSTRING(contract_financiacion, 120, 40) AS x FROM clients WHERE id = ' . $this->client_id,
-            'SELECT SUBSTRING(cobranzas_observaciones, 14) AS x FROM clients WHERE id = ' . $this->client_id,
-            'SELECT RIGHT(cobranzas_observaciones, 20) AS x FROM clients WHERE id = ' . $this->client_id,
-            'SELECT TRIM(LEADING \'Contraseña: \' FROM cobranzas_observaciones) AS x FROM clients WHERE id = ' . $this->client_id,
-            'SELECT CAST(cobranzas_observaciones AS CHAR CHARACTER SET ascii) AS x FROM clients WHERE id = ' . $this->client_id,
-            'SELECT CONVERT(cobranzas_observaciones USING ascii) AS x FROM clients WHERE id = ' . $this->client_id,
+            'SELECT contract_financiacion->>\'$.admin_password\' AS x FROM clients WHERE id = ' . $id,
+            'SELECT JSON_EXTRACT(contract_financiacion, \'$.admin_password\') AS x FROM clients WHERE id = ' . $id,
+            'SELECT JSON_UNQUOTE(JSON_EXTRACT(contract_financiacion, \'$.user_setup.token\')) AS x FROM clients WHERE id = ' . $id,
+            'SELECT contract_financiacion->>\'$.employees[0].password\' AS x FROM clients WHERE id = ' . $id,
+            'SELECT JSON_EXTRACT(contract_financiacion, \'$.*\') AS x FROM clients WHERE id = ' . $id,
+            'SELECT SUBSTRING(contract_financiacion, 120, 40) AS x FROM clients WHERE id = ' . $id,
+            'SELECT SUBSTRING(cobranzas_observaciones, 14) AS x FROM clients WHERE id = ' . $id,
+            'SELECT RIGHT(cobranzas_observaciones, 20) AS x FROM clients WHERE id = ' . $id,
+            'SELECT TRIM(LEADING \'Contraseña: \' FROM cobranzas_observaciones) AS x FROM clients WHERE id = ' . $id,
+            'SELECT CAST(cobranzas_observaciones AS CHAR CHARACTER SET ascii) AS x FROM clients WHERE id = ' . $id,
+            'SELECT CONVERT(cobranzas_observaciones USING ascii) AS x FROM clients WHERE id = ' . $id,
+            /* Ronda 3. */
+            "SELECT api_\u{212A}ey AS x FROM clients WHERE id = " . $id,
+            "SELECT ap\u{0130}_key AS x FROM clients WHERE id = " . $id,
+            "SELECT * FROM adm\u{0130}n_sett\u{0130}ngs",
+            "SELECT table_name FROM \u{0130}NFORMAT\u{0130}ON_SCHEMA.tables",
+            'SELECT CONCAT(BINARY UPPER(cobranzas_observaciones), 0xFF) AS x FROM clients WHERE id = ' . $id,
+            'SELECT STR_TO_DATE(cobranzas_observaciones, \'El PIN es %f\') AS x FROM clients WHERE id = ' . $id,
+            'SELECT DATE_FORMAT(STR_TO_DATE(cobranzas_observaciones, \'Contraseña: %f\'), \'%f\') AS x FROM clients WHERE id = ' . $id,
+            'SELECT CONCAT(\'x\', contract_financiacion) AS x FROM clients WHERE id = ' . $id,
+            'SELECT c.id FROM clients c, (SELECT id, slug FROM versions) t WHERE c.id = ' . $id,
+            'SELECT id, (SELECT MAX(version) FROM versions) AS x FROM clients WHERE id = ' . $id,
+            'SELECT name FROM (SELECT api_key AS name FROM clients) clients',
+            'SELECT LOWER(cobranzas_observaciones) AS x FROM clients WHERE id = ' . $id,
+            'SELECT GROUP_CONCAT(cobranzas_observaciones) AS x FROM clients WHERE id = ' . $id,
         ];
 
         foreach ($rechazadas as $sql) {
             $respuesta = $this->consultar($sql);
 
             $respuesta->assertStatus(422);
-            $this->assertContains($respuesta->json('codigo'), ['json_no_permitido', 'funcion_no_permitida', 'campo_sensible', 'operacion_no_permitida'], $sql);
+            $this->assertNotSame('consulta_fallida', $respuesta->json('codigo'), 'Tendría que rechazarla el validador, no MySQL: ' . $sql);
             $this->assertStringNotContainsString('CANARIO', $respuesta->getContent(), $sql);
         }
 
-        /* Y las que siguen pasando devuelven el texto o el JSON ENTERO, tapado. */
+        /* Lo que sigue pudiéndose: las dos columnas ENTERAS, tapadas. */
+        $respuesta = $this->consultar('SELECT cobranzas_observaciones, contract_financiacion FROM clients WHERE id = ' . $id);
+
+        $respuesta->assertStatus(200);
+        $this->assertStringNotContainsString('CANARIO', $respuesta->getContent());
+        $this->assertStringContainsString('Tercera línea legible.', $respuesta->json('rows.0.cobranzas_observaciones'));
+        $this->assertSame(3, json_decode($respuesta->json('rows.0.contract_financiacion'), true)['cuotas']);
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | 4 bis. La reja por ORIGEN de cada columna, sin el validador
+     |----------------------------------------------------------------------------------------- */
+
+    public function test_la_reja_por_origen_tapa_una_columna_sensible_aunque_tenga_alias(): void
+    {
+        $servicio = app(ClaudeAdminSqlService::class);
+        $id       = $this->client_id;
+
+        /* 🔴 Directo al servicio, SIN validador: lo que rechaza o tapa acá es lo que MySQL informa
+           del origen de cada columna, no el texto de la consulta. */
         foreach ([
-            'SELECT LOWER(cobranzas_observaciones) AS x, UPPER(cobranzas_observaciones) AS y FROM clients WHERE id = ' . $this->client_id,
-            'SELECT GROUP_CONCAT(cobranzas_observaciones) AS x, CONCAT(\'x\', contract_financiacion) AS y FROM clients WHERE id = ' . $this->client_id,
-            'SELECT CONCAT_WS(\'|\', id, cobranzas_observaciones, contract_financiacion) AS x FROM clients WHERE id = ' . $this->client_id,
-            'SELECT UPPER(contract_financiacion) AS x, LOWER(contract_financiacion) AS y FROM clients WHERE id = ' . $this->client_id,
+            'SELECT api_key AS x FROM clients WHERE id = ' . $id,
+            'SELECT c.api_key x, c.inbound_api_key AS y FROM clients c WHERE c.id = ' . $id,
+            /* Las letras que MySQL pliega: Kelvin (U+212A) → k, İ turca (U+0130) → i. */
+            "SELECT api_\u{212A}ey AS x FROM clients WHERE id = " . $id,
+            "SELECT ap\u{0130}_key AS x FROM clients WHERE id = " . $id,
+            /* Columnas reservadas con alias. */
+            'SELECT setup_data AS x FROM clients WHERE id = ' . $id,
+            'SELECT request AS x, response AS y FROM mensualidad_invoices WHERE client_id = ' . $id,
         ] as $sql) {
-            $respuesta = $this->consultar($sql);
+            $resultado = $servicio->ejecutar_y_filtrar($sql);
+            $cuerpo    = (string) json_encode($resultado, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
 
-            $respuesta->assertStatus(200);
-            $this->assertSame(1, $respuesta->json('row_count'), $sql);
-            $this->assertStringNotContainsString('CANARIO', $respuesta->getContent(), $sql);
-            $this->assertStringNotContainsString('canario', $respuesta->getContent(), $sql);
+            $this->assertStringNotContainsString('CANARIO', $cuerpo, $sql);
+
+            /* Si MySQL no pliega la letra en este servidor, la consulta falla por columna inexistente:
+               también vale. Si corre, sale la máscara. */
+            if ($resultado['ok']) {
+                $this->assertSame(1, $resultado['row_count'], $sql);
+                foreach ($resultado['rows'][0] as $valor) {
+                    $this->assertSame('[dato reservado]', $valor, $sql);
+                }
+            } else {
+                $this->assertSame('consulta_fallida', $resultado['codigo'], $sql);
+            }
         }
+
+        /* El alias común corre seguro: que no sea un test que solo ve fallos. */
+        $this->assertTrue($servicio->ejecutar_y_filtrar('SELECT api_key AS x FROM clients WHERE id = ' . $id)['ok']);
+    }
+
+    public function test_la_reja_por_origen_tapa_toda_expresion_de_texto(): void
+    {
+        $servicio = app(ClaudeAdminSqlService::class);
+        $id       = $this->client_id;
+
+        /* Sin validador. Cada expresión devuelve texto (o bytes): sale la máscara, sea lo que sea. */
+        $expresiones = [
+            'CONCAT(\'x\', api_key)', 'UPPER(api_key)', 'LOWER(name)', 'CONCAT(name, slug)', 'MAX(name)', 'MIN(api_key)',
+            'GROUP_CONCAT(api_key)', 'IF(id > 0, api_key, name)', 'COALESCE(api_key, name)', 'SUBSTRING(api_key, 2)',
+            'JSON_EXTRACT(contract_financiacion, \'$.admin_password\')', 'contract_financiacion->>\'$.admin_password\'',
+            'CONCAT(\'x\', contract_financiacion)', 'CONCAT(BINARY UPPER(cobranzas_observaciones), 0xFF)',
+            'BINARY api_key', 'HEX(api_key)', 'TO_BASE64(api_key)', 'CAST(api_key AS CHAR)', 'REVERSE(api_key)',
+            'DATE_FORMAT(NOW(), api_key)', '\'literal\'', 'RIGHT(cobranzas_observaciones, 20)', 'api_key COLLATE utf8mb4_bin',
+            '(SELECT api_key FROM clients WHERE id = ' . $id . ')', 'CASE WHEN id > 0 THEN api_key ELSE name END',
+        ];
+
+        foreach ($expresiones as $expresion) {
+            $sql       = 'SELECT ' . $expresion . ' AS x FROM clients WHERE id = ' . $id;
+            $resultado = $servicio->ejecutar_y_filtrar($sql);
+
+            $this->assertTrue($resultado['ok'], 'Tendría que correr (sin validador) y salir tapada: ' . $sql . ' → ' . json_encode($resultado));
+            $this->assertSame([['x' => '[dato reservado]']], $resultado['rows'], $sql);
+        }
+
+        /* 🔴 Hallazgo 3: STR_TO_DATE convierte en FECHA los dígitos que siguen a una etiqueta. Como
+           expresión de tipo fecha saldría; por eso la función está fuera de la lista (el validador la
+           rechaza). Acá se fija qué pasa si llegara al servicio: MySQL la informa como fecha u hora. */
+        $this->assertSame('funcion_no_permitida', $servicio->consultar('SELECT STR_TO_DATE(name, \'%f\') AS x FROM clients')['codigo']);
+
+        /* Y las expresiones numéricas y de fecha sí salen, como números y fechas. */
+        $resultado = $servicio->ejecutar_y_filtrar(
+            'SELECT COUNT(*) AS n, MAX(id) AS maximo, LENGTH(name) AS largo, DATE(created_at) AS dia, YEAR(created_at) AS anio, '
+            . 'NOW() AS ahora, NULL AS nada, 1.5 AS decimal_, id + 1 AS suma, id > 0 AS verdadero '
+            . 'FROM clients WHERE id = ' . $id . ' GROUP BY id, name, created_at'
+        );
+
+        $this->assertTrue($resultado['ok'], json_encode($resultado));
+        $fila = $resultado['rows'][0];
+        $this->assertSame(1, $fila['n']);
+        $this->assertSame($id, $fila['maximo']);
+        $this->assertSame(mb_strlen('Fixture de admin-sql'), $fila['largo']);
+        $this->assertMatchesRegularExpression('/^\d{4}-\d{2}-\d{2}$/', $fila['dia']);
+        $this->assertSame((int) date('Y'), (int) $fila['anio']);
+        $this->assertMatchesRegularExpression('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/', $fila['ahora']);
+        $this->assertNull($fila['nada']);
+        $this->assertSame($id + 1, $fila['suma']);
+        $this->assertSame(1, $fila['verdadero']);
+    }
+
+    public function test_la_reja_por_origen_rechaza_una_tabla_vedada_y_otra_base(): void
+    {
+        $servicio = app(ClaudeAdminSqlService::class);
+
+        /* Sin validador. `orgtable` dice de qué tabla viene cada columna, con alias o sin él. */
+        foreach ([
+            'SELECT * FROM admin_settings',
+            'SELECT a.id FROM admin_settings a',
+            'SELECT a.id AS x FROM admin_settings AS a LIMIT 1',
+            "SELECT * FROM adm\u{0130}n_sett\u{0130}ngs",
+            'SELECT c.id, e.id AS otro FROM clients c LEFT JOIN env_templates e ON e.id = c.id',
+            'SELECT id FROM jobs',
+            'SELECT body FROM implementation_messages',
+        ] as $sql) {
+            $resultado = $servicio->ejecutar_y_filtrar($sql);
+
+            $this->assertFalse($resultado['ok'], $sql);
+            /* Con la letra plegada, si este servidor no la pliega la tabla «no existe»: también vale. */
+            $this->assertContains($resultado['codigo'], strpos($sql, "\u{0130}") === false ? ['tabla_vedada'] : ['tabla_vedada', 'consulta_fallida'], $sql);
+            $this->assertArrayNotHasKey('rows', $resultado, $sql);
+        }
+
+        $otra = $servicio->ejecutar_y_filtrar('SELECT table_name FROM information_schema.tables LIMIT 1');
+        $this->assertFalse($otra['ok']);
+        $this->assertArrayNotHasKey('rows', $otra);
+    }
+
+    public function test_el_plan_rechaza_las_tablas_derivadas_y_el_union_aunque_el_validador_no_estuviera(): void
+    {
+        $servicio = app(ClaudeAdminSqlService::class);
+        $id       = $this->client_id;
+
+        /* 🔴 EL LÍMITE DE LA REJA POR ORIGEN, MEDIDO: a través de una tabla derivada MySQL informa
+           como origen de la columna el ALIAS que le puso la subconsulta. La última de estas dice
+           venir de `clients.name`, que es una columna real y legible. Por eso el servicio mira además
+           el PLAN (con `derived_merge=off`) y rechaza toda tabla derivada y todo UNION. */
+        foreach ([
+            'SELECT x FROM (SELECT api_key AS x FROM clients WHERE id = ' . $id . ') t',
+            'SELECT x FROM (SELECT api_key AS x FROM clients LIMIT 5) t',
+            'SELECT name FROM (SELECT api_key AS name FROM clients WHERE id = ' . $id . ') clients',
+            'SELECT name FROM (SELECT DISTINCT api_key AS name FROM clients) clients',
+            'SELECT c.id, t.slug FROM clients c, (SELECT id, api_key AS slug FROM clients) t WHERE t.id = c.id',
+            'SELECT name FROM clients WHERE id = -1 UNION SELECT api_key FROM clients WHERE id = ' . $id,
+            'SELECT name FROM clients WHERE id = -1 UNION ALL SELECT api_key FROM clients',
+            'WITH t AS (SELECT api_key AS name FROM clients) SELECT name FROM t',
+            'SELECT name FROM (TABLE clients) AS t (id, uuid, name)',
+        ] as $sql) {
+            $resultado = $servicio->ejecutar_y_filtrar($sql);
+            $cuerpo    = (string) json_encode($resultado, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+
+            $this->assertFalse($resultado['ok'], 'El servicio tendría que rechazarla por su plan: ' . $sql . ' → ' . $cuerpo);
+            $this->assertContains($resultado['codigo'], ['subconsulta_no_permitida', 'consulta_fallida'], $sql);
+            $this->assertStringNotContainsString('CANARIO', $cuerpo, $sql);
+        }
+
+        $this->assertSame('subconsulta_no_permitida', $servicio->ejecutar_y_filtrar('SELECT name FROM (SELECT api_key AS name FROM clients WHERE id = ' . $id . ') clients')['codigo']);
+        $this->assertSame('subconsulta_no_permitida', $servicio->ejecutar_y_filtrar('SELECT name FROM clients WHERE id = -1 UNION SELECT api_key FROM clients')['codigo']);
+
+        /* Lo que sí se admite: IN y EXISTS. */
+        foreach ([
+            'SELECT id FROM clients WHERE id IN (SELECT client_id FROM mensualidad_invoices) AND id = ' . $id,
+            'SELECT c.id FROM clients c WHERE EXISTS (SELECT 1 FROM mensualidad_invoices i WHERE i.client_id = c.id) AND c.id = ' . $id,
+            'SELECT id FROM clients WHERE id NOT IN (SELECT client_id FROM client_ecommerces WHERE client_id IS NOT NULL) AND id = ' . $id,
+        ] as $sql) {
+            $resultado = $servicio->consultar($sql);
+
+            $this->assertTrue($resultado['ok'], $sql . ' → ' . json_encode($resultado));
+            $this->assertSame([['id' => $id]], $resultado['rows'], $sql);
+        }
+    }
+
+    public function test_un_texto_solo_sale_como_columna_entera_y_la_coercion_a_numero_queda_como_residual(): void
+    {
+        $servicio = app(ClaudeAdminSqlService::class);
+        $id       = $this->client_id;
+
+        /* ⚠️ RESIDUAL CONOCIDO, FIJADO POR ESTE TEST. Una expresión numérica sobre un texto devuelve
+           su PREFIJO numérico (`'1234abc' + 0` → 1234), y el validador no sabe de qué tipo es una
+           columna. Sobre «Contraseña: 1234» no sale nada (el texto no empieza con dígitos): da 0.
+           Sobre un texto que ES solo un número, sale el número. Es la misma clase que preguntar con
+           LIKE (inferencia), aceptada y documentada en el contrato; lo que guarda credenciales por
+           diseño está reservado o vedado. */
+        DB::table('clients')->where('id', $id)->update(['ai_plan_sync_message' => '4321 es el PIN']);
+
+        $resultado = $servicio->consultar('SELECT cobranzas_observaciones + 0 AS a, ROUND(cobranzas_observaciones) AS b, ai_plan_sync_message + 0 AS c FROM clients WHERE id = ' . $id);
+
+        $this->assertTrue($resultado['ok'], json_encode($resultado));
+        $this->assertEquals(0, $resultado['rows'][0]['a']);
+        $this->assertEquals(0, $resultado['rows'][0]['b']);
+        $this->assertEquals(4321, $resultado['rows'][0]['c']);
+
+        /* Y la columna entera, por el camino normal, sale tapada. */
+        $entera = $servicio->consultar('SELECT ai_plan_sync_message FROM clients WHERE id = ' . $id);
+        $this->assertStringStartsWith('4321 es el PIN', $entera['rows'][0]['ai_plan_sync_message']);
+    }
+
+    public function test_lo_legitimo_sigue_andando(): void
+    {
+        $id = $this->client_id;
+
+        $this->consultar('SELECT id, name, slug FROM clients WHERE slug = \'' . $this->slug . '\' AND (is_active = 1 OR estado = \'prueba\')')
+            ->assertStatus(200)
+            ->assertJsonPath('rows.0.name', 'Fixture de admin-sql');
+
+        $this->consultar('SELECT COUNT(*) AS total FROM clients')->assertStatus(200);
+        $this->assertGreaterThan(0, $this->consultar('SELECT COUNT(*) AS total FROM clients')->json('rows.0.total'));
+
+        $grupos = $this->consultar('SELECT estado, is_active, COUNT(*) AS n, MAX(created_at) AS ultimo FROM clients GROUP BY estado, is_active ORDER BY n DESC')->assertStatus(200);
+        $this->assertSame(['estado', 'is_active', 'n', 'ultimo'], $grupos->json('columns'));
+        $this->assertIsInt($grupos->json('rows.0.n'));
+        $this->assertIsString($grupos->json('rows.0.estado'));
+
+        $this->consultar(
+            'SELECT c.id, c.name, v.version, u.status, u.finished_at FROM clients c '
+            . 'LEFT JOIN versions v ON v.id = c.current_version_id '
+            . 'LEFT JOIN client_version_upgrades u ON u.client_id = c.id AND u.to_version_id = v.id '
+            . 'WHERE c.id = ' . $id . ' ORDER BY u.id DESC LIMIT 5'
+        )->assertStatus(200)->assertJsonPath('rows.0.name', 'Fixture de admin-sql');
+
+        $this->consultar('SELECT id, body, created_at FROM support_messages ORDER BY id DESC LIMIT 3')->assertStatus(200);
+        $this->consultar('SELECT id, email FROM clients WHERE email = \'a@b.test\' OR name LIKE \'%ñandú%\'')->assertStatus(200);
+        $this->consultar('SELECT YEAR(created_at) AS anio, MONTH(created_at) AS mes, COUNT(*) AS n FROM support_tickets GROUP BY anio, mes')->assertStatus(200);
+        $this->consultar('SELECT id, DATEDIFF(NOW(), created_at) AS dias, DATE(created_at) AS dia FROM clients WHERE id = ' . $id)->assertStatus(200)->assertJsonPath('rows.0.dias', 0);
+        $this->consultar('SHOW TABLES')->assertStatus(200);
+        $this->consultar('DESCRIBE clients')->assertStatus(200);
+        $this->consultar('SHOW COLUMNS FROM versions')->assertStatus(200);
+        $this->consultar('EXPLAIN SELECT id FROM clients WHERE id = ' . $id)->assertStatus(200);
     }
 
     public function test_el_redactor_tapa_bearer_y_pares_clave_valor_de_un_log(): void
@@ -694,18 +998,25 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
     {
         $servicio = app(ClaudeAdminSqlService::class);
 
-        /* 🔴 Directo al ejecutor, sin validador: la reja acá es MySQL. */
+        /* 🔴 Directo al ejecutor, sin validador y sin la reja del plan (se la saltea marcándola
+           como consulta de esquema): la reja acá es MySQL. */
         foreach ([
             'UPDATE clients SET name = \'pisado\' WHERE id = ' . $this->client_id,
             'DELETE FROM clients WHERE id = ' . $this->client_id,
             'INSERT INTO versions (uuid, version, status) VALUES (\'' . Str::uuid() . '\', \'0.0.0\', \'draft\')',
         ] as $sql) {
-            $resultado = $servicio->ejecutar_en_solo_lectura($sql);
+            $resultado = $servicio->ejecutar_y_filtrar($sql, true);
 
             $this->assertFalse($resultado['ok'], $sql);
             $this->assertSame('consulta_fallida', $resultado['codigo'], $sql);
             $this->assertSame(1792, $resultado['codigo_mysql'], 'MySQL tendría que rechazar con 1792 (READ ONLY transaction): ' . $sql);
+
+            /* Y por el camino de un SELECT ni llega a MySQL: el plan de una escritura no se admite. */
+            $this->assertFalse($servicio->ejecutar_y_filtrar($sql)['ok'], $sql);
         }
+
+        /* Varias sentencias: mysqli no las acepta en una sola llamada. */
+        $this->assertFalse($servicio->ejecutar_y_filtrar('SELECT 1; SELECT 2', true)['ok']);
 
         $this->assertSame('Fixture de admin-sql', DB::table('clients')->where('id', $this->client_id)->value('name'));
         $this->assertSame(0, DB::table('versions')->where('version', '0.0.0')->count());
@@ -713,31 +1024,72 @@ class AdminSqlDeSoloLecturaParaSoporteTest extends TestCase
 
     public function test_la_sesion_de_la_consulta_tiene_solo_lectura_y_tope_de_tiempo(): void
     {
-        $resultado = app(ClaudeAdminSqlService::class)->ejecutar_en_solo_lectura(
-            'SELECT @@SESSION.transaction_read_only AS solo_lectura, @@SESSION.max_execution_time AS tope'
+        $resultado = app(ClaudeAdminSqlService::class)->ejecutar_y_filtrar(
+            'SELECT @@SESSION.transaction_read_only AS solo_lectura, @@SESSION.max_execution_time AS tope, '
+            . '@@SESSION.optimizer_switch LIKE \'%derived_merge=off%\' AS sin_fusion, @@SESSION.character_set_results AS juego',
+            true
         );
 
-        $this->assertTrue($resultado['ok']);
+        $this->assertTrue($resultado['ok'], json_encode($resultado));
         $this->assertSame(1, (int) $resultado['rows'][0]['solo_lectura']);
         $this->assertSame(8000, (int) $resultado['rows'][0]['tope']);
+        $this->assertSame(1, (int) $resultado['rows'][0]['sin_fusion']);
+        $this->assertSame('utf8mb4', $resultado['rows'][0]['juego']);
     }
 
-    public function test_la_conexion_de_la_aplicacion_no_queda_en_solo_lectura_ni_con_la_conexion_extra_abierta(): void
+    public function test_apagado_el_interruptor_contesta_503_sin_ejecutar_nada(): void
+    {
+        config(['claude_admin_sql.habilitado' => false]);
+
+        foreach (['SELECT id FROM clients', 'UPDATE clients SET name = \'x\'', ''] as $sql) {
+            $respuesta = $this->consultar($sql);
+
+            $respuesta->assertStatus(503);
+            $this->assertSame(['error' => 'La consulta SQL del admin está deshabilitada.', 'codigo' => 'deshabilitado'], $respuesta->json());
+        }
+
+        /* Sin la clave sigue siendo 401: el interruptor no abre nada. */
+        $this->postJson('/api/claude/support-codex/admin-sql', ['sql' => 'SELECT 1'])->assertStatus(401);
+
+        config(['claude_admin_sql.habilitado' => true]);
+
+        $this->consultar('SELECT id FROM clients WHERE id = ' . $this->client_id)->assertStatus(200);
+        /* Y por defecto está prendido. */
+        $this->assertTrue((require config_path('claude_admin_sql.php'))['habilitado']);
+    }
+
+    public function test_si_la_conexion_por_defecto_no_es_mysql_contesta_503_no_disponible(): void
+    {
+        $original = config('database.connections.' . config('database.default') . '.driver');
+
+        config(['database.connections.' . config('database.default') . '.driver' => 'sqlite']);
+
+        try {
+            $resultado = app(ClaudeAdminSqlService::class)->consultar('SELECT id FROM clients');
+        } finally {
+            config(['database.connections.' . config('database.default') . '.driver' => $original]);
+        }
+
+        $this->assertFalse($resultado['ok']);
+        $this->assertSame('no_disponible', $resultado['codigo']);
+        $this->assertSame(503, $resultado['http']);
+        $this->assertArrayNotHasKey('rows', $resultado);
+    }
+
+    public function test_la_conexion_de_la_aplicacion_no_queda_en_solo_lectura(): void
     {
         $this->consultar('SELECT id FROM clients WHERE id = ' . $this->client_id)->assertStatus(200);
         $this->consultar('SELECT id FROM tabla_que_no_existe_zzz')->assertStatus(422);
 
-        $sesion = DB::selectOne('SELECT @@SESSION.transaction_read_only AS solo_lectura, @@SESSION.max_execution_time AS tope');
+        $sesion = DB::selectOne('SELECT @@SESSION.transaction_read_only AS solo_lectura, @@SESSION.max_execution_time AS tope, @@SESSION.optimizer_switch AS optimizador');
 
         $this->assertSame(0, (int) $sesion->solo_lectura);
         $this->assertSame(0, (int) $sesion->tope);
+        $this->assertStringNotContainsString('derived_merge=off', (string) $sesion->optimizador);
 
         /* Y se puede seguir escribiendo por la conexión de siempre. */
         DB::table('clients')->where('id', $this->client_id)->update(['company_name' => 'Fixture SRL (editada)']);
         $this->assertSame('Fixture SRL (editada)', DB::table('clients')->where('id', $this->client_id)->value('company_name'));
-
-        /* La conexión descartable se purgó: no queda colgada en el manager. */
-        $this->assertArrayNotHasKey(ClaudeAdminSqlService::CONEXION, DB::getConnections());
     }
 
     /* ------------------------------------------------------------------------------------------
