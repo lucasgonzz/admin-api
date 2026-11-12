@@ -46,7 +46,9 @@ class SupportTourController extends Controller
 
     public function preparar(Request $request, $id, SupportCodexService $soporte, SupportDynamicTourService $tours)
     {
-        $data = $request->validate(['expected_message_id' => 'required|integer|min:1']);
+        // `path` (opcional): el camino que Martín ya conoce («ABM → Precios → Impuestos sobre ventas → …»). Con él los
+        // pasos con ancla se arman sin depender del modelo, aunque la persona haya pedido el recorrido de entrada.
+        $data = $request->validate(['expected_message_id' => 'required|integer|min:1', 'path' => 'sometimes|nullable|string|max:300']);
         try {
             $resultado = $tours->preparar((int) $id, (int) $data['expected_message_id'], function (SupportTicket $ticket) use ($request, $data, $soporte) {
                 $soporte->assert_current($ticket, [
@@ -57,7 +59,7 @@ class SupportTourController extends Controller
                 abort_if($ticket->source === 'whatsapp'
                     && ! app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone)['open'],
                     422, 'window_expired: Venció la ventana de WhatsApp.');
-            });
+            }, isset($data['path']) ? (string) $data['path'] : null);
         } catch (HttpExceptionInterface $corte) {
             // El estado del ticket cortó antes de planificar (mensaje viejo, revisión humana, misión, ventana vencida):
             // la respuesta sigue igual, pero el motivo queda en el log y en el contexto del ticket.

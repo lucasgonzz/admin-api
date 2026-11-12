@@ -20,9 +20,9 @@ class SupportDynamicTourService
      * Un fallo se registra en el log, viaja en la respuesta (reason) y queda un día en el contexto del ticket
      * (last_tour_failure), que es lo que Martín lee aunque su programa solo le pase el código.
      */
-    public function preparar(int $ticket_id, int $expected_message_id, Closure $validar): array
+    public function preparar(int $ticket_id, int $expected_message_id, Closure $validar, ?string $camino = null): array
     {
-        $resultado = $this->preparar_sin_rastro($ticket_id, $expected_message_id, $validar);
+        $resultado = $this->preparar_sin_rastro($ticket_id, $expected_message_id, $validar, $camino);
         if (($resultado['ok'] ?? false) === true) {
             Cache::forget(self::clave_de_fallo($ticket_id));
             return $resultado;
@@ -69,7 +69,7 @@ class SupportDynamicTourService
         ], now()->addDay());
     }
 
-    private function preparar_sin_rastro(int $ticket_id, int $expected_message_id, Closure $validar): array
+    private function preparar_sin_rastro(int $ticket_id, int $expected_message_id, Closure $validar, ?string $camino = null): array
     {
         $tours = app(SupportTourService::class);
         $reserva = DB::transaction(function () use ($ticket_id, $expected_message_id, $validar, $tours) {
@@ -103,10 +103,14 @@ class SupportDynamicTourService
 
         // DeepSeek y la lectura del catálogo quedan fuera del bloqueo del ticket.
         $planificador = app(SupportTourPlannerService::class);
-        $plan = $planificador->planificar($reserva['ticket'], $reserva['entrante'], $reserva['invitacion']);
+        $plan = $planificador->planificar($reserva['ticket'], $reserva['entrante'], $reserva['invitacion'], $camino);
         $motivo = $planificador->motivo;
-        if ($plan !== null && $motivo !== null) {
-            Log::info('Robotito: el modelo no armó el recorrido y se entrega el de respaldo.', ['ticket_id' => $ticket_id, 'reason' => $motivo]);
+        if ($plan !== null) {
+            // Sin datos personales: de dónde salió el recorrido y cuántos pasos señalan algo.
+            Log::info('Robotito: recorrido planificado.', [
+                'ticket_id' => $ticket_id, 'origen' => $planificador->origen, 'pasos' => count($plan['pasos'] ?? []),
+                'con_ancla' => SupportTourPlannerService::pasos_con_ancla($plan), 'motivo' => $motivo,
+            ]);
         }
 
         return DB::transaction(function () use ($ticket_id, $expected_message_id, $validar, $reserva, $plan, $tours, $motivo) {
@@ -149,6 +153,8 @@ class SupportDynamicTourService
             'respuesta_invalida' => 'El modelo devolvió un recorrido con un formato inválido.',
             'tarea_no_clara' => 'El modelo no encontró en la conversación una tarea clara para guiar.',
             'clave_rechazada' => 'El modelo eligió un paso que el catálogo de ese sistema no habilita.',
+            'plan_sin_anclas' => 'El modelo devolvió solo tarjetas de texto, sin señalar ni abrir nada.',
+            'plan_dudoso' => 'El modelo devolvió un recorrido que manda a buscar («si no lo encontrás…»).',
         ];
         $texto = $textos[$motivo] ?? 'El planificador no pudo armar el recorrido.';
         if ($detalle !== '') {

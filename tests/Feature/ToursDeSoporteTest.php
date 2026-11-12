@@ -1642,7 +1642,8 @@ class ToursDeSoporteTest extends TestCase
         $this->assertSame([
             ['clave' => 'abm.grupo.precios', 'texto' => 'En el ABM, tocá «Precios».'],
             ['clave' => 'abm.solapa.precios.impuestos_sobre_ventas', 'texto' => 'Ahora tocá «Impuestos sobre ventas».'],
-            ['clave' => 'indicacion', 'texto' => 'Seguí este camino: ' . self::CAMINO_107 . ' Esa casilla tiene que quedar destildada.'],
+            // Desde el ticket 110 el camino manda: la tarjeta final trae solo lo que el catálogo no sabe señalar.
+            ['clave' => 'indicacion', 'texto' => 'En esta solapa seguí: Ingresos Brutos → casilla "Activo". Esa casilla tiene que quedar destildada.'],
         ], $recibido['pasos']);
     }
 
@@ -1722,6 +1723,176 @@ class ToursDeSoporteTest extends TestCase
             ->assertJsonPath('reason', 'El sistema del comercio no entregó su catálogo de pasos (sin conexión, versión anterior o persona sin identificar).');
         $this->getJson(self::CLAUDE . $ticket->id, $headers)->assertOk()
             ->assertJsonPath('ticket.last_tour_failure.code', 'tour_plan_unavailable');
+    }
+
+    /*
+    |------------------------------------------------------------------------------------------------
+    | Ticket 110 (12/11/2026): el consentimiento anduvo, pero el modelo devolvió cuatro tarjetas de texto
+    | («abrí el ABM y buscá el grupo donde…») teniendo las claves del grupo y la solapa. El camino manda.
+    |------------------------------------------------------------------------------------------------
+    */
+
+    private const PEDIDO_110 = 'mostrame con el robotito donde se apaga lo de ingresos brutos';
+    private const PATH_110 = 'ABM → Precios → Impuestos sobre ventas → Ingresos Brutos → casilla "Activo"';
+    private const PLAN_DE_TEXTO_110 = [
+        'tema' => 'guia_dinamica', 'titulo' => 'Apagar Ingresos Brutos',
+        'pasos' => [
+            ['clave' => 'indicacion', 'texto' => 'Ingresos Brutos se configura en el ABM. Abrí el ABM y buscá el grupo donde están los impuestos sobre ventas.'],
+            ['clave' => 'indicacion', 'texto' => 'Entrá al grupo de precios y abrí la solapa de impuestos sobre ventas.'],
+            ['clave' => 'indicacion', 'texto' => 'Buscá en la lista el impuesto de Ingresos Brutos y abrí su edición. Si no lo encontrás en esta solapa, revisá el grupo Facturacion.'],
+            ['clave' => 'indicacion', 'texto' => 'Destildá la casilla Activo y guardá los cambios.'],
+        ],
+    ];
+
+    /** Prepara el recorrido del pedido del ticket 110 y devuelve [respuesta, lo que recibió Empresa]. */
+    private function preparar_110($modelo, ?string $path, ?array $catalogo = null): array
+    {
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
+        [$ticket, $pedido] = $this->ticket_erp_107(self::PEDIDO_110);
+        $headers = $this->reserva($ticket, $pedido);
+        $recibido = null;
+        $this->puente_107($catalogo ?? $this->catalogo_4_3_53(), $modelo, $recibido);
+        $respuesta = $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare',
+            ['expected_message_id' => $pedido->id] + ($path === null ? [] : ['path' => $path]), $headers);
+
+        return [$respuesta, $recibido];
+    }
+
+    public function test_110_con_camino_los_pasos_con_ancla_se_arman_sin_modelo(): void
+    {
+        \Illuminate\Support\Facades\Log::spy();
+        [$respuesta, $recibido] = $this->preparar_110(Http::response([], 503), self::PATH_110);
+
+        $respuesta->assertOk();
+        $this->assertSame([
+            ['clave' => 'abm.grupo.precios', 'texto' => 'En el ABM, tocá «Precios».'],
+            ['clave' => 'abm.solapa.precios.impuestos_sobre_ventas', 'texto' => 'Ahora tocá «Impuestos sobre ventas».'],
+            ['clave' => 'indicacion', 'texto' => 'En esta solapa seguí: Ingresos Brutos → casilla "Activo"'],
+        ], $recibido['pasos']);
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('info')->withArgs(function ($mensaje, $contexto) {
+            return $mensaje === 'Robotito: recorrido planificado.' && $contexto['origen'] === 'determinista'
+                && $contexto['pasos'] === 3 && $contexto['con_ancla'] === 2;
+        })->once();
+    }
+
+    public function test_110_el_plan_de_puro_texto_del_modelo_no_le_saca_las_anclas_al_camino(): void
+    {
+        [$respuesta, $recibido] = $this->preparar_110(Http::response($this->respuesta_deepseek(self::PLAN_DE_TEXTO_110)), self::PATH_110);
+
+        $respuesta->assertOk();
+        $this->assertSame(['abm.grupo.precios', 'abm.solapa.precios.impuestos_sobre_ventas', 'indicacion', 'indicacion'], array_column($recibido['pasos'], 'clave'));
+        // Lo que el modelo agrega es solo lo que el catálogo no sabe señalar, y nada que mande a buscar.
+        $this->assertSame('En esta solapa seguí: Ingresos Brutos → casilla "Activo"', $recibido['pasos'][2]['texto']);
+        $this->assertSame('Destildá la casilla Activo y guardá los cambios.', $recibido['pasos'][3]['texto']);
+        $this->assertSame('Apagar Ingresos Brutos', $recibido['titulo']);
+        foreach ($recibido['pasos'] as $paso) {
+            $this->assertStringNotContainsString('Si no lo encontrás', $paso['texto']);
+            $this->assertStringNotContainsString('buscá el grupo', $paso['texto']);
+        }
+        Http::assertSent(function ($request) {
+            return strpos($request->url(), 'https://api.deepseek.com/') === 0
+                && json_decode($request['messages'][0]['content'], true)['pasos_fijos'] === ['abm.grupo.precios', 'abm.solapa.precios.impuestos_sobre_ventas'];
+        });
+    }
+
+    public function test_110_el_modelo_puede_redactar_los_pasos_fijos_pero_no_reordenarlos_ni_cambiarlos(): void
+    {
+        $plan = ['tema' => 'guia_dinamica', 'titulo' => 'Apagar Ingresos Brutos', 'pasos' => [
+            ['clave' => 'indicacion', 'texto' => 'Primero mirá el menú de la izquierda.'],
+            ['clave' => 'abm.solapa.precios.impuestos_sobre_ventas', 'texto' => 'Tocá la solapa Impuestos sobre ventas.'],
+            ['clave' => 'abm.grupo.precios', 'texto' => 'Si no lo ves, revisá el grupo Precios.'],
+            ['clave' => 'indicacion', 'texto' => 'Abrí "Ingresos Brutos" tocando su fila y destildá "Activo".'],
+            ['clave' => 'vista.listado', 'texto' => 'Así quedan los precios en el Listado.'],
+        ]];
+        [$respuesta, $recibido] = $this->preparar_110(Http::response($this->respuesta_deepseek($plan)), self::PATH_110);
+
+        $respuesta->assertOk();
+        $this->assertSame([
+            // El orden es el del camino; el texto dudoso del modelo no se usa y el del otro paso sí.
+            ['clave' => 'abm.grupo.precios', 'texto' => 'En el ABM, tocá «Precios».'],
+            ['clave' => 'abm.solapa.precios.impuestos_sobre_ventas', 'texto' => 'Tocá la solapa Impuestos sobre ventas.'],
+            ['clave' => 'indicacion', 'texto' => 'Abrí "Ingresos Brutos" tocando su fila y destildá "Activo".'],
+        ], $recibido['pasos'], 'El último paso no lleva al Listado.');
+    }
+
+    public function test_110_el_camino_que_escribio_soporte_en_la_invitacion_tambien_manda(): void
+    {
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
+        [$ticket, , $body, $firma] = $this->ticket_erp_107('¿Dónde apago ingresos brutos?');
+        $this->invitacion_de_martin_107($ticket);
+        $si = SupportMessage::findOrFail($this->postJson(self::INBOUND, array_replace($body, [
+            'body' => 'Sí', 'message_uuid' => (string) Str::uuid(),
+        ]), $firma)->assertCreated()->json('model.id'));
+        $headers = $this->reserva($ticket, $si);
+        $recibido = null;
+        $this->puente_107($this->catalogo_4_3_53(), Http::response($this->respuesta_deepseek(self::PLAN_DE_TEXTO_110)), $recibido);
+
+        $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare', ['expected_message_id' => $si->id], $headers)->assertOk();
+        $this->assertSame(['abm.grupo.precios', 'abm.solapa.precios.impuestos_sobre_ventas'], array_slice(array_column($recibido['pasos'], 'clave'), 0, 2));
+        $this->assertStringContainsString('Ingresos Brutos → casilla "Activo"', $recibido['pasos'][2]['texto']);
+    }
+
+    public function test_110_en_un_sistema_4_3_52_el_camino_abre_el_abm_con_la_tarjeta_acoplada(): void
+    {
+        $catalogo = self::CATALOGO_DINAMICO;
+        $catalogo['pasos'][] = ['clave' => 'vista.abm', 'descripcion' => 'Abrir el ABM y mostrar una indicación textual.'];
+        [$respuesta, $recibido] = $this->preparar_110(Http::response($this->respuesta_deepseek(self::PLAN_DE_TEXTO_110)), self::PATH_110, $catalogo);
+
+        $respuesta->assertOk();
+        $this->assertSame([['clave' => 'vista.abm', 'texto' => 'Seguí este camino: ' . self::PATH_110]], $recibido['pasos']);
+    }
+
+    public function test_110_sin_camino_un_plan_de_puro_texto_que_manda_a_buscar_no_se_entrega(): void
+    {
+        \Illuminate\Support\Facades\Log::spy();
+        [$respuesta, $recibido] = $this->preparar_110(Http::response($this->respuesta_deepseek(self::PLAN_DE_TEXTO_110)), null);
+
+        $respuesta->assertStatus(422)->assertJsonPath('code', 'tour_plan_unavailable');
+        $this->assertStringContainsString('manda a buscar', $respuesta->json('reason'));
+        $this->assertNull($recibido);
+    }
+
+    public function test_110_sin_camino_un_plan_sin_anclas_cae_al_respaldo_que_si_las_tiene(): void
+    {
+        \Illuminate\Support\Facades\Log::spy();
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
+        [$ticket, , $body, $firma] = $this->ticket_erp_107('¿Dónde apago ingresos brutos?');
+        // Soporte explicó sin flechas: no hay camino, pero nombra la solapa.
+        $this->invitacion($ticket, self::GUION_DINAMICO, [
+            'body' => "Entrá al ABM y, en Precios, abrí Impuestos sobre ventas. Ahí destildás Activo en Ingresos Brutos.\n\n" . SupportTourService::INVITACION,
+            'erp_auto_reply' => ['tour_requested' => true],
+        ]);
+        $si = SupportMessage::findOrFail($this->postJson(self::INBOUND, array_replace($body, [
+            'body' => 'Sí', 'message_uuid' => (string) Str::uuid(),
+        ]), $firma)->assertCreated()->json('model.id'));
+        $headers = $this->reserva($ticket, $si);
+        $recibido = null;
+        $plan = ['tema' => 'guia_dinamica', 'titulo' => 'Apagar Ingresos Brutos', 'pasos' => [
+            ['clave' => 'indicacion', 'texto' => 'Abrí el ABM y entrá a Precios.'],
+            ['clave' => 'indicacion', 'texto' => 'Destildá Activo en Ingresos Brutos.'],
+        ]];
+        $this->puente_107($this->catalogo_4_3_53(), Http::response($this->respuesta_deepseek($plan)), $recibido);
+
+        $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare', ['expected_message_id' => $si->id], $headers)->assertOk();
+        $this->assertSame(['abm.grupo.precios', 'abm.solapa.precios.impuestos_sobre_ventas', 'indicacion'], array_column($recibido['pasos'], 'clave'));
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('info')->withArgs(function ($mensaje, $contexto) {
+            return $mensaje === 'Robotito: recorrido planificado.' && $contexto['origen'] === 'respaldo'
+                && $contexto['con_ancla'] === 2 && $contexto['motivo'] === 'plan_sin_anclas';
+        })->once();
+    }
+
+    public function test_110_un_plan_del_modelo_con_anclas_se_entrega_y_queda_registrado_como_modelo(): void
+    {
+        \Illuminate\Support\Facades\Log::spy();
+        $plan = self::GUION_107;
+        $plan['pasos'][] = ['clave' => 'vista.listado', 'texto' => 'Así quedan los precios en el Listado.'];
+        [$respuesta, $recibido] = $this->preparar_110(Http::response($this->respuesta_deepseek($plan)), null);
+
+        $respuesta->assertOk();
+        $this->assertSame(self::GUION_107['pasos'], $recibido['pasos'], 'El paso final que llevaba al Listado no viaja.');
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('info')->withArgs(function ($mensaje, $contexto) {
+            return $mensaje === 'Robotito: recorrido planificado.' && $contexto['origen'] === 'modelo' && $contexto['con_ancla'] === 2;
+        })->once();
     }
 
     private function cliente(array $extra = []): Client
