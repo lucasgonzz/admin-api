@@ -307,6 +307,12 @@ class PruebaWhatsappService
         try {
             $estado = isset($resultado['estado']) ? (string) $resultado['estado'] : '';
 
+            /* Cliente de ensayo (12/11/2026): la bienvenida ya se dejó en la conversación del sistema por
+               `enviar_plantilla_por_ticket()`; esta copia abriría un ticket de WhatsApp, que el ensayo no usa. */
+            if (Prueba\PruebaEnsayoSinWhatsappService::es_ensayo($client)) {
+                return;
+            }
+
             if ($estado === 'enviado') {
                 $copia = $this->bienvenida_del_sistema($client);
                 if ($copia !== null) {
@@ -627,7 +633,8 @@ class PruebaWhatsappService
         /* Cuántas veces salió ya el WhatsApp de cada paso (cualquiera de sus plantillas). */
         $veces = PruebaWhatsappEnvio::query()
             ->where('client_id', (int) $client->id)
-            ->where('canal', PruebaWhatsappEnvio::CANAL_WHATSAPP)
+            /* `sistema` = el mismo paso dejado en el sistema de un cliente de ensayo (12/11/2026). */
+            ->whereIn('canal', [PruebaWhatsappEnvio::CANAL_WHATSAPP, PruebaWhatsappEnvio::CANAL_SISTEMA])
             ->where('estado', PruebaWhatsappEnvio::ESTADO_ENVIADO)
             ->where('plantilla', 'like', PruebaPlantillasService::PASO_PREFIJO . '%')
             ->whereNotNull('hito')
@@ -975,8 +982,9 @@ class PruebaWhatsappService
             ->where('client_id', (int) $client->id)
             ->where('estado', PruebaWhatsappEnvio::ESTADO_ENVIADO)
             ->where('plantilla', '!=', PruebaWhatsappEnvio::PLANTILLA_AVISO_TOMAS)
-            /* Solo WhatsApps: un correo o un mensaje dejado en el sistema no gastan el tope del día. */
-            ->where('canal', PruebaWhatsappEnvio::CANAL_WHATSAPP)
+            /* Solo WhatsApps: un correo no gasta el tope del día. `sistema` lo registra únicamente el cliente de
+               ensayo (12/11/2026), cuyo mensaje del día va a la conversación del sistema en lugar de WhatsApp. */
+            ->whereIn('canal', [PruebaWhatsappEnvio::CANAL_WHATSAPP, PruebaWhatsappEnvio::CANAL_SISTEMA])
             ->where('dia', self::hoy())
             ->exists();
     }
@@ -1011,6 +1019,11 @@ class PruebaWhatsappService
      */
     public function enviar_plantilla_por_ticket(Client $client, ?Lead $lead, string $plantilla, ?string $hito, bool $encolar, $numero_asistente = null): array
     {
+        /* Cliente de ensayo (12/11/2026): cero WhatsApp. El mismo texto va a la conversación del sistema. */
+        if (Prueba\PruebaEnsayoSinWhatsappService::es_ensayo($client)) {
+            return $this->plantilla_al_sistema_del_ensayo($client, $lead, $plantilla, $hito, $numero_asistente);
+        }
+
         $estado = $this->plantillas->estado_para_enviar($plantilla);
 
         if ($estado['motivo'] !== null) {
@@ -1138,6 +1151,12 @@ class PruebaWhatsappService
      */
     public function mandar_texto_por_ticket(Client $client, string $texto, ?int $ticket_id = null): array
     {
+        /* Cliente de ensayo (12/11/2026): cero WhatsApp, sea cual sea el ticket del origen. El texto va a la
+           conversación del sistema del dueño. */
+        if (Prueba\PruebaEnsayoSinWhatsappService::es_ensayo($client)) {
+            return app(Prueba\PruebaEnsayoSinWhatsappService::class)->dejar($client, $texto);
+        }
+
         /* El aviso vuelve por el MISMO canal por el que llegó el archivo (misión prueba-e2e-campana-imperio,
          * 11/11/2026): si el ticket es la conversación de Soporte del sistema del dueño de una prueba, el mensaje
          * se sincroniza a su sistema y no sale por WhatsApp. */
@@ -1417,14 +1436,53 @@ class PruebaWhatsappService
      |----------------------------------------------------------------------------------------- */
 
     /**
+     * La plantilla de un cliente de ENSAYO (12/11/2026): no se llama a Kapso ni a Meta. El cuerpo de la plantilla ya
+     * resuelto con sus variables se deja en la conversación del sistema del dueño y el envío se registra con
+     * `canal = sistema`, para que el resumen de la prueba y el reloj de ensayo sigan mostrando qué salió cada día.
+     * No depende de que Meta haya aprobado la plantilla: no sale por Meta.
+     *
+     * @param Client      $client
+     * @param Lead|null   $lead
+     * @param string      $plantilla
+     * @param string|null $hito
+     * @param string|array<int, string>|null $numero_asistente Las variables `{{2}}`/`{{3}}`, como en WhatsApp.
+     *
+     * @return array{estado: string, detalle: string|null, whatsapp_message_id: null, support_ticket_id: int|null}
+     */
+    protected function plantilla_al_sistema_del_ensayo(Client $client, ?Lead $lead, string $plantilla, ?string $hito, $numero_asistente): array
+    {
+        $texto = $this->plantillas->cuerpo_renderizado($plantilla, $this->primer_nombre($client, $lead, ''), $numero_asistente);
+        $envio = app(Prueba\PruebaEnsayoSinWhatsappService::class)->dejar($client, $texto);
+
+        $this->registrar($client, $lead, $plantilla, $hito,
+            $envio['enviado'] ? PruebaWhatsappEnvio::ESTADO_ENVIADO : PruebaWhatsappEnvio::ESTADO_FALLIDO,
+            $envio['support_ticket_id'], $envio['support_message_id'], null, $envio['motivo'], PruebaWhatsappEnvio::CANAL_SISTEMA);
+
+        if ($envio['enviado']) {
+            /* Igual que en WhatsApp: si salió la bienvenida, se descarta la bienvenida anterior en cola. */
+            PruebaWhatsappEnvio::query()
+                ->where('client_id', (int) $client->id)
+                ->whereIn('plantilla', in_array($plantilla, PruebaPlantillasService::BIENVENIDAS, true) ? PruebaPlantillasService::BIENVENIDAS : [$plantilla])
+                ->where('estado', PruebaWhatsappEnvio::ESTADO_EN_COLA)
+                ->delete();
+        }
+
+        return ['estado' => $envio['enviado'] ? 'enviado' : 'fallido', 'detalle' => $envio['motivo'],
+            'whatsapp_message_id' => null, 'support_ticket_id' => $envio['support_ticket_id']];
+    }
+
+    /**
      * Deja el registro del envío.
+     *
+     * @param string $canal Por dónde salió (`PruebaWhatsappEnvio::CANAL_*`); `sistema` solo para el cliente de ensayo.
      *
      * @return PruebaWhatsappEnvio
      */
-    protected function registrar(Client $client, ?Lead $lead, string $plantilla, ?string $hito, string $estado, ?int $ticket_id, ?int $mensaje_id, ?string $wamid, ?string $detalle): PruebaWhatsappEnvio
+    protected function registrar(Client $client, ?Lead $lead, string $plantilla, ?string $hito, string $estado, ?int $ticket_id, ?int $mensaje_id, ?string $wamid, ?string $detalle, string $canal = PruebaWhatsappEnvio::CANAL_WHATSAPP): PruebaWhatsappEnvio
     {
         return PruebaWhatsappEnvio::create([
             'client_id'           => (int) $client->id,
+            'canal'               => $canal,
             'lead_id'             => $lead !== null ? (int) $lead->id : null,
             'plantilla'           => $plantilla,
             'hito'                => $hito,

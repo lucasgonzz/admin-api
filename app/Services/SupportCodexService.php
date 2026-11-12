@@ -288,6 +288,17 @@ class SupportCodexService
             ->where('id', '>', $case->handled_message_id)->where('id', '<', $last->id)->exists();
     }
 
+    /**
+     * Si el ticket es de un cliente marcado como ENSAYO (`clients.es_ensayo`).
+     *
+     * @param SupportTicket $ticket Ticket con la relación `client` cargada o cargable.
+     * @return bool true solo si el cliente existe y está marcado; un ticket sin cliente no es de ensayo.
+     */
+    private function es_cliente_de_ensayo(SupportTicket $ticket): bool
+    {
+        return $ticket->client !== null && (bool) $ticket->client->es_ensayo;
+    }
+
     public function context(SupportTicket $ticket, SupportCodexCase $case = null): array
     {
         $ticket->loadMissing('client', 'client_employee');
@@ -325,6 +336,9 @@ class SupportCodexService
                 'slug' => $ticket->client ? $ticket->client->slug : null,
                 // `prueba` si el negocio está en prueba gratuita (misión prueba-martin-importacion, 3/11/2026); si no, null.
                 'estado' => app(PruebaDelClienteService::class)->es_cliente_en_prueba($ticket->client) ? (string) $ticket->client->estado : null,
+                // Cliente de ENSAYO (`clients.es_ensayo`): un negocio de prueba que maneja una sesión haciendo de
+                // cliente. Misión ensayo-sin-mision-automatica (12/11/2026): sus misiones no arrancan solas.
+                'es_ensayo' => $this->es_cliente_de_ensayo($ticket),
             ],
             'contact_name' => $ticket->es_erp_sin_identidad_verificada() ? null : $ticket->resolve_contact_display_name(),
             'contact_role' => $ticket->es_contacto_empleado() ? 'employee' : 'owner',
@@ -334,6 +348,12 @@ class SupportCodexService
             'thread_id' => $case ? $case->thread_id : null,
             'mission' => $case ? $case->mission : null,
             'mission_lifecycle' => $case ? $case->mission_lifecycle() : null,
+            // Si el monitor puede abrir SOLO la tarea de una misión de error de este ticket. Un cliente de ensayo
+            // ya tiene una sesión corrigiendo lo que encuentra: la misión queda escrita en el ticket para que esa
+            // sesión la lea, pero el monitor no crea el hilo de Codex (tickets 102 y 107 del 11/11/2026). El
+            // inicio manual de Lucas no cambia. Un monitor que no conoce el campo sigue como antes.
+            'mission_autostart' => ! $this->es_cliente_de_ensayo($ticket),
+            'mission_autostart_reason' => $this->es_cliente_de_ensayo($ticket) ? 'cliente_de_ensayo' : null,
             'mission_fix_evidence' => $fix_evidence === null ? null : $fix_evidence->payload,
             'mission_progress' => $this->mission_progress_context($ticket, $case, $fix_evidence !== null),
             'upgrade_agreement' => app(SupportCodexUpgradeAgreementService::class)->context($fix_evidence),
@@ -1113,12 +1133,38 @@ class SupportCodexService
 
     private function puede_entregar(SupportTicket $ticket): bool
     {
-        return $ticket->source === 'erp'
+        return $ticket->source === 'erp' || $this->respuesta_solo_en_el_sistema($ticket)
             || app(WhatsappSessionWindowService::class)->window_state((string) $ticket->whatsapp_phone)['open'];
+    }
+
+    /**
+     * Un ticket de WhatsApp de un cliente de ENSAYO (`clients.es_ensayo`): la respuesta de Martín no sale por WhatsApp
+     * (Lucas, 12/11/2026: los WhatsApp del ensayo le bajan la reputación a la línea). Queda en la conversación y se
+     * ve en el sistema del negocio (Agentes → Soporte lee los tickets de WhatsApp del admin y muestra los mensajes
+     * con `synced_to_client_at`). No depende de la ventana de 24 h porque no se usa Meta.
+     *
+     * @param SupportTicket $ticket
+     *
+     * @return bool
+     */
+    private function respuesta_solo_en_el_sistema(SupportTicket $ticket): bool
+    {
+        $ticket->loadMissing('client');
+
+        return $ticket->source === 'whatsapp' && Prueba\PruebaEnsayoSinWhatsappService::es_ensayo($ticket->client);
     }
 
     private function entregar_respuesta(SupportTicket $ticket, SupportMessage $message): array
     {
+        if ($this->respuesta_solo_en_el_sistema($ticket)) {
+            // Cero llamadas a Kapso/Meta: la marca de sincronizado es lo que la hace visible en el sistema.
+            $message->synced_to_client_at = now();
+            $message->remote_delivery_status = null;
+            $message->save();
+
+            return ['delivery' => 'sent'];
+        }
+
         if ($ticket->source === 'whatsapp') {
             return app(SupportWhatsappOpenerService::class)->deliver_follow_up($ticket, $message, 'Martín, asistente técnico');
         }
@@ -2387,12 +2433,35 @@ class SupportCodexService
             && preg_match('/^si([,.! ]+(muchas )?gracias)?[!. ]*$/', $body));
         $implicit_completed = ($task_question || $answer_to_resolution)
             && preg_match('/^(?:(?:listo|perfecto|si)[,.! ]+)?(?:ya )?pude(?: hacerlo)?(?:[,.! ]+(?:muchas )?gracias)?[!. ]*$/', $body);
+        // Ticket #109: «ya lo hice» confirma los pasos anteriores aunque la acción no se
+        // repita por nombre. No alcanza con buscar esas palabras: la orientación y la
+        // respuesta deben ser contiguas, del mismo tema y sin una tarea aún pendiente.
+        $implicit_completed = $implicit_completed || ($question !== null
+            && $this->completed_task_after_guidance($ticket, $message, $question, $body));
         $own_error = $question !== null && $question->id < $message->id
             && ($this->acknowledges_own_error_after_guidance($body, $question_body)
                 || $this->completed_after_identifying_error($ticket, $message, $question, $body, $question_body));
         $natural_thanks = $allow_thanks_only && $this->natural_thanks_can_close($ticket, $case, $message, $body);
         return ($own_error || ! $negative)
             && ($resolved || $short_answer || $task_completed || $implicit_completed || $own_error || $natural_thanks);
+    }
+
+    private function completed_task_after_guidance(SupportTicket $ticket, SupportMessage $message, SupportMessage $guidance, string $body): bool
+    {
+        if (! preg_match('/^(?:(?:excelente|exelente|perfecto|buenisimo|genial|listo|si|ok|oka)[,.!\s]+)*ya (?:lo|la|los|las) (?:hice|hicimos)(?:[,.!\s]+(?:muchas )?gracias)?[.!\s]*$/D', $body)
+            || ($message->reply_to_message_id !== null && (int) $message->reply_to_message_id !== (int) $guidance->id)) {
+            return false;
+        }
+        $previous = $this->previous_conversation_message($ticket, $message);
+        if ($previous === null || ! $previous->is($guidance)) {
+            return false;
+        }
+        $instructions = $this->guidance_for_closure((string) $guidance->body);
+        return $this->guidance_can_end_exchange($instructions)
+            // La flecha identifica un recorrido y Str::ascii la elimina: se consulta
+            // en el original, sin aflojar la guarda de preguntas o tareas pendientes.
+            && (strpos((string) $guidance->body, '→') !== false
+                || preg_match('/\b(?:entra|ingresa|abri|crea|carga|guarda|selecciona|marca|toca|apreta|busca|edita|cambia|activa|desactiva)\b/', $instructions));
     }
 
     /**
@@ -2421,8 +2490,22 @@ class SupportCodexService
         if ($last->sender_type !== 'admin' || ! $ticket->mensaje_confiable_para_codex($last)) {
             return false; // Hay otra consulta entrante que todavía nadie contestó.
         }
-        // El «?» de un enlace al centro de recursos no es una pregunta pendiente.
-        $guidance = preg_replace('~https?://\S+~', '', Str::ascii(mb_strtolower((string) $last->body)));
+        return $this->guidance_can_end_exchange($this->guidance_for_closure((string) $last->body));
+    }
+
+    private function guidance_for_closure(string $body): string
+    {
+        // El enlace no es una pregunta. La invitación opcional de Robotito tampoco
+        // convierte en pendiente una orientación ya entregada; las demás preguntas sí.
+        $guidance = trim(preg_replace('~https?://\S+~', '', $body));
+        // Str::ascii también aplana los saltos de línea: se recorta antes para no
+        // perder el límite que distingue la invitación de una pregunta en los pasos.
+        $guidance = preg_replace('/(?:^|[\r\n])\h*quer[eé]s que te prepare un tour con robotito\?\h*$/iuD', '', $guidance);
+        return Str::ascii(mb_strtolower(trim($guidance)));
+    }
+
+    private function guidance_can_end_exchange(string $guidance): bool
+    {
         if (preg_match('/\b(manana|proximamente|pendiente|revisando|investigando|escalado)\b|\b(?:voy|vamos) a\b|\b(?:te|lo) (?:aviso|avisamos|reviso|revisamos|confirmo|confirmamos)\b|\b(?:pasame|mandame|enviame|necesito|necesitamos)\b|\b(?:proba|probar|prueba|probarlo) (?:luego|despues)\b|\bcuando (?:puedas|puedan|podamos)\b|\b(?:dame|danos) un (?:minuto|momento)\b|\b(?:estoy|estamos|sigo|seguimos) (?:viendo|revisando|investigando)\b|\bque reviso\b/', $guidance)) {
             return false;
         }

@@ -383,7 +383,10 @@ class PruebaEncuestaService
                 return 'fallido';
             }
 
-            if (app(PruebaPlantillasService::class)->estado_para_enviar($plantilla)['motivo'] !== null) {
+            /* El cliente de ensayo no usa Meta (12/11/2026): su encuesta va a la conversación del sistema aunque la
+               plantilla no esté aprobada. */
+            if (! PruebaEnsayoSinWhatsappService::es_ensayo($client)
+                && app(PruebaPlantillasService::class)->estado_para_enviar($plantilla)['motivo'] !== null) {
                 return 'plantilla_no_disponible';
             }
 

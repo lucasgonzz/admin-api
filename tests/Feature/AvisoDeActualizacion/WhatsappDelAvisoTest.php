@@ -165,6 +165,32 @@ class WhatsappDelAvisoTest extends BaseDelAviso
      *
      * @return ClientUpgradeNotice
      */
+    /**
+     * Un cliente de ENSAYO (`clients.es_ensayo`, 12/11/2026) no recibe el WhatsApp del aviso, ni por texto libre ni
+     * por plantilla: cero llamadas a Kapso. El mail sale igual. Un cliente real con la misma ventana recibe el texto.
+     *
+     * @return void
+     */
+    public function test_un_cliente_de_ensayo_no_recibe_el_whatsapp_del_aviso_y_uno_real_si()
+    {
+        Mail::fake();
+        Http::fake();
+        AdminSetting::set(AsistenteWhatsappSettings::KEY_ACTUALIZACION_TEMPLATE_NAME, 'cc_sistema_actualizado');
+        $this->ventana->abierta = true;
+
+        $aviso = $this->avisar_a_un_cliente_con_novedades(['es_ensayo' => true]);
+
+        $this->assertNotNull($aviso->mail_enviado_at, 'el mail salió');
+        $this->assertNull($aviso->whatsapp_enviado_at);
+        $this->assertNull($aviso->whatsapp_message_id);
+        $this->assertSame(0, $this->whatsapp->cuantos_envios(), 'ninguna llamada a Kapso para el ensayo');
+        $this->assertStringContainsString('Cliente de ensayo', (string) $aviso->error);
+
+        $real = $this->avisar_a_un_cliente_con_novedades(['slug' => 'cliente-real-' . uniqid()]);
+        $this->assertNotNull($real->whatsapp_enviado_at, 'al cliente real le sale como siempre');
+        $this->assertSame(1, $this->whatsapp->cuantos_envios());
+    }
+
     private function avisar_a_un_cliente_con_novedades(array $atributos_del_cliente = []): ClientUpgradeNotice
     {
         $client = $this->crear_cliente(array_merge(['email' => 'dueno@ejemplo.test'], $atributos_del_cliente));

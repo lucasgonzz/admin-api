@@ -273,7 +273,9 @@ class PruebaVideoSoporteService
             return ['estado' => 'sin_video', 'detalle' => 'El video 04 no está configurado con la URL aprobada.'];
         }
 
-        $ticket = $this->ticket_del_dueno($client, $ticket_id);
+        /* Cliente de ensayo (12/11/2026): el video va a la conversación del sistema, sin WhatsApp ni ventana de 24 h. */
+        $ensayo = PruebaEnsayoSinWhatsappService::es_ensayo($client);
+        $ticket = $ensayo ? app(PruebaEnsayoSinWhatsappService::class)->conversacion_del_sistema($client) : $this->ticket_del_dueno($client, $ticket_id);
         if ($ticket === null) {
             return ['estado' => 'sin_ticket', 'detalle' => 'No hay un ticket de WhatsApp abierto del dueño.'];
         }
@@ -289,7 +291,7 @@ class PruebaVideoSoporteService
                 return ['estado' => 'ya_entregado', 'detalle' => null];
             }
 
-            if (! app(\App\Services\WhatsappSessionWindowService::class)->is_open((string) $ticket->whatsapp_phone)) {
+            if (! $ensayo && ! app(\App\Services\WhatsappSessionWindowService::class)->is_open((string) $ticket->whatsapp_phone)) {
                 return ['estado' => 'ventana_cerrada', 'detalle' => null];
             }
 
@@ -303,6 +305,7 @@ class PruebaVideoSoporteService
                 'plantilla'         => self::plantilla(self::CODIGO_BIENVENIDA),
                 'hito'              => self::HITOS[self::CODIGO_BIENVENIDA],
                 'estado'            => self::ESTADO_ENVIANDO,
+                'canal'             => $ensayo ? PruebaWhatsappEnvio::CANAL_SISTEMA : PruebaWhatsappEnvio::CANAL_WHATSAPP,
                 'support_ticket_id' => (int) $ticket->id,
                 'dia'               => PruebaWhatsappService::hoy(),
             ]);
