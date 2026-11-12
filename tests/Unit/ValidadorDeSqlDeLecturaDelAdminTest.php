@@ -334,6 +334,23 @@ class ValidadorDeSqlDeLecturaDelAdminTest extends TestCase
             }
         }
 
+        /* 🔴 Las dos conversaciones de implementación: guardan la entrega del acceso (usuario y
+           contraseña del cliente). El resultado saldría tapado, pero filtrando por texto se puede
+           inferir; por eso no se consultan de ninguna forma, ni para contar. */
+        foreach (['implementation_messages', 'ecommerce_implementation_messages'] as $tabla) {
+            $this->assertArrayHasKey($tabla, (array) config('claude_admin_sql.tablas_vedadas'));
+
+            $this->assert_rechaza('tabla_vedada', 'SELECT id FROM ' . $tabla . ' WHERE body LIKE \'%Contraseña: a%\'');
+            $this->assert_rechaza('tabla_vedada', 'SELECT COUNT(*) FROM ' . $tabla);
+            $this->assert_rechaza('tabla_vedada', 'SELECT i.id FROM implementations i JOIN ' . $tabla . ' m ON m.implementation_id = i.id');
+            $this->assert_rechaza('tabla_vedada', 'SELECT id FROM implementations WHERE EXISTS (SELECT 1 FROM ' . $tabla . ' m WHERE m.body LIKE \'%a%\')');
+            $this->assert_rechaza('tabla_vedada', 'SHOW COLUMNS FROM ' . $tabla);
+            $this->assert_rechaza('tabla_vedada', 'DESCRIBE `' . $tabla . '`');
+        }
+
+        /* Las otras tablas de la implementación siguen consultables. */
+        $this->assert_admite('SELECT id, client_id, notes FROM implementations');
+
         $this->assert_rechaza('tabla_vedada', 'SELECT * FROM admin_settings');
         $this->assert_rechaza('tabla_vedada', 'SELECT * FROM jobs');
         $this->assert_rechaza('tabla_vedada', 'DESCRIBE whatsapp_config');
@@ -450,40 +467,40 @@ class ValidadorDeSqlDeLecturaDelAdminTest extends TestCase
         /* 🔴 El redactor tapa lo que sigue a «Contraseña: » mirando el texto ENTERO. Cada una de
            estas devuelve el valor sin su etiqueta, o rompe la etiqueta. */
         foreach ([
-            'SELECT SUBSTRING(body, 14) FROM implementation_messages',
-            'SELECT SUBSTRING(body FROM 14 FOR 20) FROM implementation_messages',
-            'SELECT SUBSTR(body, 14, 20) FROM implementation_messages',
-            'SELECT RIGHT(body, 20) FROM implementation_messages',
+            'SELECT SUBSTRING(body, 14) FROM support_messages',
+            'SELECT SUBSTRING(body FROM 14 FOR 20) FROM support_messages',
+            'SELECT SUBSTR(body, 14, 20) FROM support_messages',
+            'SELECT RIGHT(body, 20) FROM support_messages',
             'SELECT LEFT(contract_financiacion, 120) FROM clients',
-            'SELECT TRIM(LEADING \'Contraseña: \' FROM body) FROM implementation_messages',
-            'SELECT TRIM(body) FROM implementation_messages',
-            'SELECT CAST(body AS CHAR) FROM implementation_messages',
+            'SELECT TRIM(LEADING \'Contraseña: \' FROM body) FROM support_messages',
+            'SELECT TRIM(body) FROM support_messages',
+            'SELECT CAST(body AS CHAR) FROM support_messages',
             'SELECT CAST(contract_financiacion AS CHAR(50)) FROM clients',
-            'SELECT CONVERT(body USING ascii) FROM implementation_messages',
-            'SELECT CONVERT(body, CHAR(10)) FROM implementation_messages',
-            'SELECT substring (body, 14) FROM implementation_messages',
-            'SELECT UPPER(RIGHT(body, 5)) FROM implementation_messages',
+            'SELECT CONVERT(body USING ascii) FROM support_messages',
+            'SELECT CONVERT(body, CHAR(10)) FROM support_messages',
+            'SELECT substring (body, 14) FROM support_messages',
+            'SELECT UPPER(RIGHT(body, 5)) FROM support_messages',
         ] as $sql) {
             $this->assert_rechaza('funcion_no_permitida', $sql);
         }
 
         /* Con `CHARACTER SET` cae antes, por la palabra SET: «Contraseña» no se puede volver «Contrase?a». */
-        $this->assert_rechaza('operacion_no_permitida', 'SELECT CAST(body AS CHAR CHARACTER SET ascii) FROM implementation_messages');
+        $this->assert_rechaza('operacion_no_permitida', 'SELECT CAST(body AS CHAR CHARACTER SET ascii) FROM support_messages');
 
         /* Ya estaban afuera: prohibida como palabra, o nunca estuvieron en la lista. */
-        $this->assert_rechaza('operacion_no_permitida', 'SELECT REPLACE(body, \'Contraseña: \', \'\') FROM implementation_messages');
+        $this->assert_rechaza('operacion_no_permitida', 'SELECT REPLACE(body, \'Contraseña: \', \'\') FROM support_messages');
         foreach (['MID(body, 14)', 'REVERSE(body)', 'SUBSTRING_INDEX(body, \':\', -1)', 'REGEXP_SUBSTR(body, \'[0-9]+\')', 'REGEXP_REPLACE(body, \'a\', \'b\')',
             'INSERT(body, 1, 12, \'\')', 'LPAD(body, 5, \'x\')', 'RPAD(body, 5, \'x\')', 'HEX(body)', 'TO_BASE64(body)', 'ASCII(body)', 'ORD(body)',
             'LOCATE(\'a\', body)', 'INSTR(body, \'a\')', 'ELT(1, body)', 'MAKE_SET(1, body)', 'EXPORT_SET(1, body, body)', 'WEIGHT_STRING(body)',
             'JSON_ARRAY(body)', 'JSON_OBJECT(\'a\', body)', 'JSON_QUOTE(body)', 'UNHEX(body)', 'MD5(body)', 'SHA2(body, 256)', 'COMPRESS(body)'] as $llamada) {
-            $resultado = $this->validar('SELECT ' . $llamada . ' FROM implementation_messages');
+            $resultado = $this->validar('SELECT ' . $llamada . ' FROM support_messages');
 
             $this->assertFalse($resultado['ok'], 'Tendría que rechazar: ' . $llamada);
             $this->assertContains($resultado['codigo'], ['funcion_no_permitida', 'operacion_no_permitida', 'json_no_permitido'], $llamada);
         }
 
         /* Lo que queda: no cortan ni separan. */
-        $this->assert_admite('SELECT LOWER(body), UPPER(body), LTRIM(body), RTRIM(body), LENGTH(body), CONCAT(id, body) FROM implementation_messages');
+        $this->assert_admite('SELECT LOWER(body), UPPER(body), LTRIM(body), RTRIM(body), LENGTH(body), CONCAT(id, body) FROM support_messages');
     }
 
     public function test_el_validador_acepta_una_config_propia(): void

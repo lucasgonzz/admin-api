@@ -82,6 +82,8 @@ return [
         'recursos_sesiones'                     => 'Sesiones del centro de recursos: hash del token de sesión.',
         'support_codex_task_grants'             => 'Permisos de un solo uso de las tareas de Martín: hash del token.',
         'trial_instances'                       => 'Instancias de la prueba gratuita: contraseña (cifrada) del usuario de la prueba.',
+        'implementation_messages'               => 'Conversación de la implementación: incluye el mensaje de ENTREGA DEL ACCESO, con el usuario y la contraseña del sistema del cliente. Aunque el resultado salga tapado, filtrando por texto (`body LIKE …`) se puede inferir el valor letra por letra: la redacción protege lo que se devuelve, no lo que se puede preguntar. La conversación se lee por `claude/implementations`.',
+        'ecommerce_implementation_messages'     => 'Conversación de la implementación de la tienda: mismo caso que `implementation_messages` (entrega de accesos).',
     ],
 
     /*
@@ -154,7 +156,7 @@ return [
         array_fill_keys([
             'lead_messages.content', 'lead_messages.edited_content', 'lead_scheduled_messages.content',
             'support_messages.body', 'support_messages.ai_body_before_template', 'support_messages.ai_original_body',
-            'implementation_messages.body', 'ecommerce_implementation_messages.body', 'client_assistant_messages.texto',
+            'client_assistant_messages.texto',
             'demo_chat_mensajes.contenido', 'support_tickets.ai_pending_suggestion', 'whatsapp_ad_referrals.body',
             'whatsapp_ad_referrals.headline', 'lead_calls.transcript', 'lead_calls.call_summary', 'leads.call_summary',
             'recursos_preguntas.texto', 'recursos_preguntas.borrador', 'recursos_preguntas.respuesta', 'recursos_encuestas.mejora',
