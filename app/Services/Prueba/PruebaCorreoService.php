@@ -297,26 +297,59 @@ class PruebaCorreoService
      *
      * @param Client    $client
      * @param Lead|null $lead
-     * @param string    $falta «2 días», «1 día» o «menos de un día».
+     * @param string      $falta «3 días», «1 día»…
+     * @param string|null $paso  El paso que le tocaba hoy: va debajo del aviso («Mientras tanto, lo próximo para
+     *                           probar…»). No queda registrado como correo del paso ni cuenta para el tope de envíos.
      *
      * @return array{estado: string, detalle: string|null}
      */
-    public function enviar_por_terminar(Client $client, ?Lead $lead, string $falta): array
+    public function enviar_por_terminar(Client $client, ?Lead $lead, string $falta, ?string $paso = null): array
     {
+        $parrafos = [
+            self::saludo($client, $lead) . ', soy Martín, del equipo de ComercioCity.',
+            'Te aviso con tiempo: tu prueba gratuita termina en ' . $falta . '.',
+            'Si te quedó algo por probar, entrá a tu sistema, abrí Agentes y elegí Soporte: ahí te contesto, te paso los videos y, si me pedís un recorrido guiado, te lo muestro en tu pantalla.',
+            'Y si ya sabés que querés seguir, respondé este correo o escribime por WhatsApp y te cuento cómo. Todo lo que cargaste queda como está.',
+        ];
+
+        /* Debajo del aviso, el paso que le tocaba hoy (ese día el WhatsApp es solo el aviso), con su video si lo tiene. */
+        $video = null;
+        if ($paso !== null && isset(self::PASOS[$paso])) {
+            $parrafos[] = 'Mientras tanto, lo próximo para probar: ' . self::PASOS[$paso]['texto'];
+            $video      = self::video_del_paso($paso);
+            if ($video !== null) {
+                $parrafos[] = self::FRASE_DEL_VIDEO;
+            }
+        }
+
         $payload = new ComercioCityMailPayload([
             'subject'    => 'Tu prueba de ComercioCity termina en ' . $falta,
             'title'      => 'Tu prueba termina en ' . $falta,
-            'paragraphs' => [
-                self::saludo($client, $lead) . ', soy Martín, del equipo de ComercioCity.',
-                'Te aviso con tiempo: tu prueba gratuita termina en ' . $falta . '.',
-                'Si te quedó algo por probar, entrá a tu sistema, abrí Agentes y elegí Soporte: ahí te contesto, te paso los videos y, si me pedís un recorrido guiado, te lo muestro en tu pantalla.',
-                'Y si ya sabés que querés seguir, respondé este correo o escribime por WhatsApp y te cuento cómo. Todo lo que cargaste queda como está.',
-            ],
+            'paragraphs' => $parrafos,
+            'links'      => $video !== null ? [['text' => '«' . $video['titulo'] . '»', 'url' => $video['url']]] : [],
             'cta'     => self::boton_del_sistema($client),
             'closing' => 'Equipo de ComercioCity',
         ]);
 
         return $this->enviar_registrado($client, $lead, self::CORREO_DIA_5, $payload, 'dia_5');
+    }
+
+    /**
+     * Si un correo de la prueba ya salió (o quedó reservado) para este cliente.
+     *
+     * @param Client $client
+     * @param string $clave La misma de {@see self::enviar_registrado()}.
+     *
+     * @return bool
+     */
+    public function ya_salio(Client $client, string $clave): bool
+    {
+        return PruebaWhatsappEnvio::query()
+            ->where('client_id', (int) $client->id)
+            ->where('canal', PruebaWhatsappEnvio::CANAL_CORREO)
+            ->where('plantilla', self::PREFIJO . $clave)
+            ->whereIn('estado', [PruebaWhatsappEnvio::ESTADO_ENVIADO, PruebaWhatsappEnvio::ESTADO_ENVIANDO])
+            ->exists();
     }
 
     /**

@@ -260,7 +260,7 @@ class RecorridoYBarridosDeLaPruebaTest extends BaseDeLaPrueba
     }
 
     /** @test */
-    public function regla_4_el_ultimo_dia_no_sale_paso(): void
+    public function a_minutos_de_vencer_no_sale_paso(): void
     {
         $espia = $this->espiar_sender();
         $this->todo_aprobado();
@@ -345,7 +345,7 @@ class RecorridoYBarridosDeLaPruebaTest extends BaseDeLaPrueba
 
         $antes = $this->hoy_de($client)['hoy'];
         $this->assertSame([
-            'paso' => 'importo', 'motivo_sin_paso' => null, 'aviso_dia_5' => false, 'vence_hoy' => false,
+            'paso' => 'importo', 'paso_en_el_correo' => null, 'motivo_sin_paso' => null, 'aviso_dia_5' => false, 'vence_hoy' => false,
             'encuesta_pendiente' => false, 'plantilla' => 'cc_prueba_paso_importo', 'video_codigo' => '05',
         ], $antes);
 
@@ -404,7 +404,7 @@ class RecorridoYBarridosDeLaPruebaTest extends BaseDeLaPrueba
         /* Un negocio real, en el día 5: sin aviso de que termina, el paso de siempre y sin video. */
         $fila = $this->hoy_de($client);
         $this->assertSame([
-            'paso' => 'venta', 'motivo_sin_paso' => null, 'aviso_dia_5' => false, 'vence_hoy' => false,
+            'paso' => 'venta', 'paso_en_el_correo' => null, 'motivo_sin_paso' => null, 'aviso_dia_5' => false, 'vence_hoy' => false,
             'encuesta_pendiente' => false, 'plantilla' => 'cc_prueba_paso_venta', 'video_codigo' => null,
         ], $fila['hoy']);
         $this->assertSame('venta', $fila['proximo_hito']);

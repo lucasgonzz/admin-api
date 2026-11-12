@@ -62,7 +62,10 @@ class PruebaWhatsappService
     /** Dentro del alcance de las novedades: cuántas veces sale, como mucho, el WhatsApp de un mismo paso. */
     const TOPE_POR_PASO = 2;
 
-    const MOTIVO_ULTIMO_DIA      = 'Hoy vence la prueba: no sale paso, sale la encuesta al vencer.';
+    /** El día que vence sí sale paso, salvo que falten menos de estas horas para el vencimiento. */
+    const HORAS_SIN_PASO_ANTES_DE_VENCER = 3;
+
+    const MOTIVO_ULTIMO_DIA      = 'Faltan menos de 3 horas para que venza la prueba: no sale paso, sale la encuesta al vencer.';
     const MOTIVO_TOPE_DE_INGRESO = 'Todavía no entró y ya se le recordó dos veces: no se le mandan más pasos.';
 
     /** Zona horaria del tope diario. */
@@ -537,8 +540,9 @@ class PruebaWhatsappService
 
         $alcance = Prueba\PruebaSettings::novedades_para($client);
 
-        /* Dentro del alcance nuevo, el último día (el que vence) no sale paso: ese día sale la encuesta al vencer. */
-        if ($alcance && self::vence_hoy($datos)) {
+        /* Dentro del alcance nuevo, el día que vence sí sale paso mientras la prueba siga en curso (la encuesta sale
+           recién al vencer), salvo que falten menos de tres horas para el vencimiento. */
+        if ($alcance && self::vence_muy_pronto($datos)) {
             return ['estado' => 'ultimo_dia', 'detalle' => self::MOTIVO_ULTIMO_DIA];
         }
 
@@ -674,6 +678,51 @@ class PruebaWhatsappService
     }
 
     /**
+     * Si faltan menos de {@see self::HORAS_SIN_PASO_ANTES_DE_VENCER} horas para que venza: a esa altura ya no sale
+     * paso.
+     *
+     * @param array<string, mixed> $datos `PruebaDelClienteService::datos()`.
+     *
+     * @return bool
+     */
+    public static function vence_muy_pronto(array $datos): bool
+    {
+        if ($datos['vencida'] === true || empty($datos['vence_at'])) {
+            return false;
+        }
+
+        return Carbon::now()->diffInSeconds(Carbon::parse((string) $datos['vence_at']), false) < self::HORAS_SIN_PASO_ANTES_DE_VENCER * 3600;
+    }
+
+    /**
+     * El paso que le tocaría hoy a este negocio por WhatsApp si hoy no saliera otra cosa (ni aviso ni tope diario):
+     * con las reglas del empujón, sin mandar nada. Lo usa el correo del aviso de que la prueba termina, que lo
+     * lleva debajo («Mientras tanto, lo próximo para probar…»). null si hoy no le toca ninguno.
+     *
+     * @param Client               $client
+     * @param Lead|null            $lead
+     * @param array<string, mixed> $datos
+     * @param array<string, mixed>|null $hitos Si ya se tienen (los del alcance del cliente).
+     *
+     * @return string|null
+     */
+    public function paso_que_tocaba(Client $client, ?Lead $lead, array $datos, ?array $hitos = null): ?string
+    {
+        $alcance = Prueba\PruebaSettings::novedades_para($client);
+
+        if (($alcance && self::vence_muy_pronto($datos)) || $this->escribio_hace_poco($client, $alcance)) {
+            return null;
+        }
+
+        $hitos = $hitos !== null ? $hitos : $this->pruebas->hitos($client, $lead, true);
+        if (isset($hitos['vencida']) && $hitos['vencida'] === true) {
+            return null;
+        }
+
+        return $this->elegir_paso($client, $hitos)['paso'];
+    }
+
+    /**
      * Si el negocio escribió hace menos de 24 horas. Siempre mira la ventana de WhatsApp del dueño (la regla de
      * siempre); con `$cualquier_canal` (dentro del alcance de las novedades) mira además cualquier mensaje suyo a
      * Soporte, por WhatsApp o por el chat de su sistema: lo está guiando Martín.
@@ -712,7 +761,10 @@ class PruebaWhatsappService
      * @param array<string, mixed> $datos `PruebaDelClienteService::datos()`.
      * @param array<string, mixed> $hitos `PruebaDelClienteService::hitos()` de este cliente (ya con su alcance).
      *
-     * @return array{paso: string|null, motivo_sin_paso: string|null, aviso_dia_5: bool, vence_hoy: bool, encuesta_pendiente: bool, plantilla: string|null, video_codigo: string|null}
+     * @return array{paso: string|null, paso_en_el_correo: string|null, motivo_sin_paso: string|null, aviso_dia_5: bool, vence_hoy: bool, encuesta_pendiente: bool, plantilla: string|null, video_codigo: string|null}
+     *   `paso` = el paso que sale hoy por WhatsApp. `paso_en_el_correo` = el día del aviso de que termina, el paso que
+     *   va debajo del aviso en el correo (no cuenta como enviado). `vence_hoy` = vence dentro de 24 h (igual sale
+     *   paso, salvo que falten menos de 3 h).
      */
     public function que_sale_hoy(Client $client, array $datos, array $hitos): array
     {
@@ -722,7 +774,7 @@ class PruebaWhatsappService
         $en_prueba = Prueba\PruebaCicloService::esta_en_prueba($client);
 
         $hoy = [
-            'paso' => null, 'motivo_sin_paso' => null, 'aviso_dia_5' => false,
+            'paso' => null, 'paso_en_el_correo' => null, 'motivo_sin_paso' => null, 'aviso_dia_5' => false,
             'vence_hoy' => $en_prueba && ! $vencida && self::vence_hoy($datos),
             'encuesta_pendiente' => false, 'plantilla' => null, 'video_codigo' => null,
         ];
@@ -759,7 +811,16 @@ class PruebaWhatsappService
         if ($this->corresponde_el_aviso_de_que_termina($client, $datos)) {
             $hoy['aviso_dia_5']     = true;
             $hoy['plantilla']       = PruebaPlantillasService::DIA_5;
-            $hoy['motivo_sin_paso'] = 'Hoy sale el aviso de que la prueba termina.';
+            $hoy['motivo_sin_paso'] = 'Hoy sale el aviso de que la prueba termina (el WhatsApp del día es ese).';
+
+            /* El correo de hoy lleva, debajo del aviso, el paso que le tocaba (no cuenta para el tope de envíos). */
+            $correos = app(Prueba\PruebaCorreoService::class);
+            if (filter_var(trim((string) $client->email), FILTER_VALIDATE_EMAIL) && ! $correos->ya_salio($client, Prueba\PruebaCorreoService::CORREO_DIA_5)) {
+                $hoy['paso_en_el_correo'] = $this->paso_que_tocaba($client, null, $datos, $hitos);
+                if ($hoy['paso_en_el_correo'] !== null && isset(Prueba\PruebaCorreoService::VIDEO_DEL_PASO[$hoy['paso_en_el_correo']])) {
+                    $hoy['video_codigo'] = Prueba\PruebaCorreoService::VIDEO_DEL_PASO[$hoy['paso_en_el_correo']];
+                }
+            }
 
             return $hoy;
         }
@@ -770,7 +831,7 @@ class PruebaWhatsappService
             return $hoy;
         }
 
-        if ($alcance && $hoy['vence_hoy']) {
+        if ($alcance && self::vence_muy_pronto($datos)) {
             $hoy['motivo_sin_paso'] = self::MOTIVO_ULTIMO_DIA;
 
             return $hoy;
@@ -845,7 +906,12 @@ class PruebaWhatsappService
         $falta  = $restan <= 1 ? '1 día' : $restan . ' días';
 
         try {
-            app(Prueba\PruebaCorreoService::class)->enviar_por_terminar($client, $lead, $falta);
+            /* El correo lleva el aviso y, debajo, el paso que le tocaba hoy con su video. Ese paso NO cuenta como
+               enviado: mañana sale por WhatsApp como siempre. Solo se calcula si el correo todavía no salió. */
+            $correos = app(Prueba\PruebaCorreoService::class);
+            if (! $correos->ya_salio($client, Prueba\PruebaCorreoService::CORREO_DIA_5)) {
+                $correos->enviar_por_terminar($client, $lead, $falta, $this->paso_que_tocaba($client, $lead, $datos));
+            }
         } catch (\Throwable $e) {
             Log::channel('daily')->warning('PruebaWhatsapp: no salió el correo de que la prueba está por terminar.', [
                 'client_id' => (int) $client->id,
