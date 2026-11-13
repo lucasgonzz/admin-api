@@ -321,31 +321,109 @@ class LeadWhatsappOnboardingService
             return;
         }
 
-        if ($this->has_welcome_been_sent($lead)) {
+        if ($oferta_de_prueba) {
+            $this->enviar_oferta_de_prueba($lead);
+
             return;
         }
 
-        if ($oferta_de_prueba) {
-            /* Si en los segundos de la demora el lead creó su prueba (escribió y fue derecho a la web),
-               el link ya no le sirve: no se manda nada (el webhook ya lo atiende como cliente). */
-            if (LeadOfertaDePruebaService::tiene_prueba($lead)) {
-                Log::channel('daily')->info('LeadWhatsappOnboarding: oferta de prueba omitida (el lead ya tiene su prueba).', [
-                    'lead_id' => $lead->id,
-                ]);
-
-                return;
-            }
-
-            $mensajes = LeadOfertaDePruebaService::mensajes();
-            $this->persist_and_send_system_message($lead, $mensajes[0], self::KIND_WELCOME);
-            $this->persist_and_send_system_message($lead, $mensajes[1], self::KIND_PRUEBA_LINK);
-
+        if ($this->has_welcome_been_sent($lead)) {
             return;
         }
 
         /* Variantes A/B universales: funcionan con o sin nombre de contacto. */
         $body = $this->resolve_welcome_message_body($lead, $display_name);
         $this->persist_and_send_system_message($lead, $body, self::KIND_WELCOME);
+    }
+
+    /** Pausa entre los dos mensajes de la oferta, en microsegundos (la misma de `enviar_partes()`). */
+    protected const PAUSA_ENTRE_MENSAJES_US = 1200000;
+
+    /**
+     * Los dos mensajes de la oferta de la prueba gratis (misión martin-link-prueba-landing, 13/11/2026).
+     *
+     * 🔴 La pausa entre los dos NO es cosmética: dos envíos seguidos a la misma conversación dan el 409
+     * de Kapso («Another message is already in-flight for this conversation») y el segundo —el del
+     * link, que es todo el punto del cambio— se pierde. Es la misma prevención de raíz que
+     * `LeadSuggestionSendService::enviar_partes()`. Y si el link igual falla, se reintenta una vez.
+     *
+     * Cada mensaje se manda solo si todavía no salió (por su `system_message_kind`): si el job se cae
+     * entre el primero y el segundo, el reintento manda únicamente el que falta.
+     *
+     * @param Lead $lead
+     *
+     * @return void
+     */
+    private function enviar_oferta_de_prueba(Lead $lead): void
+    {
+        $ya_salio_la_presentacion = $this->has_welcome_been_sent($lead);
+        if ($ya_salio_la_presentacion && LeadOfertaDePruebaService::ya_se_ofrecio($lead)) {
+            return;
+        }
+
+        /* Si en los segundos de la demora el lead creó su prueba (escribió y fue derecho a la web), el
+           link ya no le sirve: no se manda nada (el webhook ya lo atiende como cliente). */
+        if (LeadOfertaDePruebaService::tiene_prueba($lead)) {
+            Log::channel('daily')->info('LeadWhatsappOnboarding: oferta de prueba omitida (el lead ya tiene su prueba).', [
+                'lead_id' => $lead->id,
+            ]);
+
+            return;
+        }
+
+        $mensajes = LeadOfertaDePruebaService::mensajes();
+
+        if (! $ya_salio_la_presentacion) {
+            $this->persist_and_send_system_message($lead, $mensajes[0], self::KIND_WELCOME);
+            usleep(static::PAUSA_ENTRE_MENSAJES_US);
+        }
+
+        $this->persistir_y_enviar_con_un_reintento($lead, $mensajes[1], self::KIND_PRUEBA_LINK);
+    }
+
+    /**
+     * Como {@see persist_and_send_system_message()}, pero si el envío falla espera la pausa y lo
+     * reintenta una vez (el 409 de Kapso es seguro de reintentar: el mensaje no se encoló). El primer
+     * intento no avisa el fallo a los admins; el reintento sí.
+     *
+     * @param Lead   $lead
+     * @param string $body
+     * @param string $system_message_kind
+     *
+     * @return LeadMessage
+     */
+    private function persistir_y_enviar_con_un_reintento(Lead $lead, string $body, string $system_message_kind): LeadMessage
+    {
+        $phone               = trim((string) $lead->phone);
+        $whatsapp_message_id = null;
+
+        if ($phone !== '') {
+            $whatsapp_message_id = $this->whatsapp_send_service->send_text($phone, $body, null, true);
+            if ($whatsapp_message_id === null) {
+                Log::channel('daily')->warning('LeadWhatsappOnboarding: falló el envío del link de la prueba; se reintenta una vez.', [
+                    'lead_id'     => $lead->id,
+                    'transitorio' => $this->whatsapp_send_service->last_send_was_transient(),
+                ]);
+                usleep(static::PAUSA_ENTRE_MENSAJES_US);
+                $whatsapp_message_id = $this->whatsapp_send_service->send_text($phone, $body);
+            }
+        }
+
+        $lead_message = LeadMessage::create([
+            'lead_id'               => $lead->id,
+            'sender'                => 'sistema',
+            'content'               => $body,
+            'status'                => 'enviado',
+            'is_followup'           => false,
+            'requiere_verificacion' => false,
+            'whatsapp_message_id'   => $whatsapp_message_id,
+            'system_message_kind'   => $system_message_kind,
+            'sent_at'               => now(),
+        ]);
+
+        LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $lead_message->id);
+
+        return $lead_message;
     }
 
     /**

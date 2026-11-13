@@ -77,6 +77,9 @@ class OfertaDePruebaAlLeadDeLaLandingTest extends TestCase
         AdminSetting::set(LeadOfertaDePruebaService::KEY_LINK, '');
         AdminSetting::set(PruebaSettings::KEY_DIAS_DEFAULT, '7');
         AdminSetting::set(PruebaSettings::KEY_MAX_ACTIVAS, '1000');
+        /* El alta pide una instancia libre: el pool del slot puede no tener ninguna. */
+        TrialInstance::create(['nombre' => 'ol-' . Str::lower(Str::random(6)), 'estado' => TrialInstance::ESTADO_LIBRE,
+            'erp_vps_path' => 'prueba-sintetica', 'ecommerce_vps_path' => 'tienda-sintetica']);
 
         MessageVariant::query()->where('message_type', LeadWhatsappOnboardingService::VARIANT_TYPE_WELCOME)->update(['active' => false]);
         MessageVariant::query()->where('message_type', LeadWhatsappOnboardingService::VARIANT_TYPE_WELCOME_LANDING)->delete();
@@ -217,7 +220,7 @@ class OfertaDePruebaAlLeadDeLaLandingTest extends TestCase
         AdminSetting::set(LeadOfertaDePruebaService::KEY_ACTIVA, '1');
 
         /* Pool sin lugar: el alta rechazaría, así que tampoco se manda el link. */
-        TrialInstance::create(['nombre' => 'oferta-' . Str::lower(Str::random(10)), 'estado' => TrialInstance::ESTADO_ASIGNADA,
+        TrialInstance::create(['nombre' => 'oa-' . Str::lower(Str::random(6)), 'estado' => TrialInstance::ESTADO_ASIGNADA,
             'erp_vps_path' => 'prueba-sintetica', 'ecommerce_vps_path' => 'tienda-sintetica']);
         AdminSetting::set(PruebaSettings::KEY_MAX_ACTIVAS, (string) max(1, PruebaPoolService::activas()));
         $this->assertFalse(PruebaPoolService::hay_capacidad());
@@ -318,6 +321,91 @@ class OfertaDePruebaAlLeadDeLaLandingTest extends TestCase
         $bloque_con_prueba = LeadOfertaDePruebaService::bloque_para_el_agente($lead->fresh());
         $this->assertStringContainsString('YA CREO SU PRUEBA GRATIS', $bloque_con_prueba);
         $this->assertStringNotContainsString('comerciocity.com/prueba', $bloque_con_prueba);
+    }
+
+    /**
+     * (9) Si el envío del link falla (el 409 de Kapso de dos envíos seguidos), se reintenta una vez; y
+     *     si el job se cayó después del primer mensaje, su reintento manda solo el del link.
+     *
+     * @return void
+     */
+    public function test_si_falla_el_link_se_reintenta_y_el_reintento_del_job_manda_solo_lo_que_falta(): void
+    {
+        /* El 409 de Kapso en el segundo envío: el primer intento del link falla y el reintento sale. */
+        $espia    = $this->espiar_whatsapp(['falla_el_intento' => [2]]);
+        $servicio = new LeadWhatsappOnboardingService($espia);
+        $lead     = $this->crear_lead_nuevo();
+
+        $servicio->send_presentation_message($lead, null, true);
+
+        $this->assertCount(3, $espia->textos, 'Mensaje 1, intento fallido del link y reintento.');
+        $this->assertSame(self::MENSAJE_2_DE_LUCAS, $espia->textos[2]['body']);
+        $link = LeadMessage::where('lead_id', $lead->id)->where('system_message_kind', LeadWhatsappOnboardingService::KIND_PRUEBA_LINK)->firstOrFail();
+        $this->assertNotNull($link->whatsapp_message_id, 'El reintento dejó el id de WhatsApp.');
+        $this->assertSame(2, LeadMessage::where('lead_id', $lead->id)->count());
+
+        /* El job se cayó después del primer mensaje: el reintento manda SOLO el del link. */
+        $espia2    = $this->espiar_whatsapp();
+        $servicio2 = new LeadWhatsappOnboardingService($espia2);
+        $otro      = $this->crear_lead_nuevo();
+        $servicio2->persist_and_send_system_message($otro, self::MENSAJE_1_DE_LUCAS, LeadWhatsappOnboardingService::KIND_WELCOME);
+        $servicio2->send_presentation_message($otro->fresh(), null, true);
+        $servicio2->send_presentation_message($otro->fresh(), null, true);
+
+        $this->assertSame([self::MENSAJE_1_DE_LUCAS, self::MENSAJE_2_DE_LUCAS], array_column($espia2->textos, 'body'));
+    }
+
+    /**
+     * (10) El bloque se calla cuando el lead ya pidió la demo o la tiene: ahí manda ese flujo. Y un
+     *      texto guardado sin el link no puede reemplazar al mensaje del link.
+     *
+     * @return void
+     */
+    public function test_el_bloque_se_calla_cuando_pidio_la_demo_y_el_override_sin_link_cae_al_de_siempre(): void
+    {
+        $servicio = new LeadWhatsappOnboardingService($this->espiar_whatsapp());
+        $lead     = $this->crear_lead_nuevo();
+        $servicio->send_presentation_message($lead, null, true);
+
+        foreach (['contactado', 'calificado'] as $estado) {
+            Lead::query()->whereKey($lead->id)->update(['status' => $estado]);
+            $this->assertStringContainsString('PRUEBA GRATIS (lead de la web', LeadOfertaDePruebaService::bloque_para_el_agente($lead->fresh()), $estado);
+        }
+        foreach (['solicita_disponibilidad', 'demo_agendada', 'demo_en_curso', 'demo_realizada', 'closer_activo', 'cerrado_perdido'] as $estado) {
+            Lead::query()->whereKey($lead->id)->update(['status' => $estado]);
+            $this->assertSame('', LeadOfertaDePruebaService::bloque_para_el_agente($lead->fresh()), $estado);
+        }
+
+        $con_demo = $lead->fresh();
+        $con_demo->status  = 'contactado';
+        $con_demo->demo_id = 999999;
+        $this->assertSame('', LeadOfertaDePruebaService::bloque_para_el_agente($con_demo), 'Con demo asignada.');
+
+        /* El primer mensaje del botón no cuenta como pedido de demo, y el link va completo. */
+        Lead::query()->whereKey($lead->id)->update(['status' => 'contactado']);
+        $bloque = LeadOfertaDePruebaService::bloque_para_el_agente($lead->fresh());
+        $this->assertStringContainsString('NO cuenta como pedido de demo', $bloque);
+        $this->assertStringContainsString('nunca "comerciocity.com" a secas', $bloque);
+        $this->assertStringContainsString('no le pidas el nombre', $bloque);
+
+        AdminSetting::set(LeadOfertaDePruebaService::KEY_MENSAJE_2, 'Creala desde la web, cuando quieras.');
+        $this->assertSame(self::MENSAJE_2_DE_LUCAS, LeadOfertaDePruebaService::mensajes()[1]);
+        AdminSetting::set(LeadOfertaDePruebaService::KEY_MENSAJE_1, '   ');
+        $this->assertSame(self::MENSAJE_1_DE_LUCAS, LeadOfertaDePruebaService::mensajes()[0]);
+    }
+
+    /**
+     * (11) Sin ninguna instancia libre ni armándose, el alta rechazaría: no se manda el link.
+     *
+     * @return void
+     */
+    public function test_sin_instancia_libre_en_el_pool_no_se_ofrece_el_link(): void
+    {
+        TrialInstance::query()->whereIn('estado', [TrialInstance::ESTADO_LIBRE, TrialInstance::ESTADO_CREANDO])
+            ->update(['estado' => TrialInstance::ESTADO_FALLIDA]);
+        $this->assertSame(0, PruebaPoolService::libres_o_creando());
+
+        $this->assertFalse(LeadOfertaDePruebaService::aplica_al_primer_mensaje($this->crear_lead_nuevo(), LeadOrigenService::FRASE_LANDING));
     }
 
     /**
@@ -459,18 +547,28 @@ class OfertaDePruebaAlLeadDeLaLandingTest extends TestCase
     /**
      * @return WhatsappSendService Espía: guarda cada texto, no sale nada a Kapso.
      */
-    private function espiar_whatsapp(): WhatsappSendService
+    private function espiar_whatsapp(array $opciones = []): WhatsappSendService
     {
-        return new class extends WhatsappSendService {
+        $espia = new class extends WhatsappSendService {
             /** @var array<int, array<string, mixed>> */
             public $textos = [];
+
+            /** @var array<int, int> Números de intento (desde 1) que devuelven null, como un 409. */
+            public $falla_el_intento = [];
 
             public function send_text(string $to, string $body, ?string $context = null, bool $skip_failure_notification = false): ?string
             {
                 $this->textos[] = ['to' => $to, 'body' => $body];
 
+                if (in_array(count($this->textos), $this->falla_el_intento, true)) {
+                    return null;
+                }
+
                 return 'wamid.oferta.texto.' . bin2hex(random_bytes(8));
             }
         };
+        $espia->falla_el_intento = isset($opciones['falla_el_intento']) ? $opciones['falla_el_intento'] : [];
+
+        return $espia;
     }
 }

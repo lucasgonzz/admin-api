@@ -88,6 +88,13 @@ class LeadOfertaDePruebaService
     public const PLAN_DESDE = 'inicial';
 
     /**
+     * Estados en los que el agente recibe el bloque de la oferta: los de ANTES de que el lead pida la
+     * demo. Cuando la pide (`solicita_disponibilidad`) o ya la tiene, el bloque se calla y manda el
+     * flujo de la demo y del closer, que este bloque pisaría.
+     */
+    public const ESTADOS_CON_LA_OFERTA = ['nuevo', 'contactado', 'calificado'];
+
+    /**
      * ¿La oferta está prendida? Default sí.
      *
      * @return bool
@@ -120,9 +127,11 @@ class LeadOfertaDePruebaService
         }
 
         /* Con el pool lleno el alta rechaza (SinCapacidadDePrueba): mandarle el link sería mandarlo a
-           un formulario que le va a decir que no. Ahí sigue el onboarding de la demo, como hasta hoy. */
+           un formulario que le va a decir que no. Ahí sigue el onboarding de la demo, como hasta hoy.
+           Las dos condiciones del alta: lugar bajo el tope de activas y alguna instancia libre (o
+           armándose, que en unos minutos queda libre: es lo que el lead tarda en llenar el formulario). */
         try {
-            if (! PruebaPoolService::hay_capacidad()) {
+            if (! PruebaPoolService::hay_capacidad() || PruebaPoolService::libres_o_creando() < 1) {
                 Log::channel('daily')->info('LeadOfertaDePrueba: pool de pruebas sin lugar; sigue el onboarding de la demo.', [
                     'lead_id' => $lead->id,
                 ]);
@@ -198,10 +207,19 @@ class LeadOfertaDePruebaService
     {
         $reemplazos = self::reemplazos();
 
-        return [
-            self::renderizar(self::plantilla(self::KEY_MENSAJE_1, self::DEFAULT_MENSAJE_1), $reemplazos),
-            self::renderizar(self::plantilla(self::KEY_MENSAJE_2, self::DEFAULT_MENSAJE_2), $reemplazos),
-        ];
+        $primero = self::renderizar(self::plantilla(self::KEY_MENSAJE_1, self::DEFAULT_MENSAJE_1), $reemplazos);
+        if ($primero === '') {
+            $primero = self::renderizar(self::DEFAULT_MENSAJE_1, $reemplazos);
+        }
+
+        /* El segundo mensaje ES el del link: un texto guardado que lo perdió (sin `{link_prueba}` ni el
+           link escrito) no puede salir marcado como «el link ya salió». Cae al de siempre. */
+        $segundo = self::renderizar(self::plantilla(self::KEY_MENSAJE_2, self::DEFAULT_MENSAJE_2), $reemplazos);
+        if ($segundo === '' || strpos($segundo, self::link()) === false) {
+            $segundo = self::renderizar(self::DEFAULT_MENSAJE_2, $reemplazos);
+        }
+
+        return [$primero, $segundo];
     }
 
     /**
@@ -249,8 +267,14 @@ class LeadOfertaDePruebaService
     public static function bloque_para_el_agente(Lead $lead): string
     {
         $tiene_prueba = self::tiene_prueba($lead);
-        if (! $tiene_prueba && ! self::ya_se_ofrecio($lead)) {
-            return '';
+        if (! $tiene_prueba) {
+            /* Solo antes de que pida la demo y sin demo asignada: después manda ese flujo (y el del closer). */
+            if (! in_array((string) $lead->status, self::ESTADOS_CON_LA_OFERTA, true) || $lead->demo_id) {
+                return '';
+            }
+            if (! self::ya_se_ofrecio($lead)) {
+                return '';
+            }
         }
 
         if ($tiene_prueba) {
@@ -264,16 +288,22 @@ class LeadOfertaDePruebaService
         return "\n\nPRUEBA GRATIS (lead de la web; esto PISA lo que digan los bloques de arriba y los recursos sobre calificar, pasar su\n"
             . "pagina u ofrecer y agendar la demo):\n"
             . "  - Ya le mandaste la oferta de la prueba gratis y el link para crearla (son los mensajes de SISTEMA del principio).\n"
+            . "  - El PRIMER mensaje del lead es el texto del boton de la web (por ejemplo \"" . LeadOrigenService::FRASE_LANDING . "\"):\n"
+            . "    NO cuenta como pedido de demo, ya se respondio con la prueba. \"Quiero probarlo\", \"quiero verlo\", \"dale\", \"me\n"
+            . "    interesa\" o \"como arranco\" tambien son la prueba: va el link.\n"
             . "  - Link de la prueba (copiar textual, sin cambiarle nada): " . self::link() . "\n"
             . "  - Tu objetivo es que cree su prueba. Contesta sus dudas con lo que dicen los recursos (posicionamiento, precios) y\n"
             . "    nada mas.\n"
             . "  - Si quiere arrancar, pregunta como se hace, dice que si o que le interesa: pasale de nuevo el link de la prueba,\n"
-            . "    copiado textual, en un mensaje corto.\n"
+            . "    copiado textual, en un mensaje corto. El link va siempre completo, el de arriba: nunca \"comerciocity.com\" a secas.\n"
             . "  - NO le pidas datos para calificarlo (rubro, cuantas personas trabajan, que sistema usa, mail, nombre) y NO le hagas\n"
             . "    preguntas de calificacion. Si los cuenta solo, guardalos como siempre (guardar_calificacion, guardar_email).\n"
+            . "    Esto pisa tambien las reglas generales de arriba: no le pidas el nombre y no hace falta cerrar con una pregunta\n"
+            . "    (podes cerrar con el link o con \"cualquier duda me escribis\"). Si pregunta precios, dale los planes sin\n"
+            . "    preguntarle cuantas operaciones hace.\n"
             . "  - NO le ofrezcas la demo ni una llamada, NO le pases el link de su pagina, NO devuelvas agendar_demo y NO le pidas\n"
-            . "    disponibilidad. SALVO que el lead pida EXPLICITAMENTE una demo, una llamada o una videollamada: ahi segui el flujo\n"
-            . "    de la demo de arriba.\n"
+            . "    disponibilidad. SALVO que el lead pida EXPLICITAMENTE una demo, una llamada o una videollamada (un mensaje suyo\n"
+            . "    POSTERIOR a los de la prueba, que lo pide con sus palabras): ahi segui el flujo de la demo de arriba.\n"
             . "  - La prueba se crea solo desde ese link: no la crees por WhatsApp ni le pidas la contrasena.\n";
     }
 
