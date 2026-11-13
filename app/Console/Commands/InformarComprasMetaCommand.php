@@ -142,7 +142,13 @@ class InformarComprasMetaCommand extends Command
             }
 
             if ($plan['accion'] === self::ACCION_MANDAR) {
-                $mandados += $service->registrar_compra($lead, $plan['momento']) !== null ? 1 : 0;
+                $fila = $service->registrar_compra($lead, $plan['momento']);
+                /* La compra de un ensayo de la prueba nace `omitido` (misión ensayos-sin-eventos-meta): cuenta como omitida. */
+                if ($fila !== null && $fila->estado === LeadEventoMeta::ESTADO_OMITIDO) {
+                    $omitidos++;
+                } else {
+                    $mandados += $fila !== null ? 1 : 0;
+                }
             } else {
                 $omitidos += $service->registrar_compra($lead, $plan['momento'] !== null ? $plan['momento'] : $ahora, LeadEventoMeta::ESTADO_OMITIDO, $plan['motivo_fila']) !== null ? 1 : 0;
             }

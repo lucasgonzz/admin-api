@@ -124,7 +124,22 @@ class AltaDePruebaService
 
         /* El uuid PROPIO de la prueba (`trial_instances.seguimiento_uuid`), no el del lead: el del lead ya viaja en los
            links públicos de la demo (`demo/{uuid}`) y no tiene por qué abrir el seguimiento de la prueba. */
-        return $this->respuesta(201, ['uuid' => (string) $instancia->seguimiento_uuid, 'meta_eventos' => $meta_eventos]);
+        /* `ensayo` (misión ensayos-sin-eventos-meta, 13/11/2026): con `true` la landing apaga el píxel para el resto de
+           la visita; el servidor ya dejó sus filas `omitido` y `meta_eventos` viene vacío, así que una landing anterior
+           a la marca tampoco dispara el `Lead` (sin id no manda nada). */
+        try {
+            $ensayo = MetaConversionesService::es_de_ensayo($lead_listo);
+        } catch (\Throwable $e) {
+            /* La prueba ya está creada: una lectura caída no puede convertir el 201 en un error. */
+            $ensayo = false;
+            Log::error('AltaDePrueba: no se pudo saber si el alta es de ensayo.', ['lead_id' => $lead_listo->id, 'error' => $e->getMessage()]);
+        }
+
+        return $this->respuesta(201, [
+            'uuid'         => (string) $instancia->seguimiento_uuid,
+            'meta_eventos' => $meta_eventos,
+            'ensayo'       => $ensayo,
+        ]);
     }
 
     /**
@@ -482,8 +497,9 @@ class AltaDePruebaService
             $filas = app(MetaConversionesService::class)->registrar_alcanzados($lead, null, true, $contexto_web);
             // No reemitir un Lead histórico: la deduplicación del navegador tiene una ventana limitada.
             foreach ($filas as $fila) {
+                /* Un evento `omitido` (un ensayo) no vuelve: sin su id, la landing no dispara el Lead desde el navegador. */
                 if ($fila instanceof LeadEventoMeta && $fila->canal === LeadEventoMeta::CANAL_WEB
-                    && $fila->evento === LeadEventoMeta::EVENTO_WEB_LEAD) {
+                    && $fila->evento === LeadEventoMeta::EVENTO_WEB_LEAD && $fila->estado !== LeadEventoMeta::ESTADO_OMITIDO) {
                     $salida[] = ['nombre' => (string) $fila->evento, 'event_id' => (string) $fila->event_id];
                 }
             }
