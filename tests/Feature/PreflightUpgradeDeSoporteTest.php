@@ -255,6 +255,154 @@ class PreflightUpgradeDeSoporteTest extends TestCase
         }
     }
 
+    public function test_corte_de_sistema_usa_actividad_desde_inicio_y_audita_force_solo_del_horario(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-11-03T13:00:45-03:00'));
+        config(['services.support_codex_scheduled_upgrades.enabled' => true]);
+        try {
+            [$agreement, $ticket, $api] = $this->acuerdo();
+            $agreement->update(['maintenance_mode' => 'coordinated', 'target' => 'sistema', 'minimum_minutes' => 15, 'ends_at_utc' => '2026-11-03 16:15:00']);
+            $evidence = SupportCodexMissionFixEvidence::findOrFail($agreement->mission_fix_evidence_id);
+            $evidence->update(['payload' => ['commits' => ['empresa-api' => str_repeat('a', 40)]]]);
+            $new = Version::forceCreate(['version' => '90.99.10', 'status' => 'published']);
+            $row = SupportCodexScheduledUpgrade::create(['agreement_id' => $agreement->id, 'support_ticket_id' => $ticket->id,
+                'client_id' => $ticket->client_id, 'client_api_id' => $api->id, 'target' => 'sistema',
+                'from_version_id' => $ticket->client->current_version_id, 'version_id' => $new->id, 'version' => $new->version,
+                'status' => 'starting', 'artifacts' => [], 'starts_at_utc' => $agreement->starts_at_utc, 'ends_at_utc' => $agreement->ends_at_utc]);
+            $ssh = $this->createMock(EnvSshService::class);
+            $ssh->expects($this->exactly(2))->method('read_coordinated_upgrade_activity_for')->with($this->anything(), 99009900, Carbon::parse('2026-11-03 16:00:00', 'UTC')->timestamp)
+                ->willReturnOnConsecutiveCalls(['usuarios_activos' => 0, 'ventas_recientes' => 0, 'trabajos_pendientes' => 1], ['usuarios_activos' => 0, 'ventas_recientes' => 0, 'trabajos_pendientes' => 0]);
+            $this->app->instance(EnvSshService::class, $ssh);
+            $this->assertSame('actividad_reciente', app(SupportUpgradePreflight::class)->inspect($agreement->id, $row)['reason']);
+            \Illuminate\Support\Facades\Log::shouldReceive('notice')->once()->with('Mantenimiento coordinado de sistema con force de horario.', \Mockery::on(function ($context) use ($row, $agreement) {
+                return $context['force'] === true && $context['schedule_id'] === $row->id
+                    && strpos($context['force_reason'], (string) $agreement->id) !== false;
+            }));
+            app(SupportScheduledUpgradeService::class)->before_live_write($row->id);
+            $this->assertNotNull($row->fresh()->live_touched_at);
+        } finally { Carbon::setTestNow(); }
+    }
+
+    /** @dataProvider resultados_de_restauracion */
+    public function test_tienda_interrumpida_recupera_o_escala_sin_anunciar_resolucion(bool $restore_fails): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-11-03T13:16:00-03:00'));
+        try {
+                [$row, $installation, $ticket] = $this->corrida_tienda();
+                $installation->update(['status' => 'completada']);
+                Http::fake(['*' => Http::response('No disponible', 503)]);
+                $deployment = \Mockery::mock(\App\Services\SupportEcommerceDeploymentService::class);
+                $expect = $deployment->shouldReceive('recover')->once();
+                if ($restore_fails) { $expect->andThrow(new \RuntimeException('Respaldo no verificable')); }
+                else { $expect->andReturnUsing(function () use ($row) { $row->update(['status' => 'failed', 'reason' => 'tienda_restaurada_tras_fallo']); }); }
+                $this->app->bind(\App\Services\SupportEcommerceDeploymentService::class, function () use ($deployment) { return $deployment; });
+                app(\App\Services\SupportStoreUpgradeService::class)->advance($row);
+                $this->assertSame('failed', $row->fresh()->status);
+                $this->assertSame($restore_fails ? 'restauracion_tienda_sin_confirmar' : 'tienda_restaurada_tras_fallo', $row->fresh()->reason);
+                $this->assertSame('manual_review', SupportCodexCase::where('support_ticket_id', $ticket->id)->firstOrFail()->state);
+                $this->assertNotNull($ticket->fresh()->escalated_at);
+                $this->assertNull($row->fresh()->notification_requested_at);
+        } finally { Carbon::setTestNow(); }
+    }
+
+    public function resultados_de_restauracion(): array
+    {
+        return [[false], [true]];
+    }
+
+    public function test_tienda_con_trabajador_vivo_no_se_restaura_por_encima(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-11-03T13:16:00-03:00'));
+        try {
+            [$row, $installation, $ticket] = $this->corrida_tienda();
+            $lock = \Illuminate\Support\Facades\Cache::lock('client-deployment-' . $row->client_id, 1860);
+            $this->assertTrue($lock->get());
+            try {
+                app(\App\Services\SupportStoreUpgradeService::class)->advance($row);
+                $this->assertSame('starting', $row->fresh()->status);
+                $this->assertSame('reconciliar_tienda_en_ejecucion', $row->fresh()->reason);
+                $this->assertSame('instalando', $installation->fresh()->status);
+                $this->assertNotNull($ticket->fresh()->escalated_at);
+            } finally { $lock->release(); }
+        } finally { Carbon::setTestNow(); }
+    }
+
+    public function test_tienda_rechaza_zip_alterado_y_actividad_o_cola_sin_escrituras(): void
+    {
+        [$row, $installation] = $this->corrida_tienda();
+        $service = new TiendaDeSoporteSinSsh($installation, $row);
+        $file = tempnam(sys_get_temp_dir(), 'cc-store-');
+        file_put_contents($file, 'ZIP de prueba');
+        try {
+            $row->update(['artifacts' => ['tienda-api' => ['id' => 123, 'size' => filesize($file), 'sha256' => hash_file('sha256', $file)]]]);
+            $service = new TiendaDeSoporteSinSsh($installation, $row->fresh());
+            $check = new \ReflectionMethod($service, 'assert_support_store_artifact'); $check->setAccessible(true);
+            $check->invoke($service, 'tienda-api', ['url' => 'https://api.github.test/assets/123'], $file);
+            file_put_contents($file, 'ZIP alterado');
+            try { $check->invoke($service, 'tienda-api', ['url' => 'https://api.github.test/assets/123'], $file); $this->fail('Aceptó un ZIP alterado'); }
+            catch (\RuntimeException $error) { $this->assertStringContainsString('artefacto', $error->getMessage()); }
+            $activity = new \ReflectionMethod($service, 'assert_store_idle'); $activity->setAccessible(true);
+            foreach ([['pedidos_recientes' => 1, 'carritos_recientes' => 0, 'trabajos_pendientes' => 0], ['pedidos_recientes' => 0, 'carritos_recientes' => 0, 'trabajos_pendientes' => 1]] as $counts) {
+                $service->responses['support_activity'] = json_encode($counts);
+                try { $activity->invoke($service); $this->fail('Aceptó actividad de tienda'); }
+                catch (\RuntimeException $error) { $this->assertStringContainsString('actividad', $error->getMessage()); }
+            }
+            $row->update(['live_touched_at' => null, 'backup_path' => null, 'backup_sha256' => null, 'backup_size' => null]);
+            $service->responses['support_backup'] = 'respaldo incompleto';
+            $backup = new \ReflectionMethod($service, 'backup'); $backup->setAccessible(true);
+            try { $backup->invoke($service); $this->fail('Aceptó respaldo incompleto'); }
+            catch (\RuntimeException $error) { $this->assertStringContainsString('respaldo', $error->getMessage()); }
+            $this->assertNull($row->fresh()->live_touched_at);
+            $this->assertNull($row->fresh()->backup_path);
+            $this->assertSame(['support_activity', 'support_activity', 'support_backup'], array_column($service->commands, 0));
+        } finally { unlink($file); }
+    }
+
+    public function test_respaldo_privado_de_tienda_se_verifica_y_restaura_con_identidad_exacta(): void
+    {
+        [$row, $installation] = $this->corrida_tienda();
+        $row->update(['live_touched_at' => null, 'backup_path' => null, 'backup_sha256' => null, 'backup_size' => null]);
+        $service = new TiendaDeSoporteSinSsh($installation, $row);
+        $path = '.cc-support-backups/tienda-' . $row->id . '-' . $installation->uuid . '.tar.gz';
+        $service->responses['support_backup'] = str_repeat('a', 64) . '  ' . $path . "\n123\n";
+        $backup = new \ReflectionMethod($service, 'backup'); $backup->setAccessible(true);
+        $backup->invoke($service);
+        $this->assertSame($path, $row->fresh()->backup_path);
+        $this->assertSame(str_repeat('a', 64), $row->fresh()->backup_sha256);
+        $this->assertSame(123, (int) $row->fresh()->backup_size);
+        $this->assertStringContainsString('chmod 600', $service->commands[0][1]);
+        $this->assertStringContainsString('tar -tzf', $service->commands[0][1]);
+        $row->update(['live_touched_at' => now()]);
+        $service->recover();
+        $restore = $service->commands[1][1];
+        foreach (['sha256sum', 'stat -c %s', ' && mv -- ', ' && tar -xzf '] as $check) { $this->assertStringContainsString($check, $restore); }
+        $this->assertSame('tienda_restaurada_tras_fallo', $row->fresh()->reason);
+        $this->assertSame('fallida', $installation->fresh()->status);
+        $store = $installation->client_ecommerce->fresh();
+        $this->assertSame('active', $store->status);
+        $this->assertSame((int) $row->from_version_id, (int) $store->ecommerce_version_id);
+    }
+
+    private function corrida_tienda(): array
+    {
+        [$agreement, $ticket, $api] = $this->acuerdo();
+        $old = \App\Models\EcommerceVersion::create(['version' => '96.0.' . $ticket->id, 'status' => 'published']);
+        $new = \App\Models\EcommerceVersion::create(['version' => '96.1.' . $ticket->id, 'status' => 'published']);
+        $store = \App\Models\ClientEcommerce::create(['client_id' => $ticket->client_id, 'domain' => 'tienda-' . $ticket->id . '.test',
+            'spa_url' => 'https://tienda-' . $ticket->id . '.test', 'api_url' => 'https://tienda-' . $ticket->id . '.test/api',
+            'status' => 'active', 'ecommerce_version_id' => $new->id]);
+        $agreement->update(['target' => 'tienda', 'maintenance_mode' => 'coordinated', 'minimum_minutes' => 15,
+            'client_ecommerce_id' => $store->id, 'store_identity_hash' => \App\Services\SupportMaintenancePolicy::store_hash($store),
+            'ends_at_utc' => '2026-11-03 16:15:00']);
+        $installation = $store->installations()->create(['mode' => 'update', 'status' => 'instalando', 'ecommerce_version_id' => $new->id]);
+        $row = SupportCodexScheduledUpgrade::create(['agreement_id' => $agreement->id, 'support_ticket_id' => $ticket->id,
+            'client_id' => $ticket->client_id, 'client_api_id' => $api->id, 'target' => 'tienda', 'client_ecommerce_id' => $store->id,
+            'ecommerce_installation_id' => $installation->id, 'from_version_id' => $old->id, 'version_id' => $new->id, 'version' => $new->version,
+            'status' => 'starting', 'artifacts' => [], 'starts_at_utc' => $agreement->starts_at_utc, 'ends_at_utc' => $agreement->ends_at_utc,
+            'live_touched_at' => now()->subMinute(), 'backup_path' => '.cc-support-backups/prueba.tar.gz', 'backup_sha256' => str_repeat('a', 64), 'backup_size' => 123]);
+        return [$row, $installation, $ticket];
+    }
+
     private function acuerdo(): array
     {
         AdminSetting::set(SupportCodexSettings::KEY_ENABLED, '1');
@@ -314,5 +462,18 @@ class PreflightUpgradeDeSoporteTest extends TestCase
             'proposal_body_hash' => hash('sha256', $outbound->body), 'confirmation_phrase' => 'Confirmo la actualización',
             'confirmation_message_id' => $inbound->id, 'accepted_at' => now()->subDay(),
         ]), $ticket, $api];
+    }
+}
+
+/** Los comandos se capturan: estas pruebas nunca abren una conexión SSH. */
+class TiendaDeSoporteSinSsh extends \App\Services\SupportEcommerceDeploymentService
+{
+    public $responses = [];
+    public $commands = [];
+    protected function reconnect_hosting_ssh(): void {}
+    protected function exec_hosting_ssh(string $step, string $command, bool $must_succeed = true, bool $long_running = false): string
+    {
+        $this->commands[] = [$step, $command];
+        return ($this->responses[$step] ?? '') . "\nCC_SUPPORT_OK\n";
     }
 }

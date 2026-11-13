@@ -103,6 +103,41 @@ class AvancesDeMisionDeSoporteTest extends TestCase
         ], $extra), $this->headers);
     }
 
+    public function test_inicio_de_bug_confirmado_deja_aviso_unico_sin_consumir_entrantes(): void
+    {
+        [$ticket, $case, $out] = $this->caso();
+        $case->update(['mission_thread_id' => null, 'mission_started_at' => null]);
+        $before = $case->handled_message_id;
+        $data = ['mission_thread_id' => 'mision-prueba', 'mission_hash' => hash('sha256', $case->mission), 'mission_type' => 'bug'];
+        $this->postJson($this->base . '/tickets/' . $ticket->id . '/mission-started', $data, $this->headers)
+            ->assertOk()->assertJsonPath('ticket.mission_progress.tipo', 'inicio_mision')
+            ->assertJsonPath('ticket.capabilities.mission_started_notice', true);
+        $this->postJson($this->base . '/tickets/' . $ticket->id . '/mission-started', $data, $this->headers)->assertOk();
+        $this->assertSame(1, SupportCodexMissionProgress::where('support_ticket_id', $ticket->id)->count());
+        $this->assertSame($before, $case->fresh()->handled_message_id);
+        $this->assertSame(0, $this->transport->sent);
+        $this->avance($ticket, $case->fresh())->assertOk();
+        $claim = $this->toma($ticket, $out);
+        $this->assertSame('inicio_mision', $claim['ticket']['mission_progress']['tipo']);
+        $hash = $claim['ticket']['mission_progress']['hash'];
+        $this->respuesta($ticket, $claim, $hash, ['body' => 'Ya identificamos el error y lo estamos corrigiendo. Estimamos resolverlo en las próximas horas.'])
+            ->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->assertSame(1, $this->transport->sent);
+        $latest = $this->getJson($this->base . '/tickets/' . $ticket->id, $this->headers)->json('ticket.mission_progress');
+        $this->assertArrayNotHasKey('tipo', $latest);
+        $this->assertSame('El teléfono ya estaba usado en otra cuenta.', $latest['causa']);
+    }
+
+    public function test_inicio_de_funcionalidad_y_registro_legacy_no_prometen_plazo_de_bug(): void
+    {
+        [$ticket, $case] = $this->caso();
+        $case->update(['mission_thread_id' => null, 'mission_started_at' => null]);
+        $data = ['mission_thread_id' => 'mision-prueba', 'mission_hash' => hash('sha256', $case->mission), 'mission_type' => 'funcionalidad'];
+        $this->postJson($this->base . '/tickets/' . $ticket->id . '/mission-started', $data, $this->headers)->assertOk();
+        $this->assertSame(0, SupportCodexMissionProgress::where('support_ticket_id', $ticket->id)->count());
+        $this->assertSame(0, $this->transport->sent);
+    }
+
     public function test_registra_deduplica_y_envia_sin_entrante_nuevo_conservando_mision(): void
     {
         [$ticket, $case, $out] = $this->caso();

@@ -19,17 +19,41 @@ class SupportCodexUpgradeAgreementService
     private const TIMEZONE = 'America/Argentina/Buenos_Aires';
     private const SENT = ['sent', 'reconciled_sent'];
 
-    public function proposal_input(array $data): array
+    public function proposal_input(array $data, ?SupportTicket $ticket = null): array
     {
         $start = Carbon::parse($data['starts_at'])->setTimezone(self::TIMEZONE);
         $end = Carbon::parse($data['ends_at'])->setTimezone(self::TIMEZONE);
         $date_and_time = $start->format('d/m/Y') . ' a las ' . $start->format('H:i');
+        $mode = $data['maintenance_mode'] ?? 'closed';
+        $target = $data['target'] ?? 'sistema';
         $phrase = 'Confirmo la actualización del ' . $date_and_time;
+        if ($mode === 'coordinated') {
+            abort_unless(SupportMaintenancePolicy::available(), 409, 'maintenance_unavailable: El mantenimiento coordinado todavía no está disponible.');
+            $phrase .= $target === 'tienda' ? ' de la tienda' : ' del sistema';
+            if ($target === 'tienda') {
+                abort_unless($ticket !== null, 422, 'Falta el negocio de la propuesta.');
+                $stores = \App\Models\ClientEcommerce::where('client_id', $ticket->client_id)->whereNull('demo_id')->where('status', 'active');
+                if (! empty($data['client_ecommerce_id'])) { $stores->whereKey($data['client_ecommerce_id']); }
+                $stores = $stores->get();
+                abort_unless($stores->count() === 1, 409, 'maintenance_store_required: Elegí una única tienda activa.');
+                $store = $stores->first();
+                $data['client_ecommerce_id'] = $store->id;
+                $data['store_identity_hash'] = SupportMaintenancePolicy::store_hash($store);
+                $phrase .= ' ' . $store->domain;
+            }
+        }
         $data['action'] = 'responder';
         $data['body'] = 'Ya encontramos y corregimos el problema. Para que el arreglo llegue a tu sistema, tenemos que actualizarlo. '
             . 'Podemos hacerlo el ' . $date_and_time . ', hora argentina, dentro del cierre que termina el '
             . $end->format('d/m/Y') . ' a las ' . $end->format('H:i') . '. Te sirve ese horario? '
             . 'Respondé citando este mensaje o escribí «' . $phrase . '».';
+        if ($mode === 'coordinated') {
+            $destination = $target === 'tienda' ? 'la tienda ' . $store->domain : 'el sistema';
+            $data['body'] = 'Ya corregimos el error. Para dejar el arreglo funcionando en ' . $destination
+                . ', podemos actualizar el ' . $date_and_time . ', hora argentina. Vamos a necesitar unos 15 minutos, hasta las '
+                . $end->format('H:i') . '. Durante ese corte nadie debe usar el sistema ni la tienda afectada. Te sirve ese horario? '
+                . 'Respondé citando este mensaje o escribí "' . $phrase . '".';
+        }
         $data['upgrade_proposal'] = [
             'starts_at_utc' => $start->copy()->utc()->toDateTimeString(),
             'ends_at_utc' => $end->copy()->utc()->toDateTimeString(),
@@ -38,6 +62,11 @@ class SupportCodexUpgradeAgreementService
             'mission_thread_id' => $data['mission_thread_id'],
             'mission_hash' => $data['mission_hash'],
         ];
+        if (SupportMaintenancePolicy::available()) {
+            $data['upgrade_proposal'] += ['maintenance_mode' => $mode, 'target' => $target,
+                'client_ecommerce_id' => $data['client_ecommerce_id'] ?? null, 'store_identity_hash' => $data['store_identity_hash'] ?? null];
+        }
+        unset($data['maintenance_mode'], $data['target'], $data['client_ecommerce_id'], $data['store_identity_hash']);
         unset($data['starts_at'], $data['ends_at'], $data['minimum_minutes'], $data['mission_thread_id'], $data['mission_hash']);
 
         return $data;
@@ -57,6 +86,14 @@ class SupportCodexUpgradeAgreementService
         if ($start->lessThanOrEqualTo(now()) || $start->greaterThan(now()->addDays(7))) {
             $this->fail(409, 'upgrade_window_changed', 'Proponé una ventana futura dentro de los próximos siete días.');
         }
+        $mode = $proposal['maintenance_mode'] ?? 'closed';
+        if ($mode === 'coordinated') {
+            abort_unless(SupportMaintenancePolicy::available() && (int) $proposal['minimum_minutes'] === 15
+                && $start->copy()->addMinutes(15)->equalTo($end), 422, 'El corte coordinado debe durar 15 minutos.');
+            SupportMaintenancePolicy::assert_scope($ticket, $evidence, $proposal);
+            return $evidence;
+        }
+        abort_unless(($proposal['target'] ?? 'sistema') === 'sistema', 422, 'La tienda requiere mantenimiento coordinado.');
         $window = app(ClientScheduleResolver::class)->primera_ventana_cerrada($ticket->client, $start, (int) $proposal['minimum_minutes'], self::TIMEZONE)['window'];
         if ($window === null || $window['starts_at'] !== $start->setTimezone(self::TIMEZONE)->toIso8601String()
             || $window['ends_at'] !== $end->setTimezone(self::TIMEZONE)->toIso8601String()) {
@@ -83,7 +120,14 @@ class SupportCodexUpgradeAgreementService
             $this->fail(409, 'proposal_already_sent', 'Esa ventana ya se propuso para esta corrección.');
         }
         $body_hash = hash('sha256', $body);
-        $agreement = SupportCodexUpgradeAgreement::firstOrCreate(['support_codex_operation_id' => $operation->id], [
+        $scope = [];
+        if (SupportMaintenancePolicy::available()) {
+            $store = ($proposal['maintenance_mode'] ?? 'closed') === 'coordinated'
+                ? SupportMaintenancePolicy::assert_scope(SupportTicket::findOrFail($operation->support_ticket_id), $evidence, $proposal) : null;
+            $scope = ['maintenance_mode' => $proposal['maintenance_mode'] ?? 'closed', 'target' => $proposal['target'] ?? 'sistema',
+                'client_ecommerce_id' => $store === null ? null : $store->id, 'store_identity_hash' => $store === null ? null : SupportMaintenancePolicy::store_hash($store)];
+        }
+        $agreement = SupportCodexUpgradeAgreement::firstOrCreate(['support_codex_operation_id' => $operation->id], $scope + [
             'support_ticket_id' => $operation->support_ticket_id,
             'mission_fix_evidence_id' => $evidence->id,
             'starts_at_utc' => $proposal['starts_at_utc'],
@@ -179,6 +223,8 @@ class SupportCodexUpgradeAgreementService
                 'mission_thread_id' => $evidence->mission_thread_id, 'mission_hash' => $evidence->mission_hash,
                 'starts_at_utc' => $proposal->starts_at_utc, 'ends_at_utc' => $proposal->ends_at_utc,
                 'minimum_minutes' => $proposal->minimum_minutes,
+                'maintenance_mode' => $proposal->maintenance_mode ?: 'closed', 'target' => $proposal->target ?: 'sistema',
+                'client_ecommerce_id' => $proposal->client_ecommerce_id, 'store_identity_hash' => $proposal->store_identity_hash,
             ]);
             if ($proposal->accepted_at !== null && (int) $proposal->confirmation_message_id !== (int) $inbound->id) {
                 $this->fail(409, 'proposal_already_accepted', 'La propuesta ya tiene un acuerdo registrado.');
@@ -235,6 +281,9 @@ class SupportCodexUpgradeAgreementService
     {
         $sent = in_array($proposal->operation->status, self::SENT, true);
         return [
+            'maintenance_mode' => $proposal->maintenance_mode ?: 'closed', 'target' => $proposal->target ?: 'sistema',
+            'client_ecommerce_id' => $proposal->client_ecommerce_id === null ? null : (int) $proposal->client_ecommerce_id,
+            'minimum_minutes' => (int) $proposal->minimum_minutes,
             'proposal_operation_id' => $proposal->operation->operation_id,
             'proposal_message_id' => $sent ? (int) $proposal->operation->message_id : null,
             'status' => $proposal->accepted_at !== null ? 'accepted' : ($sent ? 'sent' : $proposal->operation->status),

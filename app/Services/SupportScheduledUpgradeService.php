@@ -45,6 +45,9 @@ class SupportScheduledUpgradeService
             SupportTicket::lockForUpdate()->findOrFail($ticket_id);
             $agreement = SupportCodexUpgradeAgreement::where('support_ticket_id', $ticket_id)
                 ->lockForUpdate()->findOrFail($agreement_id);
+            if (($agreement->target ?: 'sistema') === 'tienda') {
+                return app(SupportStoreUpgradeService::class)->schedule($ticket_id, $agreement, $version_id);
+            }
             $existing = Scheduled::where('agreement_id', $agreement_id)->first();
             if ($existing !== null) {
                 abort_unless((int) $existing->version_id === $version_id, 409, 'Ya se programó otra versión para este acuerdo.');
@@ -122,7 +125,10 @@ class SupportScheduledUpgradeService
     {
         DB::transaction(function () use ($id) {
             $row = Scheduled::lockForUpdate()->findOrFail($id);
+            if ($row->target === 'tienda') { app(SupportStoreUpgradeService::class)->advance($row); return; }
             if ($row->status === Scheduled::SCHEDULED) {
+                if (SupportMaintenancePolicy::coordinated($row->agreement)
+                    && now()->lessThan(Carbon::parse($row->starts_at_utc, 'UTC')->addSeconds(30))) { return; }
                 if (Carbon::parse($row->starts_at_utc, 'UTC')->greaterThan(now())) {
                     return;
                 }
@@ -267,6 +273,10 @@ class SupportScheduledUpgradeService
                 return false;
             }
             $fresh->update(['live_touched_at' => now()]);
+            if (SupportMaintenancePolicy::coordinated($fresh->agreement)) {
+                Log::notice('Mantenimiento coordinado de sistema con force de horario.', ['schedule_id' => $fresh->id,
+                    'force' => true, 'force_reason' => SupportMaintenancePolicy::force_reason($fresh->agreement)]);
+            }
             return true;
         });
         if (! $touched) {
@@ -381,7 +391,11 @@ class SupportScheduledUpgradeService
     {
         return DB::transaction(function () use ($ticket_id, $data) {
             $row = Scheduled::where('support_ticket_id', $ticket_id)->where('agreement_id', $data['agreement_id'])
-                ->where('upgrade_id', $data['upgrade_id'])->lockForUpdate()->firstOrFail();
+                ->where(function ($query) use ($data) {
+                    if (! SupportMaintenancePolicy::available()) { $query->where('upgrade_id', $data['upgrade_id']); return; }
+                    $query->where(function ($erp) use ($data) { $erp->where('target', 'sistema')->where('upgrade_id', $data['upgrade_id']); })
+                        ->orWhere(function ($store) use ($data) { $store->where('target', 'tienda')->where('ecommerce_installation_id', $data['upgrade_id']); });
+                })->lockForUpdate()->firstOrFail();
             $ticket = SupportTicket::lockForUpdate()->findOrFail($ticket_id);
             if ($row->status === Scheduled::VERIFIED) {
                 $evidence = SupportCodexMissionFixEvidence::findOrFail($row->agreement->mission_fix_evidence_id);
@@ -395,8 +409,9 @@ class SupportScheduledUpgradeService
             if ($row->status === Scheduled::VERIFIED) {
                 return $row;
             }
-            abort_unless($row->status === Scheduled::VERIFICATION_PENDING && $row->upgrade !== null
-                && $this->database_completion($row, $row->upgrade), 409, 'El despliegue no está técnicamente verificado.');
+            abort_unless($row->status === Scheduled::VERIFICATION_PENDING && ($row->target === 'tienda'
+                ? app(SupportStoreUpgradeService::class)->completed($row)
+                : ($row->upgrade !== null && $this->database_completion($row, $row->upgrade))), 409, 'El despliegue no está técnicamente verificado.');
             if (isset($data['motivo']) && $row->verification_evidence !== null) {
                 return $row;
             }

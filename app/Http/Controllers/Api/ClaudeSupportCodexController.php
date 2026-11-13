@@ -138,6 +138,9 @@ class ClaudeSupportCodexController extends Controller
         $data = $request->validate([
             'minimum_minutes' => 'required|integer|between:1,1440',
             'not_before' => 'sometimes|date_format:Y-m-d\TH:i:sP',
+            'maintenance_mode' => 'sometimes|in:closed,coordinated',
+            'target' => 'sometimes|in:sistema,tienda',
+            'client_ecommerce_id' => 'sometimes|nullable|integer|min:1',
             'expected_message_id' => 'required|integer|min:1',
         ]);
         $resultado = DB::transaction(function () use ($request, $id, $service, $resolver, $data) {
@@ -161,6 +164,14 @@ class ClaudeSupportCodexController extends Controller
                 $desde = $reoffer;
             }
 
+            if (($data['maintenance_mode'] ?? 'closed') === 'coordinated') {
+                abort_unless(\App\Services\SupportMaintenancePolicy::available(), 409, 'maintenance_unavailable');
+                $evidence = \App\Models\SupportCodexMissionFixEvidence::current_for($ticket, $case);
+                abort_unless($evidence !== null, 409, 'Falta la corrección integrada vigente.');
+                $store = \App\Services\SupportMaintenancePolicy::assert_scope($ticket, $evidence, $data);
+                return \App\Services\SupportMaintenancePolicy::window($desde, (int) $data['minimum_minutes'], isset($data['not_before']))
+                    + ['target' => $data['target'] ?? 'sistema', 'client_ecommerce_id' => $store === null ? null : (int) $store->id];
+            }
             return $resolver->primera_ventana_cerrada($ticket->client, $desde, (int) $data['minimum_minutes'], 'America/Argentina/Buenos_Aires');
         });
 
@@ -180,9 +191,12 @@ class ClaudeSupportCodexController extends Controller
             'starts_at' => 'required|date_format:Y-m-d\TH:i:sP',
             'ends_at' => 'required|date_format:Y-m-d\TH:i:sP',
             'minimum_minutes' => 'required|integer|between:1,1440',
+            'maintenance_mode' => 'sometimes|in:closed,coordinated',
+            'target' => 'sometimes|in:sistema,tienda',
+            'client_ecommerce_id' => 'sometimes|nullable|integer|min:1',
         ]);
 
-        return response()->json($service->reply((int) $id, $agreements->proposal_input($data)));
+        return response()->json($service->reply((int) $id, $agreements->proposal_input($data, SupportTicket::with('client')->findOrFail($id))));
     }
 
     public function upgrade_agreement(Request $request, $id, SupportCodexService $service, SupportCodexUpgradeAgreementService $agreements)
@@ -306,6 +320,10 @@ class ClaudeSupportCodexController extends Controller
             'mission_thread_id' => 'required|string|max:150|regex:/^[a-zA-Z0-9_-]+$/',
             'mission_hash' => 'required|string|size:64|regex:/^[a-f0-9]{64}$/',
         ]);
+        if ($request->has('mission_type')) {
+            $request->validate(['mission_type' => 'required|in:bug,funcionalidad']);
+            $data['mission_type'] = $request->input('mission_type');
+        }
         return response()->json($service->mission_started((int) $id, $data));
     }
 

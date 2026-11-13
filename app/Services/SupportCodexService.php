@@ -368,7 +368,7 @@ class SupportCodexService
             'reason' => $this->pending_reason($ticket, $case, true, true),
             // El helper debe verificar esta capacidad ANTES de pedir el modo nuevo: un admin
             // anterior ignoraría el campo y ejecutaría el resume que consume la consulta.
-            'capabilities' => ['mission_progress' => true, 'continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => $capacidades_de_prueba['prueba_import'], 'prueba_import_resolver' => $capacidades_de_prueba['prueba_import_resolver'],
+            'capabilities' => ['mission_started_notice' => true, 'coordinated_maintenance' => SupportMaintenancePolicy::available(), 'support_store_upgrade' => SupportMaintenancePolicy::available(), 'mission_progress' => true, 'continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => $capacidades_de_prueba['prueba_import'], 'prueba_import_resolver' => $capacidades_de_prueba['prueba_import_resolver'],
                 'soporte_import' => $soporte_activo, 'soporte_import_resolver' => $soporte_activo,
                 'soporte_import_stock_existente' => $soporte_activo,
                 // Misión cruzada importaciones-de-martin (11/11/2026): la planilla derivada del PDF del dueño, el Excel
@@ -2126,6 +2126,15 @@ class SupportCodexService
             if ($case->mission_started_at === null) {
                 $case->mission_thread_id = $input['mission_thread_id'];
                 $case->mission_started_at = now();
+                if (($input['mission_type'] ?? null) === 'bug' && ! $case->close_on_mission_start) {
+                    $payload = ['tipo' => 'inicio_mision', 'estado' => 'en_correccion',
+                        'causa' => 'Ya identificamos el error y lo estamos corrigiendo.',
+                        'evidencia' => 'La misión de corrección quedó iniciada y vinculada a este ticket.', 'alternativa' => null];
+                    SupportCodexMissionProgress::firstOrCreate([
+                        'support_ticket_id' => $id, 'mission_thread_id' => $input['mission_thread_id'],
+                        'mission_hash' => $input['mission_hash'], 'progress_hash' => hash('sha256', json_encode($payload, JSON_THROW_ON_ERROR)),
+                    ], ['payload' => $payload]);
+                }
                 if ($case->close_on_mission_start && $this->can_close_on_mission_start($ticket, $case)) {
                     $this->apply_action($ticket, $case, ['action' => 'cerrar']);
                     $case->close_on_mission_start = true; // Permite reconocer la repetición del mismo inicio.

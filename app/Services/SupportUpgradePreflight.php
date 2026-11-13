@@ -47,6 +47,11 @@ class SupportUpgradePreflight
             return $this->blocked('evidencia_obsoleta');
         }
 
+        if (SupportMaintenancePolicy::coordinated($agreement)) {
+            try { SupportMaintenancePolicy::assert_scope($ticket, $evidence, ['target' => $agreement->target ?: 'sistema', 'client_ecommerce_id' => $agreement->client_ecommerce_id, 'store_identity_hash' => $agreement->store_identity_hash, 'allow_installing' => $scheduled !== null && $scheduled->target === 'tienda']); }
+            catch (\Throwable $error) { return $this->blocked('alcance_de_mantenimiento_cambio'); }
+        }
+
         $operation = $agreement->operation;
         if ($operation === null || ! in_array($operation->status, ['sent', 'reconciled_sent'], true)
             || (int) $operation->support_ticket_id !== (int) $ticket->id) {
@@ -70,12 +75,13 @@ class SupportUpgradePreflight
             return $this->blocked('frente_o_cliente_no_elegible');
         }
         if ($scheduled !== null) {
-            $version = Version::find($scheduled->version_id);
+            $versionClass = ($scheduled->target ?: 'sistema') === 'tienda' ? \App\Models\EcommerceVersion::class : Version::class;
+            $version = $versionClass::find($scheduled->version_id);
             if ($version === null || $version->status !== 'published' || $version->version !== $scheduled->version) {
                 return $this->blocked('version_no_disponible');
             }
             if ((int) $client->id !== (int) $scheduled->client_id || (int) $api->id !== (int) $scheduled->client_api_id
-                || (int) $client->current_version_id !== (int) $scheduled->from_version_id) {
+                || (($scheduled->target ?: 'sistema') === 'sistema' && (int) $client->current_version_id !== (int) $scheduled->from_version_id)) {
                 return $this->blocked('cambio_frente_o_version_origen');
             }
         }
@@ -93,7 +99,8 @@ class SupportUpgradePreflight
         $start = Carbon::parse($agreement->starts_at_utc, 'UTC');
         $end = Carbon::parse($agreement->ends_at_utc, 'UTC');
         $agreed_minutes = (int) $agreement->minimum_minutes;
-        $minutes = $planning ? max(45, $agreed_minutes) : ($continuation_margin ?? 45);
+        $coordinated = SupportMaintenancePolicy::coordinated($agreement);
+        $minutes = $coordinated ? ($planning ? 15 : 1) : ($planning ? max(45, $agreed_minutes) : ($continuation_margin ?? 45));
         $check_from = $planning ? $start->copy() : $now->copy()->startOfMinute();
         $remaining_from = $planning ? $check_from : $now;
         if ($agreed_minutes < 1 || $agreed_minutes > 1440 || (! $planning && $now->lessThan($start))
@@ -111,10 +118,19 @@ class SupportUpgradePreflight
         }
 
         $minute = $check_from->copy()->setTimezone(self::TIMEZONE);
-        $current = $this->schedule->primera_ventana_cerrada($client, $minute, $minutes, self::TIMEZONE)['window'];
+        $current = $coordinated ? ['starts_at' => $minute->toIso8601String(), 'ends_at' => $end->copy()->setTimezone(self::TIMEZONE)->toIso8601String()]
+            : $this->schedule->primera_ventana_cerrada($client, $minute, $minutes, self::TIMEZONE)['window'];
         if ($current === null || $current['starts_at'] !== $minute->toIso8601String()
             || Carbon::parse($current['ends_at'])->lessThan($end)) {
             return $this->blocked('horario_cambio');
+        }
+        if ($scheduled !== null && $scheduled->target === 'tienda') {
+            $store = \App\Models\ClientEcommerce::find($scheduled->client_ecommerce_id);
+            if ($store === null || (int) $store->client_id !== (int) $client->id || $store->is_vps()
+                || ((int) $store->ecommerce_version_id !== (int) $scheduled->from_version_id
+                    && (int) $store->ecommerce_version_id !== (int) $scheduled->version_id)) {
+                return $this->blocked('cambio_tienda_o_version_origen');
+            }
         }
         if ($planning) {
             return ['ready' => true, 'reason' => null, 'client' => $client, 'api' => $api, 'agreement' => $agreement];
@@ -122,11 +138,13 @@ class SupportUpgradePreflight
 
         if ($read_activity) {
             try {
-                $activity = $this->ssh->read_upgrade_activity_for($api, (int) $client->user_id);
+                $activity = $coordinated
+                    ? $this->ssh->read_coordinated_upgrade_activity_for($api, (int) $client->user_id, $start->timestamp)
+                    : $this->ssh->read_upgrade_activity_for($api, (int) $client->user_id);
             } catch (\Throwable $error) {
                 return $this->blocked('actividad_no_verificada');
             }
-            if ($activity['usuarios_activos'] > 0 || $activity['ventas_recientes'] > 0) {
+            if ($activity['usuarios_activos'] > 0 || $activity['ventas_recientes'] > 0 || ($activity['trabajos_pendientes'] ?? 0) > 0) {
                 return $this->blocked('actividad_reciente');
             }
         }

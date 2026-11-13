@@ -460,6 +460,9 @@ trait ArtefactosDeRelease
         $bytes = $this->artefactos_release()->download_asset($asset, $destino);
         $this->assert_local_zip_file($destino, $bytes, $step);
         $this->artefacto_assert_zip_trae($destino, $archivo_en_raiz, $step);
+        if (method_exists($this, 'assert_support_store_artifact')) {
+            $this->assert_support_store_artifact($repo, $asset, $destino);
+        }
         $this->artefacto_log(
             $step,
             "Artefacto {$nombre} bajado de GitHub ({$bytes} bytes): no se toca el VPS de builds",
