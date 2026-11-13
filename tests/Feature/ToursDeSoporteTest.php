@@ -1835,7 +1835,7 @@ class ToursDeSoporteTest extends TestCase
     /*
     |------------------------------------------------------------------------------------------------
     | A2 (12/11/2026): el camino del Listado se ancla con las claves de la ficha del artículo que Empresa
-    | publica desde la 4.3.57, solo si están en el catálogo de ESE pedido.
+    | publica desde la 4.3.58, solo si están en el catálogo de ESE pedido.
     |------------------------------------------------------------------------------------------------
     */
 
@@ -1935,6 +1935,26 @@ class ToursDeSoporteTest extends TestCase
             'el Listado de clientes no es el de artículos' => ['Listado de clientes → ficha → Precio', [], []],
             'el Listado de proveedores no es el de artículos' => ['Listado de proveedores → ficha → Precio → Guardar', [], []],
             'el Listado de ventas no es el de artículos' => ['Listado de ventas → ficha → Precio', [], []],
+            // Cuarta revisión (12/11/2026): solo la ficha del artículo; la ficha de otra entidad no se ancla.
+            'ficha del proveedor no es la del artículo' => ['Listado → ficha del proveedor → Precio → Guardar', [], []],
+            'ficha del cliente no es la del artículo' => ['Listado → ficha del cliente → Precio → Guardar', [], []],
+            'ficha de la categoría no es la del artículo' => ['Listado → ficha de la categoría → Precio → Guardar', [], []],
+            'ficha del combo no es la del artículo' => ['Listado → ficha del combo → Precio → Guardar', [], []],
+            'ficha técnica no es la del artículo' => ['Listado → ficha técnica → Precio → Guardar', [], []],
+            'ficha de importación no es la del artículo' => ['Listado → ficha de importación → Precio → Guardar', [], []],
+            // Sin la ficha anclada no es el recorrido de la ficha: el buscador solo no alcanza.
+            'buscar el artículo sin abrir la ficha: como antes' => ['Listado → Buscá el artículo → Precio → Precio final → Guardar', [], []],
+            'catálogo con buscador sin abrir la ficha: como antes' => ['Listado → Buscá el artículo → ficha → Precio → Guardar',
+                ['listado.abrir_ficha', 'listado.pestana_precio', 'listado.precio_final', 'listado.setear_precio_final', 'listado.guardar_articulo'], []],
+            'duplicar un artículo no es abrir la ficha' => ['Listado → duplicá el artículo → Precio → Guardar', [], []],
+            'lo de la ficha después de Guardar no se ancla ni queda en texto' => ['Listado → ficha del artículo → Precio → Guardar → Precio final', [],
+                ['vista.listado', 'listado.buscador', 'listado.abrir_ficha', 'listado.pestana_precio', 'listado.guardar_articulo']],
+            // Los caminos reales siguen dando el recorrido completo.
+            'abrí el artículo' => ['Listado → abrí el artículo → Precio → Setear precio final → Guardar', [], $todo],
+            'ficha sola' => ['Listado → ficha → Precio → Guardar', [],
+                ['vista.listado', 'listado.buscador', 'listado.abrir_ficha', 'listado.pestana_precio', 'listado.guardar_articulo']],
+            'abrí la ficha del artículo' => ['Listado → abrí la ficha del artículo → Precio', [],
+                ['vista.listado', 'listado.buscador', 'listado.abrir_ficha', 'listado.pestana_precio']],
         ];
     }
 
@@ -2054,6 +2074,26 @@ class ToursDeSoporteTest extends TestCase
                 && json_decode($request['messages'][0]['content'], true)['pasos_fijos'] === ['vista.listado', 'listado.buscador',
                     'listado.abrir_ficha', 'listado.pestana_precio', 'listado.setear_precio_final', 'listado.guardar_articulo'];
         });
+    }
+
+    public function test_la_cola_del_modelo_no_suma_claves_de_la_ficha_al_camino_del_listado(): void
+    {
+        // El modelo agrega el campo Precio final después de Guardar y repite la pestaña Precio: no aparecen.
+        $plan = ['tema' => 'guia_dinamica', 'titulo' => 'Cambiar el precio del tornillo', 'pasos' => [
+            ['clave' => 'listado.abrir_ficha', 'texto' => 'Abrí el tornillo autoperforante.'],
+            ['clave' => 'listado.pestana_precio', 'texto' => 'Andá a la pestaña Precio.'],
+            ['clave' => 'listado.guardar_articulo', 'texto' => 'Guardá.'],
+            ['clave' => 'listado.precio_final', 'texto' => 'Mirá el precio final.'],
+            ['clave' => 'listado.pestana_precio', 'texto' => 'Volvé a la pestaña Precio.'],
+            ['clave' => 'indicacion', 'texto' => 'Revisá que el precio nuevo quede en la lista.'],
+        ]];
+        [$respuesta, $recibido] = $this->preparar_pedido('mostrame con el robotito', $plan, self::CAMINO_DEL_PRECIO, $this->catalogo_con_ficha());
+
+        $respuesta->assertOk();
+        $this->assertSame(['vista.listado', 'listado.buscador', 'listado.abrir_ficha', 'listado.pestana_precio',
+            'listado.setear_precio_final', 'listado.guardar_articulo', 'indicacion'], array_column($recibido['pasos'], 'clave'));
+        $this->assertSame('Andá a la pestaña Precio.', $recibido['pasos'][3]['texto']);
+        $this->assertSame('Revisá que el precio nuevo quede en la lista.', $recibido['pasos'][6]['texto']);
     }
 
     public function test_en_un_sistema_sin_la_ficha_el_camino_del_listado_sigue_como_antes_sin_error(): void

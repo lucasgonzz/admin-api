@@ -431,7 +431,7 @@ class SupportTourPlannerService
     }
 
     /**
-     * Los controles de la ficha del artículo que Empresa publica desde la 4.3.57 (empresa-spa be4f5cce), en el orden en
+     * Los controles de la ficha del artículo que Empresa publica desde la 4.3.58 (empresa-spa be4f5cce), en el orden en
      * que se tocan, con el texto por defecto de cada paso. El modelo puede redactarlos; el orden y las anclas son fijos.
      */
     private const TRAMOS_DEL_LISTADO = [
@@ -447,7 +447,8 @@ class SupportTourPlannerService
     private static function tramo_del_listado(string $tramo): ?string
     {
         // Crear un artículo es otro camino (listado.nuevo_articulo): no se lo confunde con abrir la ficha de uno.
-        if (preg_match('/\b(?:nuevo|nueva|crear|crea|alta|agregar|agrega|importar|exportar)\b/', $tramo)) {
+        // Duplicar uno también crea uno nuevo.
+        if (preg_match('/\b(?:nuevo|nueva|crear|crea|alta|agregar|agrega|importar|exportar|duplic\w*)\b/', $tramo)) {
             return null;
         }
         if (preg_match('/\bsetear precio(?: final)?\b|\bprecio manual\b/', $tramo)) {
@@ -468,7 +469,9 @@ class SupportTourPlannerService
         // La ficha, o UN artículo en singular («el artículo», «abrí el producto», «tocá un artículo»). En plural es otra
         // operación del Listado («seleccioná los artículos → Actualizar precios», «tildá los productos → Eliminar»,
         // «Artículos → Importar excel»): ese tramo no se ancla y decide el modelo (tercera revisión, 12/11/2026).
-        if (preg_match('/\bficha\b/', $tramo)
+        // «Ficha» sola o la del artículo / producto, con lista blanca: «ficha del proveedor / del cliente / de la
+        // categoría / del combo / técnica / de importación» es otra ficha y no se ancla como la del artículo.
+        if (preg_match('/^(?:(?:abri|abrir|toca|tocar|entra a|entra en|anda a|ir a|la|su)\s+)*ficha(?:\s+del?\s+(?:articulo|producto)(?:\s+[a-z0-9]+){0,5})?$/', $tramo)
             || preg_match('/^(?:(?:abri|abrir|toca|tocar|elegi|elegir|selecciona|entra a|entra en|anda a)\s+)?(?:el|un|al)\s+(?:articulo|producto)(?:\s+[a-z0-9]+){0,5}$/', $tramo)) {
             return 'ficha';
         }
@@ -538,8 +541,14 @@ class SupportTourPlannerService
             }
             $anclados[] = ['clave' => $clave, 'texto' => self::TRAMOS_DEL_LISTADO[$tipo][1]];
             $ultimo = $posicion;
+            // Guardar cierra la ficha: un tramo de adentro de la ficha después de Guardar no se ancla ni queda en texto.
+            if ($tipo === 'guardar' && in_array($tipos[$i + 1] ?? null, ['ficha', 'precio', 'precio_final', 'setear', 'guardar'], true)) {
+                $hasta = count($tramos);
+                break;
+            }
         }
-        if (count($anclados) < 2) {
+        // Sin la ficha abierta no es el recorrido de la ficha («Listado → Buscá el artículo → Precio…»): como antes.
+        if (count($anclados) < 2 || ! in_array('listado.abrir_ficha', array_column($anclados, 'clave'), true)) {
             return $nada;
         }
 
@@ -560,11 +569,19 @@ class SupportTourPlannerService
     private function recorrido_del_camino(array $fijo, ?array $del_modelo, array $pasos): array
     {
         $claves = array_column($fijo['anclados'], 'clave');
+        // Camino del Listado: la cola del modelo no suma claves de la ficha que no son fijas ni repite una fija.
+        $de_la_ficha = isset($fijo['prefijo']) ? array_column(self::TRAMOS_DEL_LISTADO, 0) : [];
+        $vistas = [];
         $textos = [];
         $cola = [];
         foreach (is_array($del_modelo) ? $del_modelo['pasos'] : [] as $paso) {
             $dudoso = (bool) preg_match(self::DUDA, self::normalizar($paso['texto']));
+            if ($de_la_ficha !== [] && (in_array($paso['clave'], $vistas, true)
+                || (in_array($paso['clave'], $de_la_ficha, true) && ! in_array($paso['clave'], $claves, true)))) {
+                continue;
+            }
             if (in_array($paso['clave'], $claves, true)) {
+                $vistas[] = $paso['clave'];
                 if (! $dudoso) {
                     $textos[$paso['clave']] = $paso['texto'];
                 }
