@@ -21,7 +21,8 @@ use Illuminate\Support\Str;
  *     sobre cualquier frase, porque es lo único que trae `ctwa_clid`, y el `ctwa_clid` es lo único
  *     con lo que Meta atribuye una conversión.
  *   - `landing`: el primer mensaje contiene la frase del botón de la web (la nueva de M6a o la vieja,
- *     que manda la landing publicada hasta que se publique la nueva).
+ *     que manda la landing publicada hasta que se publique la nueva, o la de la prueba gratis del
+ *     13/11/2026, «Hola, quiero probar ComercioCity»).
  *   - `instagram`: contiene la frase del botón de «Comentá DEMO». No hay canal de Instagram en el
  *     admin: la frase es la única señal.
  *   - `desconocido`: nada de lo anterior.
@@ -78,6 +79,18 @@ class LeadOrigenService
     const FRASE_INSTAGRAM = 'Hola Martín, vengo de Instagram y quiero hacer la demo de ComercioCity';
 
     /**
+     * Frase del botón de la web cuando la oferta pasa a ser la prueba gratis (misión
+     * martin-link-prueba-landing, 13/11/2026). La landing la publica otra misión (el rediseño); hasta
+     * entonces sigue mandando FRASE_LANDING, que se sigue reconociendo. Por eso este admin tiene que
+     * estar desplegado ANTES de que la landing cambie el texto: con el admin viejo, esta frase cae
+     * como `desconocido`.
+     *
+     * 🔴 NO es un «sí a la demo»: no va en `LeadDemoSettings::get_cta_whatsapp_textos()`. El lead que
+     * la manda recibe la oferta de la prueba (`LeadOfertaDePruebaService`), no la demo.
+     */
+    const FRASE_LANDING_PRUEBA = 'Hola, quiero probar ComercioCity';
+
+    /**
      * Frase → origen, en el orden en que se evalúan. Instagram va primero por las dudas: ninguna
      * frase contiene a otra hoy, pero si mañana una se acorta, la más larga tiene que ganar.
      */
@@ -85,6 +98,7 @@ class LeadOrigenService
         [self::FRASE_INSTAGRAM, self::ORIGEN_INSTAGRAM],
         [self::FRASE_LANDING, self::ORIGEN_LANDING],
         [self::FRASE_LANDING_VIEJA, self::ORIGEN_LANDING],
+        [self::FRASE_LANDING_PRUEBA, self::ORIGEN_LANDING],
     ];
 
     /** Tolerancia entre el `received_at` del referral y el `sent_at` del primer mensaje. */

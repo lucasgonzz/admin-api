@@ -11579,6 +11579,11 @@ TXT;
             }
         }
 
+        /* La oferta de la prueba gratis al lead de la web (misión martin-link-prueba-landing, 13/11/2026):
+         * va ÚLTIMA, después de los bloques de la demo, porque los pisa (calificar, ofrecer y agendar la
+         * demo). Vacío para el lead al que no se le hizo la oferta y que no tiene prueba. */
+        $txt .= LeadOfertaDePruebaService::bloque_para_el_agente($lead);
+
         $txt .= "\n¿Qué respuesta sugerís y en qué estado debería quedar el lead?";
 
         return $txt;

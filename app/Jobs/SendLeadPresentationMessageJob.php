@@ -17,6 +17,11 @@ use Illuminate\Support\Facades\Log;
  * (misión flujo-lead-landing-closer, 17/10/2026). La demora y la variante se deciden al encolar
  * (LeadWhatsappOnboardingService); este job solo lee la variante ya asignada al lead, así que no
  * necesita saber de qué tipo era.
+ *
+ * Excepción (misión martin-link-prueba-landing, 13/11/2026): al lead de la web la presentación es la
+ * oferta de la prueba gratis, sin variante, y eso lo decide el encolado y viaja en
+ * `$oferta_de_prueba`. Default false: un job encolado antes del deploy se deserializa sin la
+ * propiedad y sigue como siempre.
  */
 class SendLeadPresentationMessageJob implements ShouldQueue
 {
@@ -33,12 +38,19 @@ class SendLeadPresentationMessageJob implements ShouldQueue
     private $display_name;
 
     /**
+     * @var bool true = mandar la oferta de la prueba gratis en vez de la variante A/B.
+     */
+    private $oferta_de_prueba = false;
+
+    /**
      * @param int         $lead_id
      * @param string|null $display_name
+     * @param bool        $oferta_de_prueba
      */
-    public function __construct(int $lead_id, ?string $display_name = null)
+    public function __construct(int $lead_id, ?string $display_name = null, bool $oferta_de_prueba = false)
     {
         $this->lead_id = $lead_id;
+        $this->oferta_de_prueba = $oferta_de_prueba;
         $this->display_name = $display_name !== null && trim($display_name) !== ''
             ? trim($display_name)
             : null;
@@ -62,6 +74,14 @@ class SendLeadPresentationMessageJob implements ShouldQueue
             return;
         }
 
-        $onboarding_service->send_presentation_message($lead, $this->display_name);
+        $onboarding_service->send_presentation_message($lead, $this->display_name, (bool) $this->oferta_de_prueba);
+    }
+
+    /**
+     * @return bool Para los tests: si este job manda la oferta de la prueba.
+     */
+    public function es_oferta_de_prueba(): bool
+    {
+        return (bool) $this->oferta_de_prueba;
     }
 }

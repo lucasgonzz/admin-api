@@ -24,6 +24,14 @@ class LeadWhatsappOnboardingService
     /** Valor en `system_message_kind` para el mensaje de bienvenida diferido. */
     public const KIND_WELCOME = 'whatsapp_welcome';
 
+    /**
+     * Valor en `system_message_kind` del SEGUNDO mensaje de la oferta de la prueba gratis (el del link;
+     * misión martin-link-prueba-landing, 13/11/2026). El primero va como `KIND_WELCOME`, porque ES la
+     * presentación: así el `contactado` determinístico del webhook y la idempotencia del job siguen
+     * mirando lo mismo. Este marca que el link salió: lo lee el bloque PRUEBA GRATIS del agente.
+     */
+    public const KIND_PRUEBA_LINK = 'whatsapp_prueba_link';
+
     /** `message_type` de las variantes A/B de la presentación genérica (lead que escribe lo suyo). */
     public const VARIANT_TYPE_WELCOME = 'welcome';
 
@@ -230,6 +238,29 @@ class LeadWhatsappOnboardingService
             return;
         }
 
+        /* Ya salió la presentación (la oferta de la prueba no manda auto, así que la guarda de arriba no
+           alcanza): no se vuelve a armar. Lo necesita la «recuperación» de la simulación del panel. */
+        if ($this->has_welcome_been_sent($lead)) {
+            return;
+        }
+
+        /*
+         * Lead de la WEB (misión martin-link-prueba-landing, 13/11/2026): en vez del auto landing y la
+         * variante que pregunta el rubro, Martín le pasa la oferta de la prueba gratis en dos mensajes
+         * (ver LeadOfertaDePruebaService). Sin auto: el primer mensaje de Martín ya saluda, y con el
+         * auto delante el lead leería dos «¡Hola!» seguidos. La demora es la landing (10 s por
+         * default), la misma con la que hoy sale la presentación de un botón. Sin variante A/B.
+         */
+        if (LeadOfertaDePruebaService::aplica_al_primer_mensaje($lead, $primer_mensaje)) {
+            Log::channel('daily')->info('LeadWhatsappOnboarding: primer mensaje desde la web; oferta de la prueba gratis.', [
+                'lead_id' => $lead->id,
+            ]);
+
+            $this->programar_presentacion($lead, $display_name, LeadWhatsappOnboardingSettings::get_welcome_delay_seconds_landing(), true);
+
+            return;
+        }
+
         $es_lead_de_un_boton = self::primer_mensaje_es_frase_de_boton($primer_mensaje);
 
         $auto_body = $es_lead_de_un_boton
@@ -243,17 +274,29 @@ class LeadWhatsappOnboardingService
             ]);
         }
 
-        if (! $this->has_welcome_been_sent($lead)) {
-            /* Demora: variante asignada (pre-pick universal) → global (landing o genérica) → sync si es 0. */
-            $delay_seconds = $this->resolve_welcome_delay_seconds($lead, $es_lead_de_un_boton);
-            $pending_dispatch = SendLeadPresentationMessageJob::dispatch((int) $lead->id, $display_name);
+        /* Demora: variante asignada (pre-pick universal) → global (landing o genérica) → sync si es 0. */
+        $this->programar_presentacion($lead, $display_name, $this->resolve_welcome_delay_seconds($lead, $es_lead_de_un_boton), false);
+    }
 
-            // Con demora 0 no depender de queue:work (mismo criterio que sugerencia IA).
-            if ($delay_seconds > 0) {
-                $pending_dispatch->delay(now()->addSeconds($delay_seconds));
-            } else {
-                $pending_dispatch->onConnection('sync')->afterResponse();
-            }
+    /**
+     * Encola el job de la presentación con la demora dada (con 0, sync después de la respuesta: no
+     * depender de queue:work, mismo criterio que la sugerencia IA).
+     *
+     * @param Lead        $lead
+     * @param string|null $display_name
+     * @param int         $delay_seconds
+     * @param bool        $oferta_de_prueba true = la presentación es la oferta de la prueba gratis.
+     *
+     * @return void
+     */
+    private function programar_presentacion(Lead $lead, ?string $display_name, int $delay_seconds, bool $oferta_de_prueba): void
+    {
+        $pending_dispatch = SendLeadPresentationMessageJob::dispatch((int) $lead->id, $display_name, $oferta_de_prueba);
+
+        if ($delay_seconds > 0) {
+            $pending_dispatch->delay(now()->addSeconds($delay_seconds));
+        } else {
+            $pending_dispatch->onConnection('sync')->afterResponse();
         }
     }
 
@@ -261,11 +304,13 @@ class LeadWhatsappOnboardingService
      * Envía el mensaje de bienvenida (invocado por el job diferido).
      *
      * @param Lead        $lead
-     * @param string|null $display_name Nombre capturado al momento del primer contacto.
+     * @param string|null $display_name     Nombre capturado al momento del primer contacto.
+     * @param bool        $oferta_de_prueba true = mandar la oferta de la prueba gratis (dos mensajes)
+     *                                      en vez de la variante A/B. Lo decidió el encolado.
      *
      * @return void
      */
-    public function send_presentation_message(Lead $lead, ?string $display_name): void
+    public function send_presentation_message(Lead $lead, ?string $display_name, bool $oferta_de_prueba = false): void
     {
         if ((string) $lead->status !== 'nuevo') {
             Log::channel('daily')->info('LeadWhatsappOnboarding: presentación omitida (lead ya no está en nuevo).', [
@@ -277,6 +322,24 @@ class LeadWhatsappOnboardingService
         }
 
         if ($this->has_welcome_been_sent($lead)) {
+            return;
+        }
+
+        if ($oferta_de_prueba) {
+            /* Si en los segundos de la demora el lead creó su prueba (escribió y fue derecho a la web),
+               el link ya no le sirve: no se manda nada (el webhook ya lo atiende como cliente). */
+            if (LeadOfertaDePruebaService::tiene_prueba($lead)) {
+                Log::channel('daily')->info('LeadWhatsappOnboarding: oferta de prueba omitida (el lead ya tiene su prueba).', [
+                    'lead_id' => $lead->id,
+                ]);
+
+                return;
+            }
+
+            $mensajes = LeadOfertaDePruebaService::mensajes();
+            $this->persist_and_send_system_message($lead, $mensajes[0], self::KIND_WELCOME);
+            $this->persist_and_send_system_message($lead, $mensajes[1], self::KIND_PRUEBA_LINK);
+
             return;
         }
 

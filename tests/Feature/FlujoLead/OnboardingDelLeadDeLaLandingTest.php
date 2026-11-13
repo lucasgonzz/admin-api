@@ -49,6 +49,12 @@ class OnboardingDelLeadDeLaLandingTest extends TestCase
         AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_LANDING, '¡Hola! 👋 Enseguida Martín se suma a la conversación.');
         AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_WITHOUT_NAME, '¡Hola! 👋 Un asesor comercial se pondrá en contacto a la brevedad.');
 
+        /* Este test describe el onboarding de la DEMO para el lead de un botón. Desde el 13/11/2026
+         * (misión martin-link-prueba-landing) el lead de la WEB recibe por default la oferta de la
+         * prueba gratis (OfertaDePruebaAlLeadDeLaLandingTest); con el interruptor apagado vuelve a este
+         * camino, que es el que se verifica acá. Instagram lo recibe siempre. */
+        AdminSetting::set(\App\Services\LeadOfertaDePruebaService::KEY_ACTIVA, '0');
+
         /* Las tres variantes landing del seeder, y todas las `welcome` de la base apagadas salvo una
          * propia, para que el reparto sea determinístico. */
         MessageVariant::query()->where('message_type', LeadWhatsappOnboardingService::VARIANT_TYPE_WELCOME)->update(['active' => false]);
