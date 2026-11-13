@@ -317,8 +317,8 @@ class OfertaDePruebaAlLeadDeLaLandingTest extends TestCase
         $this->assertStringContainsString('NO devuelvas agendar_demo', substr($contexto, $bloque));
         /* Llamada o videollamada → la prueba (decisión de Lucas del 13/11/2026); la DEMO explícita, al flujo actual. */
         $this->assertStringContainsString('Si pide una LLAMADA o una VIDEOLLAMADA', substr($contexto, $bloque));
-        $this->assertStringContainsString('durante la
-    prueba lo llamamos nosotros para ver como sigue, y pasale de nuevo el link completo de la prueba', substr($contexto, $bloque));
+        $this->assertStringContainsString('prueba lo llamamos nosotros para ver como sigue', substr($contexto, $bloque));
+        $this->assertStringContainsString('pasale de nuevo el link completo de la prueba', substr($contexto, $bloque));
         $this->assertStringContainsString('SALVO que el lead pida EXPLICITAMENTE una DEMO', substr($contexto, $bloque));
         $this->assertStringNotContainsString('una llamada o una videollamada (un mensaje suyo', substr($contexto, $bloque));
 
