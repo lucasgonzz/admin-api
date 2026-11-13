@@ -347,10 +347,6 @@ class MetaConversionesService
         $existente = LeadEventoMeta::query()->where('lead_id', (int) $lead->id)
             ->where('canal', LeadEventoMeta::CANAL_WEB)->where('evento', LeadEventoMeta::EVENTO_WEB_START_TRIAL)->first();
         if ($existente !== null) {
-            /* La fila de un ensayo no se revive ni se corrige: queda como esté y, si estaba pendiente, la ataja enviar(). */
-            if (self::es_de_ensayo($lead)) {
-                return null;
-            }
             $recuperada = DB::transaction(function () use ($existente, $config, $momento, $lead) {
                 // Bloquear la fila evita competir con el reclamo del worker o con otro replay.
                 $fila = LeadEventoMeta::query()->whereKey($existente->id)->lockForUpdate()->first();
@@ -360,6 +356,16 @@ class MetaConversionesService
                     LeadEventoMeta::ESTADO_SIN_CONFIGURAR, LeadEventoMeta::ESTADO_ERROR], true)
                     && ! $fila->event_time->equalTo($momento);
                 if (! $sin_ingreso && ! $fecha_legacy) {
+                    return false;
+                }
+                /* La fila de un ensayo no se revive ni se corrige: queda `omitido` con su motivo (misión
+                   ensayos-sin-eventos-meta, 13/11/2026). Se pregunta recién acá, cuando de verdad habría que revivirla. */
+                if (self::es_de_ensayo($lead)) {
+                    $fila->estado       = LeadEventoMeta::ESTADO_OMITIDO;
+                    $fila->ultimo_error = LeadEventoMeta::MOTIVO_ENSAYO;
+                    $fila->contexto_web = null;
+                    $fila->save();
+
                     return false;
                 }
                 $fila->estado = $config ? LeadEventoMeta::ESTADO_PENDIENTE : LeadEventoMeta::ESTADO_SIN_CONFIGURAR;

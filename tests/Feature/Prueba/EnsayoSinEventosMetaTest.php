@@ -74,11 +74,8 @@ class EnsayoSinEventosMetaTest extends BaseDePruebaGratuita
         [$lead, $respuesta] = $this->alta();
 
         $this->assertTrue($respuesta->json('ensayo'), 'La landing se entera de que es un ensayo y no dispara el píxel.');
-        /* La lista se sigue mandando igual: una landing vieja, con la lista vacía, caería al id derivado del uuid. */
-        $this->assertSame(
-            [['nombre' => 'Lead', 'event_id' => MetaConversionesService::event_id_para($lead->id, 'Lead', 'web')]],
-            $respuesta->json('meta_eventos')
-        );
+        /* Sin ids: la landing publicada antes de esta misión, que no conoce `ensayo`, tampoco dispara el Lead. */
+        $this->assertSame([], $respuesta->json('meta_eventos'));
         $this->assert_omitido_por_ensayo($this->fila($lead, 'Lead'));
         Queue::assertNotPushed(EnviarEventoMetaJob::class);
         $this->assertSame([], $this->pedidos_a_meta());
@@ -133,29 +130,47 @@ class EnsayoSinEventosMetaTest extends BaseDePruebaGratuita
         $this->assertSame([], $this->pedidos_a_meta());
     }
 
-    public function test_la_compra_de_un_ensayo_queda_omitida(): void
+    public function test_la_compra_de_un_ensayo_sin_canal_queda_omitida_y_no_se_encola(): void
     {
         $this->con_correo_de_ensayo();
         $client = Client::create([
             'name' => 'Ensayo que contrató', 'user_id' => 900500, 'slug' => 'ensayo-contrato', 'api_key' => Str::random(40),
             'inbound_api_key' => Str::random(40), 'is_active' => true, 'estado' => 'activo', 'es_ensayo' => true,
         ]);
+        /* Sin origen landing ni ctwa_clid: su compra sale por la web solo por estar promovido (canal_de_la_compra). Se
+           promueve con un update, como en la promoción real: el observer llama a registrar_compra(). */
         $lead = Lead::create([
             'contact_name' => 'Raúl Benítez', 'email' => (string) $this->cuerpo()['email'], 'phone' => '+549351' . random_int(1000000, 9999999),
-            'status' => 'cerrado_ganado', 'origen' => 'landing', 'promoted_client_id' => $client->id,
+            'status' => 'cerrado_ganado',
+        ]);
+        $this->assertSame([], LeadEventoMeta::where('lead_id', $lead->id)->pluck('evento')->all());
+        $lead->promoted_client_id = $client->id;
+        $lead->save();
+
+        $fila = $this->fila($lead, 'Purchase');
+        $this->assertNotNull($fila, 'El observer registró la compra.');
+        $this->assert_omitido_por_ensayo($fila);
+        $this->assertSame(['Purchase'], LeadEventoMeta::where('lead_id', $lead->id)->pluck('evento')->all());
+        $this->assertNull(app(MetaConversionesService::class)->registrar_compra($lead), 'Ya estaba registrada.');
+        Queue::assertNotPushed(EnviarEventoMetaJob::class);
+    }
+
+    public function test_un_starttrial_viejo_sin_ingreso_de_un_ensayo_no_se_revive_al_ingresar(): void
+    {
+        $this->con_correo_de_ensayo();
+        [$lead] = $this->alta();
+        /* Como quedaban antes las filas StartTrial que esperaban el ingreso (las revive el ingreso, si es real). */
+        LeadEventoMeta::create([
+            'lead_id' => $lead->id, 'canal' => 'web', 'evento' => 'StartTrial', 'estado' => LeadEventoMeta::ESTADO_OMITIDO,
+            'event_id' => MetaConversionesService::event_id_para($lead->id, 'StartTrial', 'web'),
+            'event_time' => now(), 'intentos' => 0, 'ultimo_error' => MetaConversionesService::MOTIVO_SIN_INGRESO,
         ]);
 
-        $meta = app(MetaConversionesService::class);
-        $meta->registrar_alcanzados($lead);
-        $meta->registrar_compra($lead);
+        $this->ingresar($lead);
 
-        $this->assertNotEmpty(LeadEventoMeta::where('lead_id', $lead->id)->get()->all());
-        foreach (LeadEventoMeta::where('lead_id', $lead->id)->get() as $fila) {
-            $this->assert_omitido_por_ensayo($fila);
-        }
-        $this->assert_omitido_por_ensayo($this->fila($lead, 'Purchase'));
+        $this->assert_omitido_por_ensayo($this->fila($lead, 'StartTrial'));
+        $this->assertSame(0, (int) $this->fila($lead, 'StartTrial')->intentos);
         Queue::assertNotPushed(EnviarEventoMetaJob::class);
-        $this->assertSame([], $this->pedidos_a_meta());
     }
 
     public function test_un_lead_sin_cliente_con_el_correo_de_ensayo_tampoco_manda_nada(): void
@@ -190,6 +205,7 @@ class EnsayoSinEventosMetaTest extends BaseDePruebaGratuita
 
         $alta = $this->fila($lead, 'Lead');
         $this->assertSame(LeadEventoMeta::ESTADO_PENDIENTE, $alta->estado);
+        $this->assertSame('Mozilla/5.0 (prueba)', $alta->contexto_web['client_user_agent'], 'El contexto del navegador se conserva.');
         Queue::assertPushed(EnviarEventoMetaJob::class, 1);
 
         $meta = app(MetaConversionesService::class);
@@ -199,6 +215,7 @@ class EnsayoSinEventosMetaTest extends BaseDePruebaGratuita
         $inicio = $this->fila($lead, 'StartTrial');
         $this->assertSame(LeadEventoMeta::ESTADO_PENDIENTE, $inicio->estado);
         $this->assertSame(MetaConversionesService::event_id_para($lead->id, 'StartTrial', 'web'), $inicio->event_id);
+        Queue::assertPushed(EnviarEventoMetaJob::class, 2);
         $this->assertSame(LeadEventoMeta::ESTADO_ENVIADO, $meta->enviar($inicio));
 
         $enviados = array_map(function ($par) {

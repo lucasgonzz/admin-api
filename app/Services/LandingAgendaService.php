@@ -369,6 +369,12 @@ class LandingAgendaService
         $filas = [];
         try {
             $filas = app(MetaConversionesService::class)->registrar_alcanzados($lead, null, false, $contexto_web);
+            /* Un evento `omitido` (reserva de un ensayo de la prueba, misión ensayos-sin-eventos-meta, 13/11/2026) no
+             * se manda por la CAPI ni vuelve a la landing: sin su id, el píxel no lo dispara. Un lead real nunca tiene
+             * una fila recién creada en `omitido`, así que para él nada cambia. */
+            $filas = array_values(array_filter($filas, function (LeadEventoMeta $fila) {
+                return $fila->estado !== LeadEventoMeta::ESTADO_OMITIDO;
+            }));
             $trabajo->filas_meta = array_map(function (LeadEventoMeta $fila) {
                 return (int) $fila->id;
             }, $filas);
