@@ -1217,9 +1217,14 @@ class SupportCodexService
         }
 
         if ($ticket->source === 'whatsapp') {
-            // El opener ya sabe partir (pausas, reintentos, partes persistidas antes de mandar): se le sube
-            // el tope a cinco solo para este envío y se le devuelve el suyo, aunque el envío explote.
+            // El opener ya sabe partir (pausas, reintentos, partes persistidas antes de mandar).
             $opener = app(SupportWhatsappOpenerService::class);
+            // Hasta tres partes alcanza su tope de siempre: el envío es exactamente la llamada de antes. Solo con
+            // cuatro o cinco se le sube el tope para este envío y se le devuelve el suyo, aunque el envío explote.
+            // 🔴 No llamarlo siempre: un mock estricto del opener (ToursDeSoporteTest) solo espera deliver_follow_up().
+            if (count($partes) <= SupportWhatsappOpenerService::MAX_PARTES) {
+                return $opener->deliver_follow_up($ticket, $message, 'Martín');
+            }
             $opener->con_tope_de_partes(self::MAX_PARTES_RESPUESTA);
             try {
                 return $opener->deliver_follow_up($ticket, $message, 'Martín');
