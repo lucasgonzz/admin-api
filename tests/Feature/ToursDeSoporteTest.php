@@ -1832,6 +1832,243 @@ class ToursDeSoporteTest extends TestCase
         $this->assertStringContainsString('Ingresos Brutos → casilla "Activo"', $recibido['pasos'][2]['texto']);
     }
 
+    /*
+    |------------------------------------------------------------------------------------------------
+    | A2 (12/11/2026): el camino del Listado se ancla con las claves de la ficha del artículo que Empresa
+    | publica desde la 4.3.57, solo si están en el catálogo de ESE pedido.
+    |------------------------------------------------------------------------------------------------
+    */
+
+    private const CAMINO_DEL_PRECIO = 'Listado → ficha del artículo → Precio → Precio final → Setear precio final → Guardar';
+    private const CLAVES_DE_LA_FICHA = [
+        'listado.buscador' => 'Abrir el Listado y señalar el buscador de artículos.',
+        'listado.abrir_ficha' => 'Señalar la tabla del Listado; avanza cuando la persona abre la ficha de un artículo.',
+        'listado.pestana_precio' => 'Señalar la pestaña Precio de la ficha del artículo.',
+        'listado.setear_precio_final' => 'Señalar el interruptor «Setear precio final» (precio manual) de la ficha.',
+        'listado.precio_final' => 'Señalar el campo Precio final de la ficha.',
+        'listado.guardar_articulo' => 'Señalar Guardar en la ficha; avanza cuando la ficha se cierra.',
+    ];
+
+    /** El catálogo de la 4.3.53 más las claves de la ficha, menos las de `$sin`. */
+    private function catalogo_con_ficha(array $sin = []): array
+    {
+        $catalogo = $this->catalogo_4_3_53();
+        foreach (self::CLAVES_DE_LA_FICHA as $clave => $descripcion) {
+            if (! in_array($clave, $sin, true)) {
+                $catalogo['pasos'][] = ['clave' => $clave, 'descripcion' => $descripcion];
+            }
+        }
+
+        return $catalogo;
+    }
+
+    /** @dataProvider caminos_del_listado */
+    public function test_que_tramos_del_camino_del_listado_se_anclan(string $camino, ?array $sin, array $claves, string $resto = ''): void
+    {
+        $pasos = [];
+        foreach (($sin === null ? $this->catalogo_4_3_53() : $this->catalogo_con_ficha($sin))['pasos'] as $paso) {
+            $pasos[$paso['clave']] = $paso + ['requiere_destino' => false];
+        }
+        $planificador = new \App\Services\SupportTourPlannerService();
+        $anclar = new \ReflectionMethod($planificador, 'pasos_del_camino');
+        $anclar->setAccessible(true);
+        $resultado = $anclar->invoke($planificador, $pasos, $camino);
+
+        $this->assertSame($claves, array_column($resultado['anclados'], 'clave'));
+        $this->assertSame($resto, $resultado['resto']);
+        $this->assertFalse($resultado['ambiguo']);
+    }
+
+    public function caminos_del_listado(): array
+    {
+        $todo = ['vista.listado', 'listado.buscador', 'listado.abrir_ficha', 'listado.pestana_precio', 'listado.setear_precio_final', 'listado.guardar_articulo'];
+
+        return [
+            'el del ticket 115, con todas las claves' => [self::CAMINO_DEL_PRECIO, [], $todo],
+            'Precio final sin Setear ancla el campo' => ['Listado → ficha del artículo → Precio → Precio final → Guardar', [],
+                ['vista.listado', 'listado.buscador', 'listado.abrir_ficha', 'listado.pestana_precio', 'listado.precio_final', 'listado.guardar_articulo']],
+            'con otros nombres' => ['Entrá al Listado → el artículo → Precios → Setear precio final → Guardar y cerrar', [], $todo],
+            // Tercera revisión (12/11/2026; antes anclaba la ficha): sin llegar a la pestaña Precio no es el recorrido
+            // de la ficha, y decide el modelo.
+            'solo la ficha' => ['Listado → ficha', [], []],
+            'la ficha sin Precio: como antes' => ['Listado → el artículo → Stock → Guardar', [], []],
+            // Los artículos en plural son otra operación del Listado: no se anclan como «abrir la ficha».
+            'seleccionar los artículos no es abrir la ficha' => ['Listado → seleccioná los artículos → Actualizar precios', [], []],
+            'tildar los productos no es abrir la ficha' => ['Listado → tildá los productos → Acciones → Eliminar', [], []],
+            'Artículos → Importar excel no es abrir la ficha' => ['Listado → Artículos → Importar excel', [], []],
+            'artículos con stock bajo no es abrir la ficha' => ['Listado → artículos con stock bajo', [], []],
+            'los artículos y después Precio tampoco' => ['Listado → los artículos → Precio → Guardar', [], []],
+            // UN artículo en singular sí es la ficha.
+            'abrí el producto' => ['Listado → abrí el producto → Precio → Guardar', [],
+                ['vista.listado', 'listado.buscador', 'listado.abrir_ficha', 'listado.pestana_precio', 'listado.guardar_articulo']],
+            'tocá un artículo' => ['Listado → tocá un artículo → Precio', [],
+                ['vista.listado', 'listado.buscador', 'listado.abrir_ficha', 'listado.pestana_precio']],
+            'ficha del producto' => ['Listado → ficha del producto → Precio', [],
+                ['vista.listado', 'listado.buscador', 'listado.abrir_ficha', 'listado.pestana_precio']],
+            // Sin el interruptor en el catálogo, «Precio final» ancla el campo; «Setear» queda en texto.
+            'sin Setear en el catálogo ancla el campo Precio final' => [self::CAMINO_DEL_PRECIO, ['listado.setear_precio_final'],
+                ['vista.listado', 'listado.buscador', 'listado.abrir_ficha', 'listado.pestana_precio', 'listado.precio_final'],
+                'Setear precio final → Guardar'],
+            'sin buscador en el catálogo' => [self::CAMINO_DEL_PRECIO, ['listado.buscador'],
+                ['vista.listado', 'listado.abrir_ficha', 'listado.pestana_precio', 'listado.setear_precio_final', 'listado.guardar_articulo']],
+            'sin la pestaña Precio: el resto queda en texto' => [self::CAMINO_DEL_PRECIO, ['listado.pestana_precio'],
+                ['vista.listado', 'listado.buscador', 'listado.abrir_ficha'], 'Precio → Precio final → Setear precio final → Guardar'],
+            'sin Guardar: el último tramo queda en texto' => [self::CAMINO_DEL_PRECIO, ['listado.guardar_articulo'],
+                ['vista.listado', 'listado.buscador', 'listado.abrir_ficha', 'listado.pestana_precio', 'listado.setear_precio_final'], 'Guardar'],
+            'un tramo desconocido corta el anclaje' => ['Listado → ficha → Precio → Margen de ganancia → Guardar', [],
+                ['vista.listado', 'listado.buscador', 'listado.abrir_ficha', 'listado.pestana_precio'], 'Margen de ganancia → Guardar'],
+            'fuera de orden no se ancla' => ['Listado → Guardar → ficha del artículo', [], []],
+            'crear un artículo no es abrir la ficha de uno' => ['Listado → Nuevo artículo → Precio → Guardar', [], []],
+            'un sistema sin las claves de la ficha: como antes' => [self::CAMINO_DEL_PRECIO, null, []],
+            'sin abrir la ficha en el catálogo: como antes' => [self::CAMINO_DEL_PRECIO, ['listado.abrir_ficha'], []],
+            // 4 de 6 (empleado sin permiso de editar): ancla hasta el campo Precio final; Setear y Guardar quedan en texto.
+            'sin Setear ni Guardar en el catálogo' => [self::CAMINO_DEL_PRECIO, ['listado.setear_precio_final', 'listado.guardar_articulo'],
+                ['vista.listado', 'listado.buscador', 'listado.abrir_ficha', 'listado.pestana_precio', 'listado.precio_final'],
+                'Setear precio final → Guardar'],
+            // Otras operaciones del Listado que no son la ficha de un artículo.
+            'Importar no es la ficha' => ['Listado → Importar', [], []],
+            'Crear → Nuevo artículo no es la ficha' => ['Listado → Crear → Nuevo artículo', [], []],
+            'Filtros no es la ficha' => ['Listado → Filtros', [], []],
+            'el Listado de artículos con su nombre largo' => ['Listado de artículos → ficha del artículo → Precio', [],
+                ['vista.listado', 'listado.buscador', 'listado.abrir_ficha', 'listado.pestana_precio']],
+            // El primer tramo tiene que ser el Listado de artículos: el de clientes, proveedores o ventas es otra pantalla.
+            'el Listado de clientes no es el de artículos' => ['Listado de clientes → ficha → Precio', [], []],
+            'el Listado de proveedores no es el de artículos' => ['Listado de proveedores → ficha → Precio → Guardar', [], []],
+            'el Listado de ventas no es el de artículos' => ['Listado de ventas → ficha → Precio', [], []],
+        ];
+    }
+
+    /** @dataProvider caminos_del_abm_como_en_master */
+    public function test_los_caminos_del_abm_se_anclan_igual_que_antes(string $camino, array $claves, string $resto): void
+    {
+        // Los caminos del ABM no pasan por el Listado: dan lo mismo que antes de anclar la ficha, aunque el catálogo la traiga.
+        $pasos = [];
+        foreach ($this->catalogo_con_ficha()['pasos'] as $paso) {
+            $pasos[$paso['clave']] = $paso + ['requiere_destino' => false];
+        }
+        $planificador = new \App\Services\SupportTourPlannerService();
+        $anclar = new \ReflectionMethod($planificador, 'pasos_del_camino');
+        $anclar->setAccessible(true);
+        $resultado = $anclar->invoke($planificador, $pasos, $camino);
+
+        $this->assertSame($claves, array_column($resultado['anclados'], 'clave'));
+        $this->assertSame($resto, $resultado['resto']);
+        $this->assertArrayNotHasKey('prefijo', $resultado);
+    }
+
+    public function caminos_del_abm_como_en_master(): array
+    {
+        return [
+            'Precios → Impuestos sobre ventas' => [self::PATH_110,
+                ['abm.grupo.precios', 'abm.solapa.precios.impuestos_sobre_ventas'], 'Ingresos Brutos → casilla "Activo"'],
+            'Articulos → Marcas' => ['ABM → Articulos → Marcas', ['abm.grupo.articulos', 'abm.solapa.articulos.marcas'], ''],
+            'Precios → Recargos' => ['ABM → Precios → Recargos', ['abm.grupo.precios', 'abm.solapa.precios.recargos'], ''],
+        ];
+    }
+
+    /** El recorrido del camino del Listado cuando Soporte lo pasa por `path`, con el modelo caído (503). */
+    private function preparar_listado(array $catalogo): array
+    {
+        return $this->preparar_110(Http::response([], 503), self::CAMINO_DEL_PRECIO, $catalogo);
+    }
+
+    public function test_115_el_camino_del_listado_se_ancla_sin_modelo_si_el_catalogo_trae_la_ficha(): void
+    {
+        \Illuminate\Support\Facades\Log::spy();
+        [$respuesta, $recibido] = $this->preparar_listado($this->catalogo_con_ficha());
+
+        $respuesta->assertOk();
+        $this->assertSame([
+            ['clave' => 'vista.listado', 'texto' => 'Abrí el Listado.'],
+            ['clave' => 'listado.buscador', 'texto' => 'Buscá el artículo por nombre o código.'],
+            ['clave' => 'listado.abrir_ficha', 'texto' => 'Tocá el artículo para abrir su ficha.'],
+            ['clave' => 'listado.pestana_precio', 'texto' => 'Tocá la pestaña «Precio».'],
+            ['clave' => 'listado.setear_precio_final', 'texto' => 'Activá «Setear precio final» y escribí el precio nuevo.'],
+            ['clave' => 'listado.guardar_articulo', 'texto' => 'Tocá «Guardar» para guardar el cambio.'],
+        ], $recibido['pasos']);
+        $this->assertSame('Cambiar el precio de un artículo', $recibido['titulo']);
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('info')->withArgs(function ($mensaje, $contexto) {
+            return $mensaje === 'Robotito: recorrido planificado.' && $contexto['origen'] === 'determinista'
+                && $contexto['camino'] === 'path' && $contexto['tramos_anclados'] === 6;
+        })->once();
+    }
+
+    public function test_115_con_4_de_las_6_claves_ancla_hasta_el_precio_final_y_el_resto_queda_en_texto(): void
+    {
+        // Un empleado sin permiso de editar: el sistema no publica el interruptor ni Guardar.
+        \Illuminate\Support\Facades\Log::spy();
+        $catalogo = $this->catalogo_con_ficha(['listado.setear_precio_final', 'listado.guardar_articulo']);
+        [$respuesta, $recibido] = $this->preparar_listado($catalogo);
+
+        $respuesta->assertOk();
+        $this->assertSame([
+            ['clave' => 'vista.listado', 'texto' => 'Abrí el Listado.'],
+            ['clave' => 'listado.buscador', 'texto' => 'Buscá el artículo por nombre o código.'],
+            ['clave' => 'listado.abrir_ficha', 'texto' => 'Tocá el artículo para abrir su ficha.'],
+            ['clave' => 'listado.pestana_precio', 'texto' => 'Tocá la pestaña «Precio».'],
+            ['clave' => 'listado.precio_final', 'texto' => 'Este es el «Precio final» del artículo.'],
+            ['clave' => 'indicacion', 'texto' => 'En la ficha seguí: Setear precio final → Guardar'],
+        ], $recibido['pasos']);
+        // Nunca se manda una clave que el catálogo de ese pedido no trae.
+        $del_catalogo = array_column($catalogo['pasos'], 'clave');
+        foreach ($recibido['pasos'] as $paso) {
+            $this->assertTrue($paso['clave'] === 'indicacion' || in_array($paso['clave'], $del_catalogo, true), $paso['clave']);
+        }
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('info')->withArgs(function ($mensaje, $contexto) {
+            return $mensaje === 'Robotito: recorrido planificado.' && $contexto['origen'] === 'determinista'
+                && $contexto['camino'] === 'path' && $contexto['tramos_anclados'] === 5;
+        })->once();
+    }
+
+    public function test_115_sin_las_claves_de_la_ficha_el_camino_del_listado_sigue_como_antes(): void
+    {
+        // Un cliente en una versión anterior: sin anclas de la ficha, el respaldo abre el Listado con el camino en texto.
+        \Illuminate\Support\Facades\Log::spy();
+        [$respuesta, $recibido] = $this->preparar_listado($this->catalogo_4_3_53());
+
+        $respuesta->assertOk();
+        $this->assertSame([['clave' => 'vista.listado', 'texto' => 'Seguí este camino: ' . self::CAMINO_DEL_PRECIO]], $recibido['pasos']);
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('info')->withArgs(function ($mensaje, $contexto) {
+            return $mensaje === 'Robotito: recorrido planificado.' && $contexto['camino'] === 'path' && $contexto['tramos_anclados'] === 0;
+        })->once();
+    }
+
+    public function test_el_modelo_redacta_los_pasos_del_listado_pero_no_los_reordena(): void
+    {
+        $plan = ['tema' => 'guia_dinamica', 'titulo' => 'Cambiar el precio del tornillo', 'pasos' => [
+            ['clave' => 'listado.pestana_precio', 'texto' => 'Andá a la pestaña Precio.'],
+            ['clave' => 'listado.abrir_ficha', 'texto' => 'Abrí el tornillo autoperforante.'],
+            ['clave' => 'listado.guardar_articulo', 'texto' => 'Guardá.'],
+            ['clave' => 'indicacion', 'texto' => 'Revisá que el precio nuevo quede en la lista.'],
+        ]];
+        [$respuesta, $recibido] = $this->preparar_pedido('mostrame con el robotito', $plan, self::CAMINO_DEL_PRECIO, $this->catalogo_con_ficha());
+
+        $respuesta->assertOk();
+        $this->assertSame(['vista.listado', 'listado.buscador', 'listado.abrir_ficha', 'listado.pestana_precio',
+            'listado.setear_precio_final', 'listado.guardar_articulo', 'indicacion'], array_column($recibido['pasos'], 'clave'));
+        $this->assertSame('Abrí el tornillo autoperforante.', $recibido['pasos'][2]['texto']);
+        $this->assertSame('Andá a la pestaña Precio.', $recibido['pasos'][3]['texto']);
+        $this->assertSame('Cambiar el precio del tornillo', $recibido['titulo']);
+        Http::assertSent(function ($request) {
+            return strpos($request->url(), 'https://api.deepseek.com/') === 0
+                && json_decode($request['messages'][0]['content'], true)['pasos_fijos'] === ['vista.listado', 'listado.buscador',
+                    'listado.abrir_ficha', 'listado.pestana_precio', 'listado.setear_precio_final', 'listado.guardar_articulo'];
+        });
+    }
+
+    public function test_en_un_sistema_sin_la_ficha_el_camino_del_listado_sigue_como_antes_sin_error(): void
+    {
+        $plan = ['tema' => 'guia_dinamica', 'titulo' => 'Cambiar un precio', 'pasos' => [
+            ['clave' => 'vista.listado', 'texto' => 'Abrí el Listado.'],
+            ['clave' => 'indicacion', 'texto' => 'Abrí el artículo, andá a Precio y cambiá el precio final.'],
+        ]];
+        [$respuesta, $recibido] = $this->preparar_pedido('mostrame con el robotito', $plan, self::CAMINO_DEL_PRECIO,
+            $this->catalogo_con_ficha(['listado.abrir_ficha', 'listado.pestana_precio', 'listado.setear_precio_final']));
+
+        $respuesta->assertOk();
+        $this->assertSame($plan['pasos'], $recibido['pasos']);
+    }
+
     public function test_110_en_un_sistema_4_3_52_el_camino_abre_el_abm_con_la_tarjeta_acoplada(): void
     {
         $catalogo = self::CATALOGO_DINAMICO;

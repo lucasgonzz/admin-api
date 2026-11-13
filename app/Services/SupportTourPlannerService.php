@@ -341,6 +341,10 @@ class SupportTourPlannerService
         }
         // Del primer tramo vale solo lo que está pegado a la flecha («En Reportes no está; andá al ABM → …»).
         $partes = preg_split('/[;:.]/u', $tramos[0]);
+        // Solo el Listado de artículos: «Listado de clientes / proveedores / ventas → ficha → Precio» es otra pantalla.
+        if (preg_match('/(?<![a-z0-9])listado(?: de (?:articulos|productos))?$/', trim(self::normalizar((string) end($partes))))) {
+            return $this->pasos_del_listado($pasos, $tramos);
+        }
         if (! self::nombra(trim((string) end($partes)), 'abm')) {
             return $nada;
         }
@@ -427,6 +431,127 @@ class SupportTourPlannerService
     }
 
     /**
+     * Los controles de la ficha del artículo que Empresa publica desde la 4.3.57 (empresa-spa be4f5cce), en el orden en
+     * que se tocan, con el texto por defecto de cada paso. El modelo puede redactarlos; el orden y las anclas son fijos.
+     */
+    private const TRAMOS_DEL_LISTADO = [
+        'buscador' => ['listado.buscador', 'Buscá el artículo por nombre o código.'],
+        'ficha' => ['listado.abrir_ficha', 'Tocá el artículo para abrir su ficha.'],
+        'precio' => ['listado.pestana_precio', 'Tocá la pestaña «Precio».'],
+        'precio_final' => ['listado.precio_final', 'Este es el «Precio final» del artículo.'],
+        'setear' => ['listado.setear_precio_final', 'Activá «Setear precio final» y escribí el precio nuevo.'],
+        'guardar' => ['listado.guardar_articulo', 'Tocá «Guardar» para guardar el cambio.'],
+    ];
+
+    /** Qué tramo del Listado nombra el texto de un tramo ya limpio, o null. */
+    private static function tramo_del_listado(string $tramo): ?string
+    {
+        // Crear un artículo es otro camino (listado.nuevo_articulo): no se lo confunde con abrir la ficha de uno.
+        if (preg_match('/\b(?:nuevo|nueva|crear|crea|alta|agregar|agrega|importar|exportar)\b/', $tramo)) {
+            return null;
+        }
+        if (preg_match('/\bsetear precio(?: final)?\b|\bprecio manual\b/', $tramo)) {
+            return 'setear';
+        }
+        if (preg_match('/^(?:(?:el|la|campo|casilla|ver|mira|revisa)\s+)*precio final$/', $tramo)) {
+            return 'precio_final';
+        }
+        if (preg_match('/^(?:(?:la|el|pestana|solapa|seccion|ir a|anda a|toca|abri)\s+)*precios?$/', $tramo)) {
+            return 'precio';
+        }
+        if (preg_match('/^(?:(?:toca|toca el|boton|el boton|y)\s+)*guarda(?:r|lo)?(?: y cerrar)?$/', $tramo)) {
+            return 'guardar';
+        }
+        if (preg_match('/\b(?:buscador|busca|buscar|buscalo)\b/', $tramo)) {
+            return 'buscador';
+        }
+        // La ficha, o UN artículo en singular («el artículo», «abrí el producto», «tocá un artículo»). En plural es otra
+        // operación del Listado («seleccioná los artículos → Actualizar precios», «tildá los productos → Eliminar»,
+        // «Artículos → Importar excel»): ese tramo no se ancla y decide el modelo (tercera revisión, 12/11/2026).
+        if (preg_match('/\bficha\b/', $tramo)
+            || preg_match('/^(?:(?:abri|abrir|toca|tocar|elegi|elegir|selecciona|entra a|entra en|anda a)\s+)?(?:el|un|al)\s+(?:articulo|producto)(?:\s+[a-z0-9]+){0,5}$/', $tramo)) {
+            return 'ficha';
+        }
+
+        return null;
+    }
+
+    /**
+     * EL CAMINO MANDA también en el Listado (ticket 115, 12/11/2026): «Listado → ficha del artículo → Precio → Precio
+     * final → Setear precio final → Guardar» se ancla, sin modelo, como vista.listado → listado.buscador →
+     * listado.abrir_ficha → listado.pestana_precio → listado.setear_precio_final → listado.guardar_articulo.
+     *
+     * - Compatibilidad: una clave se usa SOLO si está en el catálogo de ese sistema en este pedido. Un sistema anterior
+     *   a esas claves (o con alguna de menos) ancla hasta el último tramo que sabe señalar y el resto queda en texto; si
+     *   con eso no llega a dos pasos anclados devuelve `anclados` vacío y todo sigue como antes (decide el modelo).
+     * - Los tramos se anclan en el orden fijo de arriba. Un tramo que no se reconoce, que el catálogo no tiene o que
+     *   viene fuera de orden corta el anclaje: desde ahí sigue como indicación («En la ficha seguí: …»).
+     * - «Precio final» al lado de «Setear precio final» es el mismo control: manda el interruptor. Solo, ancla el campo.
+     * - El buscador no se nombra en el camino, pero hace falta para llegar a la ficha: va si se ancla la ficha.
+     *
+     * @param string[] $tramos El camino ya partido por flechas; el primero es el Listado.
+     *
+     * @return array{anclados: array, resto: string, ambiguo: bool, prefijo?: string, titulo?: string}
+     */
+    private function pasos_del_listado(array $pasos, array $tramos): array
+    {
+        $nada = ['anclados' => [], 'resto' => '', 'ambiguo' => false];
+        if (! isset($pasos['vista.listado'])) {
+            return $nada;
+        }
+        $limpio = function (string $tramo): string {
+            return trim(preg_replace('/[^a-z0-9]+/', ' ', self::normalizar($tramo)));
+        };
+        $tipos = [];
+        for ($i = 1; $i < count($tramos); $i++) {
+            $tipos[$i] = self::tramo_del_listado($limpio($tramos[$i]));
+        }
+        // Solo es el recorrido de la ficha si el camino llega al menos hasta la pestaña Precio (tercera revisión,
+        // 12/11/2026): «Listado → ficha» suelto o «Listado → el artículo → Stock» siguen como antes (decide el modelo).
+        if (! in_array('precio', $tipos, true)) {
+            return $nada;
+        }
+
+        $orden = array_keys(self::TRAMOS_DEL_LISTADO);
+        $anclados = [['clave' => 'vista.listado', 'texto' => 'Abrí el Listado.']];
+        $ultimo = -1;
+        $hasta = count($tramos);
+        for ($i = 1; $i < count($tramos); $i++) {
+            $tipo = $tipos[$i];
+            $vecinos = [$tipos[$i - 1] ?? null, $tipos[$i + 1] ?? null];
+            // Si el catálogo no trae el interruptor, el camino que nombra «Precio final» ancla el campo.
+            if ($tipo === 'precio_final' && in_array('setear', $vecinos, true) && isset($pasos['listado.setear_precio_final'])) {
+                continue;
+            }
+            $posicion = $tipo === null ? false : array_search($tipo, $orden, true);
+            // El campo y el interruptor del precio final comparten lugar en el orden.
+            $posicion = $tipo === 'setear' ? array_search('precio_final', $orden, true) : $posicion;
+            $clave = $tipo === null ? null : self::TRAMOS_DEL_LISTADO[$tipo][0];
+            // Lo de adentro de la ficha (Precio, Guardar…) solo se señala con la ficha abierta por un paso anterior.
+            $sin_ficha = ! in_array($tipo, ['buscador', 'ficha'], true) && ! in_array('listado.abrir_ficha', array_column($anclados, 'clave'), true);
+            if ($posicion === false || $posicion <= $ultimo || $sin_ficha || ! isset($pasos[$clave])) {
+                $hasta = $i;
+                break;
+            }
+            if ($tipo === 'ficha' && $ultimo < 0 && isset($pasos['listado.buscador'])) {
+                $anclados[] = ['clave' => 'listado.buscador', 'texto' => self::TRAMOS_DEL_LISTADO['buscador'][1]];
+            }
+            $anclados[] = ['clave' => $clave, 'texto' => self::TRAMOS_DEL_LISTADO[$tipo][1]];
+            $ultimo = $posicion;
+        }
+        if (count($anclados) < 2) {
+            return $nada;
+        }
+
+        $claves = array_column($anclados, 'clave');
+        return [
+            'anclados' => $anclados, 'resto' => implode(' → ', array_slice($tramos, $hasta)), 'ambiguo' => false,
+            'prefijo' => in_array('listado.abrir_ficha', $claves, true) ? 'En la ficha seguí: ' : 'En el Listado seguí: ',
+            'titulo' => in_array('listado.pestana_precio', $claves, true) ? 'Cambiar el precio de un artículo' : 'Abrir la ficha del artículo',
+        ];
+    }
+
+    /**
      * Arma el recorrido del camino FUSIONADO con el plan del modelo: primero los pasos fijos del camino, en su orden;
      * después, lo que el modelo agregó a continuación y no los repite (otros controles con ancla y las indicaciones de
      * lo que el catálogo no sabe señalar). El modelo puede redactar el texto de un paso fijo, pero no lo quita, no lo
@@ -467,7 +592,7 @@ class SupportTourPlannerService
                 $lo_nombra = $lo_nombra || ($primero !== '' && self::nombra($paso['texto'], $primero));
             }
             if (! $lo_nombra) {
-                $texto = 'En esta solapa seguí: ' . $fijo['resto'];
+                $texto = ($fijo['prefijo'] ?? 'En esta solapa seguí: ') . $fijo['resto'];
                 array_unshift($cola, ['clave' => 'indicacion', 'texto' => mb_strlen($texto) > 240 ? mb_substr($texto, 0, 239) . '…' : $texto]);
             }
         }
@@ -475,7 +600,8 @@ class SupportTourPlannerService
         $ultimo = end($fijo['anclados']);
 
         return $this->guion_minimo(
-            is_array($del_modelo) ? $del_modelo['titulo'] : 'Ir a ' . preg_replace('/^.*«(.+)».*$/u', '$1', $ultimo['texto']),
+            is_array($del_modelo) ? $del_modelo['titulo']
+                : ($fijo['titulo'] ?? 'Ir a ' . preg_replace('/^.*«(.+)».*$/u', '$1', $ultimo['texto'])),
             $recorrido
         );
     }
