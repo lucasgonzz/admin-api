@@ -45,12 +45,12 @@ class OfertaDePruebaAlLeadDeLaLandingTest extends TestCase
         . "\n"
         . "Lo mejor es que lo pruebes con tu propio negocio: tenés 7 días gratis, sin tarjeta, con el sistema de gestión, la tienda online y los agentes de IA funcionando.\n"
         . "\n"
-        . "Si te gusta y seguís, el sistema de gestión y la implementación son gratis: te cargamos tus productos nosotros y pagás solo el abono mensual, desde $27.950 (este mes, con 50 % off los primeros 3 meses).";
+        . "Si te gusta y seguís, el sistema de gestión y la implementación son gratis: te cargamos tus productos nosotros y pagás solo el abono mensual, desde $27.950 (con 50 % off los primeros 3 meses).";
 
     const MENSAJE_2_DE_LUCAS = "Tu prueba la creás desde acá, en 2 minutos 👇\n"
         . "https://comerciocity.com/prueba?utm_source=whatsapp&utm_medium=martin\n"
         . "\n"
-        . "Ponés tu nombre, tu WhatsApp, el nombre del negocio y una contraseña, y entrás en el momento.\n"
+        . "Ponés tu nombre, tu WhatsApp, tu correo, el nombre del negocio y una contraseña, y en unos minutos tenés tu sistema armado.\n"
         . "\n"
         . "Cualquier duda me escribís por acá. Y si antes de arrancar querés saber si te sirve para algo puntual de tu negocio, preguntame ahora y lo vemos.";
 
@@ -274,7 +274,7 @@ class OfertaDePruebaAlLeadDeLaLandingTest extends TestCase
             (float) ContractPreciosService::PLANES_GESTION['inicial']['abono']
         )), 0, ',', '.');
         $this->assertSame($esperado, LeadOfertaDePruebaService::precio_desde());
-        $this->assertSame(' (este mes, con ' . ContractPreciosService::DESCUENTO_INICIAL['porcentaje'] . ' % off los primeros '
+        $this->assertSame(' (con ' . ContractPreciosService::DESCUENTO_INICIAL['porcentaje'] . ' % off los primeros '
             . ContractPreciosService::DESCUENTO_INICIAL['meses'] . ' meses)', LeadOfertaDePruebaService::promo());
 
         AdminSetting::set(LeadOfertaDePruebaService::KEY_MENSAJE_1, 'Probalo {dias_prueba} días. Desde {precio_desde}{promo}.');
@@ -315,7 +315,12 @@ class OfertaDePruebaAlLeadDeLaLandingTest extends TestCase
         $this->assertStringContainsString('https://comerciocity.com/prueba?utm_source=whatsapp&utm_medium=martin', substr($contexto, $bloque));
         $this->assertStringContainsString('NO le pidas datos para calificarlo', substr($contexto, $bloque));
         $this->assertStringContainsString('NO devuelvas agendar_demo', substr($contexto, $bloque));
-        $this->assertStringContainsString('pida EXPLICITAMENTE una demo, una llamada o una videollamada', substr($contexto, $bloque));
+        /* Llamada o videollamada → la prueba (decisión de Lucas del 13/11/2026); la DEMO explícita, al flujo actual. */
+        $this->assertStringContainsString('Si pide una LLAMADA o una VIDEOLLAMADA', substr($contexto, $bloque));
+        $this->assertStringContainsString('durante la
+    prueba lo llamamos nosotros para ver como sigue, y pasale de nuevo el link completo de la prueba', substr($contexto, $bloque));
+        $this->assertStringContainsString('SALVO que el lead pida EXPLICITAMENTE una DEMO', substr($contexto, $bloque));
+        $this->assertStringNotContainsString('una llamada o una videollamada (un mensaje suyo', substr($contexto, $bloque));
 
         Lead::query()->whereKey($lead->id)->update(['status' => LeadPipelineStatus::PRUEBA_ACTIVA]);
         $bloque_con_prueba = LeadOfertaDePruebaService::bloque_para_el_agente($lead->fresh());

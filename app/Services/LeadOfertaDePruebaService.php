@@ -63,18 +63,18 @@ class LeadOfertaDePruebaService
      */
     public const DEFAULT_LINK = 'https://comerciocity.com/prueba?utm_source=whatsapp&utm_medium=martin';
 
-    /** Mensaje 1 (texto propuesto por Lucas el 13/11/2026, pendiente de su ok final). */
+    /** Mensaje 1 (texto de Lucas, aprobado el 13/11/2026). */
     public const DEFAULT_MENSAJE_1 = "¡Hola! Soy Martín, de ComercioCity 👋\n"
         . "\n"
         . "Lo mejor es que lo pruebes con tu propio negocio: tenés {dias_prueba} días gratis, sin tarjeta, con el sistema de gestión, la tienda online y los agentes de IA funcionando.\n"
         . "\n"
         . "Si te gusta y seguís, el sistema de gestión y la implementación son gratis: te cargamos tus productos nosotros y pagás solo el abono mensual, desde {precio_desde}{promo}.";
 
-    /** Mensaje 2 (texto propuesto por Lucas el 13/11/2026, pendiente de su ok final). */
+    /** Mensaje 2 (texto de Lucas, aprobado el 13/11/2026). */
     public const DEFAULT_MENSAJE_2 = "Tu prueba la creás desde acá, en 2 minutos 👇\n"
         . "{link_prueba}\n"
         . "\n"
-        . "Ponés tu nombre, tu WhatsApp, el nombre del negocio y una contraseña, y entrás en el momento.\n"
+        . "Ponés tu nombre, tu WhatsApp, tu correo, el nombre del negocio y una contraseña, y en unos minutos tenés tu sistema armado.\n"
         . "\n"
         . "Cualquier duda me escribís por acá. Y si antes de arrancar querés saber si te sirve para algo puntual de tu negocio, preguntame ahora y lo vemos.";
 
@@ -82,7 +82,7 @@ class LeadOfertaDePruebaService
      * Lo que reemplaza a `{promo}` mientras haya descuento de bienvenida. Con el espacio adelante: sin
      * promo, `{promo}` queda vacío y el renglón cierra en «desde $55.900.».
      */
-    public const PLANTILLA_PROMO = ' (este mes, con {porcentaje} % off los primeros {meses} meses)';
+    public const PLANTILLA_PROMO = ' (con {porcentaje} % off los primeros {meses} meses)';
 
     /** El plan cuyo abono es el «desde» (el más barato de los vigentes). */
     public const PLAN_DESDE = 'inicial';
@@ -302,8 +302,13 @@ class LeadOfertaDePruebaService
             . "    (podes cerrar con el link o con \"cualquier duda me escribis\"). Si pregunta precios, dale los planes sin\n"
             . "    preguntarle cuantas operaciones hace.\n"
             . "  - NO le ofrezcas la demo ni una llamada, NO le pases el link de su pagina, NO devuelvas agendar_demo y NO le pidas\n"
-            . "    disponibilidad. SALVO que el lead pida EXPLICITAMENTE una demo, una llamada o una videollamada (un mensaje suyo\n"
-            . "    POSTERIOR a los de la prueba, que lo pide con sus palabras): ahi segui el flujo de la demo de arriba.\n"
+            . "    disponibilidad.\n"
+            . "  - Si pide una LLAMADA o una VIDEOLLAMADA (que alguien se lo muestre, hablar con alguien): decile que durante la\n"
+            . "    prueba lo llamamos nosotros para ver como sigue, y pasale de nuevo el link completo de la prueba. NO le ofrezcas\n"
+            . "    la demo, NO prometas un dia ni una hora y NO devuelvas agendar_demo (esto pisa las reglas de la demo sobre las\n"
+            . "    llamadas).\n"
+            . "  - SALVO que el lead pida EXPLICITAMENTE una DEMO (un mensaje suyo POSTERIOR a los de la prueba, que la pide con\n"
+            . "    sus palabras): ahi segui el flujo de la demo de arriba.\n"
             . "  - La prueba se crea solo desde ese link: no la crees por WhatsApp ni le pidas la contrasena.\n";
     }
 
