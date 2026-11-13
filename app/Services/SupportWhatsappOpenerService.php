@@ -383,15 +383,45 @@ class SupportWhatsappOpenerService
     public static function sin_separadores(string $texto): string
     {
         // Sin una línea de solo tres guiones no hay nada que normalizar: se devuelve tal cual.
-        if (! preg_match('/^[ \t]*---[ \t]*$/m', $texto)) {
+        if (! self::tiene_separadores($texto)) {
             return $texto;
         }
+
+        // Con separadores, los fines de línea de Windows pasan a `\n` para que las regex de abajo los vean.
+        $texto = self::normalizar_fines_de_linea($texto);
 
         // Cada línea separadora queda vacía; después se colapsan los renglones en blanco seguidos a uno.
         $sin_lineas = preg_replace('/^[ \t]*---[ \t]*$/m', '', $texto);
         $colapsado = preg_replace("/\n[ \t]*(?:\n[ \t]*){2,}/", "\n\n", (string) $sin_lineas);
 
         return trim((string) $colapsado);
+    }
+
+    /**
+     * Si el texto tiene al menos una línea con solo `---` (espacios alrededor permitidos, y fin de línea `\r\n`).
+     *
+     * La regex vieja de SupportCodexService (`/^\s*---\s*$/m`) también limpiaba un `---` entre `\r\n`; esta lo
+     * reconoce igual, para que un body con fines de línea de Windows no deje el separador literal.
+     *
+     * @param string $texto Texto a revisar.
+     *
+     * @return bool
+     */
+    public static function tiene_separadores(string $texto): bool
+    {
+        return (bool) preg_match('/^[ \t]*---[ \t]*\r?$/m', $texto);
+    }
+
+    /**
+     * Pasa los fines de línea `\r\n` y los `\r` sueltos a `\n`.
+     *
+     * @param string $texto Texto a normalizar.
+     *
+     * @return string
+     */
+    public static function normalizar_fines_de_linea(string $texto): string
+    {
+        return str_replace(["\r\n", "\r"], "\n", $texto);
     }
 
     private function entregar_respuesta_whatsapp(SupportTicket $ticket, SupportMessage $message, string $admin_name): array
@@ -733,9 +763,21 @@ class SupportWhatsappOpenerService
      */
     private function emitir_mensaje(SupportMessage $mensaje): void
     {
-        $cargado = SupportMessage::query()->where('id', $mensaje->id)->withAll()->first();
-        if ($cargado !== null) {
-            event(new SupportMessageReceived((int) $cargado->id));
+        // 🔴 El aviso a la pantalla es accesorio y NO puede tirar abajo el envío: corre adentro de la
+        // transacción de deliver_follow_up() y SupportMessageReceived se emite en el acto (ShouldBroadcastNow).
+        // Si Pusher fallara a mitad de un envío partido, la excepción revertiría las partes 2..N y le devolvería
+        // a la primera el body completo con `---`, cuando al cliente ya le llegaron mensajes. Se registra y se
+        // sigue, igual que hace SupportCodexService::reply() con su propio aviso.
+        try {
+            $cargado = SupportMessage::query()->where('id', $mensaje->id)->withAll()->first();
+            if ($cargado !== null) {
+                event(new SupportMessageReceived((int) $cargado->id));
+            }
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->warning('SupportWhatsappOpenerService: no se pudo avisar a la pantalla una parte del mensaje.', [
+                'message_id' => $mensaje->id,
+                'error'      => $exception->getMessage(),
+            ]);
         }
     }
 

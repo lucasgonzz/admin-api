@@ -17,8 +17,11 @@ use App\Services\SupportCodexSettings;
 use App\Services\SupportTourService;
 use App\Services\SupportWhatsappOpenerService;
 use App\Services\WhatsappSendService;
+use App\Services\SupportCodexService;
 use App\Services\WhatsappSessionWindowService;
 use Carbon\Carbon;
+use Illuminate\Broadcasting\BroadcastException;
+use Illuminate\Events\Dispatcher;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
@@ -592,5 +595,115 @@ class SoporteCodexRespuestaEnPartesTest extends TestCase
         $this->assertSame('sent', $operacion->status);
         $this->assertSame((int) $partes[1]->id, (int) $operacion->message_id);
         $this->assertSame((int) $partes[1]->id, (int) SupportCodexCase::where('support_ticket_id', $ticket->id)->value('last_reply_id'));
+    }
+
+    /**
+     * Si el aviso a la pantalla (Pusher) falla al emitir la parte 2, el envío NO se revierte: las tres partes quedan
+     * persistidas con su id de Meta y la operación dice lo que de verdad salió.
+     *
+     * Sin el try/catch de emitir_mensaje(), la excepción deshacía la transacción del opener: se perdían las partes
+     * 2..N y la primera volvía al body completo con `---`, aunque al cliente ya le habían llegado mensajes.
+     */
+    public function test_un_fallo_del_aviso_a_la_pantalla_en_la_parte_dos_no_revierte_el_envio(): void
+    {
+        $ticket = $this->ticket_whatsapp();
+        $reserva = $this->reservar($ticket);
+
+        // Despachador que hace fallar el SEGUNDO SupportMessageReceived, como un Pusher caído a mitad del envío.
+        $despachador = new class($this->app) extends Dispatcher {
+            /** @var int Avisos de mensaje emitidos. */
+            public $avisos = 0;
+
+            public function dispatch($event, $payload = [], $halt = false)
+            {
+                if ($event instanceof SupportMessageReceived) {
+                    $this->avisos++;
+                    if ($this->avisos === 2) {
+                        throw new BroadcastException('Pusher no respondió (simulado).');
+                    }
+                }
+
+                // El resto no tiene oyentes en este test: no se transmite nada.
+                return $halt ? null : [];
+            }
+        };
+        $this->app->instance('events', $despachador);
+        Event::swap($despachador);
+
+        $this->responder($ticket, $reserva, ['body' => "Uno\n---\nDos\n---\nTres"])
+            ->assertOk()->assertJsonPath('operation.status', 'sent');
+
+        $this->assertGreaterThanOrEqual(2, $despachador->avisos);
+        $this->assertSame(['Uno', 'Dos', 'Tres'], $this->espia->textos);
+        $partes = $this->mensajes_de_martin($ticket);
+        $this->assertSame(['Uno', 'Dos', 'Tres'], $partes->pluck('body')->all());
+        foreach ($partes as $indice => $parte) {
+            $this->assertSame('wamid.parte.' . ($indice + 1), $parte->whatsapp_message_id);
+            $this->assertNull($parte->remote_delivery_status);
+        }
+        $this->assertSame((int) $partes->last()->id, (int) SupportCodexCase::where('support_ticket_id', $ticket->id)->value('last_reply_id'));
+    }
+
+    /** Una propuesta de actualización con líneas `---` se rechaza antes de registrar nada, con un motivo corregible. */
+    public function test_una_propuesta_de_actualizacion_con_separadores_se_rechaza_antes_de_registrar_nada(): void
+    {
+        $ticket = $this->ticket_whatsapp();
+        $reserva = $this->reservar($ticket);
+        $mensaje = null;
+        try {
+            app(SupportCodexService::class)->reply((int) $ticket->id, [
+                'lease_token' => $reserva['lease_token'], 'expected_message_id' => $reserva['ticket']['expected_message_id'],
+                'operation_id' => 'propuesta-con-partes-' . $ticket->id, 'action' => 'responder',
+                'body' => "Ya lo corregimos.\n---\nPodemos actualizar el lunes a las 13:00. Te sirve?",
+                'upgrade_proposal' => [
+                    'starts_at_utc' => '2026-11-16 16:00:00', 'ends_at_utc' => '2026-11-16 19:00:00',
+                    'minimum_minutes' => 180, 'confirmation_phrase' => 'Confirmo la actualización',
+                ],
+            ]);
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $exception) {
+            $this->assertSame(422, $exception->getStatusCode());
+            $mensaje = $exception->getMessage();
+        }
+
+        $this->assertNotNull($mensaje, 'La propuesta con separadores tenía que rechazarse.');
+        $this->assertStringStartsWith('proposal_with_separators:', $mensaje);
+        $this->assertStringContainsString('---', $mensaje);
+        $this->assertSame(0, SupportCodexOperation::where('support_ticket_id', $ticket->id)->count());
+        $this->assertCount(0, $this->mensajes_de_martin($ticket));
+        $this->assertSame([], $this->espia->textos);
+    }
+
+    /** Un body con fines de línea de Windows (`\r\n`) se parte igual por WhatsApp. */
+    public function test_un_body_con_fines_de_linea_de_windows_se_parte_por_whatsapp(): void
+    {
+        $ticket = $this->ticket_whatsapp();
+        $this->responder($ticket, $this->reservar($ticket), ['body' => "Uno\r\n---\r\nDos\r\n---\r\nTres"])
+            ->assertOk()->assertJsonPath('operation.status', 'sent');
+
+        $this->assertSame(['Uno', 'Dos', 'Tres'], $this->espia->textos);
+        $this->assertCount(3, $this->mensajes_de_martin($ticket));
+    }
+
+    /** Un body con fines de línea de Windows (`\r\n`) se parte igual por el chat del sistema. */
+    public function test_un_body_con_fines_de_linea_de_windows_se_parte_por_el_sistema(): void
+    {
+        $ticket = $this->ticket_erp();
+        $this->responder($ticket, $this->reservar($ticket), ['body' => "Uno\r\n---\r\nDos"])
+            ->assertOk()->assertJsonPath('operation.status', 'sent');
+
+        $this->assertSame(['Uno', 'Dos'], $this->sync->bodies);
+        $this->assertSame(['Uno', 'Dos'], $this->mensajes_de_martin($ticket)->pluck('body')->all());
+    }
+
+    /** Lo que no se parte (con adjunto) tampoco deja un `---` con fin de línea de Windows en el texto. */
+    public function test_lo_que_no_se_parte_limpia_el_separador_con_fines_de_linea_de_windows(): void
+    {
+        $ticket = $this->ticket_whatsapp();
+        $this->responder($ticket, $this->reservar($ticket), [
+            'body' => "Te paso la factura\r\n---\r\nfijate el total",
+            'attachment' => ['filename' => 'Factura.pdf', 'content_base64' => base64_encode("%PDF-1.4\nDocumento\n%%EOF\n")],
+        ])->assertOk()->assertJsonPath('operation.status', 'sent');
+
+        $this->assertSame(["Te paso la factura\n\nfijate el total"], $this->espia->adjuntos);
     }
 }

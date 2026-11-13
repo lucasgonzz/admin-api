@@ -847,6 +847,12 @@ class SupportCodexService
             $this->fail(422, 'tour_invitation_invalid', 'Terminá el mensaje de texto con la pregunta de Robotito.');
         }
         $input['tour_requested'] = $tour_requested;
+        // Una propuesta de actualización no puede traer líneas `---`: el acuerdo hashea el texto que llega acá
+        // (record_proposal) y el que sale se normaliza sin separadores, así que la confirmación exacta del dueño
+        // no coincidiría nunca. Se rechaza antes de registrar nada, con un motivo que el agente puede corregir.
+        if (isset($input['upgrade_proposal']) && SupportWhatsappOpenerService::tiene_separadores((string) $input['body'])) {
+            $this->fail(422, 'proposal_with_separators', 'Una propuesta de actualización sale en un solo mensaje: quitá las líneas --- del texto.');
+        }
         $attachment = null;
         if (isset($input['attachment'])) {
             if ($input['action'] === 'cerrar' || mb_strlen(trim($input['body'])) > SupportCodexOutboundAttachment::MAX_CAPTION_LENGTH) {
@@ -1346,6 +1352,13 @@ class SupportCodexService
      */
     private function partes_de_la_respuesta(string $texto): array
     {
+        // Sin separadores es una sola parte, sin tocarle los fines de línea.
+        if (! SupportWhatsappOpenerService::tiene_separadores($texto)) {
+            return [trim($texto)];
+        }
+        // Con separadores, `\r\n` pasa a `\n` para que una línea `---` con fin de línea de Windows también corte.
+        $texto = SupportWhatsappOpenerService::normalizar_fines_de_linea($texto);
+
         // Trozos entre separadores, sin espacios de borde y sin vacíos.
         $trozos = preg_split('/^[ \t]*---[ \t]*$/m', $texto);
         $limpias = [];
@@ -1651,6 +1664,10 @@ class SupportCodexService
             }
             $this->assert_approval_action($ticket, $case, $input);
             if (isset($input['upgrade_proposal'])) {
+                // Mismo freno que en reply(): con `---` la confirmación exacta del dueño no coincidiría nunca.
+                if (SupportWhatsappOpenerService::tiene_separadores($final)) {
+                    $this->fail(422, 'proposal_with_separators', 'Una propuesta de actualización sale en un solo mensaje: quitá las líneas --- del texto.');
+                }
                 if ($final !== $input['body']) {
                     $this->fail(422, 'proposal_text_changed', 'El texto de una propuesta de actualización debe conservar su horario exacto.');
                 }
