@@ -57,6 +57,23 @@ class SupportWhatsappOpenerService
     const MAX_PARTES = 3;
 
     /**
+     * Tope de partes que usa el PRÓXIMO deliver_follow_up() de esta instancia.
+     *
+     * Arranca en MAX_PARTES (el del agente de leads y el de cualquier otro llamador) y solo lo sube
+     * Martín (`SupportCodexService::entregar_respuesta()`, hasta 5) con con_tope_de_partes(), que lo
+     * vuelve al default apenas termina su envío.
+     *
+     * 🔴 Es una propiedad y no un cuarto parámetro de deliver_follow_up() a propósito: tres tests
+     * (SoporteAutomaticoEnCodexTest, ControlYVerificacionDeSoporteCodexTest, AvancesDeMisionDeSoporteTest)
+     * pisan deliver_follow_up() con la firma de tres parámetros, y en PHP 7.4 agregar uno opcional al padre
+     * vuelve incompatible esa declaración (un warning que Laravel convierte en excepción, y un error fatal
+     * en PHP 8). Así el contrato público de deliver_follow_up() queda intacto.
+     *
+     * @var int
+     */
+    private $tope_de_partes = self::MAX_PARTES;
+
+    /**
      * Servicio de envío a Kapso/Meta.
      *
      * @var WhatsappSendService
@@ -323,6 +340,8 @@ class SupportWhatsappOpenerService
      */
     public function deliver_follow_up(SupportTicket $ticket, SupportMessage $message, string $admin_name): array
     {
+        // `last_message_id` (envío partido): id del SupportMessage de la ÚLTIMA parte. Solo viene cuando el
+        // texto salió partido; Martín lo usa para dejar su operación y su caso apuntando a esa parte.
         return DB::transaction(function () use ($ticket, $message, $admin_name) {
             $ticket = SupportTicket::lockForUpdate()->findOrFail($ticket->id);
             if ($ticket->source !== 'whatsapp') {
@@ -330,6 +349,49 @@ class SupportWhatsappOpenerService
             }
             return $this->entregar_respuesta_whatsapp($ticket, $message, $admin_name);
         });
+    }
+
+    /**
+     * Fija en cuántos mensajes puede partirse, como mucho, la respuesta del próximo deliver_follow_up().
+     *
+     * Misión `tono-humano-martin` (13/11/2026): Martín parte sus respuestas en hasta cinco mensajes, uno
+     * por párrafo; el agente de leads y el resto de los llamadores siguen con MAX_PARTES (3). Quien lo
+     * sube tiene que volverlo a MAX_PARTES al terminar (en un `finally`): la instancia puede ser compartida.
+     *
+     * @param int $max_partes Tope de partes; menos de 1 se toma como 1.
+     *
+     * @return self
+     */
+    public function con_tope_de_partes(int $max_partes): self
+    {
+        // Un tope menor que uno no tiene sentido: equivale a no partir.
+        $this->tope_de_partes = max(1, $max_partes);
+
+        return $this;
+    }
+
+    /**
+     * Cambia las líneas de solo `---` de un texto por un renglón en blanco, sin dejar huecos triples.
+     *
+     * Es para el camino que NO parte (plantilla con la ventana cerrada, o adjunto): ahí el separador
+     * llegaría literal al cliente. Un texto sin líneas `---` vuelve idéntico, sin tocar sus espacios.
+     *
+     * @param string $texto Texto del agente.
+     *
+     * @return string
+     */
+    public static function sin_separadores(string $texto): string
+    {
+        // Sin una línea de solo tres guiones no hay nada que normalizar: se devuelve tal cual.
+        if (! preg_match('/^[ \t]*---[ \t]*$/m', $texto)) {
+            return $texto;
+        }
+
+        // Cada línea separadora queda vacía; después se colapsan los renglones en blanco seguidos a uno.
+        $sin_lineas = preg_replace('/^[ \t]*---[ \t]*$/m', '', $texto);
+        $colapsado = preg_replace("/\n[ \t]*(?:\n[ \t]*){2,}/", "\n\n", (string) $sin_lineas);
+
+        return trim((string) $colapsado);
     }
 
     private function entregar_respuesta_whatsapp(SupportTicket $ticket, SupportMessage $message, string $admin_name): array
@@ -363,11 +425,23 @@ class SupportWhatsappOpenerService
             $cuerpo = (string) ($message->body ?? '');
 
             $partes = $message->ai_generated_at !== null
-                ? $this->split_en_partes($cuerpo)
+                ? $this->split_en_partes($cuerpo, $this->tope_de_partes)
                 : (new SeparadorDeMensajesManuales())->partir($cuerpo);
 
             if (count($partes) > 1) {
                 return $this->deliver_en_partes($ticket, $message, $partes);
+            }
+        }
+
+        // Camino que no parte (ventana cerrada, adjunto, o una sola parte útil): si el texto es del
+        // agente, sus líneas `---` pasan a ser un renglón en blanco ANTES de mandar y de guardar. Si no,
+        // una plantilla de la ventana cerrada le llevaría al cliente "---" adentro de la variable.
+        // El texto de una persona no se toca: su separador tiene criterio propio (SeparadorDeMensajesManuales).
+        if ($message->ai_generated_at !== null) {
+            $normalizado = self::sin_separadores((string) ($message->body ?? ''));
+            if ($normalizado !== (string) ($message->body ?? '')) {
+                $message->body = $normalizado;
+                $message->save();
             }
         }
 
@@ -449,12 +523,16 @@ class SupportWhatsappOpenerService
      * El separador es una línea con tres guiones, igual que en el agente de leads. Se descartan
      * las partes vacías, así que un separador de más no genera un mensaje en blanco.
      *
-     * @param string $body Texto completo del agente.
+     * @param string $body       Texto completo del agente.
+     * @param int    $max_partes Tope de partes (default MAX_PARTES = 3, el del agente de leads; Martín usa 5).
      *
      * @return array<int, string>
      */
-    public function split_en_partes(string $body): array
+    public function split_en_partes(string $body, int $max_partes = self::MAX_PARTES): array
     {
+        // Un tope menor que uno equivale a no partir.
+        $max_partes = max(1, $max_partes);
+
         $partes = preg_split('/\n\s*---\s*\n/', $body);
         if ($partes === false) {
             return [trim($body)];
@@ -475,8 +553,8 @@ class SupportWhatsappOpenerService
         // Tope duro. El prompt le pide dos o tres, pero eso es una instruccion a un modelo, no
         // una garantia: ocho separadores serian ocho mensajes al cliente y ocho pausas de 1200ms
         // adentro del request del operador. Lo que sobra se pega a la ultima parte.
-        if (count($limpias) > self::MAX_PARTES) {
-            $sobrantes = array_splice($limpias, self::MAX_PARTES - 1);
+        if (count($limpias) > $max_partes) {
+            $sobrantes = array_splice($limpias, $max_partes - 1);
             $limpias[] = implode("\n\n", $sobrantes);
         }
 
@@ -503,6 +581,9 @@ class SupportWhatsappOpenerService
      * @param SupportTicket      $ticket  Ticket de la conversación.
      * @param SupportMessage     $message Mensaje original, que pasa a ser la primera parte.
      * @param array<int, string> $partes  Partes ya limpias, dos o más.
+     *
+     * Con `sent` o `partial` el resultado trae además `last_message_id`: el id (de la base) de la última
+     * parte persistida, haya salido o no.
      *
      * @return array<string, mixed>
      */
@@ -587,6 +668,11 @@ class SupportWhatsappOpenerService
             }
         }
 
+        // Id (de la base, no de Meta) de la última parte persistida. Clave nueva del 13/11/2026 (misión
+        // `tono-humano-martin`): Martín deja su operación y su caso apuntando a ESTA fila, que es la que sus
+        // guardas comparan contra el último mensaje de admin del ticket. Los demás llamadores no la leen.
+        $id_ultima_parte = (int) $filas[$total - 1]->id;
+
         if ($enviadas === 0) {
             return $this->mark_failed($message, $error, false, true, null);
         }
@@ -609,6 +695,7 @@ class SupportWhatsappOpenerService
                 'template_name' => null,
                 'sent_parts'    => $enviadas,
                 'total_parts'   => $total,
+                'last_message_id' => $id_ultima_parte,
             ];
         }
 
@@ -621,6 +708,7 @@ class SupportWhatsappOpenerService
             'template_name' => null,
             'sent_parts'    => $enviadas,
             'total_parts'   => $total,
+            'last_message_id' => $id_ultima_parte,
         ];
     }
 

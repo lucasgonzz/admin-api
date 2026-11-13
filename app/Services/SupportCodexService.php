@@ -29,6 +29,13 @@ class SupportCodexService
 {
     const LEASE_MINUTES = 15;
 
+    /**
+     * En cuántos mensajes puede salir partida, como mucho, una respuesta de Martín (misión
+     * `tono-humano-martin`, 13/11/2026: uno por párrafo, de 1 a 5). El separador es una línea con solo
+     * `---`, el mismo del agente de leads. Lo que sobra se pega a la última parte.
+     */
+    const MAX_PARTES_RESPUESTA = 5;
+
     private const CONFIRMATION_REVIEW_REASON = 'El cierre fue rechazado porque el mensaje no confirma el resultado. Revisar sin volver a pedir confirmación.';
 
     /**
@@ -1037,8 +1044,14 @@ class SupportCodexService
             if ($input['action'] === 'cerrar' && mb_stripos($body, 'de nada') === false) {
                 $body = 'De nada! ' . $body;
             }
-            // Una sola pieza: no hay reintentos de partes ni demoras de separación de mensajes.
-            $body = preg_replace('/^\s*---\s*$/m', '', $body);
+            // El texto tal como lo mandó el monitor, con sus líneas `---` (y con el «De nada! » del cierre
+            // delante, que así cae en la primera parte). Se guarda aparte porque el armado de la invitación a
+            // Robotito de acá abajo trabaja, como siempre, sobre el texto en una sola pieza.
+            $body_con_partes = $body;
+            // Hasta el 13/11/2026 la respuesta salía siempre en una sola pieza y el separador se borraba acá.
+            // Se sigue borrando (a renglón en blanco) para todo lo que no se puede partir; más abajo, si la
+            // respuesta es elegible, se recuperan las partes.
+            $body = SupportWhatsappOpenerService::sin_separadores($body);
             $tour_requested = $input['tour_requested'];
             $recordatorio = null;
             if ($tour_requested && SupportTourService::version_habilita_oferta($ticket) === false) {
@@ -1063,6 +1076,16 @@ class SupportCodexService
                         $tour_requested = true;
                     }
                 }
+            }
+            // Elegible para salir en partes: un texto puro de Martín. Con adjunto (viaja en un mensaje solo),
+            // con propuesta de actualización (su confirmación exige el texto exacto de UN mensaje), con
+            // Robotito (la invitación o su recordatorio tienen que quedar en el mensaje que la contiene) o
+            // con el aviso de avance de una misión, sale en una sola pieza como siempre.
+            $partible = $attachment === null && $proposal === null && ! $input['tour_requested'] && ! $tour_requested
+                && ! isset($input['tour_invitation']) && $recordatorio === null && ! isset($input['mission_progress_hash']);
+            if ($partible && $body_con_partes !== $body) {
+                // Solo entra si había separadores: un texto sin `---` queda exactamente como antes.
+                $body = $this->preparar_separadores($body_con_partes, true);
             }
             $message = SupportMessage::create([
                 'support_ticket_id' => $id,
@@ -1097,20 +1120,24 @@ class SupportCodexService
                 $message->remote_delivery_status = 'not_received';
                 $message->save();
             }
+            // `partial` (salieron las primeras partes y no las demás) cae acá igual que `unknown`: revisión
+            // humana y sin reintento ciego, porque el cliente ya leyó una parte de la respuesta.
             if ($result === null || ($result['delivery'] ?? '') !== 'sent') {
                 $operation->status = 'unknown';
-                $operation->detail = $ticket->source === 'erp'
-                    ? 'Entrega no confirmada. Revisá el chat del sistema antes de reintentar manualmente.'
-                    : 'Entrega no confirmada. Revisá WhatsApp antes de reintentar manualmente.';
+                $operation->detail = $this->detalle_de_entrega_incierta($ticket, $result);
                 $case->state = 'manual_review';
                 $case->review_reason = $operation->detail;
                 $case->review_requested_message_id = null;
                 $this->request_attention($ticket);
             } else {
                 $operation->status = 'sent';
+                // 🔴 Con la respuesta en partes, la operación y el caso apuntan a la ÚLTIMA parte: las guardas
+                // de cierre comparan el último mensaje de admin del ticket contra last_reply_id y buscan la
+                // operación por ese id. Sin partes, last_message_id no viene y queda el mensaje de siempre.
+                $operation->message_id = $this->id_de_la_ultima_parte($result, $message);
                 SupportCodexMissionProgress::announced_by($operation);
                 $case->handled_message_id = (int) $input['expected_message_id'];
-                $case->last_reply_id = (int) $message->id;
+                $case->last_reply_id = (int) $operation->message_id;
                 $this->apply_action($ticket, $case, $input);
             }
             $case->lease_hash = null;
@@ -1122,6 +1149,11 @@ class SupportCodexService
                     SupportMessageReceived::dispatch_after_commit((int) $message->id);
                 } else {
                     SupportMessageReceived::dispatch((int) $message->id);
+                }
+                // Las partes 2..N que se crearon por el sistema (ERP o ensayo) avisan a la pantalla igual que
+                // la primera. Las de WhatsApp ya las avisó el opener al mandarlas.
+                foreach ($this->ids_de_partes_nuevas($result) as $id_parte) {
+                    SupportMessageReceived::dispatch($id_parte);
                 }
                 SupportTicketUpdated::dispatch((int) $ticket->id);
             } catch (\Throwable $exception) {
@@ -1154,9 +1186,28 @@ class SupportCodexService
         return $ticket->source === 'whatsapp' && Prueba\PruebaEnsayoSinWhatsappService::es_ensayo($ticket->client);
     }
 
+    /**
+     * Entrega la respuesta de Martín por el canal del ticket, en una pieza o en partes.
+     *
+     * Hay partes solo si reply()/approve_draft() dejaron líneas `---` en el body, cosa que hacen únicamente
+     * con una respuesta elegible para partir (ver preparar_separadores()).
+     *
+     * @param SupportTicket  $ticket  Ticket ya bloqueado.
+     * @param SupportMessage $message Mensaje de Martín ya persistido (pasa a ser la primera parte).
+     *
+     * @return array{delivery: string, last_message_id?: int, sent_parts?: int, total_parts?: int, extra_message_ids?: array<int, int>}
+     *         `delivery` vale `sent`, `partial` (solo en partes), `unknown` o `failed`; `last_message_id`
+     *         es el id de la última parte; `extra_message_ids`, las partes 2..N que creó el camino del sistema.
+     */
     private function entregar_respuesta(SupportTicket $ticket, SupportMessage $message): array
     {
+        // Partes del texto, ya con el tope de cinco aplicado.
+        $partes = $this->partes_de_la_respuesta((string) $message->body);
+
         if ($this->respuesta_solo_en_el_sistema($ticket)) {
+            if (count($partes) > 1) {
+                return $this->entregar_partes_en_el_sistema($ticket, $message, $partes, false);
+            }
             // Cero llamadas a Kapso/Meta: la marca de sincronizado es lo que la hace visible en el sistema.
             $message->synced_to_client_at = now();
             $message->remote_delivery_status = null;
@@ -1166,7 +1217,19 @@ class SupportCodexService
         }
 
         if ($ticket->source === 'whatsapp') {
-            return app(SupportWhatsappOpenerService::class)->deliver_follow_up($ticket, $message, 'Martín, asistente técnico');
+            // El opener ya sabe partir (pausas, reintentos, partes persistidas antes de mandar): se le sube
+            // el tope a cinco solo para este envío y se le devuelve el suyo, aunque el envío explote.
+            $opener = app(SupportWhatsappOpenerService::class);
+            $opener->con_tope_de_partes(self::MAX_PARTES_RESPUESTA);
+            try {
+                return $opener->deliver_follow_up($ticket, $message, 'Martín, asistente técnico');
+            } finally {
+                $opener->con_tope_de_partes(SupportWhatsappOpenerService::MAX_PARTES);
+            }
+        }
+
+        if (count($partes) > 1) {
+            return $this->entregar_partes_en_el_sistema($ticket, $message, $partes, true);
         }
 
         $enviado = app(SupportClientSyncService::class)->sync_message_to_client($message);
@@ -1176,6 +1239,204 @@ class SupportCodexService
         }
 
         return ['delivery' => $enviado ? 'sent' : 'unknown'];
+    }
+
+    /**
+     * Entrega una respuesta partida por el chat del sistema (ERP) o, en un cliente de ensayo, solo en el sistema.
+     *
+     * Mismo orden que el envío partido de WhatsApp (SupportWhatsappOpenerService::deliver_en_partes()):
+     * PRIMERO se persisten todas las partes, marcadas como no recibidas, y recién después se sincronizan en
+     * orden, cortando en el primer fallo. Así una parte que no llegó queda visible en el hilo en vez de
+     * perderse, y mandar la tercera cuando la segunda no llegó no deja la conversación sin sentido.
+     *
+     * @param SupportTicket      $ticket      Ticket.
+     * @param SupportMessage     $message     Mensaje original, que pasa a ser la primera parte.
+     * @param array<int, string> $partes      Partes ya limpias, dos o más.
+     * @param bool               $sincronizar true: se mandan al empresa-api; false (ensayo): se marcan sincronizadas.
+     *
+     * @return array{delivery: string, last_message_id: int, sent_parts: int, total_parts: int, extra_message_ids: array<int, int>}
+     */
+    private function entregar_partes_en_el_sistema(SupportTicket $ticket, SupportMessage $message, array $partes, bool $sincronizar): array
+    {
+        // Cantidad de partes a entregar.
+        $total = count($partes);
+
+        // La primera parte se queda en el mensaje que ya existe; las demás nacen como mensajes propios del
+        // hilo, con la autoría y la marca de IA del original, no recibidas hasta que se sincronicen.
+        $message->body = $partes[0];
+        $message->save();
+        $filas = [$message];
+        $ids_nuevos = [];
+        for ($indice = 1; $indice < $total; $indice++) {
+            $fila = SupportMessage::create([
+                'support_ticket_id' => $ticket->id,
+                'sender_type' => 'admin',
+                'sender_admin_id' => $message->sender_admin_id,
+                'kind' => 'text',
+                'body' => $partes[$indice],
+                'ai_generated_at' => $message->ai_generated_at,
+                'delivered_at' => now(),
+                'remote_delivery_status' => 'not_received',
+            ]);
+            $filas[] = $fila;
+            $ids_nuevos[] = (int) $fila->id;
+        }
+
+        // Id de la última parte: a ella apuntan la operación y el caso si todo salió.
+        $id_ultima = (int) $filas[$total - 1]->id;
+
+        if (! $sincronizar) {
+            // Ensayo sin WhatsApp: cero llamadas afuera; la marca de sincronizado es lo que las muestra.
+            foreach ($filas as $fila) {
+                $fila->synced_to_client_at = now();
+                $fila->remote_delivery_status = null;
+                $fila->save();
+            }
+
+            return ['delivery' => 'sent', 'last_message_id' => $id_ultima, 'sent_parts' => $total,
+                'total_parts' => $total, 'extra_message_ids' => $ids_nuevos];
+        }
+
+        // Sincronización en orden: sync_message_to_client() marca synced_to_client_at en cada éxito.
+        $enviadas = 0;
+        foreach ($filas as $fila) {
+            $sincronizada = false;
+            try {
+                $sincronizada = app(SupportClientSyncService::class)->sync_message_to_client($fila);
+            } catch (\Throwable $exception) {
+                // Un error del puente es una entrega no confirmada de esta parte, no una caída del envío.
+                $sincronizada = false;
+            }
+            if (! $sincronizada) {
+                break;
+            }
+            $enviadas++;
+        }
+
+        // Las partes que no llegaron quedan marcadas como no recibidas (la primera incluida, si fue ella).
+        foreach ($filas as $indice => $fila) {
+            if ($indice >= $enviadas) {
+                $fila->remote_delivery_status = 'not_received';
+                $fila->save();
+            }
+        }
+
+        // Ninguna: igual que la pieza única, `unknown`. Algunas: `partial`, que se revisa a mano.
+        $delivery = $enviadas === $total ? 'sent' : ($enviadas === 0 ? 'unknown' : 'partial');
+
+        return ['delivery' => $delivery, 'last_message_id' => $id_ultima, 'sent_parts' => $enviadas,
+            'total_parts' => $total, 'extra_message_ids' => $ids_nuevos];
+    }
+
+    /**
+     * Parte el texto de una respuesta de Martín por sus líneas `---`, con el tope de MAX_PARTES_RESPUESTA.
+     *
+     * El separador es una línea con solo tres guiones (espacios alrededor permitidos), el mismo criterio
+     * que la regex `\n\s*---\s*\n` del agente de leads. Las partes vacías se descartan; lo que pasa del
+     * tope se pega a la última parte con un renglón en blanco.
+     *
+     * @param string $texto Texto completo.
+     *
+     * @return array<int, string> Una o más partes; un texto sin separadores devuelve una sola, recortada.
+     */
+    private function partes_de_la_respuesta(string $texto): array
+    {
+        // Trozos entre separadores, sin espacios de borde y sin vacíos.
+        $trozos = preg_split('/^[ \t]*---[ \t]*$/m', $texto);
+        $limpias = [];
+        foreach ($trozos === false ? [$texto] : $trozos as $trozo) {
+            $trozo = trim($trozo);
+            if ($trozo !== '') {
+                $limpias[] = $trozo;
+            }
+        }
+        if (empty($limpias)) {
+            return [trim($texto)];
+        }
+
+        // Tope duro: el prompt pide de una a cinco, pero es una instrucción a un modelo, no una garantía.
+        if (count($limpias) > self::MAX_PARTES_RESPUESTA) {
+            $sobrantes = array_splice($limpias, self::MAX_PARTES_RESPUESTA - 1);
+            $limpias[] = implode("\n\n", $sobrantes);
+        }
+
+        return $limpias;
+    }
+
+    /**
+     * Deja los separadores `---` de una respuesta listos para el envío.
+     *
+     * Elegible para partir: las partes se vuelven a unir con un separador canónico («renglón en blanco,
+     * `---`, renglón en blanco»), que el opener de WhatsApp (`\n\s*---\s*\n`) y partes_de_la_respuesta()
+     * parten igual. No elegible: el separador pasa a ser un renglón en blanco, sin huecos triples.
+     *
+     * @param string $texto    Texto con o sin separadores.
+     * @param bool   $partible Si la respuesta puede salir en partes.
+     *
+     * @return string
+     */
+    private function preparar_separadores(string $texto, bool $partible): string
+    {
+        // Lo que no se parte no puede llevar "---" literal al cliente.
+        if (! $partible) {
+            return SupportWhatsappOpenerService::sin_separadores($texto);
+        }
+
+        return implode("\n\n---\n\n", $this->partes_de_la_respuesta($texto));
+    }
+
+    /**
+     * Id de la última parte entregada, o el del mensaje mismo si la respuesta salió en una pieza.
+     *
+     * @param array<string, mixed>|null $result  Resultado de entregar_respuesta().
+     * @param SupportMessage            $message Mensaje original (primera parte).
+     *
+     * @return int
+     */
+    private function id_de_la_ultima_parte(?array $result, SupportMessage $message): int
+    {
+        // Sin `last_message_id` (una pieza, plantilla, adjunto o un espía de test) vale el mensaje mismo.
+        $ultimo = $result === null ? null : ($result['last_message_id'] ?? null);
+
+        return $ultimo === null ? (int) $message->id : (int) $ultimo;
+    }
+
+    /**
+     * Ids de las partes 2..N que creó el camino del sistema y que todavía no avisaron a la pantalla.
+     *
+     * @param array<string, mixed>|null $result Resultado de entregar_respuesta().
+     *
+     * @return array<int, int>
+     */
+    private function ids_de_partes_nuevas(?array $result): array
+    {
+        // Solo el camino del sistema (ERP o ensayo) devuelve esta clave; WhatsApp ya avisó al mandar.
+        $ids = $result === null ? [] : ($result['extra_message_ids'] ?? []);
+
+        return array_map('intval', is_array($ids) ? $ids : []);
+    }
+
+    /**
+     * Detalle de una entrega que no quedó confirmada entera, para la operación y la revisión de Lucas.
+     *
+     * @param SupportTicket             $ticket Ticket.
+     * @param array<string, mixed>|null $result Resultado de entregar_respuesta(), o null si explotó.
+     *
+     * @return string
+     */
+    private function detalle_de_entrega_incierta(SupportTicket $ticket, ?array $result): string
+    {
+        // Dónde tiene que mirar Lucas antes de reintentar a mano.
+        $donde = $ticket->source === 'erp' ? 'el chat del sistema' : 'WhatsApp';
+
+        // Entrega en partes cortada a mitad: el cliente ya recibió algunas; se dice cuántas de cuántas.
+        if ($result !== null && ($result['delivery'] ?? '') === 'partial') {
+            return 'Entrega parcial: salieron ' . (int) ($result['sent_parts'] ?? 0) . ' de ' . (int) ($result['total_parts'] ?? 0)
+                . ' partes de la respuesta; las demás quedaron en el hilo marcadas como no enviadas. Revisá '
+                . $donde . ' antes de reintentar manualmente.';
+        }
+
+        return 'Entrega no confirmada. Revisá ' . $donde . ' antes de reintentar manualmente.';
     }
 
     private function sincronizar_cierre_en_sistema(SupportTicket $ticket): void
@@ -1409,7 +1670,16 @@ class SupportCodexService
                     }
                 }
             }
-            if ($message->body !== $final) {
+            // Mismo criterio que reply() para los separadores `---`: un texto puro sale en partes; con adjunto,
+            // propuesta de actualización, aviso de avance o invitación a Robotito, en una sola pieza. Hasta el
+            // 13/11/2026 acá no se tocaban, y el opener partía en tres con la operación en la primera parte.
+            $partible = empty($input['requires_attachment']) && ! isset($input['upgrade_proposal'])
+                && ! isset($input['mission_progress_hash']) && ! isset($input['tour_invitation'])
+                && empty($input['tour_requested']) && ($message->erp_auto_reply['tour_requested'] ?? false) !== true;
+            $final = $this->preparar_separadores($final, $partible);
+            // La comparación con el borrador se hace con el borrador normalizado igual: reacomodar el
+            // separador no es una corrección de Lucas y no debe quedar como tal en ai_original_body.
+            if ($this->preparar_separadores(trim((string) $message->body), $partible) !== $final) {
                 $message->ai_original_body = $message->body;
             }
             $message->body = $final;
@@ -1472,15 +1742,17 @@ class SupportCodexService
             }
             if ($result !== null && ($result['delivery'] ?? '') === 'sent') {
                 $operation->status = 'sent';
+                // 🔴 Igual que en reply(): con partes, la operación y el caso pasan a la ÚLTIMA parte. Antes del
+                // envío la operación apuntaba al borrador (la primera parte), que es como la encuentra la aprobación.
+                $operation->message_id = $this->id_de_la_ultima_parte($result, $message);
                 SupportCodexMissionProgress::announced_by($operation);
                 $case->handled_message_id = (int) $operation->expected_message_id;
-                $case->last_reply_id = (int) $message->id;
+                $case->last_reply_id = (int) $operation->message_id;
                 $this->apply_action($ticket, $case, $input);
             } else {
+                // `partial` cae acá igual que `unknown`: revisión humana, sin reintento ciego.
                 $operation->status = 'unknown';
-                $operation->detail = $ticket->source === 'erp'
-                    ? 'Entrega no confirmada. Revisá el chat del sistema antes de reintentar manualmente.'
-                    : 'Entrega no confirmada. Revisá WhatsApp antes de reintentar manualmente.';
+                $operation->detail = $this->detalle_de_entrega_incierta($ticket, $result);
                 $case->state = 'manual_review';
                 $case->review_reason = $operation->detail;
                 $case->review_requested_message_id = null;
@@ -1499,6 +1771,10 @@ class SupportCodexService
                     SupportMessageReceived::dispatch_after_commit((int) $message->id);
                 } else {
                     SupportMessageReceived::dispatch((int) $message->id);
+                }
+                // Partes 2..N creadas por el camino del sistema (ERP o ensayo); las de WhatsApp ya se avisaron.
+                foreach ($this->ids_de_partes_nuevas($result) as $id_parte) {
+                    SupportMessageReceived::dispatch($id_parte);
                 }
                 SupportTicketUpdated::dispatch((int) $ticket->id);
             } catch (\Throwable $exception) {
