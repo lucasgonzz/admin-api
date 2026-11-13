@@ -347,6 +347,10 @@ class MetaConversionesService
         $existente = LeadEventoMeta::query()->where('lead_id', (int) $lead->id)
             ->where('canal', LeadEventoMeta::CANAL_WEB)->where('evento', LeadEventoMeta::EVENTO_WEB_START_TRIAL)->first();
         if ($existente !== null) {
+            /* La fila de un ensayo no se revive ni se corrige: queda como esté y, si estaba pendiente, la ataja enviar(). */
+            if (self::es_de_ensayo($lead)) {
+                return null;
+            }
             $recuperada = DB::transaction(function () use ($existente, $config, $momento, $lead) {
                 // Bloquear la fila evita competir con el reclamo del worker o con otro replay.
                 $fila = LeadEventoMeta::query()->whereKey($existente->id)->lockForUpdate()->first();
@@ -386,7 +390,7 @@ class MetaConversionesService
             $config ? LeadEventoMeta::ESTADO_PENDIENTE : LeadEventoMeta::ESTADO_SIN_CONFIGURAR,
             $momento, null
         );
-        if ($fila !== null && $config && $despachar) {
+        if ($fila !== null && $config && $despachar && $fila->estado === LeadEventoMeta::ESTADO_PENDIENTE) {
             $this->despachar($fila);
         }
 
@@ -480,7 +484,10 @@ class MetaConversionesService
 
         if ($despachar) {
             foreach ($creados as $fila) {
-                $this->despachar($fila);
+                /* Una fila que nació `omitido` (un ensayo, ver crear_fila()) no se encola. */
+                if ($fila->estado === LeadEventoMeta::ESTADO_PENDIENTE) {
+                    $this->despachar($fila);
+                }
             }
         }
 
@@ -587,6 +594,8 @@ class MetaConversionesService
             return null;
         }
 
+        /* El estado con que nació de verdad: un ensayo nace `omitido` aunque se haya pedido otro (ver crear_fila()). */
+        $estado = (string) $fila->estado;
         if ($estado === LeadEventoMeta::ESTADO_SIN_CONFIGURAR) {
             Log::channel('daily')->warning(
                 'Conversiones Meta: falta ' . self::config_que_falta($canal) . '. El Purchase queda sin_configurar y no sale ninguna llamada.',
@@ -702,6 +711,30 @@ class MetaConversionesService
     }
 
     /**
+     * ¿El lead es de un ENSAYO de la prueba gratuita? (misión ensayos-sin-eventos-meta, 13/11/2026.)
+     *
+     * Sí si su cliente (`promoted_client_id`) está marcado `clients.es_ensayo` —lo marca el alta con un correo de
+     * `prueba_ensayo_correos`, o `pruebas:ensayo --marcar`— o si el correo del lead está en esa misma lista (cubre
+     * al lead antes de tener cliente, o al que quedó sin él). Un lead real no cumple ninguna de las dos: para él
+     * nada cambia.
+     *
+     * @param Lead $lead
+     *
+     * @return bool
+     */
+    public static function es_de_ensayo(Lead $lead): bool
+    {
+        if (\App\Services\Prueba\PruebaSettings::es_correo_de_ensayo((string) $lead->email)) {
+            return true;
+        }
+        if ($lead->promoted_client_id === null || (string) $lead->promoted_client_id === '') {
+            return false;
+        }
+
+        return (bool) Client::query()->whereKey((int) $lead->promoted_client_id)->value('es_ensayo');
+    }
+
+    /**
      * Crea, en orden, las filas de los eventos que el lead alcanzó y no tiene registrados todavía en
      * este canal. El canal lo decide el que llama ({@see canal_del_lead()}).
      *
@@ -766,6 +799,15 @@ class MetaConversionesService
                 return null;
             }
             $contexto_web = $this->contexto_del_alta($lead);
+        }
+
+        /* 🔴 Un ensayo de la prueba gratuita no es una conversión (misión ensayos-sin-eventos-meta, 13/11/2026): la
+           fila se registra igual —así el observer y el conciliador no la vuelven a crear— pero nace `omitido` con su
+           motivo, sea cual sea el estado pedido, y nadie la reclama para mandarla. */
+        if (self::es_de_ensayo($lead)) {
+            $estado       = LeadEventoMeta::ESTADO_OMITIDO;
+            $motivo       = LeadEventoMeta::MOTIVO_ENSAYO;
+            $contexto_web = null;
         }
 
         $atributos = [
@@ -865,6 +907,15 @@ class MetaConversionesService
             );
 
             return LeadEventoMeta::ESTADO_ERROR;
+        }
+
+        /* 🔴 Ensayo de la prueba gratuita (misión ensayos-sin-eventos-meta, 13/11/2026): ataja lo que crear_fila() no
+           pudo, antes de salir a la red: una fila de antes de esta misión que quedó pendiente o en error, o un cliente
+           marcado como ensayo después de que su evento se registró (`pruebas:ensayo --marcar`). */
+        if (self::es_de_ensayo($lead)) {
+            $this->marcar_omitido($evento, LeadEventoMeta::MOTIVO_ENSAYO);
+
+            return LeadEventoMeta::ESTADO_OMITIDO;
         }
 
         if ($evento->evento === LeadEventoMeta::EVENTO_WEB_START_TRIAL) {
@@ -1616,7 +1667,8 @@ class MetaConversionesService
                 'contexto_web' => null,
             ]);
 
-        Log::channel('daily')->info('Conversiones Meta: el evento no sale porque el lead cambió de canal.', [
+        Log::channel('daily')->info('Conversiones Meta: el evento queda omitido y no sale.', [
+            'motivo'              => $motivo,
             'lead_evento_meta_id' => (int) $evento->id,
             'lead_id'             => (int) $evento->lead_id,
             'canal'               => self::canal_de_la_fila($evento),

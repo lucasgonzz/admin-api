@@ -124,7 +124,23 @@ class AltaDePruebaService
 
         /* El uuid PROPIO de la prueba (`trial_instances.seguimiento_uuid`), no el del lead: el del lead ya viaja en los
            links públicos de la demo (`demo/{uuid}`) y no tiene por qué abrir el seguimiento de la prueba. */
-        return $this->respuesta(201, ['uuid' => (string) $instancia->seguimiento_uuid, 'meta_eventos' => $meta_eventos]);
+        /* `ensayo` (misión ensayos-sin-eventos-meta, 13/11/2026): con `true` la landing no dispara ningún evento del
+           píxel y lo apaga para el resto de la visita; el servidor ya dejó sus filas `omitido`. `meta_eventos` se manda
+           igual que siempre a propósito: una landing anterior a la marca, con la lista vacía, caería al id derivado del
+           uuid y mandaría `Lead` y `StartTrial` desde el navegador. */
+        try {
+            $ensayo = MetaConversionesService::es_de_ensayo($lead_listo);
+        } catch (\Throwable $e) {
+            /* La prueba ya está creada: una lectura caída no puede convertir el 201 en un error. */
+            $ensayo = false;
+            Log::error('AltaDePrueba: no se pudo saber si el alta es de ensayo.', ['lead_id' => $lead_listo->id, 'error' => $e->getMessage()]);
+        }
+
+        return $this->respuesta(201, [
+            'uuid'         => (string) $instancia->seguimiento_uuid,
+            'meta_eventos' => $meta_eventos,
+            'ensayo'       => $ensayo,
+        ]);
     }
 
     /**

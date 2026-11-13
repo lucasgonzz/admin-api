@@ -104,6 +104,14 @@ class LeadEventoMeta extends Model
     const MOTIVO_CANAL_CAMBIADO = 'El lead cambió de canal';
 
     /**
+     * Motivo del `omitido` de un evento de un ENSAYO de la prueba gratuita (misión ensayos-sin-eventos-meta,
+     * 13/11/2026): el cliente está marcado `clients.es_ensayo` o el correo del lead está en `prueba_ensayo_correos`.
+     * Un ensayo no es una conversión: mandarlo le enseña a la campaña (que optimiza por `StartTrial`) un negocio
+     * que no existe. Ver `MetaConversionesService::es_de_ensayo()`.
+     */
+    const MOTIVO_ENSAYO = 'Ensayo de la prueba gratuita (cliente es_ensayo o correo de prueba_ensayo_correos): no se manda a Meta.';
+
+    /**
      * Motivo del `omitido` de una compra vieja que informa `leads:meta-capi-compras` (misión
      * purchase-capi-al-promover, 22/10/2026): Meta rechaza un `event_time` de más de 7 días (los 62
      * días de su doc son para ventas en local físico, `physical_store`, y una venta por WhatsApp no
