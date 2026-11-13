@@ -70,7 +70,7 @@ class ImplementationFollowupService
     const ACCION = 'seguimiento';
 
     /** El operador que figura en la plantilla `cc_soporte_apertura` («Hola X, soy <operador>…»). */
-    const OPERADOR = 'Martín, asistente técnico';
+    const OPERADOR = 'Martín';
 
     /** Minutos que se corre un seguimiento cuyo envío falló (Kapso, Meta), para que no se reofrezca en la misma vuelta. */
     const MINUTOS_TRAS_UN_FALLO = 60;
@@ -1626,7 +1626,7 @@ class ImplementationFollowupService
     /**
      * El remitente del envío: el mismo admin con el que `claude/*` firma lo que hace
      * (`ClaudeImplementationOpsController::resolver_creador()`, replicado: es `protected`), con el nombre cambiado
-     * EN MEMORIA a «Martín, asistente técnico» para la plantilla. 🔴 Es un clon que nunca se guarda: ningún Admin
+     * EN MEMORIA a «Martín» para la plantilla. 🔴 Es un clon que nunca se guarda: ningún Admin
      * real cambia de nombre.
      *
      * @return Admin|null

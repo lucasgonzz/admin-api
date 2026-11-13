@@ -1222,7 +1222,7 @@ class SupportCodexService
             $opener = app(SupportWhatsappOpenerService::class);
             $opener->con_tope_de_partes(self::MAX_PARTES_RESPUESTA);
             try {
-                return $opener->deliver_follow_up($ticket, $message, 'Martín, asistente técnico');
+                return $opener->deliver_follow_up($ticket, $message, 'Martín');
             } finally {
                 $opener->con_tope_de_partes(SupportWhatsappOpenerService::MAX_PARTES);
             }

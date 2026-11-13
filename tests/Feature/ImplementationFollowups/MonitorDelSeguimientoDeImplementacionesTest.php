@@ -283,7 +283,7 @@ class MonitorDelSeguimientoDeImplementacionesTest extends BaseDeSeguimientos
     // ── send ─────────────────────────────────────────────────────────────────────────────────────
 
     /**
-     * El camino feliz con la ventana cerrada: sale por plantilla con «Martín, asistente técnico» como operador, por
+     * El camino feliz con la ventana cerrada: sale por plantilla con «Martín» como operador, por
      * el ticket del contacto; suma uno sin respuesta, corre el próximo +2 hábiles, evento `enviado` con el texto,
      * acción `seguimiento` en la etapa y la reserva suelta. Ningún Admin real cambia de nombre.
      *
@@ -306,7 +306,7 @@ class MonitorDelSeguimientoDeImplementacionesTest extends BaseDeSeguimientos
 
         $this->assertCount(1, $this->espia->plantillas);
         $this->assertCount(0, $this->espia->textos);
-        $this->assertSame('Martín, asistente técnico', $this->espia->plantillas[0]['variables'][1]);
+        $this->assertSame('Martín', $this->espia->plantillas[0]['variables'][1]);
         $this->assertSame($nombre_del_admin, $this->admin->refresh()->name, 'el Admin real no se renombra');
 
         $ticket = SupportTicket::find($ticket_id);
