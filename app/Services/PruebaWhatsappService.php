@@ -1165,9 +1165,10 @@ class PruebaWhatsappService
     public function mandar_texto_por_ticket(Client $client, string $texto, ?int $ticket_id = null): array
     {
         /* Cliente de ensayo (12/11/2026): cero WhatsApp, sea cual sea el ticket del origen. El texto va a la
-           conversación del sistema del dueño. */
+           conversación del sistema del dueño: la del origen si es una conversación del sistema abierta del dueño
+           (A7, 14/11/2026: los avisos de la carga van al chat donde se lanzó), si no la de siempre. */
         if (Prueba\PruebaEnsayoSinWhatsappService::es_ensayo($client)) {
-            return app(Prueba\PruebaEnsayoSinWhatsappService::class)->dejar($client, $texto);
+            return app(Prueba\PruebaEnsayoSinWhatsappService::class)->dejar($client, $texto, [], $ticket_id);
         }
 
         /* El aviso vuelve por el MISMO canal por el que llegó el archivo (misión prueba-e2e-campana-imperio,
