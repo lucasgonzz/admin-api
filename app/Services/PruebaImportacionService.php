@@ -108,13 +108,13 @@ class PruebaImportacionService
 
         // Modo soporte (misión cruzada importaciones-de-martin, 11/11/2026): el Excel adjunto del dueño (artículos,
         // clientes o proveedores) o la planilla de artículos derivada de un PDF adjunto del dueño (`file` +
-        // `pdf_attachment_id`). El alcance de stock sigue siendo solo para el Excel de artículos.
+        // `pdf_attachment_id`) o catálogo público de WhatsApp acreditado por un mensaje del dueño. El alcance de stock sigue siendo solo para el Excel de artículos.
         $modelo_pedido = isset($input['model']) ? (string) $input['model'] : 'article';
-        if ($soporte_activo && (isset($input['pdf_attachment_id'])
+        if ($soporte_activo && ((isset($input['pdf_attachment_id']) || isset($input['whatsapp_catalog_url']))
                 ? (!isset($input['file']) || isset($input['attachment_id']) || $modelo_pedido !== 'article' || $alcance !== null)
                 : (!isset($input['attachment_id']) || isset($input['file']) || !in_array($modelo_pedido, self::MODELOS, true)
                     || ($alcance !== null && $modelo_pedido !== 'article')))) {
-            return ['estado' => 'archivo_invalido', 'mensaje' => 'Adjuntá al ticket el Excel del negocio (artículos, clientes o proveedores), o mandá la planilla de artículos derivada del PDF que mandó el dueño.'];
+            return ['estado' => 'archivo_invalido', 'mensaje' => 'Adjuntá al ticket el Excel del negocio (artículos, clientes o proveedores), o mandá la planilla de artículos derivada del PDF o catálogo de WhatsApp que mandó el dueño.'];
         }
 
         $archivo = $this->archivo_excel($ticket, $input, $soporte_activo);
@@ -145,6 +145,23 @@ class PruebaImportacionService
             if ($soporte_activo) {
                 $origen = 'pdf';
             }
+        }
+
+        if (isset($input['whatsapp_catalog_url']) || isset($input['whatsapp_catalog_message_id'])) {
+            $url = $this->normalizar_catalogo_whatsapp((string) ($input['whatsapp_catalog_url'] ?? ''));
+            $mensaje = SupportMessage::whereKey($input['whatsapp_catalog_message_id'] ?? 0)
+                ->where('support_ticket_id', $ticket->id)->where('sender_type', 'user')->first();
+            if (isset($input['pdf_attachment_id']) || isset($input['attachment_id']) || !isset($input['file'])
+                || $modelo !== 'article' || $alcance !== null
+                || $url === null || $mensaje === null || !$this->mensaje_contiene_catalogo($mensaje, $url)) {
+                return ['estado' => 'sin_fuente', 'mensaje' => 'El catálogo de WhatsApp debe ser un enlace enviado por el negocio en este ticket.'];
+            }
+            if ($soporte_activo && !$this->es_entrante_del_dueno($ticket, $mensaje)) {
+                return ['estado' => 'archivo_sin_remitente_verificado', 'mensaje' => 'El enlace debe llegar desde el WhatsApp registrado del dueño.'];
+            }
+            $origen = 'catalogo_whatsapp';
+            // Regenerar el XLSX de este pedido no duplica la migración; un nuevo pedido puede actualizarlo.
+            $clave = hash('sha256', 'catalogo_whatsapp:' . $ticket->id . ':' . $mensaje->id . ':' . $url);
         }
 
         if ($soporte_activo && $modelo !== 'article') {
@@ -254,6 +271,29 @@ class PruebaImportacionService
             'cuerpo'        => $cuerpo,
             'filename'      => $archivo['filename'],
         ];
+    }
+
+    private function normalizar_catalogo_whatsapp(string $url): ?string
+    {
+        if (strlen($url) > 500) { return null; }
+        $partes = parse_url(trim($url));
+        if (!is_array($partes) || ($partes['scheme'] ?? '') !== 'https'
+            || isset($partes['user']) || isset($partes['pass']) || isset($partes['port']) || isset($partes['fragment'])) {
+            return null;
+        }
+        $host = strtolower($partes['host'] ?? '');
+        if (!in_array($host, ['wa.me', 'www.whatsapp.com'], true)) { return null; }
+        $patron = $host === 'wa.me' ? '~\A/c/([1-9][0-9]{6,14})/?\z~' : '~\A/catalog/([1-9][0-9]{6,14})/?\z~';
+        return preg_match($patron, $partes['path'] ?? '', $m) === 1 ? 'https://wa.me/c/' . $m[1] : null;
+    }
+
+    private function mensaje_contiene_catalogo(SupportMessage $mensaje, string $url): bool
+    {
+        preg_match_all('~https://[^\s<>]+~u', (string) $mensaje->body, $enlaces);
+        foreach ($enlaces[0] as $enlace) {
+            if ($this->normalizar_catalogo_whatsapp(rtrim($enlace, '.,;)')) === $url) { return true; }
+        }
+        return false;
     }
 
     /**

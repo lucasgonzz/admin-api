@@ -368,7 +368,7 @@ class SupportCodexService
             'reason' => $this->pending_reason($ticket, $case, true, true),
             // El helper debe verificar esta capacidad ANTES de pedir el modo nuevo: un admin
             // anterior ignoraría el campo y ejecutaría el resume que consume la consulta.
-            'capabilities' => ['mission_started_notice' => true, 'coordinated_maintenance' => SupportMaintenancePolicy::available(), 'support_store_upgrade' => SupportMaintenancePolicy::available(), 'mission_progress' => true, 'continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => $capacidades_de_prueba['prueba_import'], 'prueba_import_resolver' => $capacidades_de_prueba['prueba_import_resolver'],
+            'capabilities' => ['mission_started_notice' => true, 'coordinated_maintenance' => SupportMaintenancePolicy::available(), 'support_store_upgrade' => SupportMaintenancePolicy::available(), 'mission_progress' => true, 'continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'migration_blocked_handoff' => true, 'whatsapp_catalog_import' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => $capacidades_de_prueba['prueba_import'], 'prueba_import_resolver' => $capacidades_de_prueba['prueba_import_resolver'],
                 'soporte_import' => $soporte_activo, 'soporte_import_resolver' => $soporte_activo,
                 'soporte_import_stock_existente' => $soporte_activo,
                 // Misión cruzada importaciones-de-martin (11/11/2026): la planilla derivada del PDF del dueño, el Excel
@@ -868,6 +868,9 @@ class SupportCodexService
         // Se conserva el hash anterior de las acciones existentes para sus replays tras el deploy.
         if ($input['action'] === 'pedir_revision') {
             $hash_payload[] = $input['review_reason'] ?? null;
+            if (isset($input['migration_blocked_reason'])) {
+                $hash_payload[] = ['migration_blocked_reason' => trim($input['migration_blocked_reason'])];
+            }
         }
         if ($input['action'] === 'escalar' && isset($input['close_on_mission_start'])) {
             $hash_payload[] = (bool) $input['close_on_mission_start'];
@@ -982,6 +985,8 @@ class SupportCodexService
                 'request_hash' => $hash,
                 'status' => 'sending',
                 'message_id' => null, 'detail' => null, 'approval_payload' => null,
+                'migration_blocked_reason' => isset($input['migration_blocked_reason']) ? trim($input['migration_blocked_reason']) : null,
+                'migration_notice_sent_at' => null, 'migration_notice_state' => null,
             ]);
             $operation->save();
             if (isset($input['mission_progress_hash'])) {
@@ -2294,6 +2299,10 @@ class SupportCodexService
                 'message_id' => $operation->message_id ? (int) $operation->message_id : null,
                 'action' => $operation->action,
                 'detail' => $operation->detail,
+                'migration_notice' => $operation->migration_blocked_reason === null ? null : [
+                    'status' => $operation->migration_notice_state ?? 'pending',
+                    'sent_at' => $operation->migration_notice_sent_at,
+                ],
                 'reconciliation' => $operation->reconciled_at === null ? null : [
                     'outcome' => $operation->reconciliation_outcome,
                     'by' => $operation->reconciled_by,

@@ -47,6 +47,40 @@ class ImportacionDesdeElTicketTest extends BaseDeLaPrueba
         $this->adjunto = $this->adjuntar($this->ticket, 'soporte/lista.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     }
 
+    public function test_catalogo_whatsapp_exige_enlace_del_negocio_en_el_mismo_ticket(): void
+    {
+        $message = SupportMessage::create(['support_ticket_id' => $this->ticket->id, 'sender_type' => 'user',
+            'kind' => 'text', 'body' => 'Mi catálogo https://www.whatsapp.com/catalog/5493483524823/?app_absent=0.']);
+        $this->fakear_http(['*/admin-sync/ai-excel-import/analyze' => Http::response(['analysis_uuid' => 'uuid-catalogo', 'automatizar_prueba' => true], 202)]);
+        $payload = ['file' => ['filename' => 'catalogo.xlsx', 'content_base64' => base64_encode('excel')],
+            'whatsapp_catalog_url' => 'https://wa.me/c/5493483524823', 'whatsapp_catalog_message_id' => $message->id];
+        $this->importar($payload)->assertOk()->assertJsonPath('estado', 'aceptado');
+        Http::assertSent(function ($request) { return $this->campo($request, 'origen') === 'catalogo_whatsapp'; });
+        $payload['whatsapp_catalog_url'] = 'https://wa.me/c/5491111111111';
+        $this->importar($payload)->assertStatus(422)->assertJsonPath('estado', 'sin_fuente');
+        $payload['whatsapp_catalog_url'] = 'https://wa.me/c/5493483524823';
+        $message->update(['sender_type' => 'admin']);
+        $this->importar($payload)->assertStatus(422)->assertJsonPath('estado', 'sin_fuente');
+    }
+
+    public function test_catalogo_del_dueno_activo_requiere_remitente_verificado_y_capacidad(): void
+    {
+        $this->pasar_a_activo();
+        $mensaje = SupportMessage::findOrFail($this->adjunto->support_message_id);
+        $mensaje->update(['body' => 'https://wa.me/c/5493483524823']);
+        $this->fakear_http([
+            '*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response(['automatizar_soporte' => true], 200),
+            '*/admin-sync/ai-excel-import/analyze' => Http::response(['analysis_uuid' => 'uuid-catalogo-activo', 'automatizar_soporte' => true], 202),
+        ]);
+        $reserva = $this->reservar_turno((int) $mensaje->id);
+        $payload = ['file' => ['filename' => 'catalogo.xlsx', 'content_base64' => base64_encode('excel')],
+            'whatsapp_catalog_url' => 'https://wa.me/c/5493483524823', 'whatsapp_catalog_message_id' => $mensaje->id,
+            'automatizar_soporte' => true] + $reserva;
+        $this->importar($payload)->assertOk()->assertJsonPath('estado', 'aceptado');
+        $mensaje->update(['whatsapp_remitente_crudo' => '+5491111111111']);
+        $this->importar($payload)->assertStatus(422)->assertJsonPath('estado', 'archivo_sin_remitente_verificado');
+    }
+
     /**
      * Un adjunto del último mensaje del ticket, con su archivo en el disco falso.
      *

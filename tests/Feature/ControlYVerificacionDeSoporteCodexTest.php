@@ -111,6 +111,61 @@ class ControlYVerificacionDeSoporteCodexTest extends TestCase
         ], $extra), $this->headers);
     }
 
+    public function test_migracion_bloqueada_avisa_por_correo_sin_duplicar_whatsapp(): void
+    {
+        \Illuminate\Support\Facades\Mail::fake();
+        $ticket = $this->ticket();
+        $claim = $this->claim($ticket);
+        $extra = ['action' => 'pedir_revision', 'review_reason' => 'Necesita migración desde catálogo.',
+            'migration_blocked_reason' => 'El catálogo de WhatsApp no permite obtener todos los productos.',
+            'body' => 'Voy a consultar con soporte cómo podemos realizar la migración y te aviso por acá.'];
+        $this->reply($ticket, $claim, $extra)->assertOk()->assertJsonPath('operation.migration_notice.status', 'pending');
+        $this->assertSame('manual_review', $ticket->fresh()->support_codex_case->state);
+        $this->assertSame('open', $ticket->fresh()->status);
+        app(\App\Services\SupportMigrationBlockedNoticeService::class)->conciliar();
+        app(\App\Services\SupportMigrationBlockedNoticeService::class)->conciliar();
+        $this->reply($ticket, $claim, $extra)->assertOk()->assertJsonPath('operation.migration_notice.status', 'sent');
+        $this->assertCount(1, $this->transport->sent);
+        \Illuminate\Support\Facades\Mail::assertSent(\App\Mail\SupportMigrationBlockedMail::class, function ($mail) use ($ticket) {
+            return $mail->hasTo(\App\Services\SupportCodexHealthService::RECIPIENT)
+                && $mail->notice['ticket_id'] === $ticket->id
+                && strpos($mail->notice['source'], 'No puedo abrir Ventas') !== false;
+        });
+        \Illuminate\Support\Facades\Mail::assertSent(\App\Mail\SupportMigrationBlockedMail::class, 1);
+        $extra['migration_blocked_reason'] = 'Otro motivo';
+        $this->reply($ticket, $claim, $extra)->assertStatus(409);
+    }
+
+    public function test_bloqueo_de_migracion_requiere_pedir_revision(): void
+    {
+        $ticket = $this->ticket();
+        $this->reply($ticket, $this->claim($ticket), ['migration_blocked_reason' => 'No se pudo migrar.'])->assertStatus(422);
+        $this->assertCount(0, $this->transport->sent);
+    }
+
+    public function test_migracion_no_envia_correo_hasta_aprobacion_ni_reintenta_smtp_incierto(): void
+    {
+        \Illuminate\Support\Facades\Mail::fake();
+        $ticket = $this->ticket();
+        $this->verification($ticket);
+        $this->reply($ticket, $this->claim($ticket), ['action' => 'pedir_revision',
+            'review_reason' => 'Revisar migración.', 'migration_blocked_reason' => 'Fuente inaccesible.'])->assertOk()
+            ->assertJsonPath('operation.status', 'awaiting_approval');
+        app(\App\Services\SupportMigrationBlockedNoticeService::class)->conciliar();
+        \Illuminate\Support\Facades\Mail::assertNothingSent();
+        $operation = SupportCodexOperation::where('support_ticket_id', $ticket->id)->firstOrFail();
+        // La conciliación de una entrega incierta también habilita el aviso, sin otro WhatsApp.
+        $operation->update(['status' => 'reconciled_sent']);
+        \Illuminate\Support\Facades\Mail::shouldReceive('mailer')->with('support_monitor')->once()->andThrow(new \RuntimeException('SMTP caído'));
+        app(\App\Services\SupportMigrationBlockedNoticeService::class)->conciliar();
+        $this->assertNull($operation->fresh()->migration_notice_sent_at);
+        \Illuminate\Support\Facades\Mail::fake();
+        app(\App\Services\SupportMigrationBlockedNoticeService::class)->conciliar();
+        \Illuminate\Support\Facades\Mail::assertNothingSent();
+        $this->assertSame('uncertain', $operation->fresh()->migration_notice_state);
+        $this->assertCount(0, $this->transport->sent);
+    }
+
     public function test_todos_nacen_autonomos_aun_con_config_global_o_payload_true(): void
     {
         AdminSetting::set(SupportAiSettings::KEY_REQUIRE_VERIFICATION, '1');

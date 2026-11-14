@@ -261,6 +261,7 @@ class ClaudeSupportCodexController extends Controller
             'mission' => 'sometimes|nullable|string|max:30000',
             'close_on_mission_start' => 'sometimes|boolean|prohibited_unless:action,escalar',
             'review_reason' => 'required_if:action,pedir_revision|nullable|string|max:500',
+            'migration_blocked_reason' => 'sometimes|required|string|max:2000|prohibited_unless:action,pedir_revision',
             'thread_id' => 'sometimes|string|max:150',
             'confirmation_message_id' => 'sometimes|nullable|integer|min:1',
         ]);
@@ -413,6 +414,8 @@ class ClaudeSupportCodexController extends Controller
             'file.filename' => 'required_with:file|string|max:160',
             'file.content_base64' => 'required_with:file|string|max:14000000',
             'pdf_attachment_id' => 'sometimes|integer|min:1',
+            'whatsapp_catalog_url' => 'required_with:whatsapp_catalog_message_id|nullable|string|max:500',
+            'whatsapp_catalog_message_id' => 'required_with:whatsapp_catalog_url|nullable|integer|min:1',
             'model' => 'sometimes|nullable|in:article,client,provider',
             'provider_id' => 'sometimes|nullable|integer|min:1',
             'origen' => 'sometimes|nullable|string|max:40',
@@ -438,8 +441,9 @@ class ClaudeSupportCodexController extends Controller
                 $soporte->assert_current($ticket, $data + ['action' => 'responder']);
                 // La planilla derivada de un PDF (misión importaciones-de-martin) la sube Martín en una atención
                 // posterior: lo que acredita al dueño es el PDF, que el servicio exige entrante del dueño.
-                $mensaje = isset($data['pdf_attachment_id']) ? null : SupportMessage::find($data['expected_message_id']);
-                if (!isset($data['pdf_attachment_id']) && !$service->es_entrante_del_dueno($ticket, $mensaje)) {
+                $derivado = isset($data['pdf_attachment_id']) || isset($data['whatsapp_catalog_url']);
+                $mensaje = $derivado ? null : SupportMessage::find($data['expected_message_id']);
+                if (!$derivado && !$service->es_entrante_del_dueno($ticket, $mensaje)) {
                     return ['estado' => 'archivo_sin_remitente_verificado',
                         'mensaje' => 'Reenviá el Excel desde el WhatsApp registrado del dueño para poder usarlo.'];
                 }
