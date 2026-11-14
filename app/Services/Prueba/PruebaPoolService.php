@@ -28,6 +28,19 @@ class PruebaPoolService
 
     const SOURCE_BLOQUE = 'prueba_pool';
 
+    /**
+     * 🔴 Cupo de certificados de Let's Encrypt (A5, 14/11/2026). Cada armado emite un certificado por host
+     * (`prueba-NN`, `api-prueba-NN`, `tienda-prueba-NN`, `api-tienda-prueba-NN`) y Let's Encrypt admite 5 por
+     * semana para el mismo conjunto de nombres. Medido en producción: `prueba-05`, armado 7 veces en 7 días,
+     * fallaba siempre en «certificados del pool» con «too many certificates (5) already issued». Un nombre que
+     * ya se armó ARMADOS_MAXIMOS_POR_NOMBRE veces en la ventana no se elige: se deja uno de margen respecto
+     * de los 5 porque un armado puede pedir el certificado más de una vez (un reintento desde el panel).
+     */
+    const ARMADOS_MAXIMOS_POR_NOMBRE = 4;
+
+    /** La ventana del cupo de Let's Encrypt: 7 días (el cupo se va devolviendo de a uno cada ~34 horas). */
+    const VENTANA_ARMADOS_DIAS = 7;
+
     /** Cuántas instancias libres o en armado hay. */
     public static function libres_o_creando(): int
     {
@@ -193,14 +206,29 @@ class PruebaPoolService
         });
     }
 
-    /** `prueba-01`, `prueba-02`... el primero que no exista en la tabla (las borradas liberan el nombre). */
+    /**
+     * `prueba-01`, `prueba-02`... el primero que no exista en la tabla (las borradas liberan el nombre) y que
+     * no esté gastado para Let's Encrypt (ver ARMADOS_MAXIMOS_POR_NOMBRE). Sin nombres gastados, el resultado
+     * es el de siempre: el más bajo libre.
+     */
     public function proximo_nombre_libre(): string
     {
         $ocupados = TrialInstance::where('estado', '!=', TrialInstance::ESTADO_BORRADA)->pluck('nombre')->all();
+        $armados  = $this->armados_recientes_por_nombre();
+        $gastados = [];
 
         for ($n = 1; $n <= self::MAX_NUMERO; $n++) {
             $nombre = PruebaNombres::nombre_numero($n);
             if (! in_array($nombre, $ocupados, true)) {
+                if (isset($armados[$nombre]) && $armados[$nombre] >= self::ARMADOS_MAXIMOS_POR_NOMBRE) {
+                    /* Gastado: armarlo de nuevo fallaría en los certificados. Se pasa al número siguiente. */
+                    $gastados[] = $nombre . ' (' . $armados[$nombre] . ')';
+                    continue;
+                }
+                if ($gastados !== []) {
+                    Log::info('PruebaPoolService: nombres salteados por el cupo de Let\'s Encrypt.', ['salteados' => $gastados, 'elegido' => $nombre]);
+                }
+
                 /* Una fila borrada con ese nombre se renombra para que el único no choque. */
                 TrialInstance::where('nombre', $nombre)
                     ->where('estado', TrialInstance::ESTADO_BORRADA)
@@ -210,7 +238,42 @@ class PruebaPoolService
             }
         }
 
+        if ($gastados !== []) {
+            throw new \RuntimeException(
+                'No quedan nombres libres en el pool (prueba-01 a prueba-99): los que no están ocupados ya se armaron '
+                    . self::ARMADOS_MAXIMOS_POR_NOMBRE . ' o más veces en los últimos ' . self::VENTANA_ARMADOS_DIAS
+                    . ' días y Let\'s Encrypt no les emitiría el certificado (' . implode(', ', $gastados) . ').'
+            );
+        }
+
         throw new \RuntimeException('No quedan nombres libres en el pool (prueba-01 a prueba-99).');
+    }
+
+    /**
+     * Cuántas veces se armó cada nombre en la ventana del cupo de Let's Encrypt, en UNA consulta.
+     *
+     * Un armado es una fila de `trial_instances` creada en la ventana: la viva (`prueba-05`) y las borradas, que
+     * al reciclar el nombre quedan renombradas `prueba-05~a1b2c3` y conservan su `created_at` (el renombrado es un
+     * `update()` por query builder, que solo toca `updated_at`). La agrupación por nombre base se hace acá, cortando
+     * en el primer `~`, y no con un `LIKE`: así `prueba-05~…` nunca se confunde con `prueba-050` ni con `prueba-5`.
+     *
+     * Cuenta también una fila cuyo armado falló ANTES de llegar a los certificados (en `dns` o en `crear`): no gastó
+     * cupo, pero contarla es conservador y lo peor que hace es pasar al número siguiente antes de tiempo.
+     *
+     * @return array<string, int> nombre base => armados en la ventana.
+     */
+    private function armados_recientes_por_nombre(): array
+    {
+        $nombres = TrialInstance::where('created_at', '>=', now()->subDays(self::VENTANA_ARMADOS_DIAS))->pluck('nombre')->all();
+
+        $armados = [];
+        foreach ($nombres as $nombre) {
+            $partes = explode('~', (string) $nombre, 2);
+            $base   = $partes[0];
+            $armados[$base] = isset($armados[$base]) ? $armados[$base] + 1 : 1;
+        }
+
+        return $armados;
     }
 
     /**
