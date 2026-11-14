@@ -800,6 +800,8 @@ class PruebaImportacionService
             $pedido = Http::withHeaders(['X-Admin-Api-Key' => $clave, 'Accept' => 'application/json'])
                 ->timeout($timeout)
                 ->withOptions(['allow_redirects' => false]);
+            // A6.1: negocio en prueba → IP del VPS sin DNS; cualquier otro cliente, el pedido intacto.
+            $pedido = app(\App\Services\Prueba\PruebaResolucionLocal::class)->aplicar($pedido, $client, $url);
 
             foreach ($archivos as $archivo) {
                 $pedido = $pedido->attach($archivo['nombre'], $archivo['bytes'], $archivo['filename']);

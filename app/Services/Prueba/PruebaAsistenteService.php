@@ -74,8 +74,10 @@ class PruebaAsistenteService
         }
 
         try {
-            $respuesta = Http::acceptJson()->withHeaders(['X-Admin-Api-Key' => $clave])
-                ->timeout(4)->withOptions(['allow_redirects' => false])->get($url);
+            $pedido = Http::acceptJson()->withHeaders(['X-Admin-Api-Key' => $clave])
+                ->timeout(4)->withOptions(['allow_redirects' => false]);
+            // A6.1: la prueba vive en el VPS del admin → se resuelve a su IP, sin depender del DNS recién creado.
+            $respuesta = app(PruebaResolucionLocal::class)->aplicar($pedido, $client, $url)->get($url);
         } catch (ConnectionException $e) {
             return null;
         }
