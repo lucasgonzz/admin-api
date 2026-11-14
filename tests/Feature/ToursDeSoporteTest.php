@@ -741,7 +741,7 @@ class ToursDeSoporteTest extends TestCase
         $scheduler = app(SupportAiSuggestionScheduler::class);
         $scheduler->schedule_after_client_inbound($ticket->id);
         app()->call([Queue::pushed(SendSupportAiSuggestion::class)->last(), 'handle']);
-        $invitacion = $ticket->messages()->where('sender_type', 'admin')->latest('id')->firstOrFail();
+        $invitacion = SupportMessage::where('support_ticket_id', $ticket->id)->where('sender_type', 'admin')->orderByDesc('id')->firstOrFail();
         $this->assertSame(['tour_requested' => true], $invitacion->erp_auto_reply);
         $this->assertTrue(SupportTourService::tiene_invitacion($invitacion->body));
 
@@ -2434,5 +2434,116 @@ class ToursDeSoporteTest extends TestCase
         return SupportMessage::whereHas('ticket', function ($ticket) use ($body) {
             $ticket->where('uuid', $body['ticket_uuid']);
         })->where('sender_type', 'admin')->latest('id')->firstOrFail();
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // Ronda 4 (14/11/2026, ticket 122): A3 el último tramo del camino del Listado, A4 el camino viaja con la invitación.
+    // ---------------------------------------------------------------------------------------------------------------
+
+    private const LINEA_122 = 'Para llegar al precio seguí: Listado → ficha del artículo → Precio → Precio final → Setear precio final → Guardar y cerrar. En "Setear precio final" activás el interruptor y escribís el importe.';
+    private const CAMINO_122 = 'Listado → ficha del artículo → Precio → Precio final → Setear precio final → Guardar y cerrar';
+    private const PROSA_122 = 'Para cambiarle el precio, abrí el Listado, buscá el artículo y tocalo para abrir su ficha. Ahí entrá a la pestaña Precio, activá Setear precio final y escribí el importe.';
+    private const PASOS_122 = [
+        ['clave' => 'vista.listado', 'texto' => 'Abrí el Listado.'],
+        ['clave' => 'listado.buscador', 'texto' => 'Buscá el artículo por nombre o código.'],
+        ['clave' => 'listado.abrir_ficha', 'texto' => 'Tocá el artículo para abrir su ficha.'],
+        ['clave' => 'listado.pestana_precio', 'texto' => 'Tocá la pestaña «Precio».'],
+        ['clave' => 'listado.setear_precio_final', 'texto' => 'Activá «Setear precio final» y escribí el precio nuevo.'],
+        ['clave' => 'listado.guardar_articulo', 'texto' => 'Tocá «Guardar y cerrar» para guardar el cambio.'],
+    ];
+
+    private function anclar_camino(string $camino): array
+    {
+        $pasos = [];
+        foreach ($this->catalogo_con_ficha()['pasos'] as $paso) {
+            $pasos[$paso['clave']] = $paso + ['requiere_destino' => false];
+        }
+        $planificador = new \App\Services\SupportTourPlannerService();
+        $anclar = new \ReflectionMethod($planificador, 'pasos_del_camino');
+        $anclar->setAccessible(true);
+
+        return $anclar->invoke($planificador, $pasos, $camino);
+    }
+
+    /** @dataProvider ultimos_tramos_del_listado */
+    public function test_a3_el_camino_del_listado_termina_en_su_ultimo_tramo(string $camino, array $claves, string $resto): void
+    {
+        $resultado = $this->anclar_camino($camino);
+
+        $this->assertSame($claves, array_column($resultado['anclados'], 'clave'));
+        $this->assertSame($resto, $resultado['resto']);
+    }
+
+    public function ultimos_tramos_del_listado(): array
+    {
+        $todo = ['vista.listado', 'listado.buscador', 'listado.abrir_ficha', 'listado.pestana_precio', 'listado.setear_precio_final', 'listado.guardar_articulo'];
+        $hasta_precio = ['vista.listado', 'listado.buscador', 'listado.abrir_ficha', 'listado.pestana_precio'];
+        $con_guardar = array_merge($hasta_precio, ['listado.guardar_articulo']);
+
+        return [
+            'el renglón del ticket 122' => [self::LINEA_122, $todo, ''],
+            'el camino del ticket 122 sin la oración' => [self::CAMINO_122, $todo, ''],
+            'Guardar con punto final' => ['Listado → ficha → Precio → Guardar.', $con_guardar, ''],
+            'Guardar y otra oración' => ['Listado → ficha → Precio → Guardar. Después revisá el precio en la lista.', $con_guardar, ''],
+            'Guardar y la invitación en el mismo renglón' => ['Listado → ficha → Precio → Guardar y cerrar ¿Querés que te prepare un tour con Robotito?', $con_guardar, ''],
+            'Guardar y una exclamación' => ['Listado → ficha → Precio → Guardar! Listo.', $con_guardar, ''],
+            'Guardá y cerrá' => ['Listado → ficha → Precio → Guardá y cerrá.', $con_guardar, ''],
+            'puntos suspensivos' => ['Listado → ficha → Precio → Guardar… y listo', $con_guardar, ''],
+            // Un tramo que no se ancla queda en texto, pero sin la oración que le sigue.
+            'tramo desconocido con otra oración' => ['Listado → ficha → Precio → Margen de ganancia. Ahí escribís el porcentaje.', $hasta_precio, 'Margen de ganancia'],
+            // Los puntos de adentro de un nombre no cortan el camino.
+            'abreviatura en el último tramo' => ['Listado → ficha → Precio → Cód. de barras', $hasta_precio, 'Cód. de barras'],
+            'dos abreviaturas' => ['Listado → ficha → Precio → Cta. Cte. del cliente', $hasta_precio, 'Cta. Cte. del cliente'],
+            'una sigla al final no se toma por fin de oración' => ['Listado → ficha → Precio → IVA. Revisalo', $hasta_precio, 'IVA. Revisalo'],
+            'un número con punto' => ['Listado → ficha → Precio → Precio 1.5 veces', $hasta_precio, 'Precio 1.5 veces'],
+            'sin nada que cortar queda igual' => [self::CAMINO_DEL_PRECIO, $todo, ''],
+            'Guardar a secas conserva su texto' => ['Listado → ficha → Precio → Guardar', $con_guardar, ''],
+        ];
+    }
+
+    public function test_a3_el_texto_de_guardar_dice_el_boton_que_nombra_el_camino(): void
+    {
+        $ultimo = function (string $camino): string {
+            $anclados = $this->anclar_camino($camino)['anclados'];
+            return $anclados[count($anclados) - 1]['texto'];
+        };
+        $this->assertSame('Tocá «Guardar y cerrar» para guardar el cambio.', $ultimo(self::CAMINO_122));
+        $this->assertSame('Tocá «Guardar y cerrar» para guardar el cambio.', $ultimo('Listado → ficha → Precio → Guardá y cerrá'));
+        $this->assertSame('Tocá «Guardar» para guardar el cambio.', $ultimo(self::CAMINO_DEL_PRECIO));
+    }
+
+    public function test_a3_los_caminos_del_abm_con_otra_oracion_quedan_como_en_master(): void
+    {
+        // El corte es solo del camino del Listado: el ABM conserva la oración que sigue en la tarjeta (test_107).
+        $resultado = $this->anclar_camino(self::PATH_110 . '. Esa casilla tiene que quedar destildada.');
+
+        $this->assertSame(['abm.grupo.precios', 'abm.solapa.precios.impuestos_sobre_ventas'], array_column($resultado['anclados'], 'clave'));
+        $this->assertSame('Ingresos Brutos → casilla "Activo". Esa casilla tiene que quedar destildada.', $resultado['resto']);
+    }
+
+    public function test_a3_la_invitacion_del_ticket_122_ancla_los_seis_tramos_sin_tarjeta_que_repita(): void
+    {
+        // Lo medido el 14/11: origen=determinista, pasos=6, con_ancla=5, tramos_anclados=5 y una sexta tarjeta sin ancla.
+        \Illuminate\Support\Facades\Log::spy();
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
+        [$ticket, , $body, $firma] = $this->ticket_erp_107('y mostrame en la pantalla donde le cambio el precio a un producto');
+        $this->invitacion($ticket, self::GUION_DINAMICO, [
+            'body' => 'Te pido disculpas. ' . self::LINEA_122 . "\n\n" . SupportTourService::INVITACION,
+            'erp_auto_reply' => ['tour_requested' => true],
+        ]);
+        $si = SupportMessage::findOrFail($this->postJson(self::INBOUND, array_replace($body, [
+            'body' => 'si', 'message_uuid' => (string) Str::uuid(),
+        ]), $firma)->assertCreated()->json('model.id'));
+        $headers = $this->reserva($ticket, $si);
+        $recibido = null;
+        $this->puente_107($this->catalogo_con_ficha(), Http::response([], 503), $recibido);
+
+        $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare', ['expected_message_id' => $si->id], $headers)
+            ->assertOk()->assertExactJson(['ok' => true, 'uuid' => $si->uuid]);
+        $this->assertSame(self::PASOS_122, $recibido['pasos']);
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('info')->withArgs(function ($mensaje, $contexto) {
+            return $mensaje === 'Robotito: recorrido planificado.' && $contexto['origen'] === 'determinista'
+                && $contexto['camino'] === 'explicacion' && $contexto['tramos_anclados'] === 6 && $contexto['con_ancla'] === 6;
+        })->once();
     }
 }

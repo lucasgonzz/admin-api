@@ -460,7 +460,8 @@ class SupportTourPlannerService
         if (preg_match('/^(?:(?:la|el|pestana|solapa|seccion|ir a|anda a|toca|abri)\s+)*precios?$/', $tramo)) {
             return 'precio';
         }
-        if (preg_match('/^(?:(?:toca|toca el|boton|el boton|y)\s+)*guarda(?:r|lo)?(?: y cerrar)?$/', $tramo)) {
+        // «Guardar», «Guardar y cerrar» y «Guardá y cerrá» son el mismo control de la ficha (listado.guardar_articulo).
+        if (preg_match('/^(?:(?:toca|toca el|boton|el boton|y)\s+)*guarda(?:r|lo)?(?: y cerrar?)?$/', $tramo)) {
             return 'guardar';
         }
         if (preg_match('/\b(?:buscador|busca|buscar|buscalo)\b/', $tramo)) {
@@ -477,6 +478,37 @@ class SupportTourPlannerService
         }
 
         return null;
+    }
+
+    /**
+     * El último tramo del camino sin la oración que viene después en el mismo renglón (ticket 122, 14/11/2026):
+     * «Guardar y cerrar. En "Setear precio final" activás el interruptor…» → «Guardar y cerrar».
+     *
+     * Corta en el primer «?», «!» o «¿» (la invitación a Robotito escrita en el mismo renglón) y en el primer punto
+     * (o «…») que cierra una oración: seguido de un espacio o del final, y que no cierra una abreviatura de una a tres
+     * letras («Cta. Cte.», «Nro.», «Cód. de barras», «IVA.»: ahí no corta). Un punto pegado a lo que sigue («1.5»,
+     * «x.com») tampoco. Si no hay dónde cortar, o el corte dejaría el tramo vacío, devuelve el tramo tal cual.
+     */
+    private static function fin_del_camino(string $tramo): string
+    {
+        if (! preg_match_all('/[.!?¿…]+/u', $tramo, $signos, PREG_OFFSET_CAPTURE)) {
+            return $tramo;
+        }
+        foreach ($signos[0] as $signo) {
+            [$texto, $posicion] = $signo;
+            if (! preg_match('/[!?¿]/u', $texto)) {
+                $despues = (string) substr($tramo, $posicion + strlen($texto));
+                $antes = (string) substr($tramo, 0, $posicion);
+                if (($despues !== '' && ! preg_match('/^\s/u', $despues)) || preg_match('/(?<!\pL)\pL{1,3}$/u', $antes)) {
+                    continue;
+                }
+            }
+            $cortado = rtrim((string) substr($tramo, 0, $posicion));
+
+            return trim($cortado) === '' ? $tramo : $cortado;
+        }
+
+        return $tramo;
     }
 
     /**
@@ -505,6 +537,9 @@ class SupportTourPlannerService
         $limpio = function (string $tramo): string {
             return trim(preg_replace('/[^a-z0-9]+/', ' ', self::normalizar($tramo)));
         };
+        // El camino termina en el último tramo: lo que sigue en el renglón es otra oración (ticket 122, 14/11/2026:
+        // «… → Guardar y cerrar. En "Setear precio final" activás el interruptor…» no se anclaba y quedaba en texto).
+        $tramos[count($tramos) - 1] = self::fin_del_camino($tramos[count($tramos) - 1]);
         $tipos = [];
         for ($i = 1; $i < count($tramos); $i++) {
             $tipos[$i] = self::tramo_del_listado($limpio($tramos[$i]));
@@ -539,7 +574,13 @@ class SupportTourPlannerService
             if ($tipo === 'ficha' && $ultimo < 0 && isset($pasos['listado.buscador'])) {
                 $anclados[] = ['clave' => 'listado.buscador', 'texto' => self::TRAMOS_DEL_LISTADO['buscador'][1]];
             }
-            $anclados[] = ['clave' => $clave, 'texto' => self::TRAMOS_DEL_LISTADO[$tipo][1]];
+            $texto = self::TRAMOS_DEL_LISTADO[$tipo][1];
+            // El control que señala listado.guardar_articulo es «Guardar y cerrar»: si el camino lo nombra así, la
+            // tarjeta lo dice igual. «Guardar» a secas conserva el texto de siempre.
+            if ($tipo === 'guardar' && preg_match('/\bcerrar?$/', $limpio($tramos[$i]))) {
+                $texto = 'Tocá «Guardar y cerrar» para guardar el cambio.';
+            }
+            $anclados[] = ['clave' => $clave, 'texto' => $texto];
             $ultimo = $posicion;
             // Guardar cierra la ficha: un tramo de adentro de la ficha después de Guardar no se ancla ni queda en texto.
             if ($tipo === 'guardar' && in_array($tipos[$i + 1] ?? null, ['ficha', 'precio', 'precio_final', 'setear', 'guardar'], true)) {
