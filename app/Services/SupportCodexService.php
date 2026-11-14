@@ -36,6 +36,9 @@ class SupportCodexService
      */
     const MAX_PARTES_RESPUESTA = 5;
 
+    /** Motivo del 422 `tour_path_invalid` (ronda 4, 14/11/2026): el helper lo muestra tal cual para corregir el pedido. */
+    const TOUR_PATH_INVALIDO = 'El camino del recorrido (tour_path) va en un solo renglón, de 1 a 300 caracteres, sin caracteres de control. Si el destino no tiene un camino de menús, no lo mandes.';
+
     private const CONFIRMATION_REVIEW_REASON = 'El cierre fue rechazado porque el mensaje no confirma el resultado. Revisar sin volver a pedir confirmación.';
 
     /**
@@ -378,6 +381,9 @@ class SupportCodexService
                 'soporte_import_web' => $soporte_activo,
                 'support_tour_consent' => true, 'support_dynamic_tour' => $robotito_disponible
                     && SupportTourService::version_admite_tour_personalizado($ticket) !== false,
+                // Ronda 4 (14/11/2026): la invitación (`tour_requested`) admite `tour_path`, el camino que usa
+                // tour/prepare cuando llega sin `path`. Un helper que no lo conoce no lo manda y nada cambia.
+                'support_tour_path' => true,
                 'support_tour_offer' => SupportTourService::entrante_admite_oferta($ticket, $last),
                 // Claim con rotate_thread + thread_id nuevo (misión cruzada ficha-del-cliente, 11/11/2026).
                 'thread_rotation' => true],
@@ -833,6 +839,16 @@ class SupportCodexService
             $this->fail(422, 'tour_invitation_invalid', 'La referencia de importación requiere una invitación a Robotito.');
         }
         $input['tour_import_history_id'] = $tour_import_history_id;
+        // El camino declarado con la invitación (ronda 4, 14/11/2026). Se valida acá, antes de registrar la operación
+        // y de enviar nada. Sin `tour_requested` no hay invitación a la que asociarlo y se ignora.
+        $tour_path = null;
+        if ($tour_requested && array_key_exists('tour_path', $input)) {
+            $tour_path = SupportTourPlannerService::camino_de_invitacion_valido($input['tour_path']);
+            if ($tour_path === null) {
+                $this->fail(422, 'tour_path_invalid', self::TOUR_PATH_INVALIDO);
+            }
+        }
+        $input['tour_path'] = $tour_path;
         $tour_invitation = null;
         if (isset($input['tour_invitation'])) {
             $tour_invitation = SupportTourService::guion($input['tour_invitation']);
@@ -889,6 +905,10 @@ class SupportCodexService
             $hash_payload[] = ['tour_requested' => true];
             if ($tour_import_history_id !== null) {
                 $hash_payload[] = ['tour_import_history_id' => $tour_import_history_id];
+            }
+            // Solo si vino: el hash de las invitaciones sin camino queda igual que antes (replays tras el deploy).
+            if ($tour_path !== null) {
+                $hash_payload[] = ['tour_path' => $tour_path];
             }
         }
         if (! empty($input['usage_answer'])) {
@@ -1106,8 +1126,11 @@ class SupportCodexService
                 'body' => $body,
                 'ai_generated_at' => now(),
                 'delivered_at' => now(),
+                // `tour_path` viaja solo con la invitación que pidió el helper: la que el admin arma a mano o por
+                // tipo de respuesta no lo trae (el camino guardado es siempre el de ESTA invitación, nunca uno viejo).
                 'erp_auto_reply' => $recordatorio['meta'] ?? ($tour_requested ? array_filter([
                     'tour_requested' => true, 'tour_import_history_id' => $input['tour_import_history_id'],
+                    'tour_path' => $input['tour_requested'] ? $input['tour_path'] : null,
                 ])
                     : (isset($input['tour_invitation']) ? ['tour_invitation' => $input['tour_invitation']] : null)),
             ]);

@@ -2546,4 +2546,277 @@ class ToursDeSoporteTest extends TestCase
                 && $contexto['camino'] === 'explicacion' && $contexto['tramos_anclados'] === 6 && $contexto['con_ancla'] === 6;
         })->once();
     }
+
+    /** Ticket del sistema con la consulta del dueño, ya reservado por el monitor. */
+    private function ticket_de_la_ronda_4(): array
+    {
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
+        [$ticket, $consulta, $body, $firma] = $this->ticket_erp_107('como le cambio el precio a un producto');
+
+        return [$ticket, $consulta, $body, $firma, $this->reserva($ticket, $consulta)];
+    }
+
+    /** Las respuestas de Soporte salen por admin-sync; el catálogo, el modelo y el recorrido, como en el ticket 107. */
+    private function puente_de_la_ronda_4(array $catalogo, $modelo, ?array &$recibido): void
+    {
+        Http::fake([
+            'empresa-tours.test/api/admin-sync/support/messages*' => Http::response(['ok' => true]),
+            self::PUENTE . '/catalogo?user_id=17' => Http::response($catalogo),
+            'api.deepseek.com/*' => $modelo,
+            self::PUENTE => function ($request) use (&$recibido) {
+                $recibido = $request->data();
+                return Http::response(['ok' => true, 'uuid' => $request['uuid']]);
+            },
+        ]);
+    }
+
+    /** Martín invita por /reply con `tour_requested` y lo que traiga `$extra` (por ejemplo `tour_path`). */
+    private function invitar_por_reply(SupportTicket $ticket, SupportMessage $consulta, array $headers, array $extra, string $explicacion = self::PROSA_122)
+    {
+        return $this->postJson(self::CLAUDE . $ticket->id . '/reply', $extra + [
+            'lease_token' => $headers['X-Support-Lease-Token'], 'operation_id' => 'invitar-ronda-4-' . $consulta->id,
+            'expected_message_id' => $consulta->id, 'action' => 'responder', 'tour_requested' => true,
+            'body' => $explicacion . "\n\n" . SupportTourService::INVITACION,
+        ], $headers);
+    }
+
+    private function aceptar(SupportTicket $ticket, array $body, array $firma, string $texto = 'si dale mostrame'): SupportMessage
+    {
+        return SupportMessage::findOrFail($this->postJson(self::INBOUND, array_replace($body, [
+            'body' => $texto, 'message_uuid' => (string) Str::uuid(),
+        ]), $firma)->assertCreated()->json('model.id'));
+    }
+
+    public function test_a4_el_admin_anuncia_la_capacidad_del_camino_de_la_invitacion(): void
+    {
+        [$ticket, , , , $headers] = $this->ticket_de_la_ronda_4();
+
+        $this->getJson(self::CLAUDE . $ticket->id, $headers)->assertOk()
+            ->assertJsonPath('ticket.capabilities.support_tour_path', true)
+            ->assertJsonPath('ticket.capabilities.support_tour_consent', true);
+    }
+
+    public function test_a4_la_invitacion_con_tour_path_y_el_si_preparan_el_camino_guardado_sin_path(): void
+    {
+        // Rondas 3 y 4: el monitor prepara solo y sin `path` al llegar el «sí», y la explicación vino en prosa.
+        \Illuminate\Support\Facades\Log::spy();
+        [$ticket, $consulta, $body, $firma, $headers] = $this->ticket_de_la_ronda_4();
+        $recibido = null;
+        $this->puente_de_la_ronda_4($this->catalogo_con_ficha(), Http::response([], 503), $recibido);
+
+        $this->invitar_por_reply($ticket, $consulta, $headers, ['tour_path' => self::CAMINO_122])
+            ->assertOk()->assertJsonPath('operation.status', 'sent');
+        $invitacion = SupportMessage::where('support_ticket_id', $ticket->id)->where('sender_type', 'admin')->orderByDesc('id')->firstOrFail();
+        $this->assertEquals(['tour_requested' => true, 'tour_path' => self::CAMINO_122], $invitacion->erp_auto_reply);
+        $this->assertSame(self::PROSA_122 . "\n\n" . SupportTourService::INVITACION, $invitacion->body);
+
+        $si = $this->aceptar($ticket, $body, $firma);
+        $headers = $this->reserva($ticket, $si);
+        $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare', ['expected_message_id' => $si->id], $headers)
+            ->assertOk()->assertExactJson(['ok' => true, 'uuid' => $si->uuid]);
+
+        $this->assertSame(self::PASOS_122, $recibido['pasos']);
+        $this->assertSame('Cambiar el precio de un artículo', $recibido['titulo']);
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('info')->withArgs(function ($mensaje, $contexto) {
+            return $mensaje === 'Robotito: recorrido planificado.' && $contexto['origen'] === 'determinista'
+                && $contexto['camino'] === 'invitacion' && $contexto['tramos_anclados'] === 6;
+        })->once();
+    }
+
+    public function test_a4_con_el_modelo_andando_el_camino_guardado_queda_fijo_igual_que_un_path(): void
+    {
+        // El modelo propone «abrí la ficha» en texto (ronda 4): los pasos fijos del camino mandan.
+        [$ticket, $consulta, $body, $firma, $headers] = $this->ticket_de_la_ronda_4();
+        $recibido = null;
+        $plan = ['tema' => 'guia_dinamica', 'titulo' => 'Cambiar el precio', 'pasos' => [
+            ['clave' => 'vista.listado', 'texto' => 'Abrí el Listado.'],
+            ['clave' => 'indicacion', 'texto' => 'Abrí la ficha del artículo.'],
+            ['clave' => 'indicacion', 'texto' => 'Abrí la ficha y buscá el precio.'],
+        ]];
+        $this->puente_de_la_ronda_4($this->catalogo_con_ficha(), Http::response($this->respuesta_deepseek($plan)), $recibido);
+        $this->invitar_por_reply($ticket, $consulta, $headers, ['tour_path' => self::CAMINO_122])->assertOk();
+
+        $si = $this->aceptar($ticket, $body, $firma);
+        $headers = $this->reserva($ticket, $si);
+        $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare', ['expected_message_id' => $si->id], $headers)->assertOk();
+
+        $this->assertSame(array_column(self::PASOS_122, 'clave'), array_slice(array_column($recibido['pasos'], 'clave'), 0, 6));
+        Http::assertSent(function ($request) {
+            return strpos($request->url(), 'https://api.deepseek.com/') === 0
+                && json_decode($request['messages'][0]['content'], true)['pasos_fijos'] === array_column(self::PASOS_122, 'clave');
+        });
+    }
+
+    public function test_a4_la_invitacion_sin_tour_path_se_comporta_como_en_master(): void
+    {
+        // Helper viejo: no manda el campo. Se guarda lo mismo que antes y, con la explicación en prosa y el modelo
+        // caído, no hay camino con el que armar el recorrido (como en master).
+        [$ticket, $consulta, $body, $firma, $headers] = $this->ticket_de_la_ronda_4();
+        $recibido = null;
+        $this->puente_de_la_ronda_4($this->catalogo_con_ficha(), Http::response([], 503), $recibido);
+
+        $this->invitar_por_reply($ticket, $consulta, $headers, [])->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->invitar_por_reply($ticket, $consulta, $headers, [])->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->assertSame(1, $ticket->messages()->where('sender_type', 'admin')->count(), 'El replay no manda otra vez.');
+        $this->assertSame(['tour_requested' => true], $ticket->messages()->where('sender_type', 'admin')->firstOrFail()->erp_auto_reply);
+
+        $si = $this->aceptar($ticket, $body, $firma);
+        $headers = $this->reserva($ticket, $si);
+        $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare', ['expected_message_id' => $si->id], $headers)
+            ->assertStatus(422)->assertJsonPath('code', 'tour_plan_unavailable');
+        $this->assertNull($recibido);
+    }
+
+    public function test_a4_la_invitacion_sin_tour_path_con_flechas_sigue_recuperando_la_explicacion(): void
+    {
+        \Illuminate\Support\Facades\Log::spy();
+        [$ticket, $consulta, $body, $firma, $headers] = $this->ticket_de_la_ronda_4();
+        $recibido = null;
+        $this->puente_de_la_ronda_4($this->catalogo_con_ficha(), Http::response([], 503), $recibido);
+        $this->invitar_por_reply($ticket, $consulta, $headers, [], 'Para llegar seguí: ' . self::CAMINO_DEL_PRECIO . '.')->assertOk();
+
+        $si = $this->aceptar($ticket, $body, $firma);
+        $headers = $this->reserva($ticket, $si);
+        $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare', ['expected_message_id' => $si->id], $headers)->assertOk();
+
+        $this->assertSame(['vista.listado', 'listado.buscador', 'listado.abrir_ficha', 'listado.pestana_precio',
+            'listado.setear_precio_final', 'listado.guardar_articulo'], array_column($recibido['pasos'], 'clave'));
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('info')->withArgs(function ($mensaje, $contexto) {
+            return $mensaje === 'Robotito: recorrido planificado.' && $contexto['camino'] === 'explicacion';
+        })->once();
+    }
+
+    public function test_a4_el_path_del_pedido_gana_sobre_el_camino_guardado(): void
+    {
+        \Illuminate\Support\Facades\Log::spy();
+        [$ticket, $consulta, $body, $firma, $headers] = $this->ticket_de_la_ronda_4();
+        $recibido = null;
+        $this->puente_de_la_ronda_4($this->catalogo_con_ficha(), Http::response([], 503), $recibido);
+        $this->invitar_por_reply($ticket, $consulta, $headers, ['tour_path' => self::CAMINO_122])->assertOk();
+
+        $si = $this->aceptar($ticket, $body, $firma);
+        $headers = $this->reserva($ticket, $si);
+        $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare', ['expected_message_id' => $si->id, 'path' => self::PATH_110], $headers)
+            ->assertOk();
+
+        $this->assertSame(['abm.grupo.precios', 'abm.solapa.precios.impuestos_sobre_ventas', 'indicacion'], array_column($recibido['pasos'], 'clave'));
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('info')->withArgs(function ($mensaje, $contexto) {
+            return $mensaje === 'Robotito: recorrido planificado.' && $contexto['camino'] === 'path';
+        })->once();
+    }
+
+    public function test_a4_una_invitacion_nueva_sin_camino_no_hereda_el_de_la_anterior(): void
+    {
+        \Illuminate\Support\Facades\Log::spy();
+        [$ticket, $consulta, $body, $firma, $headers] = $this->ticket_de_la_ronda_4();
+        $recibido = null;
+        $this->puente_de_la_ronda_4($this->catalogo_con_ficha(), Http::response([], 503), $recibido);
+        $this->invitar_por_reply($ticket, $consulta, $headers, ['tour_path' => self::CAMINO_122])->assertOk();
+
+        // Otra consulta, de otro tema, y Martín vuelve a invitar sin camino.
+        $otra = $this->aceptar($ticket, $body, $firma, 'y como cargo un cliente nuevo?');
+        $headers = $this->reserva($ticket, $otra);
+        $this->invitar_por_reply($ticket, $otra, $headers, [], 'Para cargarlo, entrá a Clientes y tocá el botón para crear uno nuevo.')
+            ->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->assertSame(['tour_requested' => true], SupportMessage::where('support_ticket_id', $ticket->id)->where('sender_type', 'admin')->orderByDesc('id')->firstOrFail()->erp_auto_reply);
+
+        $si = $this->aceptar($ticket, $body, $firma);
+        $headers = $this->reserva($ticket, $si);
+        $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare', ['expected_message_id' => $si->id], $headers)
+            ->assertStatus(422)->assertJsonPath('code', 'tour_plan_unavailable');
+        $this->assertNull($recibido, 'No se arma el recorrido del precio con la invitación de otro tema.');
+        \Illuminate\Support\Facades\Log::shouldNotHaveReceived('info', [\Mockery::any(), \Mockery::subset(['camino' => 'invitacion'])]);
+    }
+
+    /** @dataProvider caminos_de_invitacion_invalidos */
+    public function test_a4_un_tour_path_invalido_da_422_sin_mandar_nada($camino): void
+    {
+        [$ticket, $consulta, , , $headers] = $this->ticket_de_la_ronda_4();
+        $recibido = null;
+        $this->puente_de_la_ronda_4($this->catalogo_con_ficha(), Http::response([], 503), $recibido);
+
+        $this->invitar_por_reply($ticket, $consulta, $headers, ['tour_path' => $camino])->assertStatus(422)
+            ->assertJsonPath('message', 'tour_path_invalid: ' . \App\Services\SupportCodexService::TOUR_PATH_INVALIDO);
+        $this->assertSame(0, $ticket->messages()->where('sender_type', 'admin')->count());
+        $this->assertSame(0, SupportCodexOperation::where('support_ticket_id', $ticket->id)->count());
+        Http::assertNothingSent();
+
+        // Corregido, la misma operación sale.
+        $this->invitar_por_reply($ticket, $consulta, $headers, ['tour_path' => self::CAMINO_122])
+            ->assertOk()->assertJsonPath('operation.status', 'sent');
+    }
+
+    public function caminos_de_invitacion_invalidos(): array
+    {
+        return [
+            'multilínea' => ["Listado → ficha del artículo\n→ Precio"],
+            'con retorno de carro' => ["Listado → ficha\r→ Precio"],
+            'con tabulación' => ["Listado →\tPrecio"],
+            'con un carácter de control' => ["Listado → Precio\x07"],
+            'con separador de línea unicode' => ["Listado → ficha\u{2028}→ Precio"],
+            'más de 300 caracteres' => ['Listado → ' . str_repeat('a', 291)],
+            'vacío' => [''],
+            'solo espacios' => ['   '],
+            'nulo' => [null],
+            'un arreglo' => [['Listado', 'Precio']],
+            'un número' => [42],
+        ];
+    }
+
+    public function test_a4_300_caracteres_justos_se_aceptan(): void
+    {
+        [$ticket, $consulta, , , $headers] = $this->ticket_de_la_ronda_4();
+        $recibido = null;
+        $this->puente_de_la_ronda_4($this->catalogo_con_ficha(), Http::response([], 503), $recibido);
+        $camino = 'Listado → ' . str_repeat('á', 290);
+        $this->assertSame(300, mb_strlen($camino));
+
+        $this->invitar_por_reply($ticket, $consulta, $headers, ['tour_path' => $camino])->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->assertSame($camino, $ticket->messages()->where('sender_type', 'admin')->firstOrFail()->erp_auto_reply['tour_path']);
+    }
+
+    public function test_a4_sin_tour_requested_el_tour_path_se_ignora(): void
+    {
+        [$ticket, $consulta, , , $headers] = $this->ticket_de_la_ronda_4();
+        $recibido = null;
+        $this->puente_de_la_ronda_4($this->catalogo_con_ficha(), Http::response([], 503), $recibido);
+
+        // Aun inválido: sin invitación no se mira.
+        $this->postJson(self::CLAUDE . $ticket->id . '/reply', [
+            'lease_token' => $headers['X-Support-Lease-Token'], 'operation_id' => 'sin-invitar-' . $consulta->id,
+            'expected_message_id' => $consulta->id, 'action' => 'responder', 'tour_path' => "Listado\n→ Precio",
+            'body' => 'Hola, ¿me pasás el nombre del producto?',
+        ], $headers)->assertOk()->assertJsonPath('operation.status', 'sent');
+        $respuesta = $ticket->messages()->where('sender_type', 'admin')->firstOrFail();
+        $this->assertFalse(isset($respuesta->erp_auto_reply['tour_path']));
+    }
+
+    public function test_a4_el_replay_con_otro_tour_path_es_un_conflicto(): void
+    {
+        [$ticket, $consulta, , , $headers] = $this->ticket_de_la_ronda_4();
+        $recibido = null;
+        $this->puente_de_la_ronda_4($this->catalogo_con_ficha(), Http::response([], 503), $recibido);
+
+        $this->invitar_por_reply($ticket, $consulta, $headers, ['tour_path' => self::CAMINO_122])->assertOk();
+        $this->invitar_por_reply($ticket, $consulta, $headers, ['tour_path' => self::CAMINO_DEL_PRECIO])->assertStatus(409);
+        $this->invitar_por_reply($ticket, $consulta, $headers, [])->assertStatus(409);
+        $this->invitar_por_reply($ticket, $consulta, $headers, ['tour_path' => self::CAMINO_122])->assertOk()->assertJsonPath('operation.status', 'sent');
+        $this->assertSame(1, $ticket->messages()->where('sender_type', 'admin')->count());
+    }
+
+    public function test_a4_el_pedido_propio_sin_invitacion_no_usa_un_tour_path(): void
+    {
+        // Consentimiento directo: el mensaje de la persona hace de invitación; aunque trajera la marca, no es de Soporte.
+        \Illuminate\Support\Facades\Log::spy();
+        [$ticket, $pedido] = $this->ticket_erp_107(self::PEDIDO_107);
+        $pedido->update(['erp_auto_reply' => array_merge((array) $pedido->erp_auto_reply, ['tour_path' => self::CAMINO_122])]);
+        config(['services.deepseek.api_key' => 'deepseek-prueba']);
+        $headers = $this->reserva($ticket, $pedido);
+        $recibido = null;
+        $this->puente_107($this->catalogo_con_ficha(), Http::response($this->respuesta_deepseek(self::GUION_107)), $recibido);
+
+        $this->postJson(self::CLAUDE . $ticket->id . '/tour/prepare', ['expected_message_id' => $pedido->id], $headers)->assertOk();
+        $this->assertSame(self::GUION_107['pasos'], $recibido['pasos']);
+        \Illuminate\Support\Facades\Log::shouldNotHaveReceived('info', [\Mockery::any(), \Mockery::subset(['camino' => 'invitacion'])]);
+    }
 }

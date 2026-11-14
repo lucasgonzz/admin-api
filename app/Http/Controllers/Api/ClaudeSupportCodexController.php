@@ -255,6 +255,9 @@ class ClaudeSupportCodexController extends Controller
             'tour_invitation' => 'sometimes|required|array|prohibited_unless:action,responder',
             'tour_requested' => 'sometimes|boolean|prohibited_unless:action,responder',
             'tour_import_history_id' => 'sometimes|required|integer|min:1|max:' . \App\Services\SupportTourService::MAX_IMPORT_HISTORY_ID,
+            // El camino de la invitación (ronda 4). Lo valida SupportCodexService::reply() solo si `tour_requested`
+            // viene en true: sin invitación se ignora, y con ella un valor inválido da 422 `tour_path_invalid`.
+            'tour_path' => 'sometimes|nullable',
             'attachment' => 'sometimes|required|array',
             'attachment.filename' => 'required_with:attachment|string|max:160',
             'attachment.content_base64' => 'required_with:attachment|string|max:' . \App\Services\SupportCodexOutboundAttachment::MAX_ENCODED_LENGTH,
