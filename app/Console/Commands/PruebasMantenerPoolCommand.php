@@ -39,6 +39,12 @@ class PruebasMantenerPoolCommand extends Command
             return 1;
         }
 
+        $armado = $nombres === [] ? PruebaPoolService::armado_en_curso() : null;
+        if ($armado !== null && $objetivo > PruebaPoolService::libres_o_creando()) {
+            /* G1 (15/11/2026): no es un error; la próxima corrida del scheduler lo vuelve a intentar. */
+            $this->info('Nada encolado: hay un armado en curso (' . $armado->nombre . ', etapa ' . $armado->etapa . '). Se reintenta en la próxima corrida.');
+        }
+
         $this->info('Libres o en armado: ' . PruebaPoolService::libres_o_creando() . ' (mínimo ' . ($minimo === null ? PruebaSettings::pool_minimo() : $minimo) . '). Encoladas: ' . ($nombres === [] ? 'ninguna' : implode(', ', $nombres)) . '.');
 
         return 0;

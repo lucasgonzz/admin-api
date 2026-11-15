@@ -440,6 +440,30 @@ return [
 
         // Segundos de espera de las llamadas cortas al ERP de una prueba (C3: prueba/vencimiento y prueba/estado).
         'erp_timeout' => env('PRUEBA_ERP_TIMEOUT', 20),
+
+        // 🔴 La carrera entre el alta y la reposición del pool (15/11/2026). Crear una instancia del pool
+        // (`pool-crear.sh` / `pool-configurar.sh`) recarga php8.4-fpm varias veces y cada recarga corta los
+        // pedidos PHP en curso de TODOS los sitios del VPS, incluido el demo setup de un alta (→ HTTP 502).
+        // Ver PruebaPoolService::armado_en_curso() / creacion_en_curso(), CrearInstanciaDePoolJob y ArmarPruebaJob.
+        //
+        // Minutos desde el último `updated_at` en los que un armado o una creación cuentan como «en curso».
+        // Pasado eso se los da por colgados y no frenan a nadie.
+        'carrera_ventana_minutos' => env('PRUEBA_CARRERA_VENTANA_MINUTOS', 15),
+
+        // G1: una creación del pool que arranca con un armado en curso se re-encola cada tantos segundos,
+        // hasta tantas veces (30 x 30 s = 15 min, la ventana); después crea igual.
+        'crear_espera_segundos' => env('PRUEBA_CREAR_ESPERA_SEGUNDOS', 30),
+        'crear_esperas_max'     => env('PRUEBA_CREAR_ESPERAS_MAX', 30),
+
+        // G2: el armado que está por disparar el demo setup con una creación del pool en curso se re-encola
+        // cada tantos segundos, hasta un total de tantos segundos; después dispara igual.
+        'armar_espera_creacion_segundos'     => env('PRUEBA_ARMAR_ESPERA_CREACION_SEGUNDOS', 20),
+        'armar_espera_creacion_max_segundos' => env('PRUEBA_ARMAR_ESPERA_CREACION_MAX_SEGUNDOS', 180),
+
+        // G3: reintentos del demo setup ante un corte de infraestructura (HTTP 502/503/504). La espera se duplica
+        // en cada reintento: 20 s, 40 s.
+        'demo_setup_reintentos'               => env('PRUEBA_DEMO_SETUP_REINTENTOS', 2),
+        'demo_setup_reintento_espera_segundos' => env('PRUEBA_DEMO_SETUP_REINTENTO_ESPERA_SEGUNDOS', 20),
     ],
 
     // API pública de Hostinger (developers.hostinger.com): subdominios, bases de datos, cronjobs

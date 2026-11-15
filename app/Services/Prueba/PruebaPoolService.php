@@ -8,6 +8,7 @@ use App\Models\TrialInstance;
 use App\Models\UserIdBlock;
 use App\Models\Version;
 use App\Services\UserIdBlockAllocatorService;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -83,6 +84,17 @@ class PruebaPoolService
             return [];
         }
 
+        /* G1 (15/11/2026): crear una instancia recarga php8.4-fpm y le corta el demo setup a un alta en curso. Se
+           espera: el comando programado lo vuelve a intentar en su próxima corrida. */
+        $armado = self::armado_en_curso();
+        if ($armado !== null) {
+            if (Cache::add('prueba-pool:espera-armado:' . $armado->id, 1, now()->addMinutes(self::ventana_carrera_minutos()))) {
+                Log::info('PruebaPoolService: faltan ' . $faltan . ' pero nada encolado: hay un armado en curso.', ['instancia' => $armado->nombre, 'etapa' => $armado->etapa]);
+            }
+
+            return [];
+        }
+
         $version        = $this->version_publicada_de_empresa();
         $version_tienda = $this->version_publicada_de_tienda();
 
@@ -99,6 +111,39 @@ class PruebaPoolService
         Log::info('PruebaPoolService: armado encolado.', ['nombres' => $nombres, 'version' => $version, 'tienda' => $version_tienda]);
 
         return $nombres;
+    }
+
+    /** Minutos en los que un armado o una creación movidos por última vez cuentan como «en curso». */
+    public static function ventana_carrera_minutos(): int
+    {
+        return max(1, (int) config('services.prueba.carrera_ventana_minutos', 15));
+    }
+
+    /**
+     * La instancia ASIGNADA A UN NEGOCIO cuyo armado (`ArmarPruebaJob`) está en curso —todavía no llegó a `lista` ni
+     * quedó `fallida`— y se movió dentro de la ventana, o null (G1, 15/11/2026). Una colgada más vieja no frena el pool.
+     */
+    public static function armado_en_curso(): ?TrialInstance
+    {
+        return TrialInstance::where('estado', TrialInstance::ESTADO_ASIGNANDO)
+            ->whereNotNull('lead_id')
+            ->where('updated_at', '>=', now()->subMinutes(self::ventana_carrera_minutos()))
+            ->orderBy('id')
+            ->first();
+    }
+
+    /**
+     * La instancia del pool que se está creando en el VPS (`CrearInstanciaDePoolJob` ya pasó su arranque y está en
+     * dns/crear/env/configurar: las etapas que terminan recargando php8.4-fpm) y se movió dentro de la ventana, o
+     * null (G2, 15/11/2026). Una `encolada` todavía no tocó nada y no cuenta.
+     */
+    public static function creacion_en_curso(): ?TrialInstance
+    {
+        return TrialInstance::where('estado', TrialInstance::ESTADO_CREANDO)
+            ->whereIn('etapa', ['dns', 'crear', 'env', 'configurar'])
+            ->where('updated_at', '>=', now()->subMinutes(self::ventana_carrera_minutos()))
+            ->orderBy('id')
+            ->first();
     }
 
     /**

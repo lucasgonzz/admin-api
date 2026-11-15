@@ -44,9 +44,26 @@ class PruebaDemoSetupService
     /** El ERP contestó un error. */
     const RESULTADO_FALLIDO = 'fallido';
 
+    /** Códigos con los que contesta nginx cuando se le corta el PHP de atrás (p. ej. una recarga de php-fpm). */
+    const HTTP_CORTE_DE_INFRAESTRUCTURA = [502, 503, 504];
+
     /**
-     * Dispara el demo setup y devuelve `['resultado' => ..., 'mensaje' => ...]`. No tira: el llamador
-     * decide qué hacer con `sin_confirmar` y con `fallido`.
+     * ¿El resultado es un corte de infraestructura (HTTP 502/503/504) y no un error del ERP? Volver a correr el demo
+     * setup desde cero es seguro en ese caso: arranca con `migrate:fresh` y su candado es un `flock` que el sistema
+     * operativo suelta cuando muere el proceso (empresa-api, `DemoSetupController` + `DemoSetupLockHelper`).
+     *
+     * @param array<string, mixed> $resultado
+     */
+    public static function es_corte_de_infraestructura(array $resultado): bool
+    {
+        return isset($resultado['resultado'], $resultado['http_status'])
+            && $resultado['resultado'] === self::RESULTADO_FALLIDO
+            && in_array((int) $resultado['http_status'], self::HTTP_CORTE_DE_INFRAESTRUCTURA, true);
+    }
+
+    /**
+     * Dispara el demo setup y devuelve `['resultado' => ..., 'mensaje' => ...]` (con `http_status` cuando el ERP
+     * contestó un error HTTP). No tira: el llamador decide qué hacer con `sin_confirmar` y con `fallido`.
      *
      * @param string $password La contraseña en claro del dueño (viene cifrada en la instancia).
      *
@@ -80,8 +97,10 @@ class PruebaDemoSetupService
             }
 
             return [
-                'resultado' => self::RESULTADO_FALLIDO,
-                'mensaje'   => 'HTTP ' . $response->status() . ': ' . substr(
+                'resultado'   => self::RESULTADO_FALLIDO,
+                /* G3 (15/11/2026): el llamador distingue un corte de infraestructura (502/503/504) de un error del ERP. */
+                'http_status' => (int) $response->status(),
+                'mensaje'     => 'HTTP ' . $response->status() . ': ' . substr(
                     ImplementationSettings::tapar_credenciales_de_demo((string) $response->body()),
                     0,
                     2000
