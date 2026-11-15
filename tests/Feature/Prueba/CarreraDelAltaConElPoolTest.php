@@ -213,6 +213,110 @@ class CarreraDelAltaConElPoolTest extends BaseDePruebaGratuita
         $this->assertCount(0, $this->armados_reencolados());
     }
 
+    /* ------------------------------------------------- I1: dos cadenas vivas */
+
+    public function test_i1_un_job_reencolado_que_encuentra_la_instancia_en_otra_etapa_sale_sin_tocar_nada(): void
+    {
+        $instancia        = $this->alta();
+        $instancia->etapa = 'ssl';
+        $instancia->save();
+
+        $job              = new ArmarPruebaJob($instancia->id);
+        $job->desde_etapa = 'demo_setup';
+        $job->handle();
+
+        $instancia->refresh();
+        $this->assertSame(TrialInstance::ESTADO_ASIGNANDO, $instancia->estado);
+        $this->assertSame('ssl', $instancia->etapa);
+        $this->assertSame([], $this->vps->comandos, 'No repitió alias ni nada del VPS.');
+        $this->assertSame([], $this->hostinger->llamadas, 'No repitió el DNS.');
+        $this->assertSame([], $this->pedidos_al_erp_con('admin-sync/demo-setup'));
+    }
+
+    public function test_i1_un_job_reencolado_que_encuentra_la_instancia_fallida_sale_sin_tocar_nada(): void
+    {
+        $instancia         = $this->alta();
+        $instancia->estado = TrialInstance::ESTADO_FALLIDA;
+        $instancia->etapa  = 'demo_setup';
+        $instancia->error  = 'falló antes';
+        $instancia->save();
+
+        $job              = new ArmarPruebaJob($instancia->id);
+        $job->desde_etapa = 'demo_setup';
+        $job->handle();
+
+        $instancia->refresh();
+        $this->assertSame(TrialInstance::ESTADO_FALLIDA, $instancia->estado);
+        $this->assertSame('falló antes', $instancia->error);
+        $this->assertSame([], $this->pedidos_al_erp_con('admin-sync/demo-setup'));
+    }
+
+    public function test_i1_dos_reintentar_seguidos_dejan_una_sola_cadena_y_el_reintento_legitimo_sigue_andando(): void
+    {
+        $instancia = $this->alta();
+        $lead      = Lead::find($instancia->lead_id);
+        $this->zona_antes_y_despues(self::SLUG_HOSTS);
+        $instancia->estado = TrialInstance::ESTADO_FALLIDA;
+        $instancia->etapa  = 'demo_setup';
+        $instancia->save();
+        $creacion = $this->creacion_en_etapa('crear');
+
+        /* Primer «Reintentar»: la fallida arranca (legítimo) y entra en la espera de G2. */
+        (new ArmarPruebaJob($instancia->id))->handle();
+        $this->assertSame(TrialInstance::ESTADO_ASIGNANDO, $instancia->fresh()->estado);
+        $this->assertCount(1, $this->armados_reencolados());
+
+        /* Segundo «Reintentar» (despacho normal) mientras la primera cadena espera: sale sin tocar nada. */
+        (new ArmarPruebaJob($instancia->id))->handle();
+        $this->assertCount(1, $this->armados_reencolados(), 'No nació una segunda cadena.');
+        $this->assertSame([], $this->vps->comandos);
+        $this->assertSame([], $this->pedidos_al_erp_con('admin-sync/demo-setup'));
+
+        /* La primera cadena termina. */
+        $creacion->estado = TrialInstance::ESTADO_LIBRE;
+        $creacion->save();
+        $this->armados_reencolados()->last()->handle();
+
+        $this->assertSame(TrialInstance::ESTADO_ASIGNADA, $instancia->fresh()->estado);
+        $this->assertCount(1, $this->pedidos_al_erp_con('admin-sync/demo-setup'));
+        $this->assertSame('exitoso', Lead::find($lead->id)->demo_setup_status);
+    }
+
+    public function test_i1_un_despacho_normal_sobre_una_asignando_colgada_fuera_de_la_ventana_arranca_como_siempre(): void
+    {
+        $instancia = $this->alta();
+        $this->zona_antes_y_despues(self::SLUG_HOSTS);
+        DB::table('trial_instances')->where('id', $instancia->id)->update(['etapa' => 'alias', 'updated_at' => Carbon::now()->subMinutes(16)]);
+
+        (new ArmarPruebaJob($instancia->id))->handle();
+
+        $this->assertSame(TrialInstance::ESTADO_ASIGNADA, $instancia->fresh()->estado);
+    }
+
+    /* ------------------------------------------------- M1: la ventana del demo setup */
+
+    public function test_m1_la_ventana_del_armado_cuenta_desde_que_arranca_el_demo_setup(): void
+    {
+        $instancia = $this->alta();
+        $this->zona_antes_y_despues(self::SLUG_HOSTS);
+        /* Un job re-encolado: la etapa y el progreso ya estaban, así que marcar() no cambia nada y no actualiza la fila. */
+        DB::table('trial_instances')->where('id', $instancia->id)->update(['etapa' => 'demo_setup', 'progreso' => 55, 'error' => null, 'updated_at' => Carbon::now()->subMinutes(10)]);
+
+        $visto = null;
+        $this->erp['admin-sync/demo-setup'] = function () use ($instancia, &$visto) {
+            $visto = TrialInstance::find($instancia->id)->updated_at;
+
+            return Http::response(['ok' => true], 200);
+        };
+
+        $job              = new ArmarPruebaJob($instancia->id);
+        $job->desde_etapa = 'demo_setup';
+        $job->handle();
+
+        $this->assertNotNull($visto);
+        $this->assertSame(Carbon::now()->getTimestamp(), $visto->getTimestamp(), 'Durante el POST la fila ya figura movida ahora.');
+    }
+
     /* ---------------------------------------------------------------- G3 */
 
     /** El ERP contesta en orden las respuestas dadas (la última se repite). */

@@ -101,6 +101,13 @@ class ArmarPruebaJob implements ShouldQueue
             return;
         }
 
+        $otro = $this->otro_job_la_esta_armando($instancia);
+        if ($otro !== null) {
+            Log::info('ArmarPruebaJob: ' . $otro . ' Se sale sin tocar nada.', ['instancia' => $instancia->nombre, 'estado' => $instancia->estado, 'etapa' => $instancia->etapa, 'desde_etapa' => $this->desde_etapa]);
+
+            return;
+        }
+
         $lead   = $instancia->lead_id ? Lead::find($instancia->lead_id) : null;
         $client = $instancia->client_id ? Client::find($instancia->client_id) : null;
 
@@ -183,6 +190,10 @@ class ArmarPruebaJob implements ShouldQueue
         }
 
         Lead::query()->whereKey($lead->id)->update(['demo_setup_status' => 'ejecutandose', 'demo_setup_last_run_at' => now(), 'demo_setup_last_error' => null]);
+
+        /* M1: el POST de abajo dura minutos sin tocar la fila; G1 (`armado_en_curso`) cuenta la ventana por `updated_at`,
+           así que arranca a contar desde ahora y no desde que se marcó la etapa (que en un re-encolado puede ser vieja). */
+        $instancia->touch();
 
         $password  = Crypt::decryptString($cifrada);
         $resultado = app(PruebaDemoSetupService::class)->disparar($instancia, $lead, $client, $password);
@@ -293,6 +304,40 @@ class ArmarPruebaJob implements ShouldQueue
         dispatch($siguiente->delay(now()->addSeconds($segundos)));
 
         return true;
+    }
+
+    /**
+     * Que no haya dos cadenas vivas armando la misma instancia (revisión de las guardas, 15/11/2026). Con las esperas de
+     * G2/G3 hay ventanas de 20 a 180 s con la instancia `asignando` y ningún worker sobre ella: un segundo «Reintentar»
+     * del panel, o un job re-encolado que llega tarde, arrancaría otra cadena (DNS, `.env`, alias otra vez, y dos
+     * bienvenidas si las dos llegan a `terminar()`).
+     *
+     *  (a) Un job re-encolado (`desde_etapa`) solo sigue si la instancia está `asignando` justo en esa etapa; en
+     *      cualquier otro caso —incluida `fallida`: la decide el operador— sale.
+     *  (b) Un despacho normal que encuentra la instancia `asignando` ya en una etapa del armado (no `encolada` ni
+     *      `reservada`, que es como la deja el alta) y movida dentro de la ventana de la carrera, sale: otro job la está
+     *      armando. Pasada la ventana se la da por colgada y arranca como siempre.
+     *
+     * @return string|null El motivo para salir, o null si este job sigue.
+     */
+    private function otro_job_la_esta_armando(TrialInstance $instancia): ?string
+    {
+        if ($this->desde_etapa !== null) {
+            if ($instancia->estado === TrialInstance::ESTADO_ASIGNANDO && (string) $instancia->etapa === $this->desde_etapa) {
+                return null;
+            }
+
+            return 'job re-encolado desde ' . $this->desde_etapa . ', pero la instancia ya no está asignando en esa etapa.';
+        }
+
+        if ($instancia->estado === TrialInstance::ESTADO_ASIGNANDO
+            && in_array((string) $instancia->etapa, self::ETAPAS, true)
+            && $instancia->updated_at !== null
+            && $instancia->updated_at->gte(now()->subMinutes(PruebaPoolService::ventana_carrera_minutos()))) {
+            return 'la instancia ya se está armando (etapa ' . $instancia->etapa . ', movida hace menos de ' . PruebaPoolService::ventana_carrera_minutos() . ' min).';
+        }
+
+        return null;
     }
 
     /** El job que sigue este armado desde `demo_setup`, con los contadores de este. */
