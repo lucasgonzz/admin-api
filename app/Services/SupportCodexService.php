@@ -330,6 +330,10 @@ class SupportCodexService
         $remitentes_verificados = $soporte_activo ? $importador->entrantes_del_dueno($ticket, $messages) : [];
         $robotito_disponible = SupportTourService::entrante_admite_robotito($ticket, $last);
         $capacidades_de_prueba = $importador->capacidades_de_prueba($ticket);
+        // Ronda 8 (§0.3): lo nuevo de la prueba vale solo con la automatización de la prueba de ESTE ticket y si el
+        // sistema del negocio lo anunció en `capacidades_prueba`. Un sistema anterior no manda la clave: todo en false.
+        $anunciadas_en_la_prueba = app(PruebaDelClienteService::class)->es_cliente_en_prueba($ticket->client)
+            && $capacidades_de_prueba['prueba_import_resolver'] ? ($importaciones['capacidades_prueba'] ?? []) : [];
         return [
             'id' => (int) $ticket->id,
             'status' => $ticket->status,
@@ -379,6 +383,9 @@ class SupportCodexService
                 // permiso delegado de la tarea. La versión de la instancia se confirma con su 404 (version_vieja).
                 'soporte_import_pdf' => $soporte_activo, 'soporte_import_clientes' => $soporte_activo,
                 'soporte_import_web' => $soporte_activo,
+                // Ronda 8: clientes y proveedores se cargan solos en la prueba; la ganancia viaja al lanzar artículos.
+                'prueba_import_clientes' => in_array(PruebaImportacionService::CAPACIDAD_CONTACTOS, $anunciadas_en_la_prueba, true),
+                'prueba_import_margen' => in_array(PruebaImportacionService::CAPACIDAD_MARGEN_PREVIO, $anunciadas_en_la_prueba, true),
                 'support_tour_consent' => true, 'support_dynamic_tour' => $robotito_disponible
                     && SupportTourService::version_admite_tour_personalizado($ticket) !== false,
                 // Ronda 4 (14/11/2026): la invitación (`tour_requested`) admite `tour_path`, el camino que usa
@@ -412,8 +419,9 @@ class SupportCodexService
             'importaciones_soporte_pendientes' => $soporte_activo ? $importaciones['pendientes'] : [],
             'importaciones_soporte_en_proceso' => $soporte_activo ? $importaciones['en_proceso'] : false,
             // Las corridas de clientes o proveedores abiertas del ticket (misión importaciones-de-martin, 11/11/2026):
-            // [{corrida_id, modelo, estado, revision, codigo_requerido}]; vacía con una instancia anterior.
-            'importaciones_de_contactos' => $soporte_activo ? ($importaciones['importaciones_de_contactos'] ?? []) : [],
+            // [{corrida_id, modelo, estado, revision, codigo_requerido}]; vacía con una instancia anterior. Ronda 8: también
+            // en la prueba (las de `modo_prueba`), solo si el sistema anunció `contactos` en `capacidades_prueba`.
+            'importaciones_de_contactos' => $importaciones['importaciones_de_contactos'] ?? [],
             /* La implementación del sistema y de la tienda (abierta, o cerrada hace ≤ 30 días), para que
              * Martín siga la conversación de la implementación donde la dejó Lucas. null = no tiene. */
             'implementation' => app(SupportImplementationContextService::class)->bloque_para_el_ticket($ticket),

@@ -179,15 +179,21 @@ class ImportacionesDeMartinService
     /**
      * El ticket de una ruta que solo acepta la reserva (sin `expected_message_id`).
      *
+     * Ronda 8 (D1): con `$admite_prueba`, un ticket del dueño de un negocio EN PRUEBA también pasa (ticket abierto, en
+     * prueba, con la automatización de la prueba disponible: `puerta() === null && automatizacion_disponible()`). Lo
+     * usan `import-status` e `import-revert`, que la prueba necesita para seguir y deshacer su carga sola de clientes o
+     * proveedores. `import-confirm` no lo usa: en la prueba no hay código.
+     *
      * @param int    $ticket_id
      * @param string $lease_token
+     * @param bool   $admite_prueba
      *
      * @return SupportTicket
      */
-    public function ticket_con_reserva(int $ticket_id, string $lease_token): SupportTicket
+    public function ticket_con_reserva(int $ticket_id, string $lease_token, bool $admite_prueba = false): SupportTicket
     {
         $ticket = $this->ticket_que_existe(SupportTicket::with('client')->find($ticket_id), $ticket_id);
-        $this->asegurar_reserva($ticket, $lease_token);
+        $this->asegurar_reserva($ticket, $lease_token, $admite_prueba);
 
         return $ticket;
     }
@@ -201,10 +207,14 @@ class ImportacionesDeMartinService
         return $ticket;
     }
 
-    private function asegurar_reserva(SupportTicket $ticket, string $lease_token): void
+    private function asegurar_reserva(SupportTicket $ticket, string $lease_token, bool $admite_prueba = false): void
     {
         $this->asegurar_atendible($ticket);
         $this->soporte->assert_lease(SupportCodexCase::where('support_ticket_id', $ticket->id)->first(), $lease_token);
+        if ($admite_prueba && $this->importacion->puerta_activo($ticket) !== null
+            && $this->importacion->puerta($ticket) === null && $this->importacion->automatizacion_disponible($ticket)) {
+            return;
+        }
         $this->asegurar_dueno_activo($ticket);
     }
 
@@ -291,6 +301,56 @@ class ImportacionesDeMartinService
         }
 
         return $resultado + ['filename' => $archivo['filename']];
+    }
+
+    /**
+     * Ronda 8 (D1): el Excel de clientes o proveedores del dueño de un negocio EN PRUEBA al mismo servicio de soporte
+     * de empresa, con `modo_prueba=1`: se analiza y se carga solo, sin código, y el resumen le llega al dueño por el
+     * mismo ticket (el barrido de avisos de la prueba). Lo llama `PruebaImportacionService::importar_contactos_de_prueba`
+     * con las puertas de la prueba ya pasadas y la capacidad `contactos` confirmada.
+     *
+     * A diferencia de `iniciar()`, NO marca `importacion_soporte_iniciada_at`: cambiaría `estado_en_ticket` a la rama
+     * de activos y el chequeo estricto del teléfono del aviso.
+     *
+     * 🔴 Compatibilidad: un empresa anterior que reciba `modo_prueba` contesta `409 dueno_no_activo` (o 404 sin motivo
+     * si no tiene la ruta), y una corrida aceptada que no vuelva con `modo_prueba: true` no es de la prueba: las tres
+     * son `version_vieja`.
+     *
+     * @param SupportTicket                          $ticket
+     * @param string                                 $modelo  client | provider.
+     * @param array{bytes: string, filename: string} $archivo
+     * @param string                                 $clave   Huella del archivo (idempotencia del lado de empresa).
+     *
+     * @return array<string, mixed> `estado`: aceptado | version_vieja | rechazado | sin_api_key | sin_url | no_responde.
+     */
+    public function iniciar_prueba(SupportTicket $ticket, string $modelo, array $archivo, string $clave): array
+    {
+        $respuesta = $this->importacion->reenviar($ticket->client, self::RUTA_SOPORTE . $modelo . '/iniciar', $this->contexto($ticket) + [
+            'importacion_clave' => $clave,
+            'avisar_por_whatsapp' => '1',
+            'modo_prueba' => '1',
+        ], [
+            ['nombre' => 'excel_file', 'bytes' => $archivo['bytes'], 'filename' => $archivo['filename']],
+        ], 60);
+
+        $resultado = $this->resultado_de_corrida($respuesta, $modelo, 'No pude iniciar la carga de ' . $this->nombre($modelo) . ' de la prueba.');
+        $vieja = $resultado['estado'] === 'version_vieja'
+            || ($resultado['estado'] === 'rechazado' && ($resultado['motivo_instancia'] ?? null) === 'dueno_no_activo')
+            || ($resultado['estado'] === 'aceptado' && (($resultado['corrida']['modo_prueba'] ?? null) !== true));
+        if ($vieja) {
+            return ['estado' => 'version_vieja', 'disponible' => false, 'modelo' => $modelo,
+                'mensaje' => 'El sistema del negocio todavía no carga ' . $this->nombre($modelo) . ' solo en la prueba.'];
+        }
+        if ($resultado['estado'] !== 'aceptado') {
+            return $resultado + ['filename' => $archivo['filename']];
+        }
+
+        unset($resultado['automatizar_soporte']);
+        Log::channel('daily')->info('ImportacionesDeMartin: Excel de ' . $modelo . ' de la prueba reenviado al servicio de soporte.', [
+            'ticket_id' => (int) $ticket->id, 'client_id' => (int) $ticket->client_id, 'corrida_id' => $resultado['corrida_id'],
+        ]);
+
+        return $resultado + ['automatizar_prueba' => true, 'modo_prueba' => true, 'filename' => $archivo['filename']];
     }
 
     /**

@@ -391,6 +391,11 @@ class ClaudeSupportCodexController extends Controller
      * artículos; el sistema del negocio lo aplica y solo pregunta lo que no quedó cubierto. Sin el campo, todo
      * igual que antes. La ruta de solo stock no lo admite (422).
      *
+     * Ronda 8 (15/11/2026, `docs/soporte-codex-contrato.md`): `automatizar_prueba: true` con `model` client|provider, la
+     * reserva y un adjunto lleva el Excel de contactos de un negocio EN PRUEBA al motor de soporte de empresa con
+     * `modo_prueba=1` (sin código). `margen_de_ganancia` (opcional, ya normalizado) viaja solo en la prueba de artículos
+     * con automatización y vuelve `margen_previo`.
+     *
      * @return \Illuminate\Http\JsonResponse 200 aceptado/analizado_sin_corrida/rechazado · 404 no_es_prueba ·
      *                                       409 ticket_cerrado/sin_api_key/sin_url · 422 · 502 no_responde
      */
@@ -423,8 +428,17 @@ class ClaudeSupportCodexController extends Controller
             'provider_id' => 'sometimes|nullable|integer|min:1',
             'origen' => 'sometimes|nullable|string|max:40',
             'automatizar_soporte' => 'sometimes|boolean',
-            'lease_token' => 'required_if:automatizar_soporte,true|nullable|string|min:32|max:128',
-            'expected_message_id' => 'required_if:automatizar_soporte,true|nullable|integer|min:1',
+            // Ronda 8 (D1): la carga sola de clientes o proveedores de un negocio en prueba, con la reserva del turno.
+            'automatizar_prueba' => 'sometimes|boolean',
+            'lease_token' => 'required_if:automatizar_soporte,true|required_if:automatizar_prueba,true|nullable|string|min:32|max:128',
+            'expected_message_id' => 'required_if:automatizar_soporte,true|required_if:automatizar_prueba,true|nullable|integer|min:1',
+            // Ronda 8 (D2): la ganancia ya dicha por el dueño, normalizada por el helper. En array: la regex lleva `|`.
+            'margen_de_ganancia' => ['sometimes', 'nullable', 'string', 'max:40', 'regex:' . PruebaImportacionService::REGEX_MARGEN,
+                function ($atributo, $valor, $falla) {
+                    if (is_string($valor) && PruebaImportacionService::margen_valido($valor) === null) {
+                        $falla('La ganancia tiene que ser un porcentaje mayor a 0 y hasta 1000, precio:N con N mayor a 0, o despues.');
+                    }
+                }],
         ] + ($solo_stock ? ['alcance' => 'required|in:' . PruebaImportacionService::ALCANCE_STOCK_EXISTENTE] : [
             // Mapeo de columnas que soporte ya confirmó con el cliente: el sistema no vuelve a preguntarlo.
             'columnas_previas' => 'sometimes|array|min:1|max:80',
@@ -432,6 +446,32 @@ class ClaudeSupportCodexController extends Controller
             'columnas_previas.*.columna' => 'required|string|regex:/^[A-Za-z]{1,3}$/',
             'columnas_previas.*.campo' => 'required|string|min:1|max:120',
         ]));
+        $margen = isset($data['margen_de_ganancia']) && $data['margen_de_ganancia'] !== null;
+        if ($request->boolean('automatizar_prueba')) {
+            // La rama de la prueba es solo para clientes y proveedores: los artículos siguen por su camino de siempre.
+            abort_if($request->boolean('automatizar_soporte'), 422, 'automatizar_prueba y automatizar_soporte no van juntos.');
+            abort_if($solo_stock || ($data['model'] ?? 'article') === 'article', 422, 'automatizar_prueba es para clientes o proveedores (model client|provider).');
+            abort_if($margen, 422, 'La ganancia es solo para la carga de artículos.');
+
+            $resultado = DB::transaction(function () use ($id, $data, $service, $soporte) {
+                $ticket = SupportTicket::lockForUpdate()->findOrFail($id);
+                $puerta = $service->puerta($ticket);
+                if ($puerta !== null) {
+                    return $puerta;
+                }
+                if (!$service->automatizacion_disponible($ticket)) {
+                    return ['estado' => 'contacto_no_habilitado',
+                        'mensaje' => 'La carga de clientes o proveedores de la prueba es solo para el dueño, con la prueba vigente.'];
+                }
+
+                $soporte->assert_current($ticket, $data + ['action' => 'responder']);
+
+                return $service->importar_contactos_de_prueba($ticket, $data);
+            });
+
+            return response()->json($resultado, $this->http_de_la_importacion($resultado['estado']));
+        }
+        abort_if($margen && ($request->boolean('automatizar_soporte') || $solo_stock), 422, 'La ganancia al lanzar es solo para la prueba.');
         if ($request->boolean('automatizar_soporte')) {
             $resultado = DB::transaction(function () use ($id, $data, $service, $soporte) {
                 $ticket = SupportTicket::lockForUpdate()->findOrFail($id);

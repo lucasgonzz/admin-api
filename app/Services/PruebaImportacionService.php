@@ -56,6 +56,20 @@ class PruebaImportacionService
     const MODELOS = ['article', 'client', 'provider'];
     const ALCANCE_STOCK_EXISTENTE = 'stock_existente';
 
+    /**
+     * Ronda 8 (misión prueba-e2e-campana-imperio, 15/11/2026): lo que empresa anuncia en `capacidades_prueba` de
+     * `prueba-pendientes`. `contactos` = carga sola de clientes y proveedores en la prueba (`modo_prueba`);
+     * `margen_previo` = la ganancia que Martín pasa al lanzar la carga de artículos.
+     */
+    const CAPACIDAD_CONTACTOS = 'contactos';
+    const CAPACIDAD_MARGEN_PREVIO = 'margen_previo';
+
+    /**
+     * El `margen_de_ganancia` normalizado: `despues`, un porcentaje (más de 0 y hasta 1000) o `precio:N` (N más de 0).
+     * Es la misma regex en los tres repos (contrato de la ronda 8, §2.1).
+     */
+    const REGEX_MARGEN = '/^(despues|\d{1,4}(\.\d{1,2})?|precio:\d{1,9}(\.\d{1,2})?)$/';
+
     /** Extensiones de Excel y de imagen, con el mime que se declara al reenviar. */
     const EXCEL = [
         'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -202,6 +216,12 @@ class PruebaImportacionService
             $campos['automatizar_prueba'] = '1';
             $campos['support_ticket_id'] = (int) $ticket->id;
             $campos['importacion_clave'] = $clave;
+            // Ronda 8 (D2): la ganancia que el dueño ya le dijo a Martín viaja solo acá (prueba con automatización,
+            // artículos, sin alcance). En cualquier otro caso se descarta y `margen_previo` vuelve en null.
+            $margen = self::margen_valido($input['margen_de_ganancia'] ?? null);
+            if ($margen !== null && $alcance === null) {
+                $campos['margen_de_ganancia'] = $margen;
+            }
         }
 
         if ($modelo === 'article' && $alcance === null) {
@@ -250,7 +270,13 @@ class PruebaImportacionService
                 'filename'      => $archivo['filename'],
                 'automatizar_prueba' => ($cuerpo['automatizar_prueba'] ?? false) === true,
             ] + ($soporte_activo ? ['automatizar_soporte' => true] : [])
-                + ($alcance !== null ? ['alcance' => $alcance] : []);
+                + ($alcance !== null ? ['alcance' => $alcance] : [])
+                // Ronda 8 (D2): solo si Martín pasó la ganancia. Lo que guardó empresa, o null si no viajó (un sistema
+                // viejo la ignora y no devuelve la clave): el helper avisa que conteste la pregunta cuando aparezca.
+                + (!$soporte_activo && isset($input['margen_de_ganancia'])
+                    ? ['margen_previo' => isset($campos['margen_de_ganancia'], $cuerpo['margen_previo']) && is_string($cuerpo['margen_previo'])
+                        ? $cuerpo['margen_previo'] : null]
+                    : []);
         }
 
         if ($status === 200 && is_array($cuerpo) && isset($cuerpo['column_mapping'])) {
@@ -361,9 +387,122 @@ class PruebaImportacionService
         $pendientes = is_array($pendientes) ? $pendientes : [];
         $alcances = $respuesta['cuerpo']['alcances_soporte'] ?? [];
 
-        return ['pendientes' => $pendientes, 'en_proceso' => $pendientes !== [] || ($respuesta['cuerpo']['en_proceso'] ?? false) === true,
+        if ($soporte_activo) {
+            return ['pendientes' => $pendientes, 'en_proceso' => $pendientes !== [] || ($respuesta['cuerpo']['en_proceso'] ?? false) === true,
+                'disponible' => true, 'alcances_soporte' => is_array($alcances) ? $alcances : [],
+                'importaciones_de_contactos' => self::contactos_abiertos($respuesta['cuerpo']['importaciones_de_contactos'] ?? []),
+                'capacidades_prueba' => []];
+        }
+
+        // Ronda 8 (D1): en la prueba, las corridas de clientes y proveedores solo cuentan si el sistema anunció la
+        // capacidad `contactos` (uno anterior no las tiene en modo prueba). También mantienen abierta la conversación.
+        $capacidades = self::capacidades_anunciadas($respuesta['cuerpo']['capacidades_prueba'] ?? null);
+        $contactos = in_array(self::CAPACIDAD_CONTACTOS, $capacidades, true)
+            ? self::contactos_abiertos($respuesta['cuerpo']['importaciones_de_contactos'] ?? []) : [];
+
+        return ['pendientes' => $pendientes,
+            'en_proceso' => $pendientes !== [] || $contactos !== [] || ($respuesta['cuerpo']['en_proceso'] ?? false) === true,
             'disponible' => true, 'alcances_soporte' => is_array($alcances) ? $alcances : [],
-            'importaciones_de_contactos' => $soporte_activo ? self::contactos_abiertos($respuesta['cuerpo']['importaciones_de_contactos'] ?? []) : []];
+            'importaciones_de_contactos' => $contactos,
+            'capacidades_prueba' => $capacidades];
+    }
+
+    /**
+     * Las capacidades de la prueba que anunció empresa (`capacidades_prueba`): solo strings, sin repetidos. Un sistema
+     * anterior no manda la clave: lista vacía, y todo lo nuevo queda apagado.
+     *
+     * @param mixed $entrada
+     *
+     * @return array<int, string>
+     */
+    private static function capacidades_anunciadas($entrada): array
+    {
+        if (!is_array($entrada)) {
+            return [];
+        }
+
+        $capacidades = [];
+        foreach ($entrada as $capacidad) {
+            if (is_string($capacidad) && trim($capacidad) !== '' && mb_strlen($capacidad) <= 60) {
+                $capacidades[trim($capacidad)] = true;
+            }
+        }
+
+        return array_keys($capacidades);
+    }
+
+    /**
+     * El `margen_de_ganancia` si cumple el contrato (§2.1: la regex, un porcentaje mayor a 0 y hasta 1000, un precio
+     * mayor a 0), o null.
+     *
+     * @param mixed $valor
+     *
+     * @return string|null
+     */
+    public static function margen_valido($valor): ?string
+    {
+        if (!is_string($valor) || preg_match(self::REGEX_MARGEN, $valor) !== 1) {
+            return null;
+        }
+        if ($valor === 'despues') {
+            return $valor;
+        }
+
+        $es_precio = strpos($valor, 'precio:') === 0;
+        $numero = (float) ($es_precio ? substr($valor, 7) : $valor);
+        if ($numero <= 0 || (!$es_precio && $numero > 1000)) {
+            return null;
+        }
+
+        return $valor;
+    }
+
+    /**
+     * Ronda 8 (D1): el Excel de clientes o proveedores del dueño de un negocio EN PRUEBA, al motor de soporte de
+     * empresa en modo prueba (sin código: se carga solo y el resumen le llega por el mismo ticket). El controlador ya
+     * pasó la puerta de la prueba, la automatización y la reserva vigente; acá se repiten las dos primeras.
+     *
+     * 🔴 Solo si `prueba-pendientes` anuncia `contactos` en `capacidades_prueba`: con un sistema anterior es
+     * `version_vieja` y no se reenvía nada. No marca `importacion_soporte_iniciada_at` (eso es de activos).
+     *
+     * @param SupportTicket        $ticket
+     * @param array<string, mixed> $input `attachment_id`, `model` (client | provider).
+     *
+     * @return array<string, mixed>
+     */
+    public function importar_contactos_de_prueba(SupportTicket $ticket, array $input): array
+    {
+        $puerta = $this->puerta($ticket);
+        if ($puerta !== null) {
+            return $puerta;
+        }
+        if (!$this->automatizacion_disponible($ticket)) {
+            return ['estado' => 'contacto_no_habilitado', 'mensaje' => 'La carga de clientes o proveedores de la prueba es solo para el dueño, con la prueba vigente.'];
+        }
+
+        $modelo = isset($input['model']) ? (string) $input['model'] : '';
+        if (!in_array($modelo, \App\Services\ImportacionesDeMartin\ImportacionesDeMartinService::MODELOS, true)
+            || !isset($input['attachment_id']) || isset($input['file']) || isset($input['pdf_attachment_id'])
+            || isset($input['whatsapp_catalog_url']) || isset($input['whatsapp_catalog_message_id'])) {
+            return ['estado' => 'archivo_invalido', 'mensaje' => 'Adjuntá al ticket el Excel de clientes o proveedores que mandó el dueño (attachment_id).'];
+        }
+
+        $archivo = $this->archivo_excel($ticket, $input);
+        if (isset($archivo['estado'])) {
+            return $archivo;
+        }
+
+        $capacidad = $this->consultar_corridas($ticket, false);
+        if ($capacidad['en_proceso'] === null) {
+            return ['estado' => 'no_responde', 'mensaje' => 'No pude confirmar que el sistema del negocio cargue clientes o proveedores solo.'];
+        }
+        if ($capacidad['disponible'] !== true || !in_array(self::CAPACIDAD_CONTACTOS, $capacidad['capacidades_prueba'] ?? [], true)) {
+            return ['estado' => 'version_vieja', 'disponible' => false, 'modelo' => $modelo,
+                'mensaje' => 'El sistema del negocio todavía no carga clientes o proveedores solo en la prueba. No se mandó nada.'];
+        }
+
+        return app(\App\Services\ImportacionesDeMartin\ImportacionesDeMartinService::class)
+            ->iniciar_prueba($ticket, $modelo, $archivo, hash('sha256', $archivo['bytes']));
     }
 
     /**
@@ -539,7 +678,7 @@ class PruebaImportacionService
      *
      * @return array<string, mixed>|null null = pasa.
      */
-    protected function puerta(SupportTicket $ticket): ?array
+    public function puerta(SupportTicket $ticket): ?array
     {
         $ticket->loadMissing('client');
 
@@ -605,7 +744,7 @@ class PruebaImportacionService
         return $verificados;
     }
 
-    private function automatizacion_disponible(SupportTicket $ticket): bool
+    public function automatizacion_disponible(SupportTicket $ticket): bool
     {
         return ($ticket->source === 'whatsapp' || $this->es_soporte_del_sistema_del_dueno($ticket))
             && $ticket->client_employee_id === null
