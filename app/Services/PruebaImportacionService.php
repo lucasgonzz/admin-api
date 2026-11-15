@@ -66,9 +66,10 @@ class PruebaImportacionService
 
     /**
      * El `margen_de_ganancia` normalizado: `despues`, un porcentaje (más de 0 y hasta 1000) o `precio:N` (N más de 0).
-     * Es la misma regex en los tres repos (contrato de la ronda 8, §2.1).
+     * Es la misma regex en los tres repos (contrato de la ronda 8, §2.1). Con `D`: sin él, `$` acepta un salto de línea
+     * final y `"40\n"` pasaría y viajaría con el salto.
      */
-    const REGEX_MARGEN = '/^(despues|\d{1,4}(\.\d{1,2})?|precio:\d{1,9}(\.\d{1,2})?)$/';
+    const REGEX_MARGEN = '/^(despues|\d{1,4}(\.\d{1,2})?|precio:\d{1,9}(\.\d{1,2})?)$/D';
 
     /** Extensiones de Excel y de imagen, con el mime que se declara al reenviar. */
     const EXCEL = [
@@ -380,7 +381,11 @@ class PruebaImportacionService
             return ['pendientes' => [], 'en_proceso' => false, 'disponible' => false];
         }
         if ($status !== 200) {
-            return ['pendientes' => [], 'en_proceso' => null, 'disponible' => false];
+            // `falla`: por qué no se pudo leer (lo que devolvió `reenviar`, o el status del sistema del negocio). Solo lo
+            // lee `importar_contactos_de_prueba`; el contexto y el cierre siguen mirando `en_proceso` null, como siempre.
+            return ['pendientes' => [], 'en_proceso' => null, 'disponible' => false,
+                'falla' => isset($respuesta['estado']) ? ['estado' => (string) $respuesta['estado'], 'mensaje' => (string) ($respuesta['mensaje'] ?? '')]
+                    : ['status' => (int) $status, 'cuerpo' => is_array($respuesta['cuerpo'] ?? null) ? $respuesta['cuerpo'] : []]];
         }
 
         $pendientes = $respuesta['cuerpo']['pendientes'] ?? [];
@@ -494,7 +499,7 @@ class PruebaImportacionService
 
         $capacidad = $this->consultar_corridas($ticket, false);
         if ($capacidad['en_proceso'] === null) {
-            return ['estado' => 'no_responde', 'mensaje' => 'No pude confirmar que el sistema del negocio cargue clientes o proveedores solo.'];
+            return $this->falla_de_la_consulta($capacidad['falla'] ?? []);
         }
         if ($capacidad['disponible'] !== true || !in_array(self::CAPACIDAD_CONTACTOS, $capacidad['capacidades_prueba'] ?? [], true)) {
             return ['estado' => 'version_vieja', 'disponible' => false, 'modelo' => $modelo,
@@ -503,6 +508,33 @@ class PruebaImportacionService
 
         return app(\App\Services\ImportacionesDeMartin\ImportacionesDeMartinService::class)
             ->iniciar_prueba($ticket, $modelo, $archivo, hash('sha256', $archivo['bytes']));
+    }
+
+    /**
+     * Por qué no se pudo confirmar la capacidad `contactos`, sin reenviar nada. `sin_api_key` y `sin_url` salen tal cual
+     * (los mismos estados que la carga de artículos de la prueba, 409); `no_responde` queda para lo transitorio (sin
+     * conexión, timeout, 5xx); cualquier otro status del sistema del negocio es `rechazado`, con su `http`.
+     *
+     * @param array<string, mixed> $falla `{estado, mensaje}` de `reenviar` o `{status, cuerpo}`.
+     *
+     * @return array<string, mixed>
+     */
+    private function falla_de_la_consulta(array $falla): array
+    {
+        if (isset($falla['estado'])) {
+            return ['estado' => (string) $falla['estado'], 'mensaje' => (string) $falla['mensaje']];
+        }
+
+        $status = (int) ($falla['status'] ?? 0);
+        if ($status === 0 || $status >= 500) {
+            return ['estado' => 'no_responde', 'mensaje' => 'El sistema del negocio no respondió: no pude confirmar que cargue clientes o proveedores solo.'];
+        }
+
+        $cuerpo = is_array($falla['cuerpo'] ?? null) ? $falla['cuerpo'] : [];
+
+        return ['estado' => 'rechazado', 'http' => $status,
+            'motivo_instancia' => isset($cuerpo['motivo']) && is_string($cuerpo['motivo']) ? $cuerpo['motivo'] : null,
+            'mensaje' => 'El sistema del negocio no dejó consultar sus importaciones: no se mandó nada.'];
     }
 
     /**

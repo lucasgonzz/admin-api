@@ -206,6 +206,54 @@ class ContactosDeLaPruebaTest extends BaseDeImportacionesDeMartin
     }
 
     /**
+     * `no_responde` es solo lo transitorio; `sin_api_key` y `sin_url` salen como en la carga de artículos de la prueba
+     * (409), y otro status del sistema es `rechazado`. En ningún caso se reenvía el Excel.
+     *
+     * @test
+     * @dataProvider causas_de_la_consulta
+     */
+    public function cada_causa_de_no_poder_consultar_la_capacidad_sale_como_lo_que_es(string $causa, int $http, string $estado): void
+    {
+        $this->fakear_http(['*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response($this->pendientes(), 200)]);
+        $excel = $this->excel($this->sistema);
+        $reserva = $this->reservar($this->sistema);
+
+        if ($causa === 'sin_api_key') {
+            $this->client->api_key = '';
+            $this->client->save();
+        } elseif ($causa === 'sin_url') {
+            $this->client->api_url = '';
+            $this->client->save();
+            $this->client->client_apis()->delete();
+        } elseif ($causa === 'sin_conexion') {
+            $this->fakear_http(['*/admin-sync/ai-excel-import/prueba-pendientes*' => function () {
+                throw new \Illuminate\Http\Client\ConnectionException('cURL error 28: timeout');
+            }]);
+        } else {
+            $this->fakear_http(['*/admin-sync/ai-excel-import/prueba-pendientes*' => Http::response(
+                ['message' => 'No.', 'motivo' => 'otra_cosa'], $causa === 'status_409' ? 409 : 503)]);
+        }
+
+        $respuesta = $this->importar($this->sistema, ['attachment_id' => $excel->id, 'model' => 'client', 'automatizar_prueba' => true] + $reserva)
+            ->assertStatus($http)->assertJsonPath('estado', $estado);
+        if ($causa === 'status_409') {
+            $respuesta->assertJsonPath('http', 409)->assertJsonPath('motivo_instancia', 'otra_cosa');
+        }
+        $this->no_inicio();
+    }
+
+    public function causas_de_la_consulta(): array
+    {
+        return [
+            'sin api_key' => ['sin_api_key', 409, 'sin_api_key'],
+            'sin url' => ['sin_url', 409, 'sin_url'],
+            'sin conexión' => ['sin_conexion', 502, 'no_responde'],
+            '5xx del sistema' => ['status_503', 502, 'no_responde'],
+            'un 409 del sistema' => ['status_409', 200, 'rechazado'],
+        ];
+    }
+
+    /**
      * @test
      * @dataProvider empresas_viejas
      */
@@ -395,9 +443,17 @@ class ContactosDeLaPruebaTest extends BaseDeImportacionesDeMartin
     {
         $this->fakear_http(['*/admin-sync/importacion-soporte/*' => Http::response($this->corrida('client', true, 'terminada'), 200)]);
         $empleado = $this->ticket_del_sistema(['client_employee_id' => 77]);
-        $reserva = $this->reservar($this->sistema);
 
-        // El empleado no tiene reserva propia: la de otro ticket no vale.
+        // Con la reserva VÁLIDA de su propio ticket: lo que lo frena es la guarda de la prueba, no la reserva.
+        $propia = $this->reservar($empleado);
+        $this->getJson($this->ruta('import-status', $empleado) . '?modelo=client&corrida_id=' . self::CORRIDA,
+            $this->headers_de_claude() + ['X-Support-Lease-Token' => $propia['lease_token']])
+            ->assertStatus(403)->assertJsonPath('error', 'contacto_no_habilitado');
+        $this->postJson($this->ruta('import-revert', $empleado), ['lease_token' => $propia['lease_token'], 'modelo' => 'client', 'corrida_id' => self::CORRIDA],
+            $this->headers_de_claude())->assertStatus(403)->assertJsonPath('error', 'contacto_no_habilitado');
+
+        // La reserva de otro ticket tampoco vale.
+        $reserva = $this->reservar($this->sistema);
         $this->getJson($this->ruta('import-status', $empleado) . '?modelo=client&corrida_id=' . self::CORRIDA,
             $this->headers_de_claude() + ['X-Support-Lease-Token' => $reserva['lease_token']])->assertStatus(423);
 
@@ -459,6 +515,28 @@ class ContactosDeLaPruebaTest extends BaseDeImportacionesDeMartin
         return ['texto' => ['abc'], 'cero' => ['0'], 'más de mil' => ['1001'], 'precio cero' => ['precio:0'],
             'con coma (sin normalizar)' => ['35,5'], 'con tilde (sin normalizar)' => ['después'], 'tres decimales' => ['10.123'],
             'precio negativo' => ['precio:-5']];
+    }
+
+    /**
+     * La regex lleva `D`: sin él, `$` acepta un salto de línea final. Por HTTP el middleware `TrimStrings` ya lo saca
+     * antes de validar, así que acá se fija la regla misma (la del controlador usa la misma constante) y que por HTTP
+     * nunca viaje con el salto.
+     *
+     * @test
+     */
+    public function la_ganancia_con_un_salto_de_linea_final_no_pasa_la_regla_ni_viaja_con_el_salto(): void
+    {
+        $this->assertNull(\App\Services\PruebaImportacionService::margen_valido("40\n"));
+        $this->assertNull(\App\Services\PruebaImportacionService::margen_valido("precio:1300\n"));
+        $this->assertTrue(\Illuminate\Support\Facades\Validator::make(['m' => "40\n"],
+            ['m' => ['string', 'regex:' . \App\Services\PruebaImportacionService::REGEX_MARGEN]])->fails(), 'La regla del controlador da 422.');
+
+        $this->fakear_http(['*/admin-sync/ai-excel-import/analyze' => Http::response(['analysis_uuid' => 'u', 'automatizar_prueba' => true, 'margen_previo' => '40'], 202)]);
+        $excel = $this->excel($this->sistema, 'lista-de-articulos');
+        $this->importar($this->sistema, ['attachment_id' => $excel->id, 'model' => 'article', 'margen_de_ganancia' => "40\n"])->assertOk();
+        Http::assertNotSent(function ($request) {
+            return strpos($request->url(), '/ai-excel-import/analyze') !== false && $this->campo($request, 'margen_de_ganancia') === "40\n";
+        });
     }
 
     /** @test */
