@@ -1197,7 +1197,7 @@ class ImplementationConversationService
         $progress_list = $this->build_progress_list($implementation);
 
         // Construir el mensaje incluyendo la lista de archivos requeridos.
-        $responsable_saludo = $responsable !== '' ? $responsable : 'Hola';
+        $responsable_saludo = $responsable !== '' ? SupportWhatsappOpenerService::primer_nombre($responsable) : 'Hola';
 
         return "{$progress_list}\n\n"
             . "{$responsable_saludo}, ¡ya estamos instalando el sistema con la configuración de {$client_name}! 🎉\n\n"
@@ -1353,7 +1353,7 @@ class ImplementationConversationService
 
             if ($chosen_index === 0 || $chosen_index === $self_index) {
                 // El dueño mismo se encarga: usar su teléfono como contacto de migración.
-                $responsible_name  = $client ? $client->resolve_display_name() : 'el responsable';
+                $responsible_name  = $this->owner_person_name($client, 'el responsable');
                 $responsible_phone = trim((string) (Client::telefono_personal_de($client) ?? $phone));
 
                 $data['migration_responsible_name']  = $responsible_name;
@@ -1405,7 +1405,7 @@ class ImplementationConversationService
 
             if ($is_self) {
                 // El dueño se encarga: usar su nombre real y su teléfono como contacto; saltar pregunta de teléfono.
-                $responsible_name  = $client ? $client->resolve_display_name() : $body;
+                $responsible_name  = $this->owner_person_name($client, $body);
                 $responsible_phone = trim((string) (Client::telefono_personal_de($client) ?? $phone));
 
                 $data['migration_responsible_name']  = $responsible_name;
@@ -1609,7 +1609,7 @@ class ImplementationConversationService
             }
 
             // Nombre del empleado para el saludo personalizado.
-            $employee_name = trim((string) ($employee->name ?? 'empleado'));
+            $employee_name = SupportWhatsappOpenerService::primer_nombre((string) ($employee->name ?? ''));
 
             // Construir el mensaje de credenciales para el empleado.
             $employee_message = "Hola {$employee_name}! Soy {$admin_name} de ComercioCity. Tu acceso al sistema de {$client_name} ya está listo 🎉\n\n";
@@ -2057,7 +2057,7 @@ class ImplementationConversationService
 
             if ($is_self) {
                 // El dueño se encarga: usar su nombre y teléfono directamente.
-                $afip_name  = $client ? $client->resolve_display_name() : $body;
+                $afip_name  = $this->owner_person_name($client, $body);
                 $afip_phone = $owner_phone;
 
                 $data['afip_contact_name']  = $afip_name;
@@ -2128,7 +2128,7 @@ class ImplementationConversationService
         string $admin_name
     ): void {
         // Nombre y teléfono del responsable de AFIP.
-        $afip_name  = (string) ($data['afip_contact_name'] ?? 'responsable');
+        $afip_name  = SupportWhatsappOpenerService::primer_nombre((string) ($data['afip_contact_name'] ?? ''));
         $afip_phone = (string) ($data['afip_contact_phone'] ?? '');
 
         // Link a la guía de AFIP (hardcodeado por ahora).
@@ -2294,10 +2294,13 @@ class ImplementationConversationService
         // Generar la lista de progreso para incluir en el mensaje.
         $progress_list = $this->build_progress_list($implementation);
 
+        // Se le habla a la persona por su primer nombre, no por el del negocio.
+        $nombre_persona = $this->owner_first_name($client);
+
         // Construir el mensaje con los datos de acceso (si están disponibles).
         if ($link_sistema !== '' && $usuario !== '' && $contrasena !== '') {
             return "{$progress_list}\n\n"
-                . "{$client_name}, ¡tu sistema ya está listo con toda tu información cargada! 🎉\n\n"
+                . "{$nombre_persona}, ¡tu sistema ya está listo con toda tu información cargada! 🎉\n\n"
                 . "Podés ingresar desde acá: {$link_sistema}\n"
                 . "Usuario: {$usuario}\n"
                 . "Contraseña: {$contrasena}\n\n"
@@ -2308,7 +2311,7 @@ class ImplementationConversationService
         }
 
         return "{$progress_list}\n\n"
-            . "{$client_name}, ¡tu sistema ya está listo con toda tu información cargada! 🎉\n\n"
+            . "{$nombre_persona}, ¡tu sistema ya está listo con toda tu información cargada! 🎉\n\n"
             . "En breve te enviamos los datos de acceso para que puedas ingresar.\n\n"
             . "¿Alguna duda antes de empezar?";
     }
@@ -3830,10 +3833,10 @@ class ImplementationConversationService
     private function build_stage_1_greeting(?Implementation $implementation, ?Client $client): string
     {
         // Nombre del cliente para el saludo personalizado.
-        $display_name = $client ? $client->resolve_display_name() : 'cliente';
+        $display_name = $this->owner_first_name($client);
 
-        // Nombre del admin asignado para presentarse en primera persona.
-        $admin_name = $implementation ? $this->resolve_assigned_admin_name($implementation) : 'el equipo de ComercioCity';
+        // Siempre firma Martín.
+        $admin_name = SupportWhatsappOpenerService::REMITENTE;
 
         return "Hola {$display_name}! Soy {$admin_name}, te voy a hacer unas preguntas para dar de alta tu perfil en la plataforma y comenzar con la migración de tu información.";
     }
@@ -3920,9 +3923,7 @@ class ImplementationConversationService
     private function finish_stage_1(Implementation $implementation, string $phone, ?Client $client = null): void
     {
         // Nombre del cliente para personalizar el mensaje de cierre.
-        $client_name = $client
-            ? $client->resolve_display_name()
-            : "Cliente #{$implementation->client_id}";
+        $client_name = $this->owner_first_name($client);
 
         // Mensaje de confirmación en primera persona (firmado implícitamente por el admin asignado).
         $client_message = "¡Perfecto, tenemos todo lo que necesito! Voy a revisar la información y te aviso cuando el sistema esté listo para el siguiente paso. ¡Gracias {$client_name}!";
@@ -4137,10 +4138,7 @@ class ImplementationConversationService
         // Nombre del cliente para personalizar el saludo; fallback genérico si no está cargado.
         $implementation->loadMissing('client');
         $client      = $implementation->client;
-        $client_name = $client ? $client->resolve_display_name() : 'cliente';
-        if ($client_name === '') {
-            $client_name = 'cliente';
-        }
+        $client_name = $this->owner_first_name($client);
 
         return "Hola {$client_name}, ¿cómo estás?\n\n"
             . "Soy Martín, te escribo porque voy a ser el encargado de tu implementación en ComercioCity. "
@@ -4184,11 +4182,8 @@ class ImplementationConversationService
                 return;
             }
 
-            // Nombre para personalizar {{1}} de la plantilla Meta.
-            $client_name = $client->resolve_display_name();
-            if ($client_name === '') {
-                $client_name = 'cliente';
-            }
+            // Primer nombre de la persona para {{1}} de la plantilla Meta (nunca el nombre del negocio).
+            $client_name = $this->owner_first_name($client);
 
             // Envío vía plantilla aprobada (variables en orden {{1}}, {{2}}…).
             $whatsapp_message_id = $this->whatsapp_send_service->send_template(
@@ -4260,7 +4255,7 @@ class ImplementationConversationService
 
         $progress_text = implode("\n", $progress_lines);
 
-        return "¡Perfecto, {$client_name}! Ya recibimos toda la información de tu empresa 🎉\n\n"
+        return "¡Perfecto, " . $this->owner_first_name($client) . "! Ya recibimos toda la información de tu empresa 🎉\n\n"
             . "Tu progreso:\n{$progress_text}\n\n"
             . "Nuestro equipo ya está trabajando en la instalación. Te aviso cuando esté lista.";
     }
@@ -4448,17 +4443,39 @@ class ImplementationConversationService
      */
     private function resolve_assigned_admin_name(Implementation $implementation): string
     {
-        if (! $implementation->assigned_admin_id) {
-            return 'el equipo de ComercioCity';
-        }
+        // 🔴 Regla de Lucas (16/11/2026): todo mensaje al cliente sale firmado «Martín», sea cual sea el admin asignado
+        // (`assigned_admin_id` sigue sirviendo para saber quién atiende en el panel, no para firmar).
+        return SupportWhatsappOpenerService::REMITENTE;
+    }
 
-        $admin = Admin::find($implementation->assigned_admin_id);
+    /**
+     * Nombre con el que se saluda al dueño: el primer nombre de la PERSONA (`clients.name`), nunca el del negocio.
+     *
+     * Reusa SupportWhatsappOpenerService::primer_nombre() (misma regla que la apertura de soporte). Sin nombre de persona
+     * devuelve «equipo»: «Hola equipo», no «Hola Ferretería X».
+     *
+     * @param Client|null $client Cliente de la implementación.
+     *
+     * @return string
+     */
+    private function owner_first_name(?Client $client): string
+    {
+        return SupportWhatsappOpenerService::primer_nombre($client === null ? '' : (string) ($client->name ?? ''));
+    }
 
-        if ($admin === null || empty($admin->name)) {
-            return 'el equipo de ComercioCity';
-        }
+    /**
+     * Nombre de la persona dueña para guardarlo como responsable cuando «se encarga el dueño» (no el del negocio).
+     *
+     * @param Client|null $client   Cliente.
+     * @param string      $fallback Qué guardar si no hay cliente o no tiene nombre de persona.
+     *
+     * @return string
+     */
+    private function owner_person_name(?Client $client, string $fallback): string
+    {
+        $persona = $client === null ? '' : trim((string) ($client->name ?? ''));
 
-        return $admin->name;
+        return $persona !== '' ? $persona : $fallback;
     }
 
     /**

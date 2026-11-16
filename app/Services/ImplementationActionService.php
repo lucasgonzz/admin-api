@@ -612,9 +612,9 @@ class ImplementationActionService
     private function resolve_client_name(Implementation $implementation): string
     {
         $client = $implementation->client ?? Client::find($implementation->client_id);
-        $name   = $client ? $client->resolve_display_name() : '';
 
-        return $name !== '' ? $name : 'cliente';
+        // Primer nombre de la PERSONA (nunca el del negocio): misma regla que la apertura de soporte (Lucas, 16/11/2026).
+        return SupportWhatsappOpenerService::primer_nombre($client ? (string) ($client->name ?? '') : '');
     }
 
     // -------------------------------------------------------------------------
