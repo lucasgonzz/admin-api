@@ -7,6 +7,16 @@ use Illuminate\Database\Eloquent\Model;
 /** Estado durable de atención; no depende de que la PC permanezca prendida. */
 class SupportCodexCase extends Model
 {
+    protected static function booted()
+    {
+        static::saved(function (self $case) { SupportCodexMission::capture($case); });
+    }
+
+    public function missions()
+    {
+        return $this->hasMany(SupportCodexMission::class, 'support_ticket_id', 'support_ticket_id')->orderBy('id');
+    }
+
     const HUMAN_REPLY_REVIEW_REASON = 'Lucas retomó la atención desde el admin.';
 
     protected $guarded = [];

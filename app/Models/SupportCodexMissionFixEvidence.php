@@ -13,7 +13,7 @@ class SupportCodexMissionFixEvidence extends Model
 
     public static function current_for(SupportTicket $ticket, ?SupportCodexCase $case): ?self
     {
-        if ($ticket->status !== 'open' || $case === null || ($case->mission_lifecycle()['status'] ?? null) !== 'started') {
+        if ($case === null || ($case->mission_lifecycle()['status'] ?? null) !== 'started') {
             return null;
         }
 

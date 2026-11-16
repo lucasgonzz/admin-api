@@ -11,10 +11,18 @@ use Illuminate\Http\Request;
 
 class ClaudeSupportScheduledUpgradeController extends Controller
 {
-    public function show($id)
+    public function show(Request $request, $id)
     {
+        $input = $request->validate(['mission_id' => 'sometimes|integer|min:1']);
         SupportTicket::findOrFail($id);
-        $row = SupportCodexScheduledUpgrade::where('support_ticket_id', $id)->latest('id')->first();
+        $query = SupportCodexScheduledUpgrade::where('support_ticket_id', $id);
+        if (isset($input['mission_id'])) {
+            $mission = \App\Models\SupportCodexMission::where('support_ticket_id', $id)->findOrFail($input['mission_id']);
+            $evidence = SupportCodexMissionFixEvidence::where('support_ticket_id', $id)
+                ->where('mission_thread_id', $mission->mission_thread_id)->where('mission_hash', $mission->mission_hash)->first();
+            $query->whereHas('agreement', function ($q) use ($evidence) { $q->where('mission_fix_evidence_id', $evidence === null ? 0 : $evidence->id); });
+        }
+        $row = $query->latest('id')->first();
         return response()->json(['scheduled_upgrade' => $row === null ? null : $this->present($row)]);
     }
 

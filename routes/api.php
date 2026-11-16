@@ -435,6 +435,9 @@ Route::middleware('claude.task.key')
             ->whereNumber('id');
         Route::post('support-codex/tickets/{id}/upgrade-agreement', 'Api\ClaudeSupportCodexController@upgrade_agreement')
             ->whereNumber('id');
+        Route::post('support-codex/tickets/{id}/upgrade-reconfirmation', 'Api\ClaudeSupportCodexController@upgrade_reconfirmation')->whereNumber('id');
+        Route::post('support-codex/tickets/{id}/upgrade-overnight', 'Api\ClaudeSupportCodexController@upgrade_overnight')->whereNumber('id');
+        Route::post('support-codex/tickets/{id}/mission-delivery-verified', 'Api\SupportMissionDeliveryController@verify')->whereNumber('id');
         Route::get('support-codex/release-work', 'Api\ClaudeSupportReleaseController@work');
         Route::post('support-codex/tickets/{id}/release-claim', 'Api\ClaudeSupportReleaseController@claim')->whereNumber('id');
         Route::post('support-codex/tickets/{id}/release-published', 'Api\ClaudeSupportReleaseController@publish')->whereNumber('id');

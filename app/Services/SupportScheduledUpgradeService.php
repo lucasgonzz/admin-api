@@ -101,6 +101,7 @@ class SupportScheduledUpgradeService
         if (! self::enabled()) {
             return;
         }
+        app(SupportUpgradeReconfirmationService::class)->sync_overnight_agreements();
         $due = Scheduled::where('status', Scheduled::SCHEDULED)
             ->where('starts_at_utc', '<=', now()->utc()->toDateTimeString())
             ->orderBy('starts_at_utc')->limit(15)->pluck('id');
@@ -125,6 +126,9 @@ class SupportScheduledUpgradeService
     {
         DB::transaction(function () use ($id) {
             $row = Scheduled::lockForUpdate()->findOrFail($id);
+            // Este gate precede ambos destinos: delegar primero a tienda permitiría un corte sin el sí vigente.
+            if ($row->status === Scheduled::SCHEDULED
+                && ! app(SupportUpgradeReconfirmationService::class)->may_start($row)) { return; }
             if ($row->target === 'tienda') { app(SupportStoreUpgradeService::class)->advance($row); return; }
             if ($row->status === Scheduled::SCHEDULED) {
                 if (SupportMaintenancePolicy::coordinated($row->agreement)
@@ -401,7 +405,7 @@ class SupportScheduledUpgradeService
                 $evidence = SupportCodexMissionFixEvidence::findOrFail($row->agreement->mission_fix_evidence_id);
             } else {
                 $case = SupportCodexCase::where('support_ticket_id', $ticket_id)->first();
-                $evidence = SupportCodexMissionFixEvidence::current_for($ticket, $case);
+                $evidence = \App\Models\SupportCodexMission::evidence_for_agreement($row->agreement);
             }
             abort_unless($evidence !== null && (int) $evidence->id === (int) $row->agreement->mission_fix_evidence_id
                 && $data['mission_thread_id'] === $evidence->mission_thread_id
@@ -421,6 +425,7 @@ class SupportScheduledUpgradeService
                 $row->status = Scheduled::VERIFIED;
             }
             $row->save();
+            if ($data['resultado'] === 'verificado') { app(SupportMissionDeliveryService::class)->record_verified_schedule($row); }
             return $row;
         });
     }
@@ -435,7 +440,7 @@ class SupportScheduledUpgradeService
                 }
                 $ticket = SupportTicket::lockForUpdate()->findOrFail($row->support_ticket_id);
                 $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->first();
-                $evidence = SupportCodexMissionFixEvidence::current_for($ticket, $case);
+                $evidence = \App\Models\SupportCodexMission::evidence_for_agreement($row->agreement);
                 if ($evidence === null || (int) $evidence->id !== (int) $row->agreement->mission_fix_evidence_id) {
                     $row->update(['notification_requested_at' => now(), 'reason' => 'ticket_o_mision_cambio']);
                     return;
@@ -444,13 +449,15 @@ class SupportScheduledUpgradeService
                 SupportMessage::apply_mensaje_real_conditions($messages, 'support_messages');
                 $last = $messages->orderByDesc('id')->first();
                 if ($last === null || ($last->sender_type === 'user' && (int) $last->id > (int) $case->handled_message_id
-                    && (int) $last->id !== (int) $row->agreement->confirmation_message_id)) {
+                    && (int) $last->id !== (int) $row->agreement->confirmation_message_id
+                    && (int) $last->id !== (int) $row->reconfirmation_message_id)) {
                     return;
                 }
                 app(SupportCodexService::class)->resume((int) $ticket->id, [
                     'expected_message_id' => $last->id,
                     'reason' => 'Actualización aplicada y corrección verificada; pedí al negocio que confirme.',
                     'request_confirmation' => true,
+                    'mission_id' => optional(\App\Models\SupportCodexMission::resolve((int) $ticket->id, ['mission_thread_id' => $evidence->mission_thread_id, 'mission_hash' => $evidence->mission_hash]))->id,
                 ], 'Actualización verificada');
                 $row->update(['notification_requested_at' => now()]);
             });
