@@ -42,7 +42,7 @@ class SupportUpgradePreflight
         }
 
         $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->first();
-        $evidence = SupportCodexMissionFixEvidence::current_for($ticket, $case);
+        $evidence = \App\Models\SupportCodexMission::evidence_for_agreement($agreement);
         if ($evidence === null || (int) $evidence->id !== (int) $agreement->mission_fix_evidence_id) {
             return $this->blocked('evidencia_obsoleta');
         }
@@ -61,8 +61,15 @@ class SupportUpgradePreflight
         SupportMessage::apply_mensaje_real_conditions($latest, 'support_messages');
         $latest = $latest->orderByDesc('id')->first();
         $outbound = SupportMessage::find($operation->message_id);
-        if ($latest === null || (int) $latest->id !== (int) $agreement->confirmation_message_id
-            || ! $this->agreements->is_exact_confirmation($agreement, $latest, $outbound)) {
+        $confirmation_valid = $latest !== null && (int) $latest->id === (int) $agreement->confirmation_message_id
+            && $this->agreements->is_exact_confirmation($agreement, $latest, $outbound);
+        if ($agreement->maintenance_mode === 'overnight') {
+            $confirmation_valid = app(SupportUpgradeReconfirmationService::class)->valid_overnight_agreement($agreement)
+                && app(SupportUpgradeReconfirmationService::class)->later_messages_allow((int) $ticket->id, (int) $operation->message_id);
+        } elseif ($scheduled !== null && ! $planning && $agreement->maintenance_mode === 'coordinated') {
+            $confirmation_valid = app(SupportUpgradeReconfirmationService::class)->valid_confirmation($scheduled, $latest);
+        }
+        if (! $confirmation_valid) {
             return $this->blocked('confirmacion_obsoleta');
         }
 
@@ -138,7 +145,7 @@ class SupportUpgradePreflight
 
         if ($read_activity) {
             try {
-                $activity = $coordinated
+                $activity = $agreement->maintenance_mode === 'coordinated' && ($scheduled === null || ! $scheduled->overnight_fallback)
                     ? $this->ssh->read_coordinated_upgrade_activity_for($api, (int) $client->user_id, $start->timestamp)
                     : $this->ssh->read_upgrade_activity_for($api, (int) $client->user_id);
             } catch (\Throwable $error) {
