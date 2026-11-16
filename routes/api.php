@@ -447,6 +447,8 @@ Route::middleware('claude.task.key')
            el monitor pide los vencidos, reserva uno con su contexto, guarda los hitos de uso que midió y manda (o
            pospone) el mensaje que redactó Martín. Desde un ticket normal, Martín pausa o reanuda el seguimiento del
            cliente con la reserva del ticket. Reglas en App\Services\ImplementationFollowups\ImplementationFollowupService. */
+        // Pasos de «completó el formulario» sin mensaje del cliente (misión monitor-pasos-implementar-auto, 16/11/2026): solo lectura.
+        Route::get('support-codex/implementation-form-steps/pending', 'Api\ClaudeImplementationFormStepsController@pending');
         Route::get('support-codex/implementation-followups/pending', 'Api\ClaudeImplementationFollowupController@pending');
         Route::post('support-codex/implementation-followups/{id}/claim', 'Api\ClaudeImplementationFollowupController@claim')
             ->whereNumber('id');
