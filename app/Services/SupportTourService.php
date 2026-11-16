@@ -22,7 +22,6 @@ class SupportTourService
     public const RETOMAR_DESDE_CUENTA_PROPIA = 'Entrá al sistema con tu cuenta propia, volvé a este mismo chat y respondé «Sí, quiero el tour».';
     public const ACTUALIZAR_PARA_ABRIR = 'Para abrir la guía personalizada, primero necesitás actualizar tu sistema a una versión compatible con Robotito.';
     public const REVISION_ANTES_DE_PREPARAR = 'Si aceptás, Soporte tiene que revisar tu respuesta antes de que se prepare la guía.';
-    private const UMBRAL_DE_OFERTA = '3.2.47';
     private const VERSION_TOUR_PERSONALIZADO = '4.3.44';
 
     public const AVISO = 'Te mandé a Robotito a tu sistema para que te lo muestre. Tocá su aviso en la barra de navegación para empezar.';
@@ -134,7 +133,11 @@ class SupportTourService
     public static function quitar_invitacion(string $texto): string
     {
         if (! self::tiene_invitacion($texto)) {
-            return $texto;
+            $invitacion = self::invitacion_escrita_a_mano($texto, false);
+            if ($invitacion === null) {
+                return $texto;
+            }
+            $texto = $invitacion;
         }
 
         $lineas = preg_split('/\R/u', trim($texto));
@@ -162,7 +165,7 @@ class SupportTourService
      *
      * @return string|null
      */
-    public static function invitacion_escrita_a_mano(string $texto): ?string
+    public static function invitacion_escrita_a_mano(string $texto, bool $requiere_explicacion = true): ?string
     {
         if (self::tiene_invitacion($texto)) {
             return $texto;
@@ -175,7 +178,8 @@ class SupportTourService
 
         $explicacion = trim((string) preg_replace("/\n{3,}/", "\n\n", (string) preg_replace($patron, '', $texto, 1)));
 
-        return $explicacion === '' ? null : $explicacion . "\n\n" . self::INVITACION;
+        return $explicacion === '' ? ($requiere_explicacion ? null : self::INVITACION)
+            : $explicacion . "\n\n" . self::INVITACION;
     }
 
     public static function con_invitacion(
@@ -207,7 +211,7 @@ class SupportTourService
     {
         $invitacion = $this->invitacion_aceptada($ticket, $entrante);
         if (($invitacion === $entrante || ($invitacion->erp_auto_reply['tour_requested'] ?? null) === true)
-            && self::version_admite_tour_personalizado($ticket) !== false) {
+            && self::version_habilita_oferta($ticket) === true) {
             return $invitacion;
         }
 
@@ -218,7 +222,7 @@ class SupportTourService
     {
         if (! self::intento_erp_sin_robotito($ticket, $entrante)
             || $ticket->requiere_verificacion_mensajes
-            || self::version_admite_tour_personalizado($ticket) === false) {
+            || self::version_habilita_oferta($ticket) !== true) {
             return null;
         }
 
@@ -252,10 +256,10 @@ class SupportTourService
             && self::version_u_origen_admite_oferta($ticket, $entrante, self::version_del_sistema($ticket));
     }
 
-    public static function version_habilita_oferta(SupportTicket $ticket): ?bool
+    public static function version_habilita_oferta(SupportTicket $ticket): bool
     {
-        $version = self::version_del_sistema($ticket);
-        return $version === null ? null : VersionNumberComparator::compare($version, self::UMBRAL_DE_OFERTA) > 0;
+        // La invitación actual prepara una guía personalizada: una sesión válida no prueba que esa versión la incluya.
+        return self::version_admite_tour_personalizado($ticket) === true;
     }
 
     public static function version_admite_tour_personalizado(SupportTicket $ticket): ?bool
@@ -279,8 +283,7 @@ class SupportTourService
             return null;
         }
 
-        return self::con_invitacion($texto, ! self::entrante_admite_robotito($ticket, $entrante),
-            $version !== null && VersionNumberComparator::compare($version, self::VERSION_TOUR_PERSONALIZADO) < 0,
+        return self::con_invitacion($texto, ! self::entrante_admite_robotito($ticket, $entrante), false,
             (bool) $ticket->requiere_verificacion_mensajes);
     }
 
@@ -292,14 +295,7 @@ class SupportTourService
 
     private static function version_u_origen_admite_oferta(SupportTicket $ticket, SupportMessage $entrante, ?string $version): bool
     {
-        if ($version !== null) {
-            return VersionNumberComparator::compare($version, self::UMBRAL_DE_OFERTA) > 0;
-        }
-
-        // Las instalaciones sin versión registrada conservan la oferta por sesión u origen autenticado.
-        return self::entrante_admite_robotito($ticket, $entrante)
-            || ($ticket->source === 'erp'
-                && ($entrante->erp_auto_reply[SupportMessage::MARCA_ERP_VERIFICADO_PARA_CODEX] ?? null) === true);
+        return $version !== null && VersionNumberComparator::compare($version, self::VERSION_TOUR_PERSONALIZADO) >= 0;
     }
 
     private static function version_del_sistema(SupportTicket $ticket): ?string
@@ -311,10 +307,8 @@ class SupportTourService
 
         $instancia = PruebaCicloService::instancia_de($cliente);
         if ($instancia !== null && in_array($instancia->estado, [TrialInstance::ESTADO_ASIGNADA, TrialInstance::ESTADO_CLIENTE], true)) {
-            $version = self::normalizar_version($instancia->version);
-            if ($version !== null) {
-                return $version;
-            }
+            // El cliente puede conservar una versión de otra instalación; manda la instancia que está usando ahora.
+            return self::normalizar_version($instancia->version);
         }
 
         return self::normalizar_version(optional($cliente->current_version)->version);
@@ -363,7 +357,8 @@ class SupportTourService
 
     private function invitacion_aceptada(SupportTicket $ticket, SupportMessage $entrante): ?SupportMessage
     {
-        if (! self::entrante_admite_robotito($ticket, $entrante) || ! $ticket->mensaje_confiable_para_codex($entrante)) {
+        if (self::version_habilita_oferta($ticket) !== true
+            || ! self::entrante_admite_robotito($ticket, $entrante) || ! $ticket->mensaje_confiable_para_codex($entrante)) {
             return null;
         }
 

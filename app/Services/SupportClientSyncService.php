@@ -27,6 +27,15 @@ class SupportClientSyncService
             Log::warning('SupportClientSyncService: ticket sin client asociado');
             return false;
         }
+        // También se reintentan respuestas guardadas con la política anterior de Robotito.
+        if ($message->sender_type === 'admin' && $message->kind === 'text'
+            && ! SupportTourService::version_habilita_oferta($message->ticket)) {
+            $message->body = SupportTourService::quitar_invitacion((string) $message->body);
+            $meta = (array) $message->erp_auto_reply;
+            unset($meta['tour_requested'], $meta['tour_invitation']);
+            $message->erp_auto_reply = $meta === [] ? null : $meta;
+            $message->save();
+        }
 
         // URL base del cliente de empresa-api.
         $base_url = $message->ticket->source === 'erp' && ($message->ai_generated_at !== null || $message->ticket->agentes_erp)

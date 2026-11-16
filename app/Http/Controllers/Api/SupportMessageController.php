@@ -156,6 +156,9 @@ class SupportMessageController extends BaseController
                         $attributes['erp_auto_reply'] = ['tour_requested' => true];
                     }
                 }
+                if (is_string($attributes['body']) && SupportTourService::version_habilita_oferta($locked_ticket) !== true) {
+                    $attributes['body'] = SupportTourService::quitar_invitacion($attributes['body']);
+                }
                 $message = SupportMessage::create($attributes);
 
                 if ($prepared_attachment !== null) {

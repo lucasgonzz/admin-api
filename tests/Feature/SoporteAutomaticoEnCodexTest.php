@@ -2289,6 +2289,8 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         bool $quote_other_topic = false
     ): void {
         $ticket = $this->ticket();
+        // Este escenario verifica el cierre tras una oferta válida, no la falta de versión instalada.
+        $ticket->client->update(['current_version_id' => Version::firstOrCreate(['version' => '4.3.44'], ['status' => 'published'])->id]);
         $first = SupportMessage::where('support_ticket_id', $ticket->id)->firstOrFail();
         $guidance = 'Buen día Patricio! Sí, podés poner un banner en la portada que diga "Compra mínima $300.000". '
             . 'En tu sistema entrá a ABM → Tienda online → Banners → Nuevo y cargá el título, el texto y las imágenes para computadora y celular. '
@@ -2354,6 +2356,7 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         array $answers
     ): void {
         $ticket = $this->ticket();
+        $ticket->client->update(['current_version_id' => Version::firstOrCreate(['version' => '4.3.44'], ['status' => 'published'])->id]);
         $result = $this->reply($ticket, $this->claim($ticket), ['body' => $guidance])->assertOk();
         // Un mensaje histórico puede conservar el fin de línea aunque el envío nuevo
         // recorte espacios. La validación debe leer ese formato guardado sin cambiarlo.

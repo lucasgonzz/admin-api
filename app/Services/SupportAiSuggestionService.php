@@ -115,7 +115,7 @@ class SupportAiSuggestionService
             $es_erp = $ticket->source === 'erp';
             $version_habilita = SupportTourService::version_habilita_oferta($ticket);
             if ($es_erp) {
-                $system_prompt .= $this->indicaciones_para_robotito();
+                $system_prompt .= $this->indicaciones_para_robotito($version_habilita === true);
             } elseif ($ticket->source === 'whatsapp' && $version_habilita === true) {
                 $system_prompt .= "\n\nSi respondés cómo hacer una tarea en el sistema, explicá los pasos y marcá invitar_tour: true en el JSON. "
                     . 'El sistema agrega la oferta de Robotito. No la escribas en suggested_message ni la marques en saludos, aclaraciones o rechazos.';
@@ -299,13 +299,12 @@ class SupportAiSuggestionService
                 }
             }
             if ($veredicto['permitido'] && ! $should_escalate && ! $should_close && $result['suggested_message'] !== '') {
-                if ($version_habilita === true || ($es_erp && $version_habilita === null && ! $ticket->requiere_verificacion_mensajes)) {
+                if ($version_habilita === true) {
                     $ultimo = SupportMessage::where('support_ticket_id', $ticket->id);
                     SupportMessage::apply_mensaje_real_conditions($ultimo, 'support_messages');
                     $entrante = $ultimo->latest('id')->first();
                     $invitar = $parsed['invitar_tour'] ?? null;
-                    if (($invitar !== false || $version_habilita === true)
-                        && ($version_habilita === true || SupportTourService::entrante_admite_robotito($ticket, $entrante))) {
+                    if ($invitar !== false || $version_habilita === true) {
                         $oferta = SupportTourService::preparar_oferta($ticket, $entrante, $result['suggested_message'], $invitar === true);
                         if ($oferta !== null) {
                             $result['tour_requested'] = true;
@@ -383,9 +382,9 @@ Respondé SOLO en JSON con este formato exacto:
         return str_replace($standard_json_block, $title_json_block, $user_content);
     }
 
-    private function indicaciones_para_robotito(): string
+    private function indicaciones_para_robotito(bool $habilita_oferta = true): string
     {
-        return <<<'PROMPT'
+        $prompt = <<<'PROMPT'
 
 
 Respondé en un solo mensaje de soporte sin separadores. Para una consulta de uso, explicá el paso a paso en suggested_message. Si hay un video que ayuda, buscá con buscar_video_de_ayuda, elegí un resultado pertinente y agregá al JSON la clave opcional video_codigo con su código exacto. El sistema agrega el enlace. No escribas ni inventes el enlace en suggested_message.
@@ -393,6 +392,9 @@ Respondé en un solo mensaje de soporte sin separadores. Para una consulta de us
 En cualquier consulta sobre cómo hacer una tarea en el sistema, agregá al JSON invitar_tour: true después de explicar el procedimiento. El sistema suma la pregunta de Robotito al final, también si no conocés un recorrido fijo. No prepares un plan ni escribas la pregunta en suggested_message. La invitación tiene que ser la única pregunta en la respuesta, salvo que todavía te falte un dato indispensable para entender qué quiere hacer la persona.
 Si ya se lo explicaste y vuelve a preguntar, ofrecé la guía cuando no se la hayas ofrecido. Si rechaza o agradece sin aceptar, no repitas la invitación. Para consultas de uso dejá should_close en false. El sistema espera el consentimiento y avisa si confirmó el envío. No prometas que ya se envió Robotito.
 PROMPT;
+        // El video y la explicación siguen disponibles aunque la versión no pueda abrir un tour.
+        return $habilita_oferta ? $prompt : rtrim(explode('En cualquier consulta', $prompt, 2)[0])
+            . "\nNo ofrezcas recorridos ni tours con Robotito: no está confirmada su disponibilidad en esta instalación.";
     }
 
     /**
