@@ -606,8 +606,9 @@ class EcommerceImplementationConversationService
             $stage->save();
         }
 
-        // Confirmación al cliente.
-        $this->send_outbound($implementation, 1, $phone, "¡Listo {$client_name}! Ya tengo todo para armar tu tienda online. Te aviso cuando esté el próximo paso. 🛍️");
+        // Confirmación al cliente: se saluda a la persona por su primer nombre, nunca por el nombre del negocio.
+        $nombre_persona = SupportWhatsappOpenerService::primer_nombre($client ? (string) ($client->name ?? '') : '');
+        $this->send_outbound($implementation, 1, $phone, "¡Listo {$nombre_persona}! Ya tengo todo para armar tu tienda online. Te aviso cuando esté el próximo paso. 🛍️");
 
         // Notificación al admin asignado.
         $this->notify_assigned_admin($implementation, "✅ {$client_name} completó la Etapa 1 del ecommerce (configuración de la tienda).");
