@@ -52,6 +52,21 @@ class SupportWhatsappOpenerService
     const TEMPLATE_VARIABLE_MAX_LENGTH = 600;
 
     /**
+     * Quién firma SIEMPRE la apertura y la plantilla de soporte («te escribe Martín…»).
+     *
+     * 🔴 Regla de Lucas (16/11/2026): los mensajes al cliente salen a nombre de Martín, no del admin que
+     * apretó el botón (en el dry-run de Plazoleta salió «te escribe Lucas»). Quién lo mandó de verdad
+     * queda en `support_messages.sender_admin_id`; esto es solo lo que lee el cliente.
+     */
+    const REMITENTE = 'Martín';
+
+    /**
+     * Saludo cuando no hay ningún nombre de persona para usar (ficha sin nombre cargado).
+     * Nunca se cae al nombre del negocio: «Hola Ferretería plazoleta» fue justo el defecto.
+     */
+    const SALUDO_SIN_NOMBRE = 'equipo';
+
+    /**
      * En cuantos mensajes se puede partir como mucho una respuesta del agente.
      */
     const MAX_PARTES = 3;
@@ -137,6 +152,7 @@ class SupportWhatsappOpenerService
         $reused = false;
         $normalized_phone = '';
         $contact_name = '';
+        $saludo = self::SALUDO_SIN_NOMBRE;
 
         // Persiste el intento antes de enviarlo. El lock de entrega coordina con un traspaso al ERP.
         DB::transaction(function () use (
@@ -150,13 +166,15 @@ class SupportWhatsappOpenerService
             &$message,
             &$reused,
             &$normalized_phone,
-            &$contact_name
+            &$contact_name,
+            &$saludo
         ) {
             $resuelto = $this->resolve_or_create_ticket($client, $phone, $admin, $ticket_name, $name_source);
 
             $ticket = $resuelto['ticket'];
             $reused = $resuelto['reused'];
             $contact_name = $resuelto['contact_name'];
+            $saludo = $resuelto['saludo'];
             $normalized_phone = $resuelto['phone'];
 
             $message = SupportMessage::create([
@@ -172,10 +190,8 @@ class SupportWhatsappOpenerService
         $window = $this->window_service->window_state($normalized_phone);
         $use_template = ! $window['open'];
 
-        $admin_name = trim((string) ($admin->name ?? ''));
-        if ($admin_name === '') {
-            $admin_name = 'Soporte';
-        }
+        // El remitente que lee el cliente es siempre Martín, no el admin que abre (ver REMITENTE).
+        $admin_name = self::REMITENTE;
 
         // El mensaje de apertura también se parte si el operador escribió el separador. La regla
         // vale desde el primer mensaje y no recién desde la segunda respuesta: para quien escribe
@@ -190,7 +206,7 @@ class SupportWhatsappOpenerService
         // la frase-.
         $partes_de_apertura = (new SeparadorDeMensajesManuales())->partir($operator_text);
 
-        $delivery = DB::transaction(function () use ($ticket, $message, $use_template, $partes_de_apertura, $operator_text, $normalized_phone, $contact_name, $admin_name) {
+        $delivery = DB::transaction(function () use ($ticket, $message, $use_template, $partes_de_apertura, $operator_text, $normalized_phone, $saludo, $admin_name) {
             $ticket = SupportTicket::lockForUpdate()->findOrFail($ticket->id);
             if ($ticket->source !== 'whatsapp') {
                 return $this->mark_failed($message, 'La conversación continúa en el sistema.', false, false, null);
@@ -202,7 +218,7 @@ class SupportWhatsappOpenerService
                 ? implode("\n\n", $partes_de_apertura)
                 : $operator_text;
 
-            return $this->deliver($normalized_phone, $message, $use_template, $contact_name, $admin_name, $texto_de_apertura);
+            return $this->deliver($normalized_phone, $message, $use_template, $saludo, $admin_name, $texto_de_apertura);
         });
 
         $message = SupportMessage::where('id', $message->id)->withAll()->first();
@@ -235,7 +251,9 @@ class SupportWhatsappOpenerService
      * @param string|null $name_source Quién puso el título: `lucas` por defecto si hay título; `sistema` si es
      *                                 automático (misión ficha-del-cliente, 11/11/2026: Martín no pisa uno de Lucas).
      *
-     * @return array{ticket: SupportTicket, reused: bool, contact_name: string, phone: string, client_employee_id: int|null}
+     * @return array{ticket: SupportTicket, reused: bool, contact_name: string, saludo: string, phone: string, client_employee_id: int|null}
+     *         `contact_name` es la etiqueta del contacto (la del ticket y del select); `saludo` es el primer
+     *         nombre de la PERSONA, que es lo que va en «Hola …» (nunca el nombre del negocio).
      *
      * @throws \InvalidArgumentException Si el teléfono no pertenece al cliente.
      */
@@ -309,9 +327,91 @@ class SupportWhatsappOpenerService
             'ticket'              => $ticket,
             'reused'              => $reused,
             'contact_name'        => $contact_name,
+            'saludo'              => $this->nombre_para_saludar($client, $contact),
             'phone'               => $normalized_phone,
             'client_employee_id'  => $client_employee_id,
         ];
+    }
+
+    /**
+     * Primer nombre de una persona, para el «Hola …» de la apertura.
+     *
+     * Saca los sufijos que la libreta de contactos agrega a la etiqueta (« (personal)», « (del lead)»), se
+     * queda con la primera palabra y le pone la primera letra en mayúscula. Sin nombre devuelve el saludo
+     * neutro. Es idempotente: pasarle un primer nombre ya limpio lo devuelve igual.
+     *
+     * @param string $nombre Nombre completo o etiqueta.
+     *
+     * @return string
+     */
+    public static function primer_nombre(string $nombre): string
+    {
+        $limpio = trim((string) preg_replace('/\s*\((?:personal|del lead)\)\s*$/iu', '', $nombre));
+        $limpio = trim((string) preg_replace('/\s+/u', ' ', $limpio));
+        if ($limpio === '') {
+            return self::SALUDO_SIN_NOMBRE;
+        }
+
+        // Etiquetas genéricas de la libreta cuando no hay nombre cargado: no son un nombre de persona.
+        if (in_array(mb_strtolower($limpio), ['contacto del lead', 'empleado', 'cliente'], true)) {
+            return self::SALUDO_SIN_NOMBRE;
+        }
+
+        $primera = explode(' ', $limpio)[0];
+        if ($primera === '') {
+            return self::SALUDO_SIN_NOMBRE;
+        }
+
+        return mb_strtoupper(mb_substr($primera, 0, 1)) . mb_substr($primera, 1);
+    }
+
+    /**
+     * Nombre con el que se saluda a un contacto del cliente: el primer nombre de la PERSONA.
+     *
+     * 🔴 Nunca el nombre del negocio. La etiqueta del dueño en la libreta (`label`) es el nombre del negocio
+     * (`Client::resolve_display_name()` prefiere `company_name`) y por eso el dry-run de Plazoleta dijo «Hola
+     * Ferretería plazoleta». Acá el dueño sale de `clients.name`, que es la persona. Un empleado, de su
+     * propio nombre; un lead promovido, del nombre del lead.
+     *
+     * @param Client               $client   Cliente.
+     * @param array<string, mixed> $contacto Fila de ClientPhoneDirectory (label, origin, client_employee_id).
+     *
+     * @return string
+     */
+    public function nombre_para_saludar(Client $client, array $contacto): string
+    {
+        $origen = (string) ($contacto['origin'] ?? '');
+        $label  = (string) ($contacto['label'] ?? '');
+
+        if ($origen === 'employee' || $origen === 'lead') {
+            return self::primer_nombre($label);
+        }
+
+        return self::primer_nombre((string) ($client->name ?? ''));
+    }
+
+    /**
+     * Lo mismo que nombre_para_saludar(), partiendo de un ticket ya existente (respuestas a un hilo abierto).
+     *
+     * @param SupportTicket $ticket Ticket de WhatsApp.
+     *
+     * @return string
+     */
+    public function nombre_para_saludar_de_ticket(SupportTicket $ticket): string
+    {
+        $ticket->loadMissing('client', 'client_employee');
+
+        if ($ticket->client_employee !== null) {
+            return self::primer_nombre((string) ($ticket->client_employee->name ?? ''));
+        }
+
+        // Un lead promovido deja su nombre en la etiqueta cacheada del ticket, con el sufijo «(del lead)».
+        $cacheado = trim((string) ($ticket->client_user_name ?? ''));
+        if ($cacheado !== '' && preg_match('/\(del lead\)\s*$/iu', $cacheado) === 1) {
+            return self::primer_nombre($cacheado);
+        }
+
+        return self::primer_nombre((string) ($ticket->client->name ?? ''));
     }
 
     /**
@@ -496,7 +596,10 @@ class SupportWhatsappOpenerService
         // Las relaciones se cargan a mano: resolve_contact_display_name() las mira con
         // relationLoaded(), y el ticket llega acá desde un findOrFail() pelado.
         $ticket->loadMissing('client', 'client_employee');
-        $contact_name = $ticket->resolve_contact_display_name();
+        // Saludo = primer nombre de la persona (nunca el negocio) y firma = Martín, vengan del ticket y del
+        // admin que sea: el parámetro $admin_name se conserva por compatibilidad de firma y no se usa.
+        $contact_name = $this->nombre_para_saludar_de_ticket($ticket);
+        $admin_name = self::REMITENTE;
         $operator_text = trim((string) ($message->body ?? ''));
         $template_name = $this->resolve_template_name();
 
@@ -1042,8 +1145,10 @@ class SupportWhatsappOpenerService
      */
     public function build_opening_body(string $contact_name, string $admin_name, string $operator_text): string
     {
+        // 🔴 Aunque el llamador pase el nombre del negocio o el del admin, el texto sale con el primer nombre
+        // de la persona y firmado por Martín (regla de Lucas, 16/11/2026). `$admin_name` se ignora a propósito.
         $lines = [];
-        $lines[] = 'Hola ' . $contact_name . ', te escribe ' . $admin_name . ' del equipo de soporte de ComercioCity.';
+        $lines[] = 'Hola ' . self::primer_nombre($contact_name) . ', te escribe ' . self::REMITENTE . ' del equipo de soporte de ComercioCity.';
         $lines[] = '';
         $lines[] = $this->sanitize_template_variable($operator_text);
         $lines[] = '';

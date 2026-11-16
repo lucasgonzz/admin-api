@@ -191,8 +191,10 @@ class ImplementationSupportWhatsappService
         $pendiente = $ticket === null ? null : app(SupportCodexService::class)->motivo_pendiente($ticket, $caso);
         $en_pausa  = $caso !== null && $caso->state === 'manual_review';
 
-        $remitente = trim((string) $admin->name) !== '' ? trim((string) $admin->name) : 'Soporte';
-        $contacto_nombre = (string) $contacto['label'];
+        /* Lo que lee el cliente: primer nombre de la PERSONA (nunca el negocio) y firma de Martín, vengan del
+           contacto y del admin que vengan (regla de Lucas, 16/11/2026). El mismo criterio que `open()`. */
+        $remitente = SupportWhatsappOpenerService::REMITENTE;
+        $contacto_nombre = $this->opener->nombre_para_saludar($client, $contacto);
 
         $impedimentos = [];
         if ($texto_largo) {

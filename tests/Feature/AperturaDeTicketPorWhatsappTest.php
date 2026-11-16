@@ -279,7 +279,7 @@ class AperturaDeTicketPorWhatsappTest extends TestCase
         $this->assertSame('cc_soporte_apertura', $envio['template_name']);
         $this->assertSame('es_AR', $envio['language_code']);
         $this->assertCount(3, $envio['variables'], 'La plantilla no recibió las tres variables.');
-        $this->assertSame('Lucas', $envio['variables'][1], 'La variable 2 no es el nombre del operador.');
+        $this->assertSame('Martín', $envio['variables'][1], 'La variable 2 no es Martín (el remitente es siempre Martín, no el operador).');
         $this->assertStringNotContainsString(
             "\n",
             $envio['variables'][2],

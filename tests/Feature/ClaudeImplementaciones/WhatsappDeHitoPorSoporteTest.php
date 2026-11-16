@@ -335,7 +335,7 @@ class WhatsappDeHitoPorSoporteTest extends BaseDeImplementaciones
         $this->assertCount(0, $this->espia->textos);
         $this->assertSame('cc_soporte_apertura', $this->espia->plantillas[0]['template_name']);
         $this->assertSame('Primer aviso corto.', $this->espia->plantillas[0]['variables'][2]);
-        $this->assertSame($this->admin->name, $this->espia->plantillas[0]['variables'][1]);
+        $this->assertSame('Martín', $this->espia->plantillas[0]['variables'][1]);
 
         $segundo = $this->postJson(sprintf(self::RUTA, $implementation->id), $this->real($client, ['texto' => 'Segundo aviso.', 'accion' => 'pedir_archivos']), $this->headers());
         $segundo->assertStatus(200)->assertJsonPath('reusado', true);
