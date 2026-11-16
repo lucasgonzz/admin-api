@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Soporte;
 
+use App\Events\SupportMessageReceived;
 use App\Events\SupportTicketAlert;
 use App\Events\SupportTicketEscalated;
 use App\Events\SupportTicketUpdated;
@@ -624,5 +625,102 @@ class TicketsDeEnsayoFueraDeLaBandejaTest extends BaseDelCanal
         $bandeja = $this->actingAs($this->admin(), 'sanctum')->getJson('/api/admin/support-ticket')->assertOk();
         $this->assertNotContains((int) $ensayo->id, $this->ids($bandeja->json('models')));
         $this->assertContains((int) $comun->id, $this->ids($bandeja->json('models')));
+    }
+
+    /* ==================================================================================
+     * Lo que sostiene el filtro en vivo del SPA, y los bordes
+     * ================================================================================== */
+
+    /**
+     * 🔴 El contrato del que depende el SPA para no insertar en vivo un ticket de ensayo: el mensaje que se
+     * difunde lleva el cliente embebido con `es_ensayo`. El evento no trae la columna calculada de la fila, así
+     * que si alguien recorta `ticket.client` del payload el filtro en vivo deja de funcionar sin avisar.
+     *
+     * Se mira el payload ya serializado, que es lo que viaja por Pusher.
+     *
+     * @test
+     */
+    public function el_mensaje_difundido_lleva_la_marca_de_ensayo_en_el_cliente_embebido(): void
+    {
+        $ensayo = $this->ticket_sin_responder($this->cliente('+5493417771071', PruebaCicloService::CLIENTE_PRUEBA, true));
+        $comun  = $this->ticket_sin_responder($this->cliente('+5493417771072', PruebaCicloService::CLIENTE_ACTIVO, false));
+
+        $payload_de = function (SupportTicket $ticket): array {
+            $mensaje = SupportMessage::where('support_ticket_id', $ticket->id)->firstOrFail();
+
+            return json_decode(json_encode((new SupportMessageReceived((int) $mensaje->id))->broadcastWith()), true);
+        };
+
+        $del_ensayo = $payload_de($ensayo);
+        $this->assertSame((int) $ensayo->id, (int) $del_ensayo['message']['ticket']['id']);
+        $this->assertArrayHasKey('es_ensayo', $del_ensayo['message']['ticket']['client']);
+        $this->assertContains($del_ensayo['message']['ticket']['client']['es_ensayo'], [1, true], 'El SPA reconoce 1 o true, nada más.');
+
+        $del_comun = $payload_de($comun);
+        $this->assertArrayHasKey('es_ensayo', $del_comun['message']['ticket']['client']);
+        $this->assertContains($del_comun['message']['ticket']['client']['es_ensayo'], [0, false]);
+    }
+
+    /** @test */
+    public function editar_un_ticket_de_ensayo_devuelve_su_fila_marcada_y_no_un_modelo_nulo(): void
+    {
+        $admin  = $this->admin();
+        $ensayo = $this->ticket_sin_responder($this->cliente('+5493417771081', PruebaCicloService::CLIENTE_ACTIVO, true));
+
+        $respuesta = $this->actingAs($admin, 'sanctum')
+            ->putJson('/api/admin/support-ticket/' . $ensayo->id, ['name' => 'Ensayo de la ronda 9'])
+            ->assertOk();
+
+        $this->assertNotNull($respuesta->json('model'), 'El PUT de un ticket de ensayo devolvió `model: null`.');
+        $respuesta->assertJsonPath('model.id', (int) $ensayo->id)
+            ->assertJsonPath('model.name', 'Ensayo de la ronda 9')
+            ->assertJsonPath('model.es_ensayo', true);
+        $this->assertSame('Ensayo de la ronda 9', $ensayo->fresh()->name);
+    }
+
+    /** @test */
+    public function un_ensayo_con_la_prueba_vencida_tampoco_esta_en_la_lista_ni_en_los_no_leidos_de_prueba(): void
+    {
+        $admin = $this->admin();
+        $ensayo_vencido = $this->ticket_sin_responder($this->cliente('+5493417771091', PruebaCicloService::CLIENTE_PRUEBA_VENCIDA, true));
+        $vencida_real   = $this->ticket_sin_responder($this->cliente('+5493417771092', PruebaCicloService::CLIENTE_PRUEBA_VENCIDA, false));
+
+        $respuesta = $this->actingAs($admin, 'sanctum')->getJson('/api/admin/support-ticket')->assertOk();
+
+        $ids = $this->ids($respuesta->json('models'));
+        $this->assertNotContains((int) $ensayo_vencido->id, $ids, 'Un ensayo con la prueba vencida apareció en la bandeja.');
+        $this->assertContains((int) $vencida_real->id, $ids, 'Control: la prueba vencida de un lead real sigue en la bandeja.');
+        $this->assertSame(1, $respuesta->json('unread_total_prueba'), 'Solo la prueba vencida real cuenta en «Prueba».');
+        $this->assertSame(0, $respuesta->json('unread_total'));
+
+        $insignias = $this->actingAs($admin, 'sanctum')->getJson('/api/admin/support-ticket/unread-badges')->assertOk();
+        $this->assertSame(1, $insignias->json('unread_total_prueba'));
+        $this->assertSame(0, $insignias->json('unread_total'));
+    }
+
+    /** @test */
+    public function es_de_ensayo_da_lo_mismo_con_la_relacion_del_cliente_cargada_y_sin_cargar(): void
+    {
+        $ensayo = $this->ticket_sin_responder($this->cliente('+5493417771101', PruebaCicloService::CLIENTE_ACTIVO, true));
+        $comun  = $this->ticket_sin_responder($this->cliente('+5493417771102', PruebaCicloService::CLIENTE_ACTIVO, false));
+
+        foreach ([[$ensayo, true], [$comun, false]] as [$ticket, $esperado]) {
+            $sin_cargar = SupportTicket::findOrFail($ticket->id);
+            $this->assertFalse($sin_cargar->relationLoaded('client'));
+            $this->assertSame($esperado, $sin_cargar->es_de_ensayo());
+            $this->assertFalse($sin_cargar->relationLoaded('client'), 'Preguntar no tiene que cargar el cliente entero.');
+
+            $cargada = SupportTicket::with('client')->findOrFail($ticket->id);
+            $this->assertTrue($cargada->relationLoaded('client'));
+            $this->assertSame($esperado, $cargada->es_de_ensayo());
+        }
+
+        /* Con la relación cargada no se consulta: es lo que le evita al escalado un SELECT antes de avisar. */
+        $cargada = SupportTicket::with('client')->findOrFail($ensayo->id);
+        \Illuminate\Support\Facades\DB::enableQueryLog();
+        \Illuminate\Support\Facades\DB::flushQueryLog();
+        $this->assertTrue($cargada->es_de_ensayo());
+        $this->assertCount(0, \Illuminate\Support\Facades\DB::getQueryLog());
+        \Illuminate\Support\Facades\DB::disableQueryLog();
     }
 }

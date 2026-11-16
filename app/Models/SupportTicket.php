@@ -243,14 +243,19 @@ class SupportTicket extends Model
     /**
      * Si ESTE ticket es de un cliente de ensayo.
      *
-     * Consulta `clients.es_ensayo` por `client_id` y no la relación `client`: los caminos que la usan (el
-     * aviso de atención, el escalado) no siempre la tienen cargada, y una relación cargada antes de que se
-     * marcara el cliente daría la respuesta vieja.
+     * Si la relación `client` ya está cargada se resuelve con ella, sin consultar: el escalado legacy
+     * (`SendSupportAiSuggestion::handle_escalation`) trae el ticket con su cliente, y así no suma un SELECT
+     * ni un punto de falla nuevo justo antes de avisar. Si no está cargada (el alta del aviso de atención
+     * solo precarga el caso) se consulta `clients.es_ensayo` por `client_id`, sin cargar el cliente entero.
      *
      * @return bool
      */
     public function es_de_ensayo(): bool
     {
+        if ($this->relationLoaded('client')) {
+            return $this->client !== null && (bool) $this->client->es_ensayo;
+        }
+
         if ($this->client_id === null) {
             return false;
         }
