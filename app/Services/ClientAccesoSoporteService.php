@@ -310,6 +310,8 @@ class ClientAccesoSoporteService
                  * `X-Admin-Api-Key`, y la clave del cliente viajaría a donde apunte la redirección. Un 3xx vuelve como una
                  * respuesta más. */
                 ->withOptions(['allow_redirects' => false])
+                // A6.1: negocio en prueba → IP del VPS sin DNS; cualquier otro cliente, el pedido intacto.
+                ->withOptions(app(\App\Services\Prueba\PruebaResolucionLocal::class)->opciones($client, (string) $frente['url_de_emision']))
                 ->timeout(self::TIMEOUT_SEGUNDOS)
                 ->withBody(
                     (string) json_encode($cuerpo, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),

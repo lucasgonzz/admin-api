@@ -36,6 +36,9 @@ class SupportCodexService
      */
     const MAX_PARTES_RESPUESTA = 5;
 
+    /** Motivo del 422 `tour_path_invalid` (ronda 4, 14/11/2026): el helper lo muestra tal cual para corregir el pedido. */
+    const TOUR_PATH_INVALIDO = 'El camino del recorrido (tour_path) va en un solo renglón, de 1 a 300 caracteres, sin caracteres de control. Si el destino no tiene un camino de menús, no lo mandes.';
+
     private const CONFIRMATION_REVIEW_REASON = 'El cierre fue rechazado porque el mensaje no confirma el resultado. Revisar sin volver a pedir confirmación.';
 
     /**
@@ -327,6 +330,10 @@ class SupportCodexService
         $remitentes_verificados = $soporte_activo ? $importador->entrantes_del_dueno($ticket, $messages) : [];
         $robotito_disponible = SupportTourService::entrante_admite_robotito($ticket, $last);
         $capacidades_de_prueba = $importador->capacidades_de_prueba($ticket);
+        // Ronda 8 (§0.3): lo nuevo de la prueba vale solo con la automatización de la prueba de ESTE ticket y si el
+        // sistema del negocio lo anunció en `capacidades_prueba`. Un sistema anterior no manda la clave: todo en false.
+        $anunciadas_en_la_prueba = app(PruebaDelClienteService::class)->es_cliente_en_prueba($ticket->client)
+            && $capacidades_de_prueba['prueba_import_resolver'] ? ($importaciones['capacidades_prueba'] ?? []) : [];
         return [
             'id' => (int) $ticket->id,
             'status' => $ticket->status,
@@ -368,7 +375,7 @@ class SupportCodexService
             'reason' => $this->pending_reason($ticket, $case, true, true),
             // El helper debe verificar esta capacidad ANTES de pedir el modo nuevo: un admin
             // anterior ignoraría el campo y ejecutaría el resume que consume la consulta.
-            'capabilities' => ['mission_progress' => true, 'continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => $capacidades_de_prueba['prueba_import'], 'prueba_import_resolver' => $capacidades_de_prueba['prueba_import_resolver'],
+            'capabilities' => ['mission_started_notice' => true, 'coordinated_maintenance' => SupportMaintenancePolicy::available(), 'support_store_upgrade' => SupportMaintenancePolicy::available(), 'mission_progress' => true, 'continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'migration_blocked_handoff' => true, 'whatsapp_catalog_import' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => $capacidades_de_prueba['prueba_import'], 'prueba_import_resolver' => $capacidades_de_prueba['prueba_import_resolver'],
                 'soporte_import' => $soporte_activo, 'soporte_import_resolver' => $soporte_activo,
                 'soporte_import_stock_existente' => $soporte_activo,
                 // Misión cruzada importaciones-de-martin (11/11/2026): la planilla derivada del PDF del dueño, el Excel
@@ -376,8 +383,14 @@ class SupportCodexService
                 // permiso delegado de la tarea. La versión de la instancia se confirma con su 404 (version_vieja).
                 'soporte_import_pdf' => $soporte_activo, 'soporte_import_clientes' => $soporte_activo,
                 'soporte_import_web' => $soporte_activo,
+                // Ronda 8: clientes y proveedores se cargan solos en la prueba; la ganancia viaja al lanzar artículos.
+                'prueba_import_clientes' => in_array(PruebaImportacionService::CAPACIDAD_CONTACTOS, $anunciadas_en_la_prueba, true),
+                'prueba_import_margen' => in_array(PruebaImportacionService::CAPACIDAD_MARGEN_PREVIO, $anunciadas_en_la_prueba, true),
                 'support_tour_consent' => true, 'support_dynamic_tour' => $robotito_disponible
                     && SupportTourService::version_admite_tour_personalizado($ticket) !== false,
+                // Ronda 4 (14/11/2026): la invitación (`tour_requested`) admite `tour_path`, el camino que usa
+                // tour/prepare cuando llega sin `path`. Un helper que no lo conoce no lo manda y nada cambia.
+                'support_tour_path' => true,
                 'support_tour_offer' => SupportTourService::entrante_admite_oferta($ticket, $last),
                 // Claim con rotate_thread + thread_id nuevo (misión cruzada ficha-del-cliente, 11/11/2026).
                 'thread_rotation' => true],
@@ -406,8 +419,9 @@ class SupportCodexService
             'importaciones_soporte_pendientes' => $soporte_activo ? $importaciones['pendientes'] : [],
             'importaciones_soporte_en_proceso' => $soporte_activo ? $importaciones['en_proceso'] : false,
             // Las corridas de clientes o proveedores abiertas del ticket (misión importaciones-de-martin, 11/11/2026):
-            // [{corrida_id, modelo, estado, revision, codigo_requerido}]; vacía con una instancia anterior.
-            'importaciones_de_contactos' => $soporte_activo ? ($importaciones['importaciones_de_contactos'] ?? []) : [],
+            // [{corrida_id, modelo, estado, revision, codigo_requerido}]; vacía con una instancia anterior. Ronda 8: también
+            // en la prueba (las de `modo_prueba`), solo si el sistema anunció `contactos` en `capacidades_prueba`.
+            'importaciones_de_contactos' => $importaciones['importaciones_de_contactos'] ?? [],
             /* La implementación del sistema y de la tienda (abierta, o cerrada hace ≤ 30 días), para que
              * Martín siga la conversación de la implementación donde la dejó Lucas. null = no tiene. */
             'implementation' => app(SupportImplementationContextService::class)->bloque_para_el_ticket($ticket),
@@ -833,6 +847,16 @@ class SupportCodexService
             $this->fail(422, 'tour_invitation_invalid', 'La referencia de importación requiere una invitación a Robotito.');
         }
         $input['tour_import_history_id'] = $tour_import_history_id;
+        // El camino declarado con la invitación (ronda 4, 14/11/2026). Se valida acá, antes de registrar la operación
+        // y de enviar nada. Sin `tour_requested` no hay invitación a la que asociarlo y se ignora.
+        $tour_path = null;
+        if ($tour_requested && array_key_exists('tour_path', $input)) {
+            $tour_path = SupportTourPlannerService::camino_de_invitacion_valido($input['tour_path']);
+            if ($tour_path === null) {
+                $this->fail(422, 'tour_path_invalid', self::TOUR_PATH_INVALIDO);
+            }
+        }
+        $input['tour_path'] = $tour_path;
         $tour_invitation = null;
         if (isset($input['tour_invitation'])) {
             $tour_invitation = SupportTourService::guion($input['tour_invitation']);
@@ -868,6 +892,9 @@ class SupportCodexService
         // Se conserva el hash anterior de las acciones existentes para sus replays tras el deploy.
         if ($input['action'] === 'pedir_revision') {
             $hash_payload[] = $input['review_reason'] ?? null;
+            if (isset($input['migration_blocked_reason'])) {
+                $hash_payload[] = ['migration_blocked_reason' => trim($input['migration_blocked_reason'])];
+            }
         }
         if ($input['action'] === 'escalar' && isset($input['close_on_mission_start'])) {
             $hash_payload[] = (bool) $input['close_on_mission_start'];
@@ -886,6 +913,10 @@ class SupportCodexService
             $hash_payload[] = ['tour_requested' => true];
             if ($tour_import_history_id !== null) {
                 $hash_payload[] = ['tour_import_history_id' => $tour_import_history_id];
+            }
+            // Solo si vino: el hash de las invitaciones sin camino queda igual que antes (replays tras el deploy).
+            if ($tour_path !== null) {
+                $hash_payload[] = ['tour_path' => $tour_path];
             }
         }
         if (! empty($input['usage_answer'])) {
@@ -982,6 +1013,8 @@ class SupportCodexService
                 'request_hash' => $hash,
                 'status' => 'sending',
                 'message_id' => null, 'detail' => null, 'approval_payload' => null,
+                'migration_blocked_reason' => isset($input['migration_blocked_reason']) ? trim($input['migration_blocked_reason']) : null,
+                'migration_notice_sent_at' => null, 'migration_notice_state' => null,
             ]);
             $operation->save();
             if (isset($input['mission_progress_hash'])) {
@@ -1101,8 +1134,11 @@ class SupportCodexService
                 'body' => $body,
                 'ai_generated_at' => now(),
                 'delivered_at' => now(),
+                // `tour_path` viaja solo con la invitación que pidió el helper: la que el admin arma a mano o por
+                // tipo de respuesta no lo trae (el camino guardado es siempre el de ESTA invitación, nunca uno viejo).
                 'erp_auto_reply' => $recordatorio['meta'] ?? ($tour_requested ? array_filter([
                     'tour_requested' => true, 'tour_import_history_id' => $input['tour_import_history_id'],
+                    'tour_path' => $input['tour_requested'] ? $input['tour_path'] : null,
                 ])
                     : (isset($input['tour_invitation']) ? ['tour_invitation' => $input['tour_invitation']] : null)),
             ]);
@@ -2126,6 +2162,15 @@ class SupportCodexService
             if ($case->mission_started_at === null) {
                 $case->mission_thread_id = $input['mission_thread_id'];
                 $case->mission_started_at = now();
+                if (($input['mission_type'] ?? null) === 'bug' && ! $case->close_on_mission_start) {
+                    $payload = ['tipo' => 'inicio_mision', 'estado' => 'en_correccion',
+                        'causa' => 'Ya identificamos el error y lo estamos corrigiendo.',
+                        'evidencia' => 'La misión de corrección quedó iniciada y vinculada a este ticket.', 'alternativa' => null];
+                    SupportCodexMissionProgress::firstOrCreate([
+                        'support_ticket_id' => $id, 'mission_thread_id' => $input['mission_thread_id'],
+                        'mission_hash' => $input['mission_hash'], 'progress_hash' => hash('sha256', json_encode($payload, JSON_THROW_ON_ERROR)),
+                    ], ['payload' => $payload]);
+                }
                 if ($case->close_on_mission_start && $this->can_close_on_mission_start($ticket, $case)) {
                     $this->apply_action($ticket, $case, ['action' => 'cerrar']);
                     $case->close_on_mission_start = true; // Permite reconocer la repetición del mismo inicio.
@@ -2285,6 +2330,10 @@ class SupportCodexService
                 'message_id' => $operation->message_id ? (int) $operation->message_id : null,
                 'action' => $operation->action,
                 'detail' => $operation->detail,
+                'migration_notice' => $operation->migration_blocked_reason === null ? null : [
+                    'status' => $operation->migration_notice_state ?? 'pending',
+                    'sent_at' => $operation->migration_notice_sent_at,
+                ],
                 'reconciliation' => $operation->reconciled_at === null ? null : [
                     'outcome' => $operation->reconciliation_outcome,
                     'by' => $operation->reconciled_by,

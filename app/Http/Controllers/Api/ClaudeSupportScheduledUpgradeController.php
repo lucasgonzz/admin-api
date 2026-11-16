@@ -20,7 +20,9 @@ class ClaudeSupportScheduledUpgradeController extends Controller
 
     public function store(Request $request, $id, SupportScheduledUpgradeService $service)
     {
-        $input = $request->validate(['agreement_id' => 'required|integer|min:1', 'version_id' => 'required|integer|min:1']);
+        $input = $request->validate(['agreement_id' => 'required|integer|min:1', 'version_id' => 'required|integer|min:1', 'target' => 'sometimes|in:sistema,tienda']);
+        $agreement = \App\Models\SupportCodexUpgradeAgreement::where('support_ticket_id', $id)->findOrFail($input['agreement_id']);
+        abort_unless(($input['target'] ?? 'sistema') === ($agreement->target ?: 'sistema'), 409, 'El destino no coincide con el acuerdo.');
         $row = $service->schedule((int) $id, (int) $input['agreement_id'], (int) $input['version_id']);
         return response()->json(['scheduled_upgrade' => $this->present($row)], $row->wasRecentlyCreated ? 201 : 200);
     }
@@ -45,11 +47,16 @@ class ClaudeSupportScheduledUpgradeController extends Controller
     {
         $evidence = SupportCodexMissionFixEvidence::find(optional($row->agreement)->mission_fix_evidence_id);
         return [
-            'id' => (int) $row->id,
+            'id' => (int) $row->id, 'target' => $row->target ?: 'sistema',
+            'client_ecommerce_id' => $row->client_ecommerce_id === null ? null : (int) $row->client_ecommerce_id,
+            'maintenance_mode' => optional($row->agreement)->maintenance_mode ?: 'closed',
+            'force' => optional($row->agreement)->maintenance_mode === 'coordinated',
             'agreement_id' => (int) $row->agreement_id,
             'version_id' => (int) $row->version_id,
             'version' => $row->version,
-            'upgrade_id' => $row->upgrade_id === null ? null : (int) $row->upgrade_id,
+            'upgrade_id' => $row->target === 'tienda'
+                ? ($row->ecommerce_installation_id === null ? null : (int) $row->ecommerce_installation_id)
+                : ($row->upgrade_id === null ? null : (int) $row->upgrade_id),
             'status' => $row->status,
             'reason' => $row->reason,
             'starts_at_utc' => $row->starts_at_utc,

@@ -68,6 +68,26 @@ Respuesta: `{lease_token,lease_expires_at,ticket:<contexto>}`. La reserva dura 1
 
 Los tickets de prueba conservan `prueba_import`, `prueba_import_resolver` y `importaciones_prueba_*`.
 
+### Clientes, proveedores y ganancia en la prueba (ronda 8, 15/11/2026)
+
+Contrato completo: `_cruzado/misiones/20261111-prueba-e2e-campana-imperio/contrato-ronda-8.md`. Nada de esto cambia a los negocios activos.
+
+- **Capacidades.** Empresa anuncia en `prueba-pendientes` la clave `capacidades_prueba` (lista de strings). El admin la lee en la prueba y publica dos capacidades en `ticket.capabilities`:
+  - `prueba_import_clientes`: `true` solo si el cliente está en prueba, `prueba_import_resolver` es `true` (ticket del dueño, por WhatsApp o por el sistema, prueba sin vencer) y `capacidades_prueba` trae `"contactos"`.
+  - `prueba_import_margen`: lo mismo, con `"margen_previo"`.
+  - Con un empresa anterior (4.3.50, 4.3.56), que no manda la clave, las dos quedan en `false`. Con un cliente activo, siempre `false`.
+- **`POST tickets/{id}/import-excel` con `automatizar_prueba: true`** (`model` `client` o `provider`, `attachment_id`, `lease_token` y `expected_message_id`, que pasan a ser obligatorios). El admin controla, en este orden: que el ticket esté abierto y en prueba (si no, `ticket_cerrado` 409 o `no_es_prueba` 404), la automatización de la prueba (si no, `contacto_no_habilitado` 403), y la reserva vigente (`assert_current`: 423 o 409). Después confirma `contactos` en `capacidades_prueba` y reenvía el Excel a `admin-sync/importacion-soporte/{modelo}/iniciar` con `modo_prueba=1`, `user_id`, `support_ticket_id`, `importacion_clave` (sha256 de los bytes) y `avisar_por_whatsapp=1`.
+  - Son 422: `automatizar_prueba` junto con `automatizar_soporte`, con `model=article` o sin `model` (los artículos siguen por su camino), y con `margen_de_ganancia`.
+  - Respuesta aceptada: la de una corrida de soporte (`estado_corrida`, `motivo`, `tandas`, `resumen`, `codigo_requerido: false`, `codigo: null`, `corrida`…) más `automatizar_prueba: true`, `modo_prueba: true` y `filename`, **sin** `automatizar_soporte`.
+  - `{"estado": "version_vieja", "disponible": false}`, sin reenviar, si falta `contactos`. También es `version_vieja` si empresa contesta 404 sin `motivo`, `409 dueno_no_activo` o una corrida sin `modo_prueba: true`. Un `409 dueno_no_en_prueba` vuelve como `rechazado` con `motivo_instancia`. Si `prueba-pendientes` no contesta, `no_responde` (502).
+  - No marca `importacion_soporte_iniciada_at`. El resumen le llega al dueño por el barrido de avisos de la prueba, por el canal del ticket (el chat del sistema, la conversación del ensayo o WhatsApp con la ventana abierta).
+- **`GET tickets/{id}/import-status` y `POST tickets/{id}/import-revert`** aceptan también un ticket de prueba con la puerta de la prueba (`puerta()` y la automatización de la prueba) y la reserva. Empresa decide la guarda por la corrida. **`import-confirm` sigue solo para activos**: en la prueba contesta 403 `contacto_no_habilitado`.
+- **Contexto.** `importaciones_de_contactos` incluye también en la prueba las corridas abiertas de `modo_prueba`, pero solo si empresa anunció `contactos`. Mientras haya una, `importaciones_prueba_en_proceso` es `true` y cerrar el ticket da `409 trial_import_pending`.
+- **`margen_de_ganancia`** (D2). Es opcional en `import-excel`. Es un string de hasta 40 caracteres ya normalizado por el helper, que cumple `^(despues|\d{1,4}(\.\d{1,2})?|precio:\d{1,9}(\.\d{1,2})?)$`, con un porcentaje mayor a 0 y hasta 1000 o un precio mayor a 0. Si no, es 422 en `errors.margen_de_ganancia`.
+  - Con `automatizar_soporte` o en la ruta de solo stock, es 422.
+  - Solo se reenvía a `ai-excel-import/analyze` en la prueba de artículos con automatización (junto con `automatizar_prueba=1`). En cualquier otro caso se descarta.
+  - Si el pedido trajo el campo, la respuesta aceptada lleva `margen_previo`: lo que devolvió empresa, o `null` si no viajó o si empresa no lo devolvió (un sistema anterior lo ignora). Sin el campo, la respuesta no cambia.
+
 `mission_lifecycle` es `null` si no hay una misión guardada; si existe es `{status:"pending"|"started",thread_id:string|null,started_at:ISO8601|null}`. El inicio solo se informa tras registrar la tarea creada. Una misión iniciada puede seguir pendiente de implementación o publicación cuando se cierra la conversación de soporte. El cierre conserva su diagnóstico y vínculo.
 
 La bandeja y el detalle autenticados del admin agregan `support_attention:{needs_human:boolean,reason:string|null,mission:<mission_lifecycle>|null}`. Los tickets abiertos con una misión sola no requieren atención humana. Un estado `manual_review` por un bloqueo real conserva su motivo y puede convivir con una misión pendiente o iniciada; los escalados legacy sin misión conservan la intervención humana. La pausa específica «Lucas retomó la atención desde el admin.» corresponde a un turno ya contestado y no muestra una intervención pendiente, incluso si persiste una marca de escalación anterior; una misión sigue mostrándose por su cuenta. Los tickets cerrados no muestran ninguna alerta. La relación completa `support_codex_case` no se serializa; los serializadores genéricos que no precargaron esa relación devuelven `support_attention:null`, sin consultas extra por fila ni motivos internos en otros canales.

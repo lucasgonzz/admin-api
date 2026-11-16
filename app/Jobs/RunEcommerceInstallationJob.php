@@ -44,11 +44,12 @@ class RunEcommerceInstallationJob implements ShouldQueue
      * @var string
      */
     private $installation_uuid;
+    private $support_schedule_id;
 
     /**
      * @param  string|ClientEcommerceInstallation  $installation_uuid  UUID o instancia de la corrida.
      */
-    public function __construct($installation_uuid)
+    public function __construct($installation_uuid, ?int $support_schedule_id = null)
     {
         // Acepta tanto UUID string como instancia del modelo para facilitar el dispatch.
         if ($installation_uuid instanceof ClientEcommerceInstallation) {
@@ -56,6 +57,7 @@ class RunEcommerceInstallationJob implements ShouldQueue
         }
 
         $this->installation_uuid = (string) $installation_uuid;
+        $this->support_schedule_id = $support_schedule_id;
     }
 
     /**
@@ -76,14 +78,30 @@ class RunEcommerceInstallationJob implements ShouldQueue
             ->with(['client_ecommerce.client.active_client_api'])
             ->firstOrFail();
 
+        $owned = \App\Services\SupportMaintenancePolicy::available() ? \App\Models\SupportCodexScheduledUpgrade::where('ecommerce_installation_id', $installation->id)->first() : null;
+        if ($owned !== null && $this->support_schedule_id === null) { return; }
+        $support_lock = null;
         try {
+            $row = null;
+            if ($this->support_schedule_id !== null) {
+                $support_lock = \Illuminate\Support\Facades\Cache::lock('client-deployment-' . $installation->client_ecommerce->client_id, 1860);
+                $support_lock->block(10);
+                $installation->refresh();
+            }
+            if ($this->support_schedule_id !== null) {
+                $row = app(\App\Services\SupportStoreUpgradeService::class)->prepare($this->support_schedule_id, $installation);
+                if ($row === null) { return; }
+            }
             // Selecciona el servicio según el mode de la corrida: instalación desde cero (dentro
             // del try, para que un error del propio constructor también quede cubierto abajo).
-            $service = $installation->mode === 'update'
+            $service = $row !== null ? new \App\Services\SupportEcommerceDeploymentService($installation, $row) : ($installation->mode === 'update'
                 ? new EcommerceDeploymentService($installation)
-                : new EcommerceInstallationService($installation);
+                : new EcommerceInstallationService($installation));
 
             $service->run();
+        } catch (\Illuminate\Contracts\Cache\LockTimeoutException $e) {
+            // Otro trabajador conserva el cliente: no modificar su corrida ni su estado.
+            return;
         } catch (\Throwable $e) {
             // Los servicios ya marcan status='fallida' (y restauran el status del ecommerce)
             // dentro de su propio run(). Esta guardia cubre el caso de que la excepción ocurra
@@ -97,6 +115,8 @@ class RunEcommerceInstallationJob implements ShouldQueue
                 ]);
             }
             throw $e;
+        } finally {
+            if ($support_lock !== null) { $support_lock->release(); }
         }
     }
 }

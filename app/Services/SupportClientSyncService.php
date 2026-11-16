@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\SupportMessage;
+use App\Services\Prueba\PruebaResolucionLocal;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
@@ -65,6 +66,8 @@ class SupportClientSyncService
                 ])
                 ->timeout((int) config('services.client_api.timeout', 15))
                 ->retry((int) config('services.client_api.retries', 2), 500);
+            // A6.1: un negocio en prueba (instancia del VPS) se resuelve a la IP del VPS, sin DNS. Otro cliente: igual que antes.
+            $request = app(PruebaResolucionLocal::class)->aplicar($request, $client, $base_url . '/api/admin-sync/support/messages');
 
             // Adjunta binarios para que empresa-api guarde copia local.
             $files_attached = false;
@@ -144,14 +147,10 @@ class SupportClientSyncService
         }
 
         try {
+            $url = $base_url . '/api/admin-sync/support/tickets/' . $ticket->uuid;
             // Envía actualización simple de estado/nombre al ticket remoto.
-            $response = Http::withHeaders([
-                    'X-Admin-Api-Key' => $client->api_key,
-                    'Accept' => 'application/json',
-                ])
-                ->timeout((int) config('services.client_api.timeout', 15))
-                ->retry((int) config('services.client_api.retries', 2), 500)
-                ->put($base_url . '/api/admin-sync/support/tickets/' . $ticket->uuid, [
+            $response = $this->pedido($client, $url)
+                ->put($url, [
                     'name' => $ticket->name,
                     'status' => $ticket->status,
                 ]);
@@ -175,13 +174,9 @@ class SupportClientSyncService
         }
 
         try {
-            $response = Http::withHeaders([
-                    'X-Admin-Api-Key' => $client->api_key,
-                    'Accept' => 'application/json',
-                ])
-                ->timeout((int) config('services.client_api.timeout', 15))
-                ->retry((int) config('services.client_api.retries', 2), 500)
-                ->post(rtrim($client->api_url, '/') . '/api/admin-sync/support/messages/read', [
+            $url = rtrim($client->api_url, '/') . '/api/admin-sync/support/messages/read';
+            $response = $this->pedido($client, $url)
+                ->post($url, [
                     'message_uuid' => $message->uuid,
                     'read_at' => optional($message->read_at)->toIso8601String(),
                 ]);
@@ -205,13 +200,9 @@ class SupportClientSyncService
         }
 
         try {
-            $response = Http::withHeaders([
-                    'X-Admin-Api-Key' => $client->api_key,
-                    'Accept' => 'application/json',
-                ])
-                ->timeout((int) config('services.client_api.timeout', 15))
-                ->retry((int) config('services.client_api.retries', 2), 500)
-                ->post(rtrim($client->api_url, '/') . '/api/admin-sync/support/typing', [
+            $url = rtrim($client->api_url, '/') . '/api/admin-sync/support/typing';
+            $response = $this->pedido($client, $url)
+                ->post($url, [
                     'ticket_uuid' => $ticket->uuid,
                     'actor_type' => 'admin',
                     // Quien está escribiendo: el operador autenticado. Antes salía de
@@ -239,13 +230,9 @@ class SupportClientSyncService
         }
 
         try {
-            $response = Http::withHeaders([
-                    'X-Admin-Api-Key' => $client->api_key,
-                    'Accept' => 'application/json',
-                ])
-                ->timeout((int) config('services.client_api.timeout', 15))
-                ->retry((int) config('services.client_api.retries', 2), 500)
-                ->post(rtrim($client->api_url, '/') . '/api/admin-sync/support/tickets', [
+            $url = rtrim($client->api_url, '/') . '/api/admin-sync/support/tickets';
+            $response = $this->pedido($client, $url)
+                ->post($url, [
                     'ticket_uuid' => $ticket->uuid,
                     'client_user_id' => $ticket->client_user_id,
                     'name' => $ticket->name,
@@ -258,5 +245,26 @@ class SupportClientSyncService
             return false;
         }
     }
-}
 
+    /**
+     * El pedido de siempre hacia el empresa-api del cliente (clave, JSON, timeout y reintentos de config), con la
+     * resolución local del VPS si el cliente está en prueba (A6.1). Para cualquier otro cliente es el mismo pedido
+     * que se armaba en cada método antes del 14/11/2026.
+     *
+     * @param \App\Models\Client $client
+     * @param string             $url
+     *
+     * @return \Illuminate\Http\Client\PendingRequest
+     */
+    protected function pedido($client, string $url)
+    {
+        $pedido = Http::withHeaders([
+                'X-Admin-Api-Key' => $client->api_key,
+                'Accept' => 'application/json',
+            ])
+            ->timeout((int) config('services.client_api.timeout', 15))
+            ->retry((int) config('services.client_api.retries', 2), 500);
+
+        return app(PruebaResolucionLocal::class)->aplicar($pedido, $client, $url);
+    }
+}

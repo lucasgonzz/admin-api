@@ -31,7 +31,8 @@ class SupportTourPlannerService
     public $origen = null;
 
     /**
-     * Qué pasó con el camino escrito: de dónde vino (`path`, `explicacion` o null si no había), cuántos tramos se
+     * Qué pasó con el camino escrito: de dónde vino (`path` del pedido, `invitacion` —el `tour_path` guardado con la
+     * invitación aceptada—, `explicacion` o null si no había), cuántos tramos se
      * anclaron y si quedó sin usar por ambiguo (una solapa con ese nombre en más de un grupo). Va al log.
      *
      * @var array{origen: string|null, anclados: int, ambiguo: bool}
@@ -110,17 +111,23 @@ class SupportTourPlannerService
                     $de_soporte[] = $mensaje['texto'];
                 }
             }
-            $respaldo = $this->recorrido_minimo($pasos, array_merge([(string) $camino_dado, $explicacion], $de_soporte), (string) $pregunta);
+            // EL CAMINO VIAJA CON LA INVITACIÓN (ronda 4, 14/11/2026): al llegar el «sí», el monitor prepara el
+            // recorrido solo y sin `path`. Si el pedido no trae uno, vale el `tour_path` que Soporte declaró al invitar,
+            // con la misma construcción que un `path` del pedido. El `path` del pedido, si viene, gana.
+            $del_pedido = trim((string) $camino_dado) !== '' ? (string) $camino_dado : null;
+            $guardado = $del_pedido === null ? self::camino_de_la_invitacion($entrante, $invitacion) : null;
+            $escrito = (string) ($del_pedido ?? $guardado);
+            $respaldo = $this->recorrido_minimo($pasos, array_merge([$escrito, $explicacion], $de_soporte), (string) $pregunta);
             // EL CAMINO MANDA: si el camino escrito nombra el grupo y la solapa del ABM, esos pasos quedan fijos antes de
             // consultar al modelo. Con menos que eso (otra pantalla, un sistema sin esas claves, una solapa ambigua)
             // decide el modelo, y el camino queda de respaldo por si no señala nada.
-            $del_path = $this->camino_de([(string) $camino_dado]);
+            $del_path = $this->camino_de([$escrito]);
             $camino = $del_path ?? $this->camino_de([$explicacion]);
             if ($camino !== null) {
                 $hay_camino = true;
                 $del_camino = $this->pasos_del_camino($pasos, $camino);
                 $this->camino = [
-                    'origen' => $del_path !== null ? 'path' : 'explicacion',
+                    'origen' => $del_path === null ? 'explicacion' : ($guardado !== null ? 'invitacion' : 'path'),
                     'anclados' => count($del_camino['anclados']), 'ambiguo' => $del_camino['ambiguo'],
                 ];
                 $this->fijo = count($del_camino['anclados']) >= 2 ? $del_camino : null;
@@ -230,6 +237,44 @@ class SupportTourPlannerService
         $this->origen = 'modelo';
 
         return $guion;
+    }
+
+    /** Largo máximo del camino que Soporte declara al invitar (`tour_path`), igual que el `path` de tour/prepare. */
+    public const MAX_CAMINO_DE_INVITACION = 300;
+
+    /**
+     * El `tour_path` que manda el helper con la invitación, listo para guardar, o null si no sirve: tiene que ser
+     * texto de UN renglón, de 1 a 300 caracteres (sin contar los espacios de los bordes), sin caracteres de control
+     * ni separadores de línea o párrafo, y en UTF-8 válido.
+     *
+     * @param mixed $valor
+     */
+    public static function camino_de_invitacion_valido($valor): ?string
+    {
+        if (! is_string($valor)) {
+            return null;
+        }
+        $camino = trim($valor);
+        if ($camino === '' || ! mb_check_encoding($camino, 'UTF-8') || mb_strlen($camino) > self::MAX_CAMINO_DE_INVITACION
+            || preg_match('/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u', $camino) !== 0) {
+            return null;
+        }
+
+        return $camino;
+    }
+
+    /**
+     * El camino guardado con la invitación aceptada (`erp_auto_reply.tour_path`), o null. Solo cuenta el de un mensaje
+     * de Soporte distinto del que acepta: un pedido propio o una pregunta dentro de la guía no traen invitación, y lo
+     * que venga en un mensaje de la persona no es un camino de Soporte.
+     */
+    private static function camino_de_la_invitacion(SupportMessage $entrante, SupportMessage $invitacion): ?string
+    {
+        if ((int) $invitacion->id === (int) $entrante->id || $invitacion->sender_type !== 'admin') {
+            return null;
+        }
+
+        return self::camino_de_invitacion_valido($invitacion->erp_auto_reply['tour_path'] ?? null);
     }
 
     private function con_respaldo(?array $respaldo, string $motivo): ?array
@@ -460,7 +505,8 @@ class SupportTourPlannerService
         if (preg_match('/^(?:(?:la|el|pestana|solapa|seccion|ir a|anda a|toca|abri)\s+)*precios?$/', $tramo)) {
             return 'precio';
         }
-        if (preg_match('/^(?:(?:toca|toca el|boton|el boton|y)\s+)*guarda(?:r|lo)?(?: y cerrar)?$/', $tramo)) {
+        // «Guardar», «Guardar y cerrar» y «Guardá y cerrá» son el mismo control de la ficha (listado.guardar_articulo).
+        if (preg_match('/^(?:(?:toca|toca el|boton|el boton|y)\s+)*guarda(?:r|lo)?(?: y cerrar?)?$/', $tramo)) {
             return 'guardar';
         }
         if (preg_match('/\b(?:buscador|busca|buscar|buscalo)\b/', $tramo)) {
@@ -477,6 +523,37 @@ class SupportTourPlannerService
         }
 
         return null;
+    }
+
+    /**
+     * El último tramo del camino sin la oración que viene después en el mismo renglón (ticket 122, 14/11/2026):
+     * «Guardar y cerrar. En "Setear precio final" activás el interruptor…» → «Guardar y cerrar».
+     *
+     * Corta en el primer «?», «!» o «¿» (la invitación a Robotito escrita en el mismo renglón) y en el primer punto
+     * (o «…») que cierra una oración: seguido de un espacio o del final, y que no cierra una abreviatura de una a tres
+     * letras («Cta. Cte.», «Nro.», «Cód. de barras», «IVA.»: ahí no corta). Un punto pegado a lo que sigue («1.5»,
+     * «x.com») tampoco. Si no hay dónde cortar, o el corte dejaría el tramo vacío, devuelve el tramo tal cual.
+     */
+    private static function fin_del_camino(string $tramo): string
+    {
+        if (! preg_match_all('/[.!?¿…]+/u', $tramo, $signos, PREG_OFFSET_CAPTURE)) {
+            return $tramo;
+        }
+        foreach ($signos[0] as $signo) {
+            [$texto, $posicion] = $signo;
+            if (! preg_match('/[!?¿]/u', $texto)) {
+                $despues = (string) substr($tramo, $posicion + strlen($texto));
+                $antes = (string) substr($tramo, 0, $posicion);
+                if (($despues !== '' && ! preg_match('/^\s/u', $despues)) || preg_match('/(?<!\pL)\pL{1,3}$/u', $antes)) {
+                    continue;
+                }
+            }
+            $cortado = rtrim((string) substr($tramo, 0, $posicion));
+
+            return trim($cortado) === '' ? $tramo : $cortado;
+        }
+
+        return $tramo;
     }
 
     /**
@@ -505,6 +582,9 @@ class SupportTourPlannerService
         $limpio = function (string $tramo): string {
             return trim(preg_replace('/[^a-z0-9]+/', ' ', self::normalizar($tramo)));
         };
+        // El camino termina en el último tramo: lo que sigue en el renglón es otra oración (ticket 122, 14/11/2026:
+        // «… → Guardar y cerrar. En "Setear precio final" activás el interruptor…» no se anclaba y quedaba en texto).
+        $tramos[count($tramos) - 1] = self::fin_del_camino($tramos[count($tramos) - 1]);
         $tipos = [];
         for ($i = 1; $i < count($tramos); $i++) {
             $tipos[$i] = self::tramo_del_listado($limpio($tramos[$i]));
@@ -539,7 +619,13 @@ class SupportTourPlannerService
             if ($tipo === 'ficha' && $ultimo < 0 && isset($pasos['listado.buscador'])) {
                 $anclados[] = ['clave' => 'listado.buscador', 'texto' => self::TRAMOS_DEL_LISTADO['buscador'][1]];
             }
-            $anclados[] = ['clave' => $clave, 'texto' => self::TRAMOS_DEL_LISTADO[$tipo][1]];
+            $texto = self::TRAMOS_DEL_LISTADO[$tipo][1];
+            // El control que señala listado.guardar_articulo es «Guardar y cerrar»: si el camino lo nombra así, la
+            // tarjeta lo dice igual. «Guardar» a secas conserva el texto de siempre.
+            if ($tipo === 'guardar' && preg_match('/\bcerrar?$/', $limpio($tramos[$i]))) {
+                $texto = 'Tocá «Guardar y cerrar» para guardar el cambio.';
+            }
+            $anclados[] = ['clave' => $clave, 'texto' => $texto];
             $ultimo = $posicion;
             // Guardar cierra la ficha: un tramo de adentro de la ficha después de Guardar no se ancla ni queda en texto.
             if ($tipo === 'guardar' && in_array($tipos[$i + 1] ?? null, ['ficha', 'precio', 'precio_final', 'setear', 'guardar'], true)) {

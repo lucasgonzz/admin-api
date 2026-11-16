@@ -70,6 +70,15 @@ class CrearInstanciaDePoolJob implements ShouldQueue
     /** @var int */
     public $trial_instance_id;
 
+    /**
+     * Cuántas veces este armado ya se re-encoló esperando un alta en curso (G1). Va en el job y no en la fila: con
+     * `$tries = 1` no se usa `release()` (contaría como un intento y el worker lo daría por fallido); cada espera es un
+     * job nuevo con la demora, que hereda el contador.
+     *
+     * @var int
+     */
+    public $esperas_por_armado = 0;
+
     public function __construct(int $trial_instance_id)
     {
         $this->trial_instance_id = $trial_instance_id;
@@ -88,6 +97,10 @@ class CrearInstanciaDePoolJob implements ShouldQueue
         if (! in_array($instancia->estado, [TrialInstance::ESTADO_CREANDO, TrialInstance::ESTADO_FALLIDA], true) || $instancia->client_id) {
             Log::info('CrearInstanciaDePoolJob: la instancia no está para armar.', ['instancia' => $instancia->nombre, 'estado' => $instancia->estado]);
 
+            return;
+        }
+
+        if ($this->esperar_si_hay_un_armado($instancia)) {
             return;
         }
 
@@ -134,6 +147,41 @@ class CrearInstanciaDePoolJob implements ShouldQueue
 
             Log::error('CrearInstanciaDePoolJob: falló.', ['instancia' => $instancia->nombre, 'etapa' => $instancia->etapa, 'error' => $e->getMessage()]);
         }
+    }
+
+    /**
+     * G1 (15/11/2026): crear la instancia recarga php8.4-fpm hasta seis veces y cada recarga corta los pedidos PHP en
+     * curso de todo el VPS, incluido el demo setup de un alta (medido el 15/11 02:51: HTTP 502 y prueba `fallida`).
+     * Si hay un armado en curso, este job se vuelve a encolar con una espera corta, sin tocar la fila (sigue `creando`
+     * en `encolada`, así `mantener()` no arma otra al lado). Con el tope de esperas agotado crea igual: un armado que
+     * no se mueve en la ventana ya no cuenta como en curso, así que el tope es solo una red.
+     *
+     * @return bool true si se re-encoló (el llamador no hace nada más).
+     */
+    private function esperar_si_hay_un_armado(TrialInstance $instancia): bool
+    {
+        $armado = PruebaPoolService::armado_en_curso();
+        if ($armado === null) {
+            return false;
+        }
+
+        $tope = max(0, (int) config('services.prueba.crear_esperas_max', 30));
+        if ($this->esperas_por_armado >= $tope) {
+            Log::warning('CrearInstanciaDePoolJob: se agotaron las esperas por un armado en curso; se crea igual.', ['instancia' => $instancia->nombre, 'armado' => $armado->nombre, 'esperas' => $this->esperas_por_armado]);
+
+            return false;
+        }
+
+        $segundos = max(1, (int) config('services.prueba.crear_espera_segundos', 30));
+        if ($this->esperas_por_armado === 0) {
+            Log::info('CrearInstanciaDePoolJob: hay un armado en curso; la creación espera.', ['instancia' => $instancia->nombre, 'armado' => $armado->nombre, 'etapa' => $armado->etapa, 'segundos' => $segundos]);
+        }
+
+        $siguiente = new self($this->trial_instance_id);
+        $siguiente->esperas_por_armado = $this->esperas_por_armado + 1;
+        dispatch($siguiente->delay(now()->addSeconds($segundos)));
+
+        return true;
     }
 
     /**

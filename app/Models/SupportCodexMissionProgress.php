@@ -16,8 +16,12 @@ class SupportCodexMissionProgress extends Model
         if ($ticket->status !== 'open' || $case === null || ($case->mission_lifecycle()['status'] ?? null) !== 'started') {
             return null;
         }
-        return self::where('support_ticket_id', $ticket->id)->where('mission_thread_id', $case->mission_thread_id)
-            ->where('mission_hash', hash('sha256', (string) $case->mission))->orderByDesc('id')->first();
+        $query = self::where('support_ticket_id', $ticket->id)->where('mission_thread_id', $case->mission_thread_id)
+            ->where('mission_hash', hash('sha256', (string) $case->mission));
+        // La causa puede llegar antes de que Martín avise el inicio. No debe borrar ese compromiso.
+        $start = (clone $query)->whereNull('announced_at')->whereNull('dismissed_at')
+            ->where('payload->tipo', 'inicio_mision')->oldest('id')->first();
+        return $start ?? $query->orderByDesc('id')->first();
     }
 
     /** Se llama solamente después de una entrega confirmada, incluso al conciliarla manualmente. */

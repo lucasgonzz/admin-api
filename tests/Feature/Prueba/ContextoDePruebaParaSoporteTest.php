@@ -9,6 +9,7 @@ use App\Models\SupportTicket;
 use App\Models\TrialInstance;
 use App\Services\Prueba\PruebaContextoSoporteService;
 use App\Services\SupportCodexService;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 
 /**
@@ -81,6 +82,85 @@ class ContextoDePruebaParaSoporteTest extends BaseDePruebaGratuita
         $this->assertSame('prueba-01', $bloque['instancia_vista']);
         $this->assertTrue($bloque['semilla_presente']);
         $this->assertSame([], $bloque['hitos']);
+    }
+
+    /**
+     * Ronda 8 (§0.3): `prueba_import_clientes` y `prueba_import_margen` salen de lo que el sistema del negocio anunció
+     * en `capacidades_prueba` de `prueba-pendientes`; un sistema 4.3.50/4.3.56 no manda la clave y quedan en false.
+     *
+     * @dataProvider capacidades_anunciadas
+     */
+    public function test_las_capacidades_nuevas_de_la_prueba_salen_de_lo_que_anuncia_el_sistema(?array $anunciadas, bool $clientes, bool $margen): void
+    {
+        $ticket = $this->ticket_de_una_prueba_lista();
+        $abierta = ['corrida_id' => '6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b', 'modelo' => 'client', 'estado' => 'importar',
+            'revision' => 1, 'codigo_requerido' => false, 'modo_prueba' => true];
+        $this->erp['ai-excel-import/prueba-pendientes'] = Http::response(['pendientes' => [], 'en_proceso' => true,
+            'importaciones_de_contactos' => [$abierta]] + ($anunciadas === null ? [] : ['capacidades_prueba' => $anunciadas]), 200);
+
+        $contexto = app(SupportCodexService::class)->context($ticket);
+
+        $this->assertSame($clientes, $contexto['capabilities']['prueba_import_clientes']);
+        $this->assertSame($margen, $contexto['capabilities']['prueba_import_margen']);
+        $this->assertSame($clientes ? [$abierta] : [], $contexto['importaciones_de_contactos']);
+        // Lo de activos no se enciende en la prueba.
+        $this->assertFalse($contexto['capabilities']['soporte_import_clientes']);
+        $this->assertTrue($contexto['capabilities']['prueba_import_resolver']);
+    }
+
+    public function capacidades_anunciadas(): array
+    {
+        return [
+            'las dos' => [['margen_previo', 'contactos'], true, true],
+            'solo la ganancia' => [['margen_previo'], false, true],
+            'un sistema anterior sin la clave' => [null, false, false],
+            'una lista vacía' => [[], false, false],
+        ];
+    }
+
+    public function test_un_cliente_activo_tiene_las_capacidades_nuevas_de_la_prueba_en_false(): void
+    {
+        $ticket = $this->ticket_de_una_prueba_lista();
+        $ticket->client->update(['estado' => \App\Services\Prueba\PruebaCicloService::CLIENTE_ACTIVO]);
+        $this->erp['ai-excel-import/prueba-pendientes'] = Http::response(['pendientes' => [], 'en_proceso' => false,
+            'automatizar_soporte' => true, 'capacidades_prueba' => ['margen_previo', 'contactos']], 200);
+
+        $contexto = app(SupportCodexService::class)->context($ticket->fresh());
+
+        $this->assertFalse($contexto['capabilities']['prueba_import_clientes']);
+        $this->assertFalse($contexto['capabilities']['prueba_import_margen']);
+    }
+
+    public function test_una_prueba_vencida_tiene_las_capacidades_nuevas_en_false(): void
+    {
+        $ticket = $this->ticket_de_una_prueba_lista();
+        $ticket->client->update(['trial_ends_at' => now()->subDay()]);
+        $this->erp['ai-excel-import/prueba-pendientes'] = Http::response(['pendientes' => [], 'en_proceso' => false,
+            'capacidades_prueba' => ['margen_previo', 'contactos']], 200);
+
+        $contexto = app(SupportCodexService::class)->context($ticket->fresh());
+
+        $this->assertFalse($contexto['capabilities']['prueba_import_resolver']);
+        $this->assertFalse($contexto['capabilities']['prueba_import_clientes']);
+        $this->assertFalse($contexto['capabilities']['prueba_import_margen']);
+    }
+
+    /** Un cliente en prueba con su instancia lista y el ticket de WhatsApp de su dueño. */
+    private function ticket_de_una_prueba_lista(): SupportTicket
+    {
+        $instancia = $this->crear_instancia_libre('prueba-01', 900100);
+        $uuid      = $this->postear_alta()->json('uuid');
+        $client    = Client::find($this->lead_del_alta($uuid)->promoted_client_id);
+        $instancia->refresh();
+        $instancia->update(['estado' => TrialInstance::ESTADO_ASIGNADA, 'etapa' => 'lista', 'progreso' => 100]);
+
+        $ticket = SupportTicket::create([
+            'client_id' => $client->id, 'client_user_id' => 0, 'client_user_name' => 'Lucas Prueba', 'status' => 'open',
+            'source' => 'whatsapp', 'whatsapp_phone' => self::TELEFONO_E164, 'opened_at' => now(),
+        ]);
+        SupportMessage::create(['support_ticket_id' => $ticket->id, 'sender_type' => 'user', 'kind' => 'text', 'body' => 'Te mando mis clientes', 'delivered_at' => now()]);
+
+        return $ticket;
     }
 
     public function test_un_cliente_que_no_es_una_prueba_no_trae_bloque(): void

@@ -138,6 +138,9 @@ class ClaudeSupportCodexController extends Controller
         $data = $request->validate([
             'minimum_minutes' => 'required|integer|between:1,1440',
             'not_before' => 'sometimes|date_format:Y-m-d\TH:i:sP',
+            'maintenance_mode' => 'sometimes|in:closed,coordinated',
+            'target' => 'sometimes|in:sistema,tienda',
+            'client_ecommerce_id' => 'sometimes|nullable|integer|min:1',
             'expected_message_id' => 'required|integer|min:1',
         ]);
         $resultado = DB::transaction(function () use ($request, $id, $service, $resolver, $data) {
@@ -161,6 +164,14 @@ class ClaudeSupportCodexController extends Controller
                 $desde = $reoffer;
             }
 
+            if (($data['maintenance_mode'] ?? 'closed') === 'coordinated') {
+                abort_unless(\App\Services\SupportMaintenancePolicy::available(), 409, 'maintenance_unavailable');
+                $evidence = \App\Models\SupportCodexMissionFixEvidence::current_for($ticket, $case);
+                abort_unless($evidence !== null, 409, 'Falta la corrección integrada vigente.');
+                $store = \App\Services\SupportMaintenancePolicy::assert_scope($ticket, $evidence, $data);
+                return \App\Services\SupportMaintenancePolicy::window($desde, (int) $data['minimum_minutes'], isset($data['not_before']))
+                    + ['target' => $data['target'] ?? 'sistema', 'client_ecommerce_id' => $store === null ? null : (int) $store->id];
+            }
             return $resolver->primera_ventana_cerrada($ticket->client, $desde, (int) $data['minimum_minutes'], 'America/Argentina/Buenos_Aires');
         });
 
@@ -180,9 +191,12 @@ class ClaudeSupportCodexController extends Controller
             'starts_at' => 'required|date_format:Y-m-d\TH:i:sP',
             'ends_at' => 'required|date_format:Y-m-d\TH:i:sP',
             'minimum_minutes' => 'required|integer|between:1,1440',
+            'maintenance_mode' => 'sometimes|in:closed,coordinated',
+            'target' => 'sometimes|in:sistema,tienda',
+            'client_ecommerce_id' => 'sometimes|nullable|integer|min:1',
         ]);
 
-        return response()->json($service->reply((int) $id, $agreements->proposal_input($data)));
+        return response()->json($service->reply((int) $id, $agreements->proposal_input($data, SupportTicket::with('client')->findOrFail($id))));
     }
 
     public function upgrade_agreement(Request $request, $id, SupportCodexService $service, SupportCodexUpgradeAgreementService $agreements)
@@ -241,12 +255,16 @@ class ClaudeSupportCodexController extends Controller
             'tour_invitation' => 'sometimes|required|array|prohibited_unless:action,responder',
             'tour_requested' => 'sometimes|boolean|prohibited_unless:action,responder',
             'tour_import_history_id' => 'sometimes|required|integer|min:1|max:' . \App\Services\SupportTourService::MAX_IMPORT_HISTORY_ID,
+            // El camino de la invitación (ronda 4). Lo valida SupportCodexService::reply() solo si `tour_requested`
+            // viene en true: sin invitación se ignora, y con ella un valor inválido da 422 `tour_path_invalid`.
+            'tour_path' => 'sometimes|nullable',
             'attachment' => 'sometimes|required|array',
             'attachment.filename' => 'required_with:attachment|string|max:160',
             'attachment.content_base64' => 'required_with:attachment|string|max:' . \App\Services\SupportCodexOutboundAttachment::MAX_ENCODED_LENGTH,
             'mission' => 'sometimes|nullable|string|max:30000',
             'close_on_mission_start' => 'sometimes|boolean|prohibited_unless:action,escalar',
             'review_reason' => 'required_if:action,pedir_revision|nullable|string|max:500',
+            'migration_blocked_reason' => 'sometimes|required|string|max:2000|prohibited_unless:action,pedir_revision',
             'thread_id' => 'sometimes|string|max:150',
             'confirmation_message_id' => 'sometimes|nullable|integer|min:1',
         ]);
@@ -306,6 +324,10 @@ class ClaudeSupportCodexController extends Controller
             'mission_thread_id' => 'required|string|max:150|regex:/^[a-zA-Z0-9_-]+$/',
             'mission_hash' => 'required|string|size:64|regex:/^[a-f0-9]{64}$/',
         ]);
+        if ($request->has('mission_type')) {
+            $request->validate(['mission_type' => 'required|in:bug,funcionalidad']);
+            $data['mission_type'] = $request->input('mission_type');
+        }
         return response()->json($service->mission_started((int) $id, $data));
     }
 
@@ -369,6 +391,11 @@ class ClaudeSupportCodexController extends Controller
      * artículos; el sistema del negocio lo aplica y solo pregunta lo que no quedó cubierto. Sin el campo, todo
      * igual que antes. La ruta de solo stock no lo admite (422).
      *
+     * Ronda 8 (15/11/2026, `docs/soporte-codex-contrato.md`): `automatizar_prueba: true` con `model` client|provider, la
+     * reserva y un adjunto lleva el Excel de contactos de un negocio EN PRUEBA al motor de soporte de empresa con
+     * `modo_prueba=1` (sin código). `margen_de_ganancia` (opcional, ya normalizado) viaja solo en la prueba de artículos
+     * con automatización y vuelve `margen_previo`.
+     *
      * @return \Illuminate\Http\JsonResponse 200 aceptado/analizado_sin_corrida/rechazado · 404 no_es_prueba ·
      *                                       409 ticket_cerrado/sin_api_key/sin_url · 422 · 502 no_responde
      */
@@ -395,12 +422,23 @@ class ClaudeSupportCodexController extends Controller
             'file.filename' => 'required_with:file|string|max:160',
             'file.content_base64' => 'required_with:file|string|max:14000000',
             'pdf_attachment_id' => 'sometimes|integer|min:1',
+            'whatsapp_catalog_url' => 'required_with:whatsapp_catalog_message_id|nullable|string|max:500',
+            'whatsapp_catalog_message_id' => 'required_with:whatsapp_catalog_url|nullable|integer|min:1',
             'model' => 'sometimes|nullable|in:article,client,provider',
             'provider_id' => 'sometimes|nullable|integer|min:1',
             'origen' => 'sometimes|nullable|string|max:40',
             'automatizar_soporte' => 'sometimes|boolean',
-            'lease_token' => 'required_if:automatizar_soporte,true|nullable|string|min:32|max:128',
-            'expected_message_id' => 'required_if:automatizar_soporte,true|nullable|integer|min:1',
+            // Ronda 8 (D1): la carga sola de clientes o proveedores de un negocio en prueba, con la reserva del turno.
+            'automatizar_prueba' => 'sometimes|boolean',
+            'lease_token' => 'required_if:automatizar_soporte,true|required_if:automatizar_prueba,true|nullable|string|min:32|max:128',
+            'expected_message_id' => 'required_if:automatizar_soporte,true|required_if:automatizar_prueba,true|nullable|integer|min:1',
+            // Ronda 8 (D2): la ganancia ya dicha por el dueño, normalizada por el helper. En array: la regex lleva `|`.
+            'margen_de_ganancia' => ['sometimes', 'nullable', 'string', 'max:40', 'regex:' . PruebaImportacionService::REGEX_MARGEN,
+                function ($atributo, $valor, $falla) {
+                    if (is_string($valor) && PruebaImportacionService::margen_valido($valor) === null) {
+                        $falla('La ganancia tiene que ser un porcentaje mayor a 0 y hasta 1000, precio:N con N mayor a 0, o despues.');
+                    }
+                }],
         ] + ($solo_stock ? ['alcance' => 'required|in:' . PruebaImportacionService::ALCANCE_STOCK_EXISTENTE] : [
             // Mapeo de columnas que soporte ya confirmó con el cliente: el sistema no vuelve a preguntarlo.
             'columnas_previas' => 'sometimes|array|min:1|max:80',
@@ -408,6 +446,32 @@ class ClaudeSupportCodexController extends Controller
             'columnas_previas.*.columna' => 'required|string|regex:/^[A-Za-z]{1,3}$/',
             'columnas_previas.*.campo' => 'required|string|min:1|max:120',
         ]));
+        $margen = isset($data['margen_de_ganancia']) && $data['margen_de_ganancia'] !== null;
+        if ($request->boolean('automatizar_prueba')) {
+            // La rama de la prueba es solo para clientes y proveedores: los artículos siguen por su camino de siempre.
+            abort_if($request->boolean('automatizar_soporte'), 422, 'automatizar_prueba y automatizar_soporte no van juntos.');
+            abort_if($solo_stock || ($data['model'] ?? 'article') === 'article', 422, 'automatizar_prueba es para clientes o proveedores (model client|provider).');
+            abort_if($margen, 422, 'La ganancia es solo para la carga de artículos.');
+
+            $resultado = DB::transaction(function () use ($id, $data, $service, $soporte) {
+                $ticket = SupportTicket::lockForUpdate()->findOrFail($id);
+                $puerta = $service->puerta($ticket);
+                if ($puerta !== null) {
+                    return $puerta;
+                }
+                if (!$service->automatizacion_disponible($ticket)) {
+                    return ['estado' => 'contacto_no_habilitado',
+                        'mensaje' => 'La carga de clientes o proveedores de la prueba es solo para el dueño, con la prueba vigente.'];
+                }
+
+                $soporte->assert_current($ticket, $data + ['action' => 'responder']);
+
+                return $service->importar_contactos_de_prueba($ticket, $data);
+            });
+
+            return response()->json($resultado, $this->http_de_la_importacion($resultado['estado']));
+        }
+        abort_if($margen && ($request->boolean('automatizar_soporte') || $solo_stock), 422, 'La ganancia al lanzar es solo para la prueba.');
         if ($request->boolean('automatizar_soporte')) {
             $resultado = DB::transaction(function () use ($id, $data, $service, $soporte) {
                 $ticket = SupportTicket::lockForUpdate()->findOrFail($id);
@@ -420,8 +484,9 @@ class ClaudeSupportCodexController extends Controller
                 $soporte->assert_current($ticket, $data + ['action' => 'responder']);
                 // La planilla derivada de un PDF (misión importaciones-de-martin) la sube Martín en una atención
                 // posterior: lo que acredita al dueño es el PDF, que el servicio exige entrante del dueño.
-                $mensaje = isset($data['pdf_attachment_id']) ? null : SupportMessage::find($data['expected_message_id']);
-                if (!isset($data['pdf_attachment_id']) && !$service->es_entrante_del_dueno($ticket, $mensaje)) {
+                $derivado = isset($data['pdf_attachment_id']) || isset($data['whatsapp_catalog_url']);
+                $mensaje = $derivado ? null : SupportMessage::find($data['expected_message_id']);
+                if (!$derivado && !$service->es_entrante_del_dueno($ticket, $mensaje)) {
                     return ['estado' => 'archivo_sin_remitente_verificado',
                         'mensaje' => 'Reenviá el Excel desde el WhatsApp registrado del dueño para poder usarlo.'];
                 }

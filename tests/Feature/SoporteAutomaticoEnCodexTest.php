@@ -377,6 +377,95 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         $this->getJson($pending, $this->headers)->assertJsonCount(0, 'tickets');
     }
 
+    public function test_corte_coordinado_de_quince_minutos_se_acuerda_aunque_el_negocio_este_abierto(): void
+    {
+        [$ticket, $case, $data] = $this->preparar_propuesta_upgrade();
+        $this->cargar_turnos_de_upgrade($ticket, 'lunes', [['08:00', '21:00']]);
+        $data = array_replace($data, ['maintenance_mode' => 'coordinated', 'target' => 'sistema', 'minimum_minutes' => 15,
+            'starts_at' => '2026-10-26T12:30:00-03:00', 'ends_at' => '2026-10-26T12:45:00-03:00']);
+        $base = $this->base . '/tickets/' . $ticket->id;
+        $this->postJson($base . '/upgrade-proposal', array_replace($data, ['ends_at' => '2026-10-26T12:46:00-03:00']), $this->headers)->assertStatus(422);
+        $sent = $this->postJson($base . '/upgrade-proposal', $data, $this->headers)->assertOk()->assertJsonPath('operation.status', 'sent')->json('operation');
+        $body = SupportMessage::findOrFail($sent['message_id'])->body;
+        $this->assertStringContainsString('unos 15 minutos', $body);
+        $this->assertStringContainsString('nadie debe usar', $body);
+        $this->assertStringContainsString('"Confirmo la actualización del 26/10/2026 a las 12:30 del sistema"', $body);
+        $inbound = $this->inbound($ticket, 'Confirmo la actualización del 26/10/2026 a las 12:30 del sistema');
+        $inbound->update(['whatsapp_message_id' => 'wamid.coordinado-' . $ticket->id]);
+        $lease = $this->claim($ticket);
+        $this->postJson($base . '/upgrade-agreement', ['lease_token' => $lease['lease_token'], 'expected_message_id' => $inbound->id,
+            'proposal_operation_id' => $sent['id']], $this->headers)->assertOk()
+            ->assertJsonPath('upgrade_agreement.status', 'accepted')->assertJsonPath('upgrade_agreement.maintenance_mode', 'coordinated');
+        $this->assertSame('open', $ticket->fresh()->status);
+    }
+
+    public function test_ventana_coordinada_da_margen_de_release_con_segundos_y_respeta_horario_elegido(): void
+    {
+        [$ticket, $case, $data] = $this->preparar_propuesta_upgrade();
+        Carbon::setTestNow(Carbon::parse('2026-10-26T12:00:23-03:00'));
+        $url = $this->base . '/tickets/' . $ticket->id . '/upgrade-window?minimum_minutes=15&maintenance_mode=coordinated&target=sistema&expected_message_id=' . $data['expected_message_id'];
+        $headers = $this->headers + ['X-Support-Lease-Token' => $data['lease_token']];
+        $this->getJson($url, $headers)->assertOk()->assertJsonPath('window.starts_at', '2026-10-26T13:31:00-03:00')
+            ->assertJsonPath('window.ends_at', '2026-10-26T13:46:00-03:00')->assertJsonPath('target', 'sistema');
+        $this->getJson($url . '&not_before=' . urlencode('2026-10-26T12:35:00-03:00'), $headers)->assertOk()
+            ->assertJsonPath('window.starts_at', '2026-10-26T12:35:00-03:00');
+    }
+
+    public function test_tienda_tiene_destino_visible_release_propio_y_programacion_por_acuerdo(): void
+    {
+        \Illuminate\Support\Facades\Queue::fake();
+        config(['services.support_codex_scheduled_upgrades.enabled' => true]);
+        [$ticket, $case, $data] = $this->preparar_propuesta_upgrade();
+        $old = \App\Models\EcommerceVersion::create(['version' => '97.1.0', 'status' => 'published']);
+        $store = \App\Models\ClientEcommerce::create(['client_id' => $ticket->client_id, 'domain' => 'tienda-coordinada.test',
+            'spa_url' => 'https://tienda-coordinada.test', 'api_url' => 'https://tienda-coordinada.test/api', 'status' => 'active', 'ecommerce_version_id' => $old->id]);
+        $evidence = \App\Models\SupportCodexMissionFixEvidence::where('support_ticket_id', $ticket->id)->firstOrFail();
+        $payload = $evidence->payload; $payload['commits'] = ['tienda-api' => str_repeat('a', 40)]; $evidence->update(['payload' => $payload]);
+        $data = array_replace($data, ['maintenance_mode' => 'coordinated', 'target' => 'tienda', 'client_ecommerce_id' => $store->id,
+            'minimum_minutes' => 15, 'ends_at' => '2026-10-26T13:15:00-03:00']);
+        $base = $this->base . '/tickets/' . $ticket->id;
+        $sent = $this->postJson($base . '/upgrade-proposal', $data, $this->headers)->assertOk()->json('operation');
+        $this->assertStringContainsString('tienda-coordinada.test', SupportMessage::findOrFail($sent['message_id'])->body);
+        $inbound = $this->inbound($ticket, 'Sí, confirmo');
+        $inbound->update(['reply_to_message_id' => $sent['message_id'], 'whatsapp_message_id' => 'wamid.tienda-acuerdo-' . $ticket->id]);
+        $lease = $this->claim($ticket);
+        $this->postJson($base . '/upgrade-agreement', ['lease_token' => $lease['lease_token'], 'expected_message_id' => $inbound->id,
+            'proposal_operation_id' => $sent['id']], $this->headers)->assertOk()->assertJsonPath('upgrade_agreement.target', 'tienda');
+        $agreement = SupportCodexUpgradeAgreement::where('support_ticket_id', $ticket->id)->firstOrFail();
+        $github = \Mockery::mock(ReleaseArtifactService::class);
+        $github->shouldReceive('support_fix_is_ancestor')->andReturn(true);
+        $github->shouldReceive('verify_support_release')->andReturn(true);
+        $this->app->instance(ReleaseArtifactService::class, $github);
+        $claim = ['agreement_id' => $agreement->id, 'target' => 'tienda', 'draft_version_id' => null, 'draft_version' => '97.1.1',
+            'develop' => ['tienda-api' => str_repeat('e', 40), 'tienda-spa' => str_repeat('f', 40)]];
+        $this->postJson($base . '/release-claim', array_replace($claim, ['target' => 'sistema']), $this->headers)->assertStatus(409);
+        $claimed = $this->postJson($base . '/release-claim', $claim, $this->headers)->assertOk()->assertJsonPath('release.target', 'tienda')->json('release');
+        $proof = ['agreement_id' => $agreement->id, 'target' => 'tienda', 'version_id' => $claimed['version_id'], 'version' => '97.1.1',
+            'develop' => $claim['develop'], 'trigger_commits' => ['tienda-api' => str_repeat('1', 40), 'tienda-spa' => str_repeat('2', 40)],
+            'tag_commits' => ['tienda-api' => str_repeat('1', 40), 'tienda-spa' => str_repeat('2', 40)], 'artifacts' => [
+                'tienda-api' => ['id' => 1, 'size' => 100, 'name' => 'tienda-api-v97.1.1.zip', 'sha256' => str_repeat('a', 64)],
+                'tienda-spa' => ['id' => 2, 'size' => 200, 'name' => 'tienda-spa-v97.1.1-dist.zip', 'sha256' => str_repeat('b', 64)]]];
+        $this->postJson($base . '/release-published', $proof, $this->headers)->assertOk()->assertJsonPath('release.status', 'published');
+        $this->assertSame('published', \App\Models\EcommerceVersion::findOrFail($claimed['version_id'])->status);
+        $erp = Version::create(['version' => '97.7.0', 'status' => 'published']);
+        $api = \App\Models\ClientApi::create(['client_id' => $ticket->client_id, 'url' => 'https://coordinado-api.test', 'path' => 'coordinado/api']);
+        $ticket->client->update(['user_id' => 99009900, 'current_version_id' => $erp->id, 'active_client_api_id' => $api->id]);
+        $this->postJson($base . '/schedule-upgrade', ['target' => 'tienda', 'agreement_id' => $agreement->id, 'version_id' => $claimed['version_id']], $this->headers)
+            ->assertCreated()->assertJsonPath('scheduled_upgrade.target', 'tienda')->assertJsonPath('scheduled_upgrade.client_ecommerce_id', $store->id);
+        $ssh = $this->createMock(\App\Services\EnvSshService::class);
+        $ssh->method('read_coordinated_upgrade_activity_for')->willReturn(['usuarios_activos' => 0, 'ventas_recientes' => 0, 'trabajos_pendientes' => 0]);
+        $this->app->instance(\App\Services\EnvSshService::class, $ssh);
+        Carbon::setTestNow(Carbon::parse('2026-10-26T13:00:45-03:00'));
+        app(\App\Services\SupportScheduledUpgradeService::class)->tick();
+        app(\App\Services\SupportScheduledUpgradeService::class)->tick();
+        \Illuminate\Support\Facades\Queue::assertPushed(\App\Jobs\RunEcommerceInstallationJob::class, 1);
+        $row = \App\Models\SupportCodexScheduledUpgrade::where('agreement_id', $agreement->id)->firstOrFail();
+        $this->assertSame('starting', $row->status); $this->assertNull($row->live_touched_at);
+        $this->assertNotNull($row->ecommerce_installation_id);
+        $store->update(['domain' => 'otro-destino.test']);
+        $this->assertSame('alcance_de_mantenimiento_cambio', app(\App\Services\SupportUpgradePreflight::class)->inspect($agreement->id, $row)['reason']);
+    }
+
     private function preparar_propuesta_upgrade(): array
     {
         Carbon::setTestNow(Carbon::parse('2026-10-26T12:00:00-03:00'));

@@ -252,7 +252,8 @@ class ClaudeImportacionesDeMartinController extends Controller
 
     /**
      * `GET claude/support-codex/tickets/{id}/import-status?modelo=&corrida_id=` — el estado y el resumen de una
-     * corrida de clientes o proveedores (con la reserva del ticket).
+     * corrida de clientes o proveedores (con la reserva del ticket). Ronda 8: también en un ticket del dueño de un
+     * negocio en prueba (la carga sola con `modo_prueba`); empresa decide la guarda por la corrida.
      *
      * @param Request    $request
      * @param int|string $id
@@ -267,7 +268,7 @@ class ClaudeImportacionesDeMartinController extends Controller
         }
 
         return $this->responder(function () use ($request, $id) {
-            $ticket = $this->importaciones->ticket_con_reserva((int) $id, (string) $this->lease($request));
+            $ticket = $this->importaciones->ticket_con_reserva((int) $id, (string) $this->lease($request), true);
 
             return $this->importaciones->estado($ticket, (string) $request->input('modelo'), (string) $request->input('corrida_id'));
         });
@@ -324,7 +325,7 @@ class ClaudeImportacionesDeMartinController extends Controller
 
     /**
      * `POST claude/support-codex/tickets/{id}/import-revert` — deshace una corrida de clientes o proveedores, a pedido
-     * del dueño (con la reserva del ticket).
+     * del dueño (con la reserva del ticket). Ronda 8: también en la prueba, como `import-status`.
      *
      * @param Request    $request `{lease_token, modelo, corrida_id}`.
      * @param int|string $id
@@ -339,7 +340,7 @@ class ClaudeImportacionesDeMartinController extends Controller
         }
 
         return $this->responder(function () use ($request, $id) {
-            $ticket = $this->importaciones->ticket_con_reserva((int) $id, (string) $request->input('lease_token'));
+            $ticket = $this->importaciones->ticket_con_reserva((int) $id, (string) $request->input('lease_token'), true);
 
             return $this->importaciones->revertir($ticket, (string) $request->input('modelo'), (string) $request->input('corrida_id'));
         });

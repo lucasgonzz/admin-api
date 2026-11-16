@@ -106,6 +106,8 @@ class PruebaVencimientoService
         try {
             $pendiente = Http::withHeaders(['Accept' => 'application/json', 'X-Admin-Api-Key' => $clave])
                 ->timeout((int) config('services.prueba.erp_timeout', 20));
+            // A6.1: la prueba vive en el VPS del admin → se resuelve a su IP, sin depender del DNS recién creado.
+            $pendiente = app(PruebaResolucionLocal::class)->aplicar($pendiente, $client, $url);
 
             $response = $metodo === 'GET' ? $pendiente->get($url) : $pendiente->post($url, $cuerpo);
         } catch (\Throwable $e) {

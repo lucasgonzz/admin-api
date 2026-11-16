@@ -50,6 +50,7 @@ class ClaudeSupportReleaseController extends Controller
     {
         $data = $request->validate([
             'agreement_id' => 'required|integer|min:1',
+            'target' => 'sometimes|in:sistema,tienda',
             'reason' => 'required|in:window_expired,gate_rejected,draft_conflict,workflow_failed,artifact_invalid,agreement_changed,unsupported_scope,release_blocked',
             'partial' => 'required|boolean',
         ]);
@@ -61,6 +62,7 @@ class ClaudeSupportReleaseController extends Controller
     {
         return [
             'agreement_id' => 'required|integer|min:1',
+            'target' => 'sometimes|in:sistema,tienda',
             'develop' => $this->repo_map(),
             'develop.*' => $this->sha_rules(),
         ];
@@ -68,7 +70,7 @@ class ClaudeSupportReleaseController extends Controller
 
     private function repo_map(): string
     {
-        return 'required|array:' . implode(',', SupportCodexReleaseService::REPOS) . '|size:2';
+        return 'required|array:' . implode(',', array_merge(SupportCodexReleaseService::REPOS, ['tienda-api', 'tienda-spa'])) . '|size:2';
     }
 
     private function sha_rules(): array

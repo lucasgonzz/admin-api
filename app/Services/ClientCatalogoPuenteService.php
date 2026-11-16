@@ -339,6 +339,8 @@ class ClientCatalogoPuenteService
                  * Un 3xx vuelve como una respuesta más, con su `status`. */
                 ->withOptions(['allow_redirects' => false])
                 ->timeout($timeout);
+            // A6.1: negocio en prueba → IP del VPS sin DNS; cualquier otro cliente, el pedido intacto.
+            $pedido = app(\App\Services\Prueba\PruebaResolucionLocal::class)->aplicar($pedido, $client, $url);
 
             if ($metodo === 'POST') {
                 $response = $pedido

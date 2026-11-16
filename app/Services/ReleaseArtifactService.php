@@ -119,7 +119,7 @@ class ReleaseArtifactService
         }
 
         $release = $this->support_metadata($repo, 'releases/tags/' . rawurlencode($tag));
-        $name = $repo . '-' . $tag . ($repo === 'empresa-spa' ? '-dist.zip' : '.zip');
+        $name = $repo . '-' . $tag . (in_array($repo, ['empresa-spa', 'tienda-spa'], true) ? '-dist.zip' : '.zip');
         foreach ($release['assets'] ?? [] as $asset) {
             if (($asset['name'] ?? null) === $name && $artifact['name'] === $name && ($asset['state'] ?? null) === 'uploaded'
                 && (int) ($asset['id'] ?? 0) === (int) $artifact['id'] && (int) ($asset['size'] ?? 0) === (int) $artifact['size']
@@ -133,7 +133,7 @@ class ReleaseArtifactService
 
     public function support_release_untouched(string $repo, string $version, string $develop): bool
     {
-        $branch = $this->support_metadata($repo, 'git/ref/heads/develop');
+        $branch = $this->support_metadata($repo, 'git/ref/heads/' . (strpos($repo, 'tienda-') === 0 ? 'master' : 'develop'));
         if (($branch['object']['sha'] ?? null) !== $develop) {
             return false;
         }
@@ -144,7 +144,7 @@ class ReleaseArtifactService
 
     private function support_metadata(string $repo, string $path, array $query = [], bool $allow_missing = false): array
     {
-        if (! in_array($repo, ['empresa-api', 'empresa-spa'], true)) {
+        if (! in_array($repo, ['empresa-api', 'empresa-spa', 'tienda-api', 'tienda-spa'], true)) {
             throw new \InvalidArgumentException('Repositorio ajeno al release de empresa.');
         }
         $url = self::GITHUB_API_BASE . '/repos/' . rawurlencode($this->owner()) . '/' . $repo . '/' . $path;

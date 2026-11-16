@@ -102,13 +102,19 @@ class PruebaEnsayoSinWhatsappService
      * @param Client               $client
      * @param string               $texto  El texto ya resuelto (la plantilla con sus variables o el texto libre).
      * @param array<string, mixed> $extra  Columnas adicionales del mensaje (`ai_generated_at`…).
+     * @param int|null             $ticket_preferido A7 (14/11/2026): la conversación donde se originó el aviso (p. ej. la
+     *   del circuito de carga, que empresa informa en `support_ticket_id`). Se usa solo si es una conversación del
+     *   sistema abierta del dueño de ESTE cliente (`conversacion_preferida()`); si no, la de siempre.
      *
      * @return array{enviado: bool, motivo: string|null, whatsapp_message_id: null, support_ticket_id: int|null, support_message_id: int|null}
      *   La misma forma que `PruebaWhatsappService::mandar_texto_por_ticket()`, con el id del mensaje.
      */
-    public function dejar(Client $client, string $texto, array $extra = []): array
+    public function dejar(Client $client, string $texto, array $extra = [], ?int $ticket_preferido = null): array
     {
-        $ticket = $this->conversacion_del_sistema($client);
+        $ticket = $ticket_preferido === null ? null : $this->conversacion_preferida($client, $ticket_preferido);
+        if ($ticket === null) {
+            $ticket = $this->conversacion_del_sistema($client);
+        }
         if ($ticket === null) {
             return ['enviado' => false, 'motivo' => 'El negocio no tiene usuario del sistema: no hay conversación donde dejar el mensaje.',
                 'whatsapp_message_id' => null, 'support_ticket_id' => null, 'support_message_id' => null];
@@ -156,6 +162,34 @@ class PruebaEnsayoSinWhatsappService
 
         return ['enviado' => true, 'motivo' => null, 'whatsapp_message_id' => null,
             'support_ticket_id' => (int) $ticket->id, 'support_message_id' => (int) $mensaje->id];
+    }
+
+    /**
+     * A7: la conversación pedida, si es elegible con EXACTAMENTE los mismos filtros de pertenencia que
+     * `conversacion_abierta()` (este cliente, canal sistema, sin empleado, del usuario dueño, abierta) más el id.
+     * Caso real: ticket 126 del cliente de ensayo 85, donde el dueño mandó la planilla; los avisos de la carga caían
+     * en la «Prueba gratuita» (125) y el dueño no los veía.
+     *
+     * @param Client $client
+     * @param int    $ticket_id
+     *
+     * @return SupportTicket|null null si no es elegible (o el cliente no tiene usuario dueño).
+     */
+    protected function conversacion_preferida(Client $client, int $ticket_id): ?SupportTicket
+    {
+        $usuario = (int) $client->user_id;
+        if ($usuario < 1 || $ticket_id < 1) {
+            return null;
+        }
+
+        return SupportTicket::query()
+            ->whereKey($ticket_id)
+            ->where('client_id', (int) $client->id)
+            ->where('source', 'erp')
+            ->whereNull('client_employee_id')
+            ->where('client_user_id', $usuario)
+            ->where('status', SupportTicket::STATUS_ABIERTO)
+            ->first();
     }
 
     /**

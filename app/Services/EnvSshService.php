@@ -191,6 +191,31 @@ class EnvSshService
         }
     }
 
+    /** Lectura acotada al corte expresamente aceptado; no interpreta sesiones anteriores como actividad actual. */
+    public function read_coordinated_upgrade_activity_for(ClientApi $client_api, int $owner_id, int $since): array
+    {
+        if ($owner_id < 1 || $since < 1) { throw new \InvalidArgumentException('Falta la identidad del negocio o del corte.'); }
+        $this->connect_for($client_api);
+        try {
+            $payload = file_get_contents(__DIR__ . '/UpgradePreflight/read_coordinated_activity.php');
+            if ($payload === false || strpos($payload, '<?php') !== 0) { throw new \RuntimeException('Falta el lector de actividad del corte.'); }
+            $command = 'cd ' . $this->escape_remote_arg($this->get_api_path($client_api))
+                . ' && php -d display_errors=0 -r ' . $this->escape_remote_arg(substr($payload, 5))
+                . ' -- ' . $owner_id . ' ' . $since . ' 2>/dev/null';
+            $site_user = $this->path_resolver->vps_site_user($client_api);
+            if ($site_user !== '') { $command = 'sudo -n -H -u ' . $this->escape_remote_arg($site_user) . ' /bin/bash -c ' . $this->escape_remote_arg($command); }
+            $this->ssh->setTimeout(15);
+            $output = $this->ssh->exec($command);
+            $result = is_string($output) ? json_decode($output, true) : null;
+            if ($this->ssh->isTimeout() || $this->ssh->getExitStatus() !== 0 || ! is_array($result)
+                || array_keys($result) !== ['usuarios_activos', 'ventas_recientes', 'trabajos_pendientes']) {
+                throw new \RuntimeException('No se pudo verificar la actividad y la cola del negocio.');
+            }
+            foreach ($result as $value) { if (! is_int($value) || $value < 0) { throw new \RuntimeException('La actividad medida es inválida.'); } }
+            return $result;
+        } finally { $this->disconnect(); }
+    }
+
     /**
      * Lee y parsea el .env de esa ClientApi.
      *
