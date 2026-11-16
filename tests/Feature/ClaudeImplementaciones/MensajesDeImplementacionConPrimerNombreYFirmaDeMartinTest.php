@@ -241,6 +241,25 @@ class MensajesDeImplementacionConPrimerNombreYFirmaDeMartinTest extends BaseDeIm
     }
 
     /**
+     * El pedido de archivos: un responsable viejo guardado como el negocio, o el genérico, saluda al dueño por su nombre.
+     *
+     * @return void
+     */
+    public function test_el_pedido_de_archivos_no_saluda_con_el_negocio_ni_con_el_generico(): void
+    {
+        $impl = $this->crear_implementacion($this->cliente_de_plazoleta());
+
+        foreach (['Ferretería plazoleta', 'el responsable', ''] as $guardado) {
+            $this->escribir_data_de_la_etapa($impl, 1, ['migration_responsible_name' => $guardado]);
+            $texto = $this->privado($this->servicio, 'build_files_request_body', [$impl]);
+            $this->assertStringContainsString($guardado === '' ? 'Hola, ¡ya estamos' : 'Sebastián, ¡ya estamos', $texto, 'guardado: ' . $guardado);
+        }
+
+        $this->escribir_data_de_la_etapa($impl, 1, ['migration_responsible_name' => 'Julieta Roca']);
+        $this->assertStringContainsString('Julieta, ¡ya estamos', $this->privado($this->servicio, 'build_files_request_body', [$impl]));
+    }
+
+    /**
      * @return void
      */
     public function test_el_primer_nombre_de_un_empleado_sale_del_helper_compartido(): void

@@ -1197,7 +1197,10 @@ class ImplementationConversationService
         $progress_list = $this->build_progress_list($implementation);
 
         // Construir el mensaje incluyendo la lista de archivos requeridos.
-        $responsable_saludo = $responsable !== '' ? SupportWhatsappOpenerService::primer_nombre($responsable) : 'Hola';
+        // Un responsable guardado como el negocio (valor viejo) o como el genérico «el responsable» no es una persona: se saluda al dueño.
+        $es_generico = $responsable === '' || mb_strtolower($responsable) === 'el responsable'
+            || ($client !== null && mb_strtolower($responsable) === mb_strtolower((string) $client->resolve_display_name()) && trim((string) $client->name) !== '');
+        $responsable_saludo = $responsable === '' ? 'Hola' : SupportWhatsappOpenerService::primer_nombre($es_generico ? $this->owner_person_name($client, '') : $responsable);
 
         return "{$progress_list}\n\n"
             . "{$responsable_saludo}, ¡ya estamos instalando el sistema con la configuración de {$client_name}! 🎉\n\n"
@@ -1621,7 +1624,7 @@ class ImplementationConversationService
 
             $this->send_outbound($implementation, 6, $employee_phone, $employee_message);
 
-            $notified_names[] = $employee_name;
+            $notified_names[] = trim((string) ($employee->name ?? '')) !== '' ? trim((string) $employee->name) : $employee_name;
         }
 
         // Persistir la lista de empleados notificados en el data del stage.
@@ -2128,7 +2131,9 @@ class ImplementationConversationService
         string $admin_name
     ): void {
         // Nombre y teléfono del responsable de AFIP.
-        $afip_name  = SupportWhatsappOpenerService::primer_nombre((string) ($data['afip_contact_name'] ?? ''));
+        // Nombre completo para el aviso interno; el saludo al responsable va por su primer nombre.
+        $afip_nombre_completo = (string) ($data['afip_contact_name'] ?? 'responsable');
+        $afip_name            = SupportWhatsappOpenerService::primer_nombre((string) ($data['afip_contact_name'] ?? ''));
         $afip_phone = (string) ($data['afip_contact_phone'] ?? '');
 
         // Link a la guía de AFIP (hardcodeado por ahora).
@@ -2152,7 +2157,7 @@ class ImplementationConversationService
         $stage->save();
 
         // Notificación al admin asignado para que haga la vinculación manualmente en ARCA.
-        $admin_message = "📋 {$client_name} — Etapa 7: pasos de AFIP enviados a {$afip_name} ({$afip_phone}). Cuando el cliente complete los pasos, entrá al ARCA y hacé la vinculación.";
+        $admin_message = "📋 {$client_name} — Etapa 7: pasos de AFIP enviados a {$afip_nombre_completo} ({$afip_phone}). Cuando el cliente complete los pasos, entrá al ARCA y hacé la vinculación.";
         $this->notify_assigned_admin($implementation, $admin_message);
 
         // Mensaje al dueño informando que se enviaron los pasos.
@@ -4508,7 +4513,8 @@ class ImplementationConversationService
         $context = $body;
         if ($client !== null) {
             $display_name = $client->resolve_display_name();
-            $context .= " [nombre del cliente: {$display_name}]";
+            $persona = trim((string) ($client->name ?? ''));
+            $context .= " [nombre del cliente: {$display_name}" . ($persona !== '' && $persona !== $display_name ? " / persona: {$persona}" : '') . "]";
         }
 
         // Texto genérico que representa la pregunta de responsabilidad.
