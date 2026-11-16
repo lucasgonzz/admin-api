@@ -462,7 +462,9 @@ class SoporteCodexRespuestaEnPartesTest extends TestCase
     /** Con la invitación a Robotito no se parte: la oferta tiene que quedar en el mensaje que la contiene. */
     public function test_con_invitacion_a_robotito_sale_una_sola_pieza(): void
     {
-        $ticket = $this->ticket_whatsapp();
+        $ticket = $this->ticket_whatsapp([
+            'current_version_id' => \App\Models\Version::firstOrCreate(['version' => '4.3.44'], ['status' => 'published'])->id,
+        ]);
         $this->responder($ticket, $this->reservar($ticket), [
             'body' => "ok, mirá\n---\nse cobra desde Ventas\n\n" . SupportTourService::INVITACION,
             'tour_requested' => true,

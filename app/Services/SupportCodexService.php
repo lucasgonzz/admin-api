@@ -1097,7 +1097,7 @@ class SupportCodexService
                 // También limpia ofertas del monitor viejo o redactadas a mano: el canal no acredita la versión instalada.
                 $body = SupportTourService::invitacion_escrita_a_mano($body) ?? $body;
                 $body = SupportTourService::quitar_invitacion($body);
-                $body_con_partes = $body;
+                $body_con_partes = SupportTourService::quitar_invitacion($body_con_partes);
                 $tour_requested = false;
                 unset($input['tour_invitation']);
             } elseif (! $tour_requested && $input['action'] === 'responder' && $attachment === null
