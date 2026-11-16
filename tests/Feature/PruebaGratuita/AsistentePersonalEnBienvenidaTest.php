@@ -87,6 +87,10 @@ class AsistentePersonalEnBienvenidaTest extends BaseDeLaPrueba
         $servicio->retomar_bienvenidas((int) $client->id);
         $this->assertCount(2, $espia->plantillas);
         $this->assertSame(PruebaPlantillasService::ASISTENTE_LISTO, $espia->plantillas[1]['template_name']);
+        $aviso = SupportMessage::where('whatsapp_message_id', 'wamid.plantilla.2')->sole();
+        $this->assertTrue($aviso->is_trial_import_notice, 'El aviso no consume una consulta que todavía espera respuesta.');
+        $this->assertSame(1, \App\Models\PruebaWhatsappEnvio::where('client_id', $client->id)
+            ->where('plantilla', PruebaPlantillasService::ASISTENTE_LISTO)->count());
         Mail::assertSent(ComercioCityMail::class, 1);
     }
 

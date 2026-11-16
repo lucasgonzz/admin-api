@@ -1109,6 +1109,9 @@ class PruebaWhatsappService
                 'sender_admin_id'        => (int) $admin->id,
                 'kind'                   => 'text',
                 'body'                   => $this->plantillas->cuerpo_renderizado($plantilla, $primer_nombre, $numero_asistente),
+                /* Es un aviso del programa, no una respuesta al dueño: no puede consumir su entrante ni
+                 * invalidar una reserva de Codex. La procedencia se guarda al crear, nunca por el texto. */
+                'is_trial_import_notice' => true,
                 'delivered_at'           => now(),
                 'whatsapp_message_id'    => $wamid,
                 'remote_delivery_status' => $wamid === null ? 'not_received' : null,
