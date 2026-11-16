@@ -104,7 +104,7 @@ class SupportTicket extends Model
 
     public function support_codex_case()
     {
-        return $this->hasOne(SupportCodexCase::class, 'support_ticket_id');
+        return $this->hasOne(SupportCodexCase::class, 'support_ticket_id')->with('missions');
     }
 
     public function scopeParaCodex($query)
@@ -233,10 +233,17 @@ class SupportTicket extends Model
         if (! $this->relationLoaded('support_codex_case')) {
             return null;
         }
-        if ($this->status !== self::STATUS_ABIERTO) {
-            return ['needs_human' => false, 'reason' => null, 'mission' => null, 'can_toggle' => true];
-        }
         $case = $this->support_codex_case;
+        $missions = $case === null ? collect() : $case->missions;
+        $counts = ['bug' => ['total' => 0, 'completed' => 0], 'funcionalidad' => ['total' => 0, 'completed' => 0]];
+        foreach ($missions as $item) {
+            ++$counts[$item->mission_type]['total'];
+            if ($item->completed_at !== null) { ++$counts[$item->mission_type]['completed']; }
+        }
+        $collection = ['mission_counts' => $counts, 'missions' => $missions->map(function ($item) { return $item->summary(); })->values()->all()];
+        if ($this->status !== self::STATUS_ABIERTO) {
+            return $collection + ['needs_human' => false, 'reason' => null, 'mission' => null, 'can_toggle' => true];
+        }
         $mission = $case ? $case->mission_lifecycle() : null;
         $human_reply_pause = $case !== null && $case->is_human_reply_pause();
         $needs_human = ! $human_reply_pause && (($case !== null && ($case->state === 'manual_review'
@@ -253,7 +260,7 @@ class SupportTicket extends Model
                 ? (trim((string) $case->review_reason) !== '' ? $case->review_reason : 'La atención necesita revisión humana.')
                 : ($this->escalation_reason ?: 'Marcado para intervención desde el admin.');
         }
-        return ['needs_human' => $needs_human, 'reason' => $reason, 'mission' => $mission, 'can_toggle' => true];
+        return $collection + ['needs_human' => $needs_human, 'reason' => $reason, 'mission' => $mission, 'can_toggle' => true];
     }
 
     /**

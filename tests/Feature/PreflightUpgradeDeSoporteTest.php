@@ -269,6 +269,16 @@ class PreflightUpgradeDeSoporteTest extends TestCase
                 'client_id' => $ticket->client_id, 'client_api_id' => $api->id, 'target' => 'sistema',
                 'from_version_id' => $ticket->client->current_version_id, 'version_id' => $new->id, 'version' => $new->version,
                 'status' => 'starting', 'artifacts' => [], 'starts_at_utc' => $agreement->starts_at_utc, 'ends_at_utc' => $agreement->ends_at_utc]);
+            // La nueva regla exige el sí al llegar la hora; este caso sigue midiendo actividad DESPUÉS de ese sí.
+            $notice = SupportMessage::create(['support_ticket_id' => $ticket->id, 'sender_type' => 'admin', 'kind' => 'text',
+                'body' => 'Confirmás que nadie usa el sistema?', 'whatsapp_message_id' => 'wamid.reconfirmacion.aviso']);
+            $confirmation = SupportMessage::create(['support_ticket_id' => $ticket->id, 'sender_type' => 'user', 'kind' => 'text',
+                'body' => 'Sí', 'reply_to_message_id' => $notice->id, 'whatsapp_message_id' => 'wamid.reconfirmacion.si']);
+            $reconfirmation = SupportCodexOperation::create(['support_ticket_id' => $ticket->id, 'expected_message_id' => $agreement->confirmation_message_id,
+                'operation_id' => 'reconfirmacion-actividad-' . $ticket->id, 'request_hash' => str_repeat('c', 64),
+                'action' => 'responder', 'status' => 'sent', 'message_id' => $notice->id]);
+            $row->update(['reconfirmation_operation_id' => $reconfirmation->id, 'reconfirmation_message_id' => $confirmation->id,
+                'reconfirmed_at' => now(), 'reconfirmation_requested_at' => now(), 'reconfirmation_expires_at' => now()->addMinutes(15)]);
             $ssh = $this->createMock(EnvSshService::class);
             $ssh->expects($this->exactly(2))->method('read_coordinated_upgrade_activity_for')->with($this->anything(), 99009900, Carbon::parse('2026-11-03 16:00:00', 'UTC')->timestamp)
                 ->willReturnOnConsecutiveCalls(['usuarios_activos' => 0, 'ventas_recientes' => 0, 'trabajos_pendientes' => 1], ['usuarios_activos' => 0, 'ventas_recientes' => 0, 'trabajos_pendientes' => 0]);

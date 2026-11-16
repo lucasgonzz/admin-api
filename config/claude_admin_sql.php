@@ -238,6 +238,8 @@ return [
             'whatsapp_ad_referrals.source_url', 'whatsapp_ad_referrals.thumbnail_url', 'lead_eventos_meta.respuesta',
         ], 'JSON o texto con una estructura que arma el propio admin (preferencias, contrato, hitos, acciones, ids, conteos, URLs públicas). No recibe credenciales; sus claves pasan igual por la redacción recursiva.'),
         [
+            'support_codex_missions.mission' => 'Diagnóstico de una misión del ticket; mismo dato privado que support_codex_cases.mission, sin credenciales.',
+            'support_codex_missions.delivery_verification_evidence' => 'Resultado de la reproducción funcional tras instalar un release que incluye varias misiones; texto de soporte sin credenciales.',
             'support_codex_mission_fix_evidence.payload' => 'Evidencia de una corrección integrada: commits, bases verificadas, informe y pruebas, con formato validado por el controlador. Ya viaja en el contexto del ticket.',
         ]
     ),

@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\SupportCodexCase;
+use App\Models\SupportCodexMission;
 use App\Models\SupportCodexMissionFixEvidence;
 use App\Models\SupportCodexOperation;
 use App\Models\SupportCodexUpgradeAgreement;
@@ -27,7 +28,7 @@ class SupportCodexUpgradeAgreementService
         $mode = $data['maintenance_mode'] ?? 'closed';
         $target = $data['target'] ?? 'sistema';
         $phrase = 'Confirmo la actualización del ' . $date_and_time;
-        if ($mode === 'coordinated') {
+        if (in_array($mode, ['coordinated', 'overnight'], true)) {
             abort_unless(SupportMaintenancePolicy::available(), 409, 'maintenance_unavailable: El mantenimiento coordinado todavía no está disponible.');
             $phrase .= $target === 'tienda' ? ' de la tienda' : ' del sistema';
             if ($target === 'tienda') {
@@ -50,15 +51,19 @@ class SupportCodexUpgradeAgreementService
         if ($mode === 'coordinated') {
             $destination = $target === 'tienda' ? 'la tienda ' . $store->domain : 'el sistema';
             $data['body'] = 'Ya corregimos el error. Para dejar el arreglo funcionando en ' . $destination
-                . ', podemos actualizar el ' . $date_and_time . ', hora argentina. Vamos a necesitar unos 15 minutos, hasta las '
-                . $end->format('H:i') . '. Durante ese corte nadie debe usar el sistema ni la tienda afectada. Te sirve ese horario? '
+                . ', podemos actualizar el ' . $date_and_time . ', hora argentina. Vamos a necesitar entre 15 y 30 minutos sin que nadie use el sistema ni la tienda afectada. Al llegar la hora te vamos a pedir que confirmes antes de empezar. Te sirve ese horario? '
                 . 'Respondé citando este mensaje o escribí "' . $phrase . '".';
+        }
+        if ($mode === 'overnight') {
+            $data['body'] = 'Ya corregimos el error. Como no podemos acordar una pausa durante la jornada, vamos a actualizar el '
+                . $start->format('d/m/Y') . ' a las 02:00, hora argentina. El sistema y la tienda afectada no se podrán usar durante unos 15 a 30 minutos, para que mañana a primera hora lo tengas disponible. No hace falta que estés pendiente de confirmar a esa hora.';
         }
         $data['upgrade_proposal'] = [
             'starts_at_utc' => $start->copy()->utc()->toDateTimeString(),
             'ends_at_utc' => $end->copy()->utc()->toDateTimeString(),
             'minimum_minutes' => (int) $data['minimum_minutes'],
             'confirmation_phrase' => $phrase,
+            'mission_id' => $data['mission_id'] ?? null,
             'mission_thread_id' => $data['mission_thread_id'],
             'mission_hash' => $data['mission_hash'],
         ];
@@ -75,7 +80,11 @@ class SupportCodexUpgradeAgreementService
     public function assert_valid_proposal(SupportTicket $ticket, SupportCodexCase $case, array $proposal): SupportCodexMissionFixEvidence
     {
         $this->assert_owner($ticket);
-        $evidence = SupportCodexMissionFixEvidence::current_for($ticket, $case);
+        $selected = SupportCodexMission::resolve((int) $ticket->id, $proposal);
+        if (isset($proposal['mission_id']) && $selected === null) {
+            $this->fail(409, 'mission_evidence_changed', 'La misión seleccionada no corresponde a la corrección propuesta.');
+        }
+        $evidence = SupportCodexMissionFixEvidence::current_for($ticket, $selected === null ? $case : $selected->project($case));
         if ($evidence === null || $evidence->mission_thread_id !== $proposal['mission_thread_id']
             || ! hash_equals($evidence->mission_hash, $proposal['mission_hash'])) {
             $this->fail(409, 'mission_evidence_changed', 'La corrección integrada no corresponde a la misión vigente.');
@@ -87,9 +96,18 @@ class SupportCodexUpgradeAgreementService
             $this->fail(409, 'upgrade_window_changed', 'Proponé una ventana futura dentro de los próximos siete días.');
         }
         $mode = $proposal['maintenance_mode'] ?? 'closed';
+        if ($mode === 'overnight') {
+            $local = $start->copy()->setTimezone(self::TIMEZONE);
+            abort_unless(SupportUpgradeReconfirmationService::available() && $local->format('H:i:s') === '02:00:00'
+                && $local->toDateString() === now()->setTimezone(self::TIMEZONE)->addDay()->toDateString()
+                && (int) $proposal['minimum_minutes'] === 60 && $start->copy()->addHour()->equalTo($end), 422,
+                'La actualización nocturna se programa para la próxima madrugada a las 02:00.');
+            SupportMaintenancePolicy::assert_scope($ticket, $evidence, $proposal);
+            return $evidence;
+        }
         if ($mode === 'coordinated') {
-            abort_unless(SupportMaintenancePolicy::available() && (int) $proposal['minimum_minutes'] === 15
-                && $start->copy()->addMinutes(15)->equalTo($end), 422, 'El corte coordinado debe durar 15 minutos.');
+            abort_unless(SupportMaintenancePolicy::available() && in_array((int) $proposal['minimum_minutes'], [15, 30], true)
+                && $start->copy()->addMinutes((int) $proposal['minimum_minutes'])->equalTo($end), 422, 'El corte coordinado debe durar 15 o 30 minutos.');
             SupportMaintenancePolicy::assert_scope($ticket, $evidence, $proposal);
             return $evidence;
         }
@@ -122,7 +140,7 @@ class SupportCodexUpgradeAgreementService
         $body_hash = hash('sha256', $body);
         $scope = [];
         if (SupportMaintenancePolicy::available()) {
-            $store = ($proposal['maintenance_mode'] ?? 'closed') === 'coordinated'
+            $store = in_array($proposal['maintenance_mode'] ?? 'closed', ['coordinated', 'overnight'], true)
                 ? SupportMaintenancePolicy::assert_scope(SupportTicket::findOrFail($operation->support_ticket_id), $evidence, $proposal) : null;
             $scope = ['maintenance_mode' => $proposal['maintenance_mode'] ?? 'closed', 'target' => $proposal['target'] ?? 'sistema',
                 'client_ecommerce_id' => $store === null ? null : $store->id, 'store_identity_hash' => $store === null ? null : SupportMaintenancePolicy::store_hash($store)];
@@ -145,13 +163,16 @@ class SupportCodexUpgradeAgreementService
 
     public function pending_offer(SupportTicket $ticket, SupportCodexCase $case): bool
     {
-        if ($case->state !== 'mission_pending' || $ticket->source !== 'whatsapp' || $ticket->client_employee_id !== null || $ticket->client === null) {
+        if ($ticket->status !== 'open' || $ticket->source !== 'whatsapp' || $ticket->client_employee_id !== null || $ticket->client === null) {
             return false;
         }
         $evidence = SupportCodexMissionFixEvidence::current_for($ticket, $case);
         if ($evidence === null) {
             return false;
         }
+        $mission = SupportCodexMission::where('support_ticket_id', $ticket->id)->where('mission_hash', $evidence->mission_hash)
+            ->where('mission_thread_id', $evidence->mission_thread_id)->first();
+        if ($mission !== null && $mission->installed_at !== null) { return false; }
         $proposals = SupportCodexUpgradeAgreement::where('mission_fix_evidence_id', $evidence->id);
         foreach ((clone $proposals)->whereNotNull('accepted_at')->get() as $accepted) {
             if (! $this->can_replace_accepted($accepted)) {
@@ -205,12 +226,21 @@ class SupportCodexUpgradeAgreementService
             $ticket = SupportTicket::with('client')->lockForUpdate()->findOrFail($id);
             $this->assert_owner($ticket);
             $case = $support->assert_current($ticket, $data + ['action' => 'responder']);
-            $evidence = SupportCodexMissionFixEvidence::current_for($ticket, $case);
-            $proposal = $evidence === null ? null : SupportCodexUpgradeAgreement::where('mission_fix_evidence_id', $evidence->id)
-                ->whereHas('operation', function ($query) { $query->whereIn('status', self::SENT); })
-                ->with('operation')->latest('id')->lockForUpdate()->first();
-            if ($proposal === null || $proposal->operation->operation_id !== $data['proposal_operation_id']) {
+            $reconfirmed = app(SupportUpgradeReconfirmationService::class)->accept($ticket, $data);
+            if ($reconfirmed !== null) { return $reconfirmed; }
+            $proposal = SupportCodexUpgradeAgreement::where('support_ticket_id', $id)
+                ->whereHas('operation', function ($query) use ($data) { $query->whereIn('status', self::SENT)->where('operation_id', $data['proposal_operation_id']); })
+                ->with('operation')->lockForUpdate()->first();
+            $evidence = $proposal === null ? null : SupportCodexMission::evidence_for_agreement($proposal);
+            $superseded = $proposal !== null && SupportCodexUpgradeAgreement::where('mission_fix_evidence_id', $proposal->mission_fix_evidence_id)
+                ->where('id', '>', $proposal->id)->whereHas('operation', function ($query) { $query->whereIn('status', self::SENT); })->exists();
+            if ($proposal === null || $evidence === null || $superseded || $proposal->operation->operation_id !== $data['proposal_operation_id']) {
                 $this->fail(409, 'proposal_not_current', 'La propuesta no es la última enviada para esta corrección.');
+            }
+            if (isset($data['mission_id'])) {
+                $selected = SupportCodexMission::resolve((int) $ticket->id, ['mission_id' => $data['mission_id'],
+                    'mission_hash' => $evidence->mission_hash, 'mission_thread_id' => $evidence->mission_thread_id]);
+                if ($selected === null) { $this->fail(409, 'mission_evidence_changed', 'El acuerdo corresponde a otra misión.'); }
             }
             $outbound = SupportMessage::where('support_ticket_id', $id)->whereKey($proposal->operation->message_id)
                 ->where('sender_type', 'admin')->first();
