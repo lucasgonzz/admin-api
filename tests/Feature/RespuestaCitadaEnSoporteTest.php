@@ -152,9 +152,37 @@ class RespuestaCitadaEnSoporteTest extends TestCase
             'inferior' => ['3.2.46', false, false],
             'límite estricto' => ['3.2.47', false, false],
             'límite con cuarto componente cero' => ['3.2.47.0', false, false],
-            'superior sin guía personalizada' => ['3.2.48', true, true],
+            'superior al umbral viejo sin Robotito' => ['3.2.48', false, false],
+            'antes de personalizados' => ['4.3.43', false, false],
+            'primera compatible' => ['4.3.44', true, false],
             'versión con guía personalizada' => ['4.3.47', true, false],
         ];
+    }
+
+    public function test_el_reintento_de_whatsapp_limpia_oferta_antigua_sin_perder_video_ni_metadata_ajena(): void
+    {
+        $ticket = $this->ticket(); // Sin versión conocida, aunque el número tenga ventana abierta.
+        $this->entrante($ticket, 'wamid.ABRE_VENTANA');
+        $texto = 'Abrí Soporte. Video: https://recursos.comerciocity.com/?v=T0.1';
+        $mensaje = SupportMessage::create([
+            'support_ticket_id' => $ticket->id, 'sender_type' => 'admin', 'kind' => 'text',
+            'body' => $texto . "\n\n" . SupportTourService::INVITACION,
+            'ai_body_before_template' => $texto . "\n\n" . SupportTourService::INVITACION,
+            'erp_auto_reply' => ['tour_requested' => true, 'dato_ajeno' => 17],
+        ]);
+        app(\App\Services\SupportWhatsappOpenerService::class)->deliver_follow_up($ticket, $mensaje, 'Martín');
+        $this->assertSame($texto, $this->payload_enviado()['text']['body']);
+        $this->assertSame($texto, $mensaje->fresh()->ai_body_before_template);
+        $this->assertSame(['dato_ajeno' => 17], $mensaje->fresh()->erp_auto_reply);
+    }
+
+    public function test_respuesta_manual_no_envia_una_invitacion_pegada_si_desconoce_la_version(): void
+    {
+        $this->actingAs($this->admin(), 'sanctum');
+        $ticket = $this->ticket();
+        $this->entrante($ticket, 'wamid.ABRE_VENTANA');
+        $this->responder($ticket, ['kind' => 'text', 'body' => 'Abrí Soporte. ¿Te gustaría que te arme un tour con Robotito?'])->assertCreated();
+        $this->assertSame('Abrí Soporte.', $this->payload_enviado()['text']['body']);
     }
 
     public function test_no_se_puede_citar_un_mensaje_de_otro_ticket(): void

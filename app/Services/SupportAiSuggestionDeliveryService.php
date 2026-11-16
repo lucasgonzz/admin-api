@@ -61,7 +61,7 @@ class SupportAiSuggestionDeliveryService
         }
 
         $oferta = $tour_message_id === null ? null : $this->oferta_whatsapp_vigente($ticket, $text_body, $tour_message_id);
-        if ($tour_message_id !== null) {
+        if ($tour_message_id !== null || SupportTourService::version_habilita_oferta($ticket) !== true) {
             $text_body = $oferta ?? SupportTourService::quitar_invitacion($text_body);
             if ($text_body === '') {
                 return null;
@@ -192,10 +192,9 @@ class SupportAiSuggestionDeliveryService
                             $body = $oferta;
                             $invitacion = ['tour_requested' => true];
                         }
-                    } elseif ($version_habilita === null && SupportTourService::entrante_admite_robotito($ticket, $entrante)) {
-                        $invitacion = ['tour_requested' => true];
                     }
-                } elseif ($tour !== null && SupportTourService::entrante_admite_robotito($ticket, $entrante)) {
+                } elseif ($tour !== null && SupportTourService::version_habilita_oferta($ticket) === true
+                    && SupportTourService::entrante_admite_robotito($ticket, $entrante)) {
                     $invitacion = ['tour_invitation' => $tour];
                 }
                 if ($invitacion === null) {
