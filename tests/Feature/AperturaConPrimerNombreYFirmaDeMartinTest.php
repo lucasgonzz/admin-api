@@ -98,6 +98,7 @@ class AperturaConPrimerNombreYFirmaDeMartinTest extends TestCase
         $this->assertSame('Sebastián', SupportWhatsappOpenerService::primer_nombre('Sebastián Referido'));
         $this->assertSame('Sebastián', SupportWhatsappOpenerService::primer_nombre('  sebastián   referido '));
         $this->assertSame('Sebastián', SupportWhatsappOpenerService::primer_nombre('Sebastián'), 'No es idempotente.');
+        $this->assertSame('Sebastián', SupportWhatsappOpenerService::primer_nombre('SEBASTIÁN REFERIDO'));
         $this->assertSame('Ana', SupportWhatsappOpenerService::primer_nombre('Ana (del lead)'));
         $this->assertSame('Ana', SupportWhatsappOpenerService::primer_nombre('Ana López (personal)'));
         $this->assertSame('equipo', SupportWhatsappOpenerService::primer_nombre(''));

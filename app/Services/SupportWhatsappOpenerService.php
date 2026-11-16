@@ -362,6 +362,11 @@ class SupportWhatsappOpenerService
             return self::SALUDO_SIN_NOMBRE;
         }
 
+        // Una ficha cargada en mayúsculas («SEBASTIÁN») se saluda como nombre propio, no a los gritos.
+        if (mb_strlen($primera) > 1 && $primera === mb_strtoupper($primera)) {
+            $primera = mb_strtolower($primera);
+        }
+
         return mb_strtoupper(mb_substr($primera, 0, 1)) . mb_substr($primera, 1);
     }
 
