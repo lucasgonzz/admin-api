@@ -29,8 +29,8 @@ class SupportPendingReplyService
      *
      * Gemelo en PHP de {@see SupportTicket::scopeSinResponder()}: el ticket tiene que estar `open` y
      * su último mensaje REAL tiene que ser del cliente (`sender_type = 'user'`). Lo que es un
-     * mensaje real lo decide {@see SupportMessage::es_mensaje_real()} —el mismo método que usa el
-     * gemelo SQL por su versión `apply_mensaje_real_conditions()`—, así que un borrador de la IA sin
+     * mensaje real lo decide {@see SupportMessage::cuenta_para_respuesta()} —el mismo método que usa el
+     * gemelo SQL por su versión `apply_cuenta_para_respuesta_conditions()`—, así que un borrador de la IA sin
      * aprobar se saltea y no tapa al mensaje del cliente que sigue esperando.
      *
      * ⚠️ Acá tampoco se mira la entrega del saliente, igual que en el gemelo SQL y a diferencia de
@@ -61,7 +61,7 @@ class SupportPendingReplyService
            ordenada por id, pero este método también se llama sobre colecciones armadas a mano. */
         $ultimo_real = null;
         foreach ($mensajes as $mensaje) {
-            if (! SupportMessage::es_mensaje_real($mensaje)) {
+            if (! SupportMessage::cuenta_para_respuesta($mensaje)) {
                 continue;
             }
 

@@ -43,6 +43,25 @@ class SupportMessage extends Model
     }
 
     /**
+     * Un aviso automático sigue siendo parte del historial, pero no contesta una consulta.
+     * Este criterio es sólo para la cola «sin responder»; no modifica la definición de mensaje real.
+     */
+    public static function cuenta_para_respuesta(SupportMessage $mensaje): bool
+    {
+        return self::es_mensaje_real($mensaje) && ! $mensaje->is_trial_import_notice;
+    }
+
+    /** Gemelo SQL de cuenta_para_respuesta(), compartido por el contador y el flag de cada fila. */
+    public static function apply_cuenta_para_respuesta_conditions($query, string $alias): void
+    {
+        self::apply_mensaje_real_conditions($query, $alias);
+        $query->where(function ($respuesta) use ($alias) {
+            $respuesta->whereNull($alias . '.is_trial_import_notice')
+                ->orWhere($alias . '.is_trial_import_notice', false);
+        });
+    }
+
+    /**
      * Gemelo en SQL de {@see self::es_mensaje_real()}: aplica la misma condición sobre el alias de
      * una subconsulta de `support_messages`.
      *

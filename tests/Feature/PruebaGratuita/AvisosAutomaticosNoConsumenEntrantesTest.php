@@ -9,9 +9,11 @@ use App\Models\PruebaWhatsappEnvio;
 use App\Models\SupportCodexCase;
 use App\Models\SupportCodexOperation;
 use App\Models\SupportMessage;
+use App\Models\SupportTicket;
 use App\Services\PruebaPlantillasService;
 use App\Services\PruebaWhatsappService;
 use App\Services\SupportCodexSettings;
+use App\Services\SupportPendingReplyService;
 use Illuminate\Support\Facades\Event;
 
 /** Productor real + endpoints reales de Codex; solamente el transporte externo se reemplaza. */
@@ -65,6 +67,40 @@ class AvisosAutomaticosNoConsumenEntrantesTest extends BaseDeLaPrueba
     {
         return collect($this->getJson($this->base . '/pending', $this->headers_de_claude())
             ->assertOk()->json('tickets'))->where('id', (int) $this->ticket->id)->values()->all();
+    }
+
+    private function verificar_sin_responder(bool $esperado): void
+    {
+        $ticket = $this->ticket->fresh()->load('messages');
+        $this->assertSame($esperado, app(SupportPendingReplyService::class)->ticket_sin_responder($ticket));
+        $this->assertSame($esperado, SupportTicket::whereKey($ticket->id)->sinResponder()->exists());
+        $this->assertSame($esperado, SupportTicket::whereKey($ticket->id)->withIndicadoresDeInicio()->firstOrFail()->sin_responder);
+        $filas = $this->actingAs($this->operator, 'sanctum')->getJson('/api/admin/support-ticket')->assertOk()->json('models');
+        $fila = collect($filas)->firstWhere('id', $ticket->id);
+        $this->assertNotNull($fila);
+        $this->assertSame($esperado, $fila['sin_responder'], 'La tarjeta y la fila del listado comparten el criterio.');
+    }
+
+    public function test_las_tarjetas_y_el_listado_no_cuentan_avisos_como_respuestas_pero_si_al_operador(): void
+    {
+        // Un cliente activo entra al contador de inicio; las pruebas gratuitas van en otra bandeja.
+        $this->client->update(['estado' => \App\Services\Prueba\PruebaCicloService::CLIENTE_ACTIVO]);
+        $this->verificar_sin_responder(true);
+        $antes = $this->getJson('/api/admin/inicio/tarjetas')->assertOk()->json('tickets_sin_responder');
+        $aviso = $this->aviso();
+        $this->assertTrue($aviso->is_trial_import_notice);
+        $this->assertTrue(SupportMessage::es_mensaje_real($aviso), 'El aviso sigue siendo parte del historial.');
+        $this->verificar_sin_responder(true);
+        $this->assertSame($antes, $this->getJson('/api/admin/inicio/tarjetas')->assertOk()->json('tickets_sin_responder'));
+
+        // Mismo texto, distinta procedencia: el POST humano sí responde; no se clasifica por contenido.
+        $this->postJson('/api/admin/support-ticket/' . $this->ticket->id . '/message', [
+            'body' => $aviso->body, 'kind' => 'text', 'client_message_id' => 'respuesta-humana-resumen',
+        ])->assertStatus(201);
+        $this->aviso(PruebaPlantillasService::BIENVENIDA);
+        $this->verificar_sin_responder(false);
+        $this->assertSame($antes - 1, $this->getJson('/api/admin/inicio/tarjetas')->assertOk()->json('tickets_sin_responder'));
+        $this->assertSame(1, $this->ticket->fresh()->messages()->where('client_message_id', 'respuesta-humana-resumen')->count());
     }
 
     public function test_asistente_listo_no_tapa_el_catalogo_y_sigue_visible_en_el_contexto(): void

@@ -273,9 +273,9 @@ class SupportTicket extends Model
      * 🔴 LA definición en SQL de "este ticket está sin responder", y la única que hay.
      *
      * Ticket `open` cuyo ÚLTIMO mensaje real es del cliente. Es la definición que fijó Lucas,
-     * textual: «ticket `open` cuyo último mensaje real (sin borradores de IA) es del cliente». Lo
-     * que es un "mensaje real" lo define {@see SupportMessage::es_mensaje_real()} y su gemelo en
-     * SQL {@see SupportMessage::apply_mensaje_real_conditions()}: un borrador de la IA sin aprobar
+     * textual: «ticket `open` cuyo último mensaje que cuenta para respuesta (sin borradores de IA ni avisos automáticos) es del cliente». Lo
+     * que es un "mensaje real" lo define {@see SupportMessage::cuenta_para_respuesta()} y su gemelo en
+     * SQL {@see SupportMessage::apply_cuenta_para_respuesta_conditions()}: un borrador de la IA sin aprobar
      * NO tapa nada, porque el cliente nunca lo recibió.
      *
      * Misma forma que {@see Lead::scopeRequiereRevision()}: un `whereExists` sobre los mensajes del
@@ -410,8 +410,8 @@ class SupportTicket extends Model
     {
         $query->where('support_messages.sender_type', 'user');
 
-        /* Gemelo en SQL de SupportMessage::es_mensaje_real(). No lo vuelvas a escribir a mano acá. */
-        SupportMessage::apply_mensaje_real_conditions($query, 'support_messages');
+        /* El aviso queda en el hilo, sin tapar una consulta que todavía espera respuesta. */
+        SupportMessage::apply_cuenta_para_respuesta_conditions($query, 'support_messages');
 
         $query->whereNotExists(function ($posterior) {
             $posterior->selectRaw('1')
@@ -419,8 +419,8 @@ class SupportTicket extends Model
                 ->whereColumn('posterior.support_ticket_id', 'support_messages.support_ticket_id')
                 ->whereColumn('posterior.id', '>', 'support_messages.id');
             /* Cualquier mensaje real posterior tapa al candidato, sea del cliente o del operador:
-               un borrador de IA sin aprobar, en cambio, no tapa nada. */
-            SupportMessage::apply_mensaje_real_conditions($posterior, 'posterior');
+               los borradores sin aprobar y los avisos automáticos no tapan nada. */
+            SupportMessage::apply_cuenta_para_respuesta_conditions($posterior, 'posterior');
         });
     }
 
