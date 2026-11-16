@@ -34,6 +34,7 @@ class AvisosPushDeAtencionDeSoporteTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+        \Illuminate\Support\Facades\Mail::fake();
         Carbon::setTestNow(Carbon::parse('2026-10-29 10:00:00'));
         Queue::fake();
         Admin::query()->update(['is_default_support_owner' => false, 'notify_support_escalation_whatsapp' => false]);
@@ -106,7 +107,7 @@ class AvisosPushDeAtencionDeSoporteTest extends TestCase
         $sent = $this->service->sent[0];
         $this->assertSame((int) $this->owner->id, $sent['admin_id']);
         $this->assertStringContainsString('Inés', $sent['title']);
-        $this->assertSame('Este ticket necesita tu revisión.', $sent['body']);
+        $this->assertSame('Este ticket necesita tu revisión. Motivo: No puede operar.', $sent['body']);
         $this->assertSame('/soporte/ticket/' . $this->ticket->id, $sent['data']['url']);
         $this->assertTrue($sent['data']['needs_review']);
         $this->assertFalse($sent['data']['mission_pending']);
@@ -121,7 +122,7 @@ class AvisosPushDeAtencionDeSoporteTest extends TestCase
         $this->assertFalse($this->service->sent[0]['data']['needs_review']);
         $this->case->update(['state' => 'manual_review', 'review_reason' => 'Fallo de atención.']);
         $this->run_job();
-        $this->assertSame('Necesita tu revisión y tiene una misión pendiente de iniciar.', $this->service->sent[1]['body']);
+        $this->assertSame('Necesita tu revisión y tiene una misión pendiente de iniciar. Motivo: Fallo de atención.', $this->service->sent[1]['body']);
         $this->assertTrue($this->service->sent[1]['data']['mission_pending']);
         $this->assertStringNotContainsString('Diagnóstico privado', json_encode($this->service->sent));
     }
@@ -165,7 +166,7 @@ class AvisosPushDeAtencionDeSoporteTest extends TestCase
             'mission_thread_id' => 'hilo-real', 'mission_started_at' => now(),
         ]);
         $this->run_job();
-        $this->assertSame('Este ticket necesita tu revisión.', $this->service->sent[0]['body']);
+        $this->assertSame('Este ticket necesita tu revisión. Motivo: Revisar.', $this->service->sent[0]['body']);
     }
 
     public function test_la_pausa_por_respuesta_humana_no_pide_revision(): void
@@ -363,12 +364,17 @@ class AvisosPushDeAtencionDeSoporteTest extends TestCase
         $this->assertCount(1, $this->service->sent);
     }
 
-    public function test_legacy_sin_caso_conserva_su_canal_existente_sin_nuevo_aviso(): void
+    public function test_legacy_sin_caso_tambien_recibe_el_aviso_central_sin_duplicar(): void
     {
         $legacy = SupportTicket::create([
             'client_id' => $this->ticket->client_id, 'client_user_id' => 0, 'status' => 'open',
             'escalated_at' => now(), 'escalation_reason' => 'Escalación legacy.',
         ]);
-        $this->assertFalse(SupportAttentionNotification::where('support_ticket_id', $legacy->id)->exists());
+        $notice = SupportAttentionNotification::where('support_ticket_id', $legacy->id)->firstOrFail();
+        $this->service->enviar((int) $legacy->id, $notice->generation);
+        $this->service->enviar((int) $legacy->id, $notice->generation);
+        $this->assertCount(1, $this->service->sent);
+        $this->assertStringContainsString('Escalación legacy.', $this->service->sent[0]['body']);
+        \Illuminate\Support\Facades\Mail::assertSent(\App\Mail\ComercioCityMail::class, 1);
     }
 }

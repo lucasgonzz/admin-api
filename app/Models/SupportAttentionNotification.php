@@ -11,6 +11,8 @@ class SupportAttentionNotification extends Model
 
     protected $casts = [
         'generation' => 'integer',
+        'emailed_admin_ids' => 'array',
+        'email_notified_at' => 'datetime',
         'dispatched_admin_ids' => 'array',
         'accepted_endpoint_hashes' => 'array',
         'processing_until' => 'datetime',

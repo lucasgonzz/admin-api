@@ -3,6 +3,10 @@
 namespace App\Services;
 
 use App\Jobs\EnviarAvisoDeSoporteJob;
+use App\Mail\ComercioCityMail;
+use App\Mail\ComercioCityMailPayload;
+use App\Mail\Helpers\RechazosDeCorreoHelper;
+use Illuminate\Support\Facades\Mail;
 use App\Models\Admin;
 use App\Models\AdminPushSubscription;
 use App\Models\SupportAttentionNotification;
@@ -21,15 +25,11 @@ class SupportAttentionNotificationService
                 return;
             }
             $ticket->load('support_codex_case');
-            // El agente legacy conserva su aviso y respaldo WhatsApp existentes; no se duplica.
-            if ($ticket->support_codex_case === null) {
-                return;
-            }
             $state = $this->estado($ticket);
             $notification = SupportAttentionNotification::firstOrCreate(['support_ticket_id' => $ticket_id]);
             $fingerprint = $state === null ? null : $state['fingerprint'];
             if ($notification->fingerprint === $fingerprint) {
-                if ($fingerprint !== null && $notification->notified_at === null
+                if ($fingerprint !== null && ($notification->notified_at === null || ($state['human'] && $notification->email_notified_at === null))
                     && ($notification->processing_until === null || $notification->processing_until->isPast())
                     && ($notification->enqueued_at === null || $notification->enqueued_at->lte(now()->subMinutes(5)))) {
                     $this->encolar($notification);
@@ -39,6 +39,8 @@ class SupportAttentionNotificationService
             $notification->fingerprint = $fingerprint;
             $notification->generation = (int) $notification->generation + 1;
             $notification->dispatched_admin_ids = [];
+            $notification->emailed_admin_ids = [];
+            $notification->email_notified_at = null;
             $notification->accepted_endpoint_hashes = [];
             $notification->processing_until = null;
             $notification->notified_at = null;
@@ -71,7 +73,7 @@ class SupportAttentionNotificationService
     /** Recupera fallas de registro/cola y pendientes que ya existían antes del despliegue. */
     public function conciliar(): void
     {
-        SupportTicket::where('status', SupportTicket::STATUS_ABIERTO)->whereHas('support_codex_case')
+        SupportTicket::where('status', SupportTicket::STATUS_ABIERTO)
             ->select('id')->chunkById(100, function ($tickets) {
                 foreach ($tickets as $ticket) {
                     $this->registrar((int) $ticket->id);
@@ -105,6 +107,7 @@ class SupportAttentionNotificationService
         $case = $ticket->support_codex_case;
         return [
             'human' => $human,
+            'reason' => $human ? $this->motivo_para_aviso((string) $attention['reason']) : '',
             'mission' => $mission,
             'approval' => $approval !== null,
             // El diagnóstico solo participa del hash; nunca sale en el push ni en un evento público.
@@ -137,7 +140,7 @@ class SupportAttentionNotificationService
         $state = $this->estado($ticket);
         $notification = DB::transaction(function () use ($ticket_id, $generation, $state) {
             $row = SupportAttentionNotification::where('support_ticket_id', $ticket_id)->lockForUpdate()->first();
-            if ($row === null || $row->generation !== $generation || $row->notified_at !== null
+            if ($row === null || $row->generation !== $generation || ($row->notified_at !== null && (! $state || ! $state['human'] || $row->email_notified_at !== null))
                 || $state === null || $row->fingerprint !== $state['fingerprint']
                 || ($row->processing_until !== null && $row->processing_until->isFuture())) {
                 return null;
@@ -160,6 +163,8 @@ class SupportAttentionNotificationService
         $body = $state['approval'] ? 'Hay una respuesta lista que espera tu aprobación.' : ($state['human'] && $state['mission']
             ? 'Necesita tu revisión y tiene una misión pendiente de iniciar.'
             : ($state['human'] ? 'Este ticket necesita tu revisión.' : 'Hay una misión pendiente de iniciar.'));
+        if ($state['human']) { $body .= ' Motivo: ' . $state['reason']; }
+        $body = mb_strimwidth($body, 0, 220, '…');
         foreach ($ids as $admin_id) {
             if (in_array($admin_id, $dispatched, true) || ! in_array($admin_id, $with_device)) {
                 continue;
@@ -196,18 +201,73 @@ class SupportAttentionNotificationService
                 ]);
             }
         }
+        // El correo tiene su propia confirmación: un push aceptado o sin dispositivo no lo silencia.
+        $emailed = $notification->emailed_admin_ids ?: [];
+        $email_failed = false;
+        $email_transport_failed = false;
+        if ($state['human']) {
+            foreach (Admin::whereIn('id', $ids)->get() as $admin) {
+                $admin_id = (int) $admin->id;
+                if (in_array($admin_id, $emailed, true)) { continue; }
+                $current = SupportAttentionNotification::whereKey($notification->id)->first();
+                if ($current === null || $current->generation !== $generation) { return; }
+                $email = filter_var($admin->support_notification_email, FILTER_VALIDATE_EMAIL)
+                    ? $admin->support_notification_email : $admin->email;
+                if (! filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                    $email_failed = true;
+                    Log::warning('Soporte: falta un correo válido para el aviso de intervención.', ['admin_id' => $admin_id, 'ticket_id' => $ticket_id]);
+                    continue;
+                }
+                try {
+                    $this->send_email($email, $title, $state['reason'], $ticket_id);
+                    $emailed[] = $admin_id;
+                    SupportAttentionNotification::whereKey($notification->id)->where('generation', $generation)
+                        ->update(['emailed_admin_ids' => json_encode($emailed)]);
+                } catch (\Throwable $exception) {
+                    $email_failed = true;
+                    $email_transport_failed = true;
+                    Log::warning('Soporte: correo de intervención pendiente.', ['admin_id' => $admin_id, 'ticket_id' => $ticket_id]);
+                }
+            }
+        }
         SupportAttentionNotification::whereKey($notification->id)->where('generation', $generation)->update([
+            'email_notified_at' => ! $state['human'] || (! $email_failed && ! empty($ids)) ? now() : null,
             'processing_until' => null,
             // Una suscripción que se recupere mientras el ticket sigue pendiente todavía debe avisar.
             'notified_at' => $failed || ! empty($without_device) || empty($ids) ? null : now(),
         ]);
-        if ($failed) {
-            throw new \RuntimeException('No se pudieron despachar todos los avisos push de soporte.');
+        if ($failed || $email_transport_failed) {
+            throw new \RuntimeException('No se pudieron despachar todos los avisos de soporte.');
         }
         Log::channel('daily')->info('Soporte: aviso push procesado.', [
             'ticket_id' => $ticket_id, 'admin_ids' => $dispatched,
             'sin_device' => $without_device,
         ]);
+    }
+
+    /** Detalle operativo para el responsable; jamás copiar consultas, credenciales ni trazas al teléfono. */
+    public function motivo_para_aviso(string $reason): string
+    {
+        $sentences = preg_split('/(?<=[.!?])\s+|[\r\n]+/u', strip_tags($reason));
+        $safe = [];
+        foreach ($sentences as $sentence) {
+            if (preg_match('/\b(SQL|SELECT|INSERT|UPDATE|DELETE|stack\s*trace|password|contraseña|secret[oa]?|token|api[_ -]?key|authorization|bearer|(?:access|refresh|auth)[_ -]?token|clave(?:\s+de\s+acceso)?|credenciales)\b|(?:[A-Z]:\\\\|\/home\/|\/var\/)/iu', $sentence)) { continue; }
+            $safe[] = $sentence;
+        }
+        $text = preg_replace('/https?:\/\/[^\s]+/iu', '[enlace en el ticket]', implode(' ', $safe));
+        $text = trim(preg_replace('/\s+/u', ' ', $text));
+        return $text !== '' ? mb_strimwidth($text, 0, 700, '…') : 'El caso necesita revisión humana. Abrí el ticket para ver el detalle.';
+    }
+
+    protected function send_email(string $email, string $title, string $reason, int $ticket_id): void
+    {
+        Mail::mailer('support_monitor')->to($email)->send(new ComercioCityMail(new ComercioCityMailPayload([
+            'subject' => $title . ' requiere tu intervención',
+            'title' => 'Se requiere tu intervención en soporte',
+            'paragraphs' => [$title, 'Motivo: ' . $reason],
+            'cta' => ['text' => 'Abrir ticket', 'url' => rtrim((string) config('services.admin_spa.url'), '/') . '/soporte/ticket/' . $ticket_id],
+        ])));
+        RechazosDeCorreoHelper::fallar_si_hubo_rechazos('support_monitor');
     }
 
     protected function send_push(int $admin_id, string $title, string $body, array $data, array $accepted_hashes = []): array

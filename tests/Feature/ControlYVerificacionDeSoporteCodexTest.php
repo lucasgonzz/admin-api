@@ -40,6 +40,7 @@ class ControlYVerificacionDeSoporteCodexTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+        \Illuminate\Support\Facades\Mail::fake();
         Carbon::setTestNow(Carbon::parse('2026-10-30 11:00:00'));
         config(['services.claude_task_ingest.key' => 'control-soporte-test']);
         Event::fake([SupportMessageReceived::class, SupportMessageRemoved::class, SupportTicketUpdated::class]);

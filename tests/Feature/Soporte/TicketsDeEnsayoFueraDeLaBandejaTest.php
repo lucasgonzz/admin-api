@@ -46,6 +46,7 @@ class TicketsDeEnsayoFueraDeLaBandejaTest extends BaseDelCanal
     protected function setUp(): void
     {
         parent::setUp();
+        \Illuminate\Support\Facades\Mail::fake();
 
         /* Ningún operador preexistente de la base del slot recibe avisos: los destinatarios son los del test. */
         Admin::query()->update(['is_default_support_owner' => false, 'notify_support_escalation_whatsapp' => false]);
@@ -567,7 +568,7 @@ class TicketsDeEnsayoFueraDeLaBandejaTest extends BaseDelCanal
         $this->admin(['phone_number' => '+5493410000022', 'notify_support_escalation_whatsapp' => true]);
 
         $sender = $this->espiar_sender();
-        $push   = $this->espiar_push_del_escalado();
+        $push   = $this->espiar_avisos_de_atencion();
         $this->claude_que_escala('No está cubierto por el manual');
 
         /* Ensayo: se escala igual, pero no le avisa a nadie. */
@@ -578,7 +579,7 @@ class TicketsDeEnsayoFueraDeLaBandejaTest extends BaseDelCanal
         $this->assertSame('No está cubierto por el manual', $ensayo->fresh()->escalation_reason);
         Event::assertNotDispatched(SupportTicketEscalated::class);
         Event::assertDispatched(SupportTicketUpdated::class);
-        $this->assertCount(0, $push->enviados, 'Salió un push por el escalado de un ensayo.');
+        $this->assertCount(0, $push->sent, 'Salió un push por el escalado de un ensayo.');
         $this->assertCount(0, $sender->plantillas, 'Salió un WhatsApp por el escalado de un ensayo.');
 
         /* Control: el mismo escalado en un ticket común avisa por los tres caminos. */
@@ -589,8 +590,12 @@ class TicketsDeEnsayoFueraDeLaBandejaTest extends BaseDelCanal
         Event::assertDispatched(SupportTicketEscalated::class, function ($evento) use ($comun) {
             return (int) $evento->ticket_id === (int) $comun->id;
         });
-        $this->assertCount(1, $push->enviados);
-        $this->assertSame((int) $con_device->id, $push->enviados[0]['admin_id']);
+        // El escalado usa ahora la misma entrega durable que Codex; no manda otra push sincrónica.
+        $notice = SupportAttentionNotification::where('support_ticket_id', $comun->id)->firstOrFail();
+        $push->enviar((int) $comun->id, $notice->generation);
+        $push->enviar((int) $comun->id, $notice->generation);
+        $this->assertCount(1, $push->sent);
+        $this->assertSame((int) $con_device->id, $push->sent[0]['admin_id']);
         $this->assertCount(1, $sender->plantillas);
         $this->assertSame('+5493410000022', $sender->plantillas[0]['to']);
     }

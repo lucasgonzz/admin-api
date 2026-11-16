@@ -1658,6 +1658,8 @@ Route::prefix('admin')->group(function () {
         // "contact-search" y el buscador del modal de alta contestaría 404.
         Route::get('support-ticket/contact-search', [\App\Http\Controllers\Api\SupportTicketController::class, 'contact_search']);
         Route::get('support-ticket/{id}', [\App\Http\Controllers\Api\SupportTicketController::class, 'show']);
+        Route::get('support-ticket/{id}/message-notifications', [\App\Http\Controllers\Api\SupportMessageNotificationController::class, 'show'])->whereNumber('id');
+        Route::put('support-ticket/{id}/message-notifications', [\App\Http\Controllers\Api\SupportMessageNotificationController::class, 'update'])->whereNumber('id');
         Route::get('support-ticket/{id}/tours', [\App\Http\Controllers\Api\SupportTourController::class, 'seguimiento'])->whereNumber('id');
         /* Lo que hizo Martín en el ticket, por atención, con su plan (misión cruzada auditoria-de-martin, 11/11/2026). */
         Route::get('support-ticket/{id}/martin-activity', [\App\Http\Controllers\Api\SupportCodexActivityController::class, 'del_ticket'])->whereNumber('id');

@@ -14,7 +14,8 @@ use App\Services\SupportAiSuggestionDeliveryService;
 use App\Services\SupportAiSuggestionScheduler;
 use App\Services\SupportAiSuggestionService;
 use App\Services\SupportDynamicTourService;
-use App\Services\EscalationPushNotificationService;
+use App\Models\AdminPushSubscription;
+use App\Services\SupportAttentionNotificationService;
 use App\Services\SupportEscalationWhatsappService;
 use App\Services\SupportTourService;
 use Illuminate\Bus\Queueable;
@@ -490,7 +491,10 @@ class SendSupportAiSuggestion implements ShouldQueue
                  * El WhatsApp queda como red de seguridad para los operadores que no tienen
                  * ningún device registrado — si no, no se enterarían de nada. No son dos canales
                  * en paralelo. Ver EscalationPushNotificationService. */
-                $reparto = app(EscalationPushNotificationService::class)->notificar_ticket($ticket, $escalation_reason);
+                // El observer ya registró el push y el correo durables; acá queda sólo el respaldo legacy.
+                $ids = app(SupportAttentionNotificationService::class)->destinatarios($ticket);
+                $con_device = AdminPushSubscription::whereIn('admin_id', $ids)->distinct()->pluck('admin_id')->all();
+                $reparto = ['sin_device' => array_values(array_diff($ids, $con_device))];
 
                 app(SupportEscalationWhatsappService::class)->notify($ticket, $escalation_reason, $reparto['sin_device']);
             }

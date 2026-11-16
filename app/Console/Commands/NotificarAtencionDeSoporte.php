@@ -14,6 +14,7 @@ class NotificarAtencionDeSoporte extends Command
     public function handle(SupportAttentionNotificationService $service): int
     {
         $service->conciliar();
+        app(\App\Services\SupportMessageNotificationService::class)->conciliar();
         return 0;
     }
 }

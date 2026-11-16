@@ -51,6 +51,7 @@ class AppServiceProvider extends ServiceProvider
          */
         Lead::observe(ConversionesMetaObserver::class);
         Lead::observe(\App\Observers\ReservaAtribucionObserver::class);
+        \App\Models\SupportMessage::observe(\App\Observers\SupportMessageNotificationObserver::class);
         \App\Models\SupportTicket::observe(\App\Observers\SupportAttentionObserver::class);
         \App\Models\SupportCodexCase::observe(\App\Observers\SupportAttentionObserver::class);
 
