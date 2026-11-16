@@ -214,6 +214,23 @@ class ImplementacionFormStepsPendientesTest extends BaseDeImplementaciones
         $this->assertCount(1, $r2->json('items'));
     }
 
+    /**
+     * Un `since` en UTC (sufijo Z, como lo manda el monitor) se compara en la zona de la app: 15:00Z = 12:00 en
+     * Buenos Aires, así que un formulario enviado a las 12:30 locales entra y uno de las 11:30 no.
+     *
+     * @return void
+     */
+    public function test_since_en_utc_se_convierte_a_la_zona_de_la_app()
+    {
+        list(, $antes) = $this->caso('Antes', '2030-01-01 11:30:00');
+        list(, $despues) = $this->caso('Despues', '2030-01-01 12:30:00');
+
+        $r = $this->getJson(self::RUTA . '?since=2030-01-01T15:00:00Z', $this->headers())->assertOk();
+        $ids = $this->ids($r);
+        $this->assertContains($despues->id, $ids);
+        $this->assertNotContains($antes->id, $ids);
+    }
+
     /** @return void */
     public function test_valida_parametros_con_422()
     {

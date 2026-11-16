@@ -40,8 +40,12 @@ class ClaudeImplementationFormStepsController extends Controller
             return $error;
         }
 
-        // `since` ya validado como fecha; se interpreta con su propio offset si lo trae.
-        $since = $request->filled('since') ? Carbon::parse($request->input('since')) : null;
+        // `since` ya validado como fecha; se interpreta con su propio offset si lo trae y se pasa a la zona de la
+        // app: Laravel bindea un Carbon con su zona propia y `form_submitted_at` se guarda en hora de la app, así
+        // que un `since` en UTC (sufijo Z) sin convertir se compararía 3 horas corrido y perdería formularios.
+        $since = $request->filled('since')
+            ? Carbon::parse($request->input('since'))->setTimezone(config('app.timezone'))
+            : null;
         $limit = $request->filled('limit') ? (int) $request->input('limit') : ImplementationFormSteps::LIMITE_POR_DEFECTO;
 
         return response()->json($servicio->pending($since, $limit));
