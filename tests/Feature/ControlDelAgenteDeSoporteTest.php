@@ -36,6 +36,7 @@ class ControlDelAgenteDeSoporteTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+        \Illuminate\Support\Facades\Mail::fake();
 
         Http::fake();
 

@@ -8,7 +8,9 @@ use App\Models\AdminPushSubscription;
 use App\Models\Client;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
-use App\Services\EscalationPushNotificationService;
+use App\Services\SupportAttentionNotificationService;
+use App\Models\SupportAttentionNotification;
+use App\Jobs\EnviarAvisoDeSoporteJob;
 use App\Services\KnowledgeGroundingGate;
 use App\Services\SupportAiSuggestionScheduler;
 use App\Services\SupportAiSuggestionService;
@@ -31,6 +33,12 @@ use Tests\TestCase;
 class AgentesSoloLoExplicitoTest extends TestCase
 {
     use DatabaseTransactions;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        \Illuminate\Support\Facades\Mail::fake();
+    }
 
     /*
      * 🔴 A propósito NO hay un `Http::fake()` sin argumentos en un setUp().
@@ -584,6 +592,7 @@ class AgentesSoloLoExplicitoTest extends TestCase
      */
     public function test_con_device_registrado_avisa_por_push_y_no_por_whatsapp()
     {
+        Admin::query()->update(['is_default_support_owner' => false, 'notify_support_escalation_whatsapp' => false]);
         $suscrito                                     = $this->crear_admin('push-con-device@test.local');
         $suscrito->phone_number                       = '+5493410000011';
         $suscrito->notify_support_escalation_whatsapp = true;
@@ -605,11 +614,16 @@ class AgentesSoloLoExplicitoTest extends TestCase
         ]);
 
         $this->correr_agente($ticket);
+        // La escalación ahora registra la entrega durable; ejecutar el worker real conserva
+        // la prueba del canal sin exigir que la red salga desde el job que atiende al cliente.
+        $notice = SupportAttentionNotification::where('support_ticket_id', $ticket->id)->firstOrFail();
+        (new EnviarAvisoDeSoporteJob((int) $ticket->id, $notice->generation))->handle($push);
+        (new EnviarAvisoDeSoporteJob((int) $ticket->id, $notice->generation))->handle($push);
 
         $this->assertCount(1, $push->enviados, 'No salió el push al operador con device registrado.');
         $this->assertSame((int) $suscrito->id, $push->enviados[0]['admin_id']);
         $this->assertStringContainsString(
-            '/soporte?ticket_id=' . $ticket->id,
+            '/soporte/ticket/' . $ticket->id,
             (string) $push->enviados[0]['data']['url'],
             'El push no abre el ticket.'
         );
@@ -628,6 +642,7 @@ class AgentesSoloLoExplicitoTest extends TestCase
      */
     public function test_sin_device_registrado_sigue_avisando_por_whatsapp()
     {
+        Admin::query()->update(['is_default_support_owner' => false, 'notify_support_escalation_whatsapp' => false]);
         $suscrito                                     = $this->crear_admin('push-sin-device@test.local');
         $suscrito->phone_number                       = '+5493410000012';
         $suscrito->notify_support_escalation_whatsapp = true;
@@ -647,6 +662,11 @@ class AgentesSoloLoExplicitoTest extends TestCase
         ]);
 
         $this->correr_agente($ticket);
+        // La escalación ahora registra la entrega durable; ejecutar el worker real conserva
+        // la prueba del canal sin exigir que la red salga desde el job que atiende al cliente.
+        $notice = SupportAttentionNotification::where('support_ticket_id', $ticket->id)->firstOrFail();
+        (new EnviarAvisoDeSoporteJob((int) $ticket->id, $notice->generation))->handle($push);
+        (new EnviarAvisoDeSoporteJob((int) $ticket->id, $notice->generation))->handle($push);
 
         $this->assertCount(0, $push->enviados, 'Se intentó un push a un operador sin ningún device.');
         $this->assertCount(1, $espia->plantillas, 'El operador sin device se quedó sin aviso.');
@@ -1027,15 +1047,15 @@ class AgentesSoloLoExplicitoTest extends TestCase
     /**
      * Sustituye el envío real de Web Push, que necesitaría claves VAPID y salir a la red.
      *
-     * @return EscalationPushNotificationService
+     * @return SupportAttentionNotificationService
      */
-    private function espiar_push(): EscalationPushNotificationService
+    private function espiar_push(): SupportAttentionNotificationService
     {
-        $espia = new class extends EscalationPushNotificationService {
+        $espia = new class extends SupportAttentionNotificationService {
             /** @var array<int, array<string, mixed>> Push despachados. */
             public $enviados = [];
 
-            protected function send_push(int $admin_id, string $titulo, string $cuerpo, array $data): void
+            protected function send_push(int $admin_id, string $titulo, string $cuerpo, array $data, array $accepted_hashes = []): array
             {
                 $this->enviados[] = [
                     'admin_id' => $admin_id,
@@ -1043,10 +1063,11 @@ class AgentesSoloLoExplicitoTest extends TestCase
                     'cuerpo'   => $cuerpo,
                     'data'     => $data,
                 ];
+                return ['complete' => true, 'accepted_endpoint_hashes' => [hash('sha256', 'device-' . $admin_id)]];
             }
         };
 
-        $this->app->instance(EscalationPushNotificationService::class, $espia);
+        $this->app->instance(SupportAttentionNotificationService::class, $espia);
 
         return $espia;
     }
