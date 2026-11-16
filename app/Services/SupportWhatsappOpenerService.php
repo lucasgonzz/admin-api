@@ -531,6 +531,17 @@ class SupportWhatsappOpenerService
 
     private function entregar_respuesta_whatsapp(SupportTicket $ticket, SupportMessage $message, string $admin_name): array
     {
+        // El reintento puede traer una invitación creada antes de conocer la versión o de un cambio de instalación.
+        if (! SupportTourService::version_habilita_oferta($ticket)) {
+            $message->body = SupportTourService::quitar_invitacion((string) $message->body);
+            if ($message->ai_body_before_template !== null) {
+                $message->ai_body_before_template = SupportTourService::quitar_invitacion($message->ai_body_before_template);
+            }
+            $meta = (array) $message->erp_auto_reply;
+            unset($meta['tour_requested'], $meta['tour_invitation'], $meta['whatsapp_tour_message_id']);
+            $message->erp_auto_reply = $meta === [] ? null : $meta;
+            $message->save();
+        }
         $to = (string) $ticket->whatsapp_phone;
         $window = $this->window_service->window_state($to);
 

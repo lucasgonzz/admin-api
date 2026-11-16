@@ -387,7 +387,7 @@ class SupportCodexService
                 'prueba_import_clientes' => in_array(PruebaImportacionService::CAPACIDAD_CONTACTOS, $anunciadas_en_la_prueba, true),
                 'prueba_import_margen' => in_array(PruebaImportacionService::CAPACIDAD_MARGEN_PREVIO, $anunciadas_en_la_prueba, true),
                 'support_tour_consent' => true, 'support_dynamic_tour' => $robotito_disponible
-                    && SupportTourService::version_admite_tour_personalizado($ticket) !== false,
+                    && SupportTourService::version_habilita_oferta($ticket) === true,
                 // Ronda 4 (14/11/2026): la invitación (`tour_requested`) admite `tour_path`, el camino que usa
                 // tour/prepare cuando llega sin `path`. Un helper que no lo conoce no lo manda y nada cambia.
                 'support_tour_path' => true,
@@ -1093,11 +1093,13 @@ class SupportCodexService
             $body = SupportWhatsappOpenerService::sin_separadores($body);
             $tour_requested = $input['tour_requested'];
             $recordatorio = null;
-            if ($tour_requested && SupportTourService::version_habilita_oferta($ticket) === false) {
+            if (SupportTourService::version_habilita_oferta($ticket) !== true) {
+                // También limpia ofertas del monitor viejo o redactadas a mano: el canal no acredita la versión instalada.
+                $body = SupportTourService::invitacion_escrita_a_mano($body) ?? $body;
                 $body = SupportTourService::quitar_invitacion($body);
+                $body_con_partes = $body;
                 $tour_requested = false;
-            } elseif ($tour_requested && SupportTourService::version_admite_tour_personalizado($ticket) === false) {
-                $body = SupportTourService::con_invitacion($body, false, true);
+                unset($input['tour_invitation']);
             } elseif (! $tour_requested && $input['action'] === 'responder' && $attachment === null
                 && $proposal === null && ! isset($input['tour_invitation']) && ! isset($input['mission_progress_hash'])) {
                 $entrante = SupportMessage::find($input['expected_message_id']);
@@ -1510,6 +1512,9 @@ class SupportCodexService
 
     private function prepare_approval(SupportTicket $ticket, SupportCodexCase $case, SupportCodexOperation $operation, array $input, ?array $attachment): void
     {
+        if (SupportTourService::version_habilita_oferta($ticket) !== true) {
+            $input['body'] = SupportTourService::quitar_invitacion($input['body']);
+        }
         if ($input['action'] === 'cerrar' && mb_stripos($input['body'], 'de nada') === false) {
             $input['body'] = 'De nada! ' . trim($input['body']);
         }
@@ -1716,6 +1721,10 @@ class SupportCodexService
                 $this->assert_approval_attachment($message);
             }
             if ($input['action'] === 'responder' && empty($input['requires_attachment']) && ! isset($input['upgrade_proposal'])) {
+                if (SupportTourService::version_habilita_oferta($ticket) !== true) {
+                    $final = SupportTourService::quitar_invitacion($final);
+                    $message->erp_auto_reply = null;
+                }
                 $uso_confirmado = ! empty($input['usage_answer']) && $final === trim($message->body);
                 if (! empty($input['_tour_en_borrador'])) {
                     $final = SupportTourService::quitar_invitacion($final);
