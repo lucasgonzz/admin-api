@@ -13,7 +13,7 @@ use Carbon\Carbon;
  * mensaje del cliente (misión cruzada `monitor-pasos-implementar-auto`, 16/11/2026).
  *
  * Es SOLO LECTURA: no reserva, no marca ni escribe nada. Que un item se haya despachado o no lo lleva el
- * monitor en su estado local (clave `form:<implementation_id>:<form_submitted_at>`), no el admin.
+ * monitor en su estado local (clave `form:<implementation_id>`, una sola vez por implementación), no el admin.
  *
  * Una implementación entra en la lista si cumple TODO esto:
  *  - es de sistema (el modelo `Implementation` es la del sistema; tienda y agentes tienen modelos propios);
