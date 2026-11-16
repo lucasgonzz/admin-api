@@ -43,6 +43,10 @@ class CheckSupportResponseAlerts extends Command
 
         $tickets = SupportTicket::query()
             ->where('status', 'open')
+            /* Sin los tickets de un cliente de ENSAYO (misión soporte-ocultar-tickets-ensayo, 16/11/2026): los
+               atiende Martín y el operador no los ve en la bandeja, así que una alerta de demora suya abriría un
+               ticket que no está. Los de prueba gratuita de un lead real siguen alertando como siempre. */
+            ->sinEnsayo()
             ->whereNotNull('last_client_message_at')
             ->where('last_client_message_at', '<=', $deadline)
             ->where(function ($query) {

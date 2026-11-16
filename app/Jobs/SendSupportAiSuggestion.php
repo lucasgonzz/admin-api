@@ -460,13 +460,20 @@ class SendSupportAiSuggestion implements ShouldQueue
         /* Nombre del cliente: usar relación si está cargada. */
         $client_name = $ticket->resolve_contact_display_name();
 
+        /* Un ticket de un cliente de ENSAYO no le avisa a un humano (misión soporte-ocultar-tickets-ensayo,
+         * 16/11/2026): ni el toast del admin, ni el push, ni el WhatsApp. El escalado en sí (estado del ticket,
+         * actualización de la fila, mensaje de espera) queda exactamente igual. */
+        $es_de_ensayo = $ticket->es_de_ensayo();
+
         /* Emitir alerta de escalado para toast en admin-spa. */
-        event(new SupportTicketEscalated(
-            $ticket->id,
-            $ticket_name,
-            $client_name,
-            $escalation_reason !== '' ? $escalation_reason : 'Claude no pudo resolver este caso.'
-        ));
+        if (! $es_de_ensayo) {
+            event(new SupportTicketEscalated(
+                $ticket->id,
+                $ticket_name,
+                $client_name,
+                $escalation_reason !== '' ? $escalation_reason : 'Claude no pudo resolver este caso.'
+            ));
+        }
 
         /* Emitir actualización de la fila en la bandeja para reflejar escalated_at. */
         // Vía ::dispatch() y no event(new ...): el dispatch del evento pasa por BroadcastGuard,
@@ -478,7 +485,7 @@ class SendSupportAiSuggestion implements ShouldQueue
          * Va en su propio try: si el aviso falla, el ticket YA quedó escalado y con badge, y
          * perder eso por un problema de Meta sería peor que quedarse sin el WhatsApp. */
         try {
-            if (! $es_el_mismo_escalado) {
+            if (! $es_el_mismo_escalado && ! $es_de_ensayo) {
                 /* Web Push primero: llega al teléfono con el admin cerrado y no gasta plantilla.
                  * El WhatsApp queda como red de seguridad para los operadores que no tienen
                  * ningún device registrado — si no, no se enterarían de nada. No son dos canales

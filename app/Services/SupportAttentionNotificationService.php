@@ -93,6 +93,15 @@ class SupportAttentionNotificationService
         if (! $human && ! $mission && $approval === null) {
             return null;
         }
+        /* Un ticket de un cliente de ENSAYO no le avisa a un humano (misión soporte-ocultar-tickets-ensayo,
+           16/11/2026). El corte va ACÁ porque es el único punto por el que pasan los tres caminos: el alta
+           (registrar), el conciliador (que llama a registrar) y el job que manda (enviar). Sin estado no hay
+           fingerprint: registrar no encola, y un aviso de ensayo que ya estaba pendiente queda resuelto
+           (fingerprint en null, generación nueva) sin mandarse; un job ya encolado sale por `$state === null`.
+           🔴 Solo se corta el push: el caso, `support_attention_enabled` y el trabajo de Martín no se tocan. */
+        if ($ticket->es_de_ensayo()) {
+            return null;
+        }
         $case = $ticket->support_codex_case;
         return [
             'human' => $human,
