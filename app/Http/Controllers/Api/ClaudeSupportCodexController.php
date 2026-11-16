@@ -109,9 +109,10 @@ class ClaudeSupportCodexController extends Controller
         return response()->json($service->claim((int) $id, $data));
     }
 
-    public function show($id, SupportCodexService $service)
+    public function show(Request $request, $id, SupportCodexService $service)
     {
-        return response()->json(['ticket' => $service->context(SupportTicket::findOrFail($id))]);
+        $data = $request->validate(['mission_id' => 'sometimes|integer|min:1']);
+        return response()->json(['ticket' => $service->context(SupportTicket::findOrFail($id), null, isset($data['mission_id']) ? (int) $data['mission_id'] : null)]);
     }
 
     /**
@@ -136,9 +137,10 @@ class ClaudeSupportCodexController extends Controller
     public function upgrade_window(Request $request, $id, SupportCodexService $service, ClientScheduleResolver $resolver)
     {
         $data = $request->validate([
+            'mission_id' => 'sometimes|integer|min:1',
             'minimum_minutes' => 'required|integer|between:1,1440',
             'not_before' => 'sometimes|date_format:Y-m-d\TH:i:sP',
-            'maintenance_mode' => 'sometimes|in:closed,coordinated',
+            'maintenance_mode' => 'sometimes|in:closed,coordinated,overnight',
             'target' => 'sometimes|in:sistema,tienda',
             'client_ecommerce_id' => 'sometimes|nullable|integer|min:1',
             'expected_message_id' => 'required|integer|min:1',
@@ -150,6 +152,7 @@ class ClaudeSupportCodexController extends Controller
                 'expected_message_id' => $data['expected_message_id'],
                 'action' => 'responder',
             ]);
+            if (isset($data['mission_id'])) { $case = \App\Models\SupportCodexMission::where('support_ticket_id', $id)->findOrFail($data['mission_id'])->project($case); }
             abort_unless($ticket->contacto_puede_consultar(), 403, 'Este contacto no tiene permiso para consultar datos del negocio.');
 
             $desde = now();
@@ -164,6 +167,14 @@ class ClaudeSupportCodexController extends Controller
                 $desde = $reoffer;
             }
 
+            if (($data['maintenance_mode'] ?? 'closed') === 'overnight') {
+                abort_unless(\App\Services\SupportUpgradeReconfirmationService::available(), 409, 'overnight_upgrade_unavailable');
+                $evidence = \App\Models\SupportCodexMissionFixEvidence::current_for($ticket, $case);
+                abort_unless($evidence !== null, 409, 'Falta la corrección integrada vigente.');
+                $store = \App\Services\SupportMaintenancePolicy::assert_scope($ticket, $evidence, $data);
+                $start = \App\Services\SupportUpgradeReconfirmationService::next_overnight($desde);
+                return ['window' => ['starts_at' => $start->toIso8601String(), 'ends_at' => $start->copy()->addHour()->toIso8601String()], 'maintenance_mode' => 'overnight', 'minimum_minutes' => 60, 'target' => $data['target'] ?? 'sistema', 'client_ecommerce_id' => $store === null ? null : (int) $store->id];
+            }
             if (($data['maintenance_mode'] ?? 'closed') === 'coordinated') {
                 abort_unless(\App\Services\SupportMaintenancePolicy::available(), 409, 'maintenance_unavailable');
                 $evidence = \App\Models\SupportCodexMissionFixEvidence::current_for($ticket, $case);
@@ -186,12 +197,13 @@ class ClaudeSupportCodexController extends Controller
             'operation_id' => 'required|string|max:120|regex:/^[a-zA-Z0-9_-]+$/',
             'thread_id' => 'sometimes|string|max:150',
             'supports_human_approval' => 'sometimes|boolean',
+            'mission_id' => 'sometimes|integer|min:1',
             'mission_thread_id' => ['required', 'string', 'max:150', 'regex:/\A[a-zA-Z0-9_-]+\z/'],
             'mission_hash' => ['required', 'string', 'regex:/\A[0-9a-f]{64}\z/'],
             'starts_at' => 'required|date_format:Y-m-d\TH:i:sP',
             'ends_at' => 'required|date_format:Y-m-d\TH:i:sP',
             'minimum_minutes' => 'required|integer|between:1,1440',
-            'maintenance_mode' => 'sometimes|in:closed,coordinated',
+            'maintenance_mode' => 'sometimes|in:closed,coordinated,overnight',
             'target' => 'sometimes|in:sistema,tienda',
             'client_ecommerce_id' => 'sometimes|nullable|integer|min:1',
         ]);
@@ -205,9 +217,32 @@ class ClaudeSupportCodexController extends Controller
             'lease_token' => 'required|string|min:32|max:128',
             'expected_message_id' => 'required|integer|min:1',
             'proposal_operation_id' => 'required|string|max:120|regex:/^[a-zA-Z0-9_-]+$/',
+            'schedule_id' => 'sometimes|integer|min:1',
+            'mission_id' => 'sometimes|integer|min:1',
         ]);
 
         return response()->json($agreements->accept((int) $id, $data, $service));
+    }
+
+    public function upgrade_reconfirmation(Request $request, $id, \App\Services\SupportUpgradeReconfirmationService $service)
+    {
+        return $this->send_upgrade_notice($request, (int) $id, $service, 'confirm');
+    }
+
+    public function upgrade_overnight(Request $request, $id, \App\Services\SupportUpgradeReconfirmationService $service)
+    {
+        return $this->send_upgrade_notice($request, (int) $id, $service, 'overnight');
+    }
+
+    private function send_upgrade_notice(Request $request, int $id, \App\Services\SupportUpgradeReconfirmationService $service, string $kind)
+    {
+        $data = $request->validate([
+            'lease_token' => 'required|string|min:32|max:128', 'expected_message_id' => 'required|integer|min:1',
+            'operation_id' => 'required|string|max:120|regex:/^[a-zA-Z0-9_-]+$/',
+            'supports_human_approval' => 'sometimes|boolean', 'schedule_id' => 'sometimes|integer|min:1',
+            'mission_id' => 'sometimes|integer|min:1', 'thread_id' => 'sometimes|string|max:150',
+        ]);
+        return response()->json($service->request($id, $data, $kind));
     }
 
     /**
@@ -262,6 +297,9 @@ class ClaudeSupportCodexController extends Controller
             'attachment.filename' => 'required_with:attachment|string|max:160',
             'attachment.content_base64' => 'required_with:attachment|string|max:' . \App\Services\SupportCodexOutboundAttachment::MAX_ENCODED_LENGTH,
             'mission' => 'sometimes|nullable|string|max:30000',
+            'mission_id' => 'sometimes|integer|min:1',
+            'mission_type' => 'sometimes|in:bug,funcionalidad',
+            'scope_confirmed_message_id' => 'sometimes|integer|min:1',
             'close_on_mission_start' => 'sometimes|boolean|prohibited_unless:action,escalar',
             'review_reason' => 'required_if:action,pedir_revision|nullable|string|max:500',
             'migration_blocked_reason' => 'sometimes|required|string|max:2000|prohibited_unless:action,pedir_revision',
@@ -321,6 +359,7 @@ class ClaudeSupportCodexController extends Controller
     public function mission_started(Request $request, $id, SupportCodexService $service)
     {
         $data = $request->validate([
+            'mission_id' => 'sometimes|integer|min:1',
             'mission_thread_id' => 'required|string|max:150|regex:/^[a-zA-Z0-9_-]+$/',
             'mission_hash' => 'required|string|size:64|regex:/^[a-f0-9]{64}$/',
         ]);
@@ -334,6 +373,7 @@ class ClaudeSupportCodexController extends Controller
     public function mission_progress(Request $request, $id, SupportCodexService $service)
     {
         $data = $request->validate([
+            'mission_id' => 'sometimes|integer|min:1',
             'mission_thread_id' => 'required|string|max:150|regex:/^[a-zA-Z0-9_-]+$/',
             'mission_hash' => 'required|string|size:64|regex:/^[a-f0-9]{64}$/',
             'estado' => 'required|in:identificado,en_correccion',
@@ -350,6 +390,7 @@ class ClaudeSupportCodexController extends Controller
         $sha = ['required', 'string', 'regex:/\A[0-9a-f]{40}\z/'];
         $data = $request->validate([
             'ticket_id' => 'prohibited',
+            'mission_id' => 'sometimes|integer|min:1',
             'mission_thread_id' => ['required', 'string', 'max:150', 'regex:/\A[a-zA-Z0-9_-]+\z/'],
             'mission_hash' => ['required', 'string', 'regex:/\A[0-9a-f]{64}\z/'],
             'informe' => ['required', 'string', 'regex:~\Ainformes/[0-9]{8}-[a-z0-9][a-z0-9-]{0,100}\.md\z~'],

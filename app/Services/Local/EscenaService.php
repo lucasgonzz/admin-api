@@ -916,6 +916,8 @@ class EscenaService
         $casos = $pendientes
             ->leftJoin('clients as cl', 'cl.id', '=', 't.client_id')
             ->select(
+                'c.id as mission_id',
+                'c.mission_type',
                 'c.updated_at',
                 'c.local_mission_request_id',
                 'c.local_mission_claim_token',
@@ -935,7 +937,8 @@ class EscenaService
             $ticket_id = (int) $caso->ticket_id;
             $cliente = $this->nombre_de($caso->client_company, $caso->client_name, $caso->client_id);
             $items[] = [
-                'id' => 'soporte-mision-' . $ticket_id,
+                'id' => 'soporte-mision-' . $ticket_id . '-' . $caso->mission_id,
+                'mission_id' => (int) $caso->mission_id, 'mission_type' => $caso->mission_type,
                 'tipo' => 'mision_pendiente',
                 'titulo' => 'Misión · ' . $cliente . ': ' . $this->recortar($caso->mission_inicio, self::LETRAS_DE_MISION),
                 'client_id' => $caso->client_id !== null ? (int) $caso->client_id : null,

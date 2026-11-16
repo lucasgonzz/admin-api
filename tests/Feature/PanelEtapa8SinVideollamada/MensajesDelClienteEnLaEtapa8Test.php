@@ -61,7 +61,7 @@ class MensajesDelClienteEnLaEtapa8Test extends BaseDeLaEtapa8DelPanel
 
         // Al cliente: el acuse, y nada más.
         $this->assertSame([
-            'Recibí tu mensaje. ' . self::NOMBRE_DEL_ADMIN . ' te va a responder en breve. 🙏',
+            'Recibí tu mensaje. Martín te va a responder en breve. 🙏',
         ], $this->lo_que_recibio_el_cliente($implementacion));
         $this->assertSame((string) $implementacion->client->phone, $whatsapp->enviados[1]['to']);
 
@@ -141,7 +141,7 @@ class MensajesDelClienteEnLaEtapa8Test extends BaseDeLaEtapa8DelPanel
     }
 
     /**
-     * (e) Sin admin asignado el cliente igual recibe el acuse, con el nombre institucional, y no se rompe nada.
+     * (e) Sin admin asignado el cliente igual recibe el acuse, firmado Martín (regla de Lucas, 16/11/2026), y no se rompe nada.
      *
      * @return void
      */
@@ -152,7 +152,7 @@ class MensajesDelClienteEnLaEtapa8Test extends BaseDeLaEtapa8DelPanel
 
         $this->servicio($whatsapp)->handle($implementacion->refresh(), $this->mensaje_del_cliente($implementacion, 'hola'));
 
-        $this->assertSame(['Recibí tu mensaje. el equipo de ComercioCity te va a responder en breve. 🙏'], $this->lo_que_recibio_el_cliente($implementacion));
+        $this->assertSame(['Recibí tu mensaje. Martín te va a responder en breve. 🙏'], $this->lo_que_recibio_el_cliente($implementacion));
     }
 
     /**
@@ -180,7 +180,7 @@ class MensajesDelClienteEnLaEtapa8Test extends BaseDeLaEtapa8DelPanel
         $this->assertSame('completed', $data['current_question']);
         $this->assertTrue($data['completed']);
 
-        $this->assertSame(['Perfecto, le paso tu disponibilidad a ' . self::NOMBRE_DEL_ADMIN . ' para que confirme el horario. Te avisamos a la brevedad.'], $this->lo_que_recibio_el_cliente($implementacion));
+        $this->assertSame(['Perfecto, le paso tu disponibilidad a Martín para que confirme el horario. Te avisamos a la brevedad.'], $this->lo_que_recibio_el_cliente($implementacion));
         $this->assertStringContainsString('disponibilidad para videollamada: el viernes a la tarde', $this->aviso_al_admin($whatsapp));
     }
 

@@ -3,6 +3,7 @@
 namespace App\Services\Local;
 
 use App\Models\SupportCodexCase;
+use App\Models\SupportCodexMission;
 use App\Models\SupportTicket;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Facades\Cache;
@@ -13,10 +14,9 @@ class MisionesDelLocal
 {
     public static function pendientes(): Builder
     {
-        return DB::table('support_codex_cases as c')
+        return DB::table('support_codex_missions as c')
             ->join('support_tickets as t', 't.id', '=', 'c.support_ticket_id')
-            ->where('t.status', SupportTicket::STATUS_ABIERTO)
-            ->where('c.state', 'mission_pending')
+            ->where(function ($query) { $query->where('t.status', SupportTicket::STATUS_ABIERTO)->orWhere('c.mission_type', 'funcionalidad'); })
             ->whereNull('c.mission_started_at')
             ->whereRaw("TRIM(c.mission) <> ''");
     }
@@ -30,13 +30,15 @@ class MisionesDelLocal
         return $tomada ? 'iniciando' : 'solicitada';
     }
 
-    public function solicitar(int $id, ?string $hash): array
+    public function solicitar(int $id, ?string $hash, ?int $mission_id = null): array
     {
-        $resultado = DB::transaction(function () use ($id, $hash) {
+        $resultado = DB::transaction(function () use ($id, $hash, $mission_id) {
             $ticket = SupportTicket::query()->lockForUpdate()->findOrFail($id);
-            $caso = $this->bloquear_caso($id);
+            abort_if($mission_id === null && $hash === null && SupportCodexMission::where('support_ticket_id', $id)
+                ->whereNull('mission_started_at')->count() > 1, 409, 'Elegí la misión que querés iniciar.');
+            $caso = $this->bloquear_caso($id, $mission_id, $hash);
 
-            abort_if($ticket->status !== SupportTicket::STATUS_ABIERTO || $caso === null
+            abort_if($caso === null
                 || trim((string) $caso->mission) === '', 409, 'El ticket ya no tiene una misión pendiente.');
 
             abort_if($hash !== null && ! hash_equals(hash('sha256', $caso->mission), $hash),
@@ -46,11 +48,11 @@ class MisionesDelLocal
                 return ['estado_inicio' => 'iniciada', 'hilo_id' => $caso->mission_thread_id];
             }
 
-            abort_if($caso->state !== 'mission_pending', 409, 'La misión ya no está pendiente de inicio.');
 
             if ($caso->local_mission_request_id === null) {
                 $caso->local_mission_request_id = (string) Str::uuid();
                 $caso->save();
+                $this->reflejar_inicio_legacy($caso);
             }
 
             return ['estado_inicio' => self::estado($caso->local_mission_request_id, $caso->local_mission_claim_token !== null)];
@@ -68,28 +70,29 @@ class MisionesDelLocal
             ->orderByRaw('c.local_mission_claim_token IS NOT NULL')
             ->orderBy('c.updated_at')
             ->limit(50)
-            ->get(['c.support_ticket_id', 'c.local_mission_request_id', 'c.local_mission_claim_token', 'c.mission', 'c.thread_id'])
+            ->get(['c.id', 'c.mission_type', 'c.support_ticket_id', 'c.local_mission_request_id', 'c.local_mission_claim_token', 'c.mission'])
             ->map(function ($fila) {
                 return [
                     'ticket_id' => (int) $fila->support_ticket_id,
+                    'mission_id' => (int) $fila->id, 'mission_type' => $fila->mission_type,
                     'solicitud_id' => $fila->local_mission_request_id,
                     'estado_inicio' => self::estado($fila->local_mission_request_id, $fila->local_mission_claim_token !== null),
                     'mission' => $fila->mission,
                     'mission_sha256' => hash('sha256', $fila->mission),
-                    'thread_id' => $fila->thread_id,
+                    'thread_id' => optional(SupportCodexCase::where('support_ticket_id', $fila->support_ticket_id)->first())->thread_id,
                 ];
             })
             ->all();
     }
 
-    public function reclamar(int $id, string $solicitud, string $token): bool
+    public function reclamar(int $id, string $solicitud, string $token, ?int $mission_id = null): bool
     {
-        $tomada = DB::transaction(function () use ($id, $solicitud, $token) {
+        $tomada = DB::transaction(function () use ($id, $solicitud, $token, $mission_id) {
             $ticket = SupportTicket::query()->lockForUpdate()->findOrFail($id);
-            $caso = $this->bloquear_caso($id);
+            $caso = SupportCodexMission::where('support_ticket_id', $id)->where('local_mission_request_id', $solicitud)->when($mission_id !== null, function ($q) use ($mission_id) { $q->whereKey($mission_id); })->lockForUpdate()->first();
 
-            if ($ticket->status !== SupportTicket::STATUS_ABIERTO || $caso === null
-                || $caso->state !== 'mission_pending' || $caso->mission_started_at !== null
+            if ($caso === null
+                || $caso->mission_started_at !== null
                 || $caso->local_mission_request_id !== $solicitud
                 || trim((string) $caso->mission) === '') {
                 return false;
@@ -102,6 +105,7 @@ class MisionesDelLocal
             // Un resultado incierto se concilia por el ID en Codex. Otro monitor no repite la apertura.
             $caso->local_mission_claim_token = $token;
             $caso->save();
+            $this->reflejar_inicio_legacy($caso);
 
             return true;
         });
@@ -113,8 +117,14 @@ class MisionesDelLocal
         return $tomada;
     }
 
-    private function bloquear_caso(int $id): ?SupportCodexCase
+    private function reflejar_inicio_legacy(SupportCodexMission $mission): void
     {
-        return SupportCodexCase::query()->where('support_ticket_id', $id)->lockForUpdate()->first();
+        SupportCodexCase::where('support_ticket_id', $mission->support_ticket_id)->where('mission', $mission->mission)
+            ->update(['local_mission_request_id' => $mission->local_mission_request_id, 'local_mission_claim_token' => $mission->local_mission_claim_token]);
+    }
+
+    private function bloquear_caso(int $id, ?int $mission_id = null, ?string $hash = null): ?SupportCodexMission
+    {
+        return SupportCodexMission::where('support_ticket_id', $id)->when($mission_id !== null, function ($q) use ($mission_id) { $q->whereKey($mission_id); })->when($hash !== null, function ($q) use ($hash) { $q->where('mission_hash', $hash); })->latest('id')->lockForUpdate()->first();
     }
 }

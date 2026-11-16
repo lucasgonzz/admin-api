@@ -25,7 +25,7 @@ class SupportMaintenancePolicy
 
     public static function coordinated(SupportCodexUpgradeAgreement $agreement): bool
     {
-        return $agreement->maintenance_mode === 'coordinated';
+        return in_array($agreement->maintenance_mode, ['coordinated', 'overnight'], true);
     }
 
     public static function target(SupportCodexUpgradeAgreement $agreement): string
@@ -70,7 +70,7 @@ class SupportMaintenancePolicy
 
     public static function window(Carbon $from, int $minutes, bool $explicit = false): array
     {
-        abort_unless($minutes === self::MINUTES, 422, 'El corte coordinado requiere una ventana de 15 minutos.');
+        abort_unless(in_array($minutes, [15, 30], true), 422, 'El corte coordinado requiere una ventana de 15 o 30 minutos.');
         $start = $from->copy()->setTimezone(self::TIMEZONE)->ceilMinute();
         if (! $explicit && $start->lessThan(now()->addMinutes(90))) {
             $start = now()->setTimezone(self::TIMEZONE)->addMinutes(90)->ceilMinute();
@@ -84,6 +84,10 @@ class SupportMaintenancePolicy
 
     public static function force_reason(SupportCodexUpgradeAgreement $agreement): string
     {
+        if ($agreement->maintenance_mode === 'overnight') {
+            return 'Actualización a las 02:00 informada en ticket #' . $agreement->support_ticket_id
+                . ', acuerdo #' . $agreement->id . '. Autorización de Lucas del 16/11/2026; sin omitir actividad real ni respaldos.';
+        }
         return 'Corte coordinado de soporte acordado en ticket #' . $agreement->support_ticket_id
             . ', acuerdo #' . $agreement->id . ', confirmación #' . $agreement->confirmation_message_id
             . '. Autorización permanente de Lucas del 13/11/2026 para el gate de horario.';

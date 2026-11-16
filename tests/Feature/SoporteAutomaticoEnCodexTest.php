@@ -233,9 +233,12 @@ class SoporteAutomaticoEnCodexTest extends TestCase
 
         $this->postJson($path, array_replace($evidence, ['pruebas' => ['Suite distinta']]), $this->headers)->assertStatus(409);
         $case->fresh()->update(['mission' => 'Se reemplazó el diagnóstico.']);
-        $this->postJson($path, $evidence, $this->headers)->assertStatus(409);
+        // La misión anterior conserva su identidad aunque el ticket siga con un diagnóstico nuevo.
+        $this->postJson($path, $evidence, $this->headers)->assertOk()
+            ->assertJsonPath('mission_fix_evidence.mission_hash', $evidence['mission_hash']);
         $this->getJson($this->base . '/tickets/' . $ticket->id, $this->headers)->assertOk()
-            ->assertJsonPath('ticket.mission_fix_evidence', null);
+            ->assertJsonPath('ticket.mission_fix_evidence.mission_hash', $evidence['mission_hash'])
+            ->assertJsonCount(2, 'ticket.missions');
     }
 
     public function test_evidencia_de_mision_rechaza_identidad_y_campos_invalidos(): void
@@ -260,8 +263,10 @@ class SoporteAutomaticoEnCodexTest extends TestCase
             $this->postJson($path, array_replace($evidence, $invalid), $this->headers)->assertStatus(422);
         }
         $ticket->update(['status' => 'closed']);
-        $this->postJson($path, $evidence, $this->headers)->assertStatus(409);
-        $this->assertFalse(DB::table('support_codex_mission_fix_evidence')->where('support_ticket_id', $ticket->id)->exists());
+        // Cerrar la atención no impide registrar la integración del trabajo que ya estaba iniciado.
+        $this->postJson($path, $evidence, $this->headers)->assertOk();
+        $this->assertTrue(DB::table('support_codex_mission_fix_evidence')->where('support_ticket_id', $ticket->id)->exists());
+        $this->assertSame('closed', $ticket->fresh()->status);
     }
 
     private function mission_evidence(SupportCodexCase $case): array
@@ -331,7 +336,12 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         ClientScheduleDay::where('client_id', $ticket->client_id)->where('day_key', 'lunes')->delete();
         $mission = $case->mission;
         $case->fresh()->update(['mission' => 'Otra corrección pendiente.']);
-        $this->postJson($base . '/upgrade-agreement', $accept, $this->headers)->assertStatus(409);
+        // Un diagnóstico B ya no revoca la propuesta identificada de A.
+        $this->postJson($base . '/upgrade-agreement', $accept, $this->headers)->assertOk()
+            ->assertJsonPath('upgrade_agreement.status', 'accepted');
+        $this->assertSame('Otra corrección pendiente.', $case->fresh()->mission);
+        $this->assertSame($data['mission_hash'], \App\Models\SupportCodexMissionFixEvidence::findOrFail(
+            SupportCodexUpgradeAgreement::where('support_ticket_id', $ticket->id)->firstOrFail()->mission_fix_evidence_id)->mission_hash);
         $case->fresh()->update(['mission' => $mission]);
         $this->postJson($base . '/upgrade-agreement', $accept, $this->headers)->assertOk()
             ->assertJsonPath('upgrade_agreement.status', 'accepted');
@@ -387,8 +397,9 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         $this->postJson($base . '/upgrade-proposal', array_replace($data, ['ends_at' => '2026-10-26T12:46:00-03:00']), $this->headers)->assertStatus(422);
         $sent = $this->postJson($base . '/upgrade-proposal', $data, $this->headers)->assertOk()->assertJsonPath('operation.status', 'sent')->json('operation');
         $body = SupportMessage::findOrFail($sent['message_id'])->body;
-        $this->assertStringContainsString('unos 15 minutos', $body);
-        $this->assertStringContainsString('nadie debe usar', $body);
+        $this->assertStringContainsString('entre 15 y 30 minutos', $body);
+        $this->assertStringContainsString('sin que nadie use el sistema ni la tienda afectada', $body);
+        $this->assertStringContainsString('Al llegar la hora te vamos a pedir que confirmes antes de empezar', $body);
         $this->assertStringContainsString('"Confirmo la actualización del 26/10/2026 a las 12:30 del sistema"', $body);
         $inbound = $this->inbound($ticket, 'Confirmo la actualización del 26/10/2026 a las 12:30 del sistema');
         $inbound->update(['whatsapp_message_id' => 'wamid.coordinado-' . $ticket->id]);
@@ -456,6 +467,22 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         $ssh->method('read_coordinated_upgrade_activity_for')->willReturn(['usuarios_activos' => 0, 'ventas_recientes' => 0, 'trabajos_pendientes' => 0]);
         $this->app->instance(\App\Services\EnvSshService::class, $ssh);
         Carbon::setTestNow(Carbon::parse('2026-10-26T13:00:45-03:00'));
+        app(\App\Services\SupportScheduledUpgradeService::class)->tick();
+        \Illuminate\Support\Facades\Queue::assertNothingPushed();
+        $row = \App\Models\SupportCodexScheduledUpgrade::where('agreement_id', $agreement->id)->firstOrFail();
+        $this->assertSame('esperando_reconfirmacion', $row->reason);
+        $lease = $this->postJson($base . '/claim', ['worker_id' => 'pc-lucas', 'expected_message_id' => $inbound->id,
+            'supports_upgrade_agreement' => true], $this->headers)->assertOk()->json();
+        $notice = $this->postJson($base . '/upgrade-reconfirmation', ['lease_token' => $lease['lease_token'],
+            'expected_message_id' => $inbound->id, 'operation_id' => 'reconfirmar-tienda-' . $ticket->id,
+            'schedule_id' => $row->id], $this->headers)->assertOk()->assertJsonPath('operation.status', 'sent')->json('operation');
+        $confirmation = $this->inbound($ticket, 'Sí');
+        $confirmation->update(['reply_to_message_id' => $notice['message_id'], 'whatsapp_message_id' => 'wamid.reconfirmar-tienda-' . $ticket->id]);
+        $lease = $this->claim($ticket);
+        $this->postJson($base . '/upgrade-agreement', ['lease_token' => $lease['lease_token'], 'expected_message_id' => $confirmation->id,
+            'proposal_operation_id' => $notice['id'], 'schedule_id' => $row->id], $this->headers)->assertOk()
+            ->assertJsonPath('upgrade_reconfirmation.status', 'confirmed');
+        Carbon::setTestNow(now()->addSeconds(31));
         app(\App\Services\SupportScheduledUpgradeService::class)->tick();
         app(\App\Services\SupportScheduledUpgradeService::class)->tick();
         \Illuminate\Support\Facades\Queue::assertPushed(\App\Jobs\RunEcommerceInstallationJob::class, 1);
@@ -664,7 +691,11 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         $this->assertSame('pending', $attention['mission']['status']);
         $ticket->update(['status' => 'closed']);
         $attention = $ticket->fresh()->load('support_codex_case')->support_attention;
-        $this->assertSame(['needs_human' => false, 'reason' => null, 'mission' => null, 'can_toggle' => true], $attention);
+        $this->assertSame(['needs_human' => false, 'reason' => null, 'mission' => null, 'can_toggle' => true],
+            array_intersect_key($attention, array_flip(['needs_human', 'reason', 'mission', 'can_toggle'])));
+        $this->assertSame(['bug' => ['total' => 1, 'completed' => 0], 'funcionalidad' => ['total' => 0, 'completed' => 0]], $attention['mission_counts']);
+        $this->assertCount(1, $attention['missions']);
+        $this->assertSame('pending', $attention['missions'][0]['status']);
     }
 
     public function test_pedir_revision_sin_mision_envia_una_respuesta_y_deja_la_revision_pendiente(): void
@@ -1198,10 +1229,22 @@ class SoporteAutomaticoEnCodexTest extends TestCase
         $legacy->update(['escalated_at' => now(), 'escalation_reason' => 'Necesita que Lucas revise el contrato.']);
         $admin = Admin::firstOrCreate(['email' => 'misiones-bandeja@test.local'], ['name' => 'Lucas', 'password' => bcrypt('prueba')]);
         DB::enableQueryLog();
-        $this->actingAs($admin, 'sanctum')->getJson('/api/admin/support-ticket?assigned_filter=all')->assertOk()
-            ->assertJsonFragment(['support_attention' => ['needs_human' => false, 'reason' => null, 'can_toggle' => true,
-                'mission' => ['status' => 'pending', 'thread_id' => null, 'started_at' => null]]])
-            ->assertJsonFragment(['support_attention' => ['needs_human' => true, 'reason' => 'Necesita que Lucas revise el contrato.', 'mission' => null, 'can_toggle' => true]]);
+        $rows = $this->actingAs($admin, 'sanctum')->getJson('/api/admin/support-ticket?assigned_filter=all')->assertOk()->json('models');
+        $rows = collect($rows)->keyBy('id');
+        $attention = $rows[$ticket->id]['support_attention'];
+        $this->assertFalse($attention['needs_human']);
+        $this->assertNull($attention['reason']);
+        $this->assertTrue($attention['can_toggle']);
+        $this->assertSame(['status' => 'pending', 'thread_id' => null, 'started_at' => null], $attention['mission']);
+        $this->assertSame(['bug' => ['total' => 1, 'completed' => 0], 'funcionalidad' => ['total' => 0, 'completed' => 0]], $attention['mission_counts']);
+        $this->assertCount(1, $attention['missions']);
+        $legacy_attention = $rows[$legacy->id]['support_attention'];
+        $this->assertTrue($legacy_attention['needs_human']);
+        $this->assertSame('Necesita que Lucas revise el contrato.', $legacy_attention['reason']);
+        $this->assertNull($legacy_attention['mission']);
+        $this->assertTrue($legacy_attention['can_toggle']);
+        $this->assertSame(['bug' => ['total' => 0, 'completed' => 0], 'funcionalidad' => ['total' => 0, 'completed' => 0]], $legacy_attention['mission_counts']);
+        $this->assertSame([], $legacy_attention['missions']);
         $case_queries = array_filter(DB::getQueryLog(), function ($query) {
             return stripos($query['query'], 'support_codex_cases') !== false;
         });

@@ -14,9 +14,9 @@ class LocalMisionesController extends Controller
     {
         abort_unless($request->user() instanceof Admin, 403);
 
-        $input = $request->validate(['mission_sha256' => 'sometimes|string|regex:/^[a-f0-9]{64}$/']);
+        $input = $request->validate(['mission_id' => 'sometimes|integer|min:1', 'mission_sha256' => 'sometimes|string|regex:/^[a-f0-9]{64}$/']);
 
-        return response()->json($misiones->solicitar((int) $id, $input['mission_sha256'] ?? null), 202);
+        return response()->json($misiones->solicitar((int) $id, $input['mission_sha256'] ?? null, $input['mission_id'] ?? null), 202);
     }
 
     public function pendientes(MisionesDelLocal $misiones): JsonResponse
@@ -26,8 +26,8 @@ class LocalMisionesController extends Controller
 
     public function reclamar(Request $request, $id, MisionesDelLocal $misiones): JsonResponse
     {
-        $input = $request->validate(['solicitud_id' => 'required|uuid', 'claim_token' => 'required|uuid']);
+        $input = $request->validate(['mission_id' => 'sometimes|integer|min:1', 'solicitud_id' => 'required|uuid', 'claim_token' => 'required|uuid']);
 
-        return response()->json(['claimed' => $misiones->reclamar((int) $id, $input['solicitud_id'], $input['claim_token'])]);
+        return response()->json(['claimed' => $misiones->reclamar((int) $id, $input['solicitud_id'], $input['claim_token'], $input['mission_id'] ?? null)]);
     }
 }

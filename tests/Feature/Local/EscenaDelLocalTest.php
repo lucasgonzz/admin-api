@@ -299,6 +299,12 @@ class EscenaDelLocalTest extends TestCase
      *
      * @return array<string, mixed>|null
      */
+    private function id_de_mision(int $ticket_id): string
+    {
+        $mission_id = \App\Models\SupportCodexMission::where('support_ticket_id', $ticket_id)->latest('id')->value('id');
+        return 'soporte-mision-' . $ticket_id . '-' . $mission_id;
+    }
+
     private function item_de_bandeja(array $escena, string $id): ?array
     {
         foreach ($escena['bandeja'] as $item) {
@@ -401,7 +407,9 @@ class EscenaDelLocalTest extends TestCase
 
         $this->assertNotEmpty($escena['bandeja']);
         foreach ($escena['bandeja'] as $item) {
-            $this->assertSame(['id', 'tipo', 'titulo', 'client_id', 'creado_at', 'ruta', 'ticket_id', 'mission_sha256', 'estado_inicio'], array_keys($item));
+            $this->assertSame(['id', 'mission_id', 'mission_type', 'tipo', 'titulo', 'client_id', 'creado_at', 'ruta', 'ticket_id', 'mission_sha256', 'estado_inicio'], array_keys($item));
+            $this->assertIsInt($item['mission_id']);
+            $this->assertContains($item['mission_type'], ['bug', 'funcionalidad']);
             $this->assertSame('mision_pendiente', $item['tipo']);
         }
         $this->assertLessThanOrEqual(50, count($escena['bandeja']));
@@ -787,7 +795,7 @@ class EscenaDelLocalTest extends TestCase
 
         $escena = $this->escena($admin);
 
-        $item = $this->item_de_bandeja($escena, 'soporte-mision-' . $con_mision->id);
+        $item = $this->item_de_bandeja($escena, $this->id_de_mision($con_mision->id));
         $this->assertNotNull($item, 'La misión pendiente está en la bandeja.');
         $this->assertSame('mision_pendiente', $item['tipo']);
         $this->assertSame('Misión · Ferre Total de prueba: ' . rtrim(mb_substr($mision, 0, 70)) . '…', $item['titulo']);
@@ -796,9 +804,9 @@ class EscenaDelLocalTest extends TestCase
         $this->assertSame(hash('sha256', $mision), $item['mission_sha256']);
         $this->assertMatchesRegularExpression(self::ISO, $item['creado_at']);
 
-        $this->assertNull($this->item_de_bandeja($escena, 'soporte-mision-' . $iniciada->id), 'La misión ya iniciada pasó a las oficinas.');
+        $this->assertNull($this->item_de_bandeja($escena, $this->id_de_mision($iniciada->id)), 'La misión ya iniciada pasó a las oficinas.');
 
-        $this->assertNull($this->item_de_bandeja($escena, 'soporte-mision-' . $cerrado->id));
+        $this->assertNull($this->item_de_bandeja($escena, $this->id_de_mision($cerrado->id)));
         $this->assertNull($this->item_de_bandeja($escena, 'soporte-revision-' . $en_revision->id));
         $this->assertNull($this->item_de_bandeja($escena, 'soporte-caso-' . $delegado->id));
         $this->assertNull($this->item_de_bandeja($escena, 'tarea-' . $tarea_id));
@@ -912,7 +920,7 @@ class EscenaDelLocalTest extends TestCase
         $this->postJson($claim, ['solicitud_id' => $pedido['solicitud_id'], 'claim_token' => (string) Str::uuid()], $headers)
             ->assertOk()->assertJsonPath('claimed', false);
 
-        $id = 'soporte-mision-' . $ticket->id;
+        $id = $this->id_de_mision($ticket->id);
         $this->assertSame('iniciando', $this->item_de_bandeja($this->escena($admin), $id)['estado_inicio']);
         $this->postJson($confirmar, ['mission_thread_id' => 'hilo-mision', 'mission_hash' => str_repeat('0', 64)], $headers)
             ->assertStatus(409);
@@ -970,7 +978,7 @@ class EscenaDelLocalTest extends TestCase
 
         $escena = $this->escena($admin);
 
-        $this->assertNotNull($this->item_de_bandeja($escena, 'soporte-mision-' . $ticket->id));
+        $this->assertNotNull($this->item_de_bandeja($escena, $this->id_de_mision($ticket->id)));
         $this->assertNull($this->item_de_bandeja($escena, 'soporte-caso-' . $ticket->id), 'No se repite como caso delegado.');
         $this->assertCount(1, array_filter($escena['bandeja'], function ($item) use ($ticket) {
             return $item['ruta'] === '/soporte/ticket/' . $ticket->id;

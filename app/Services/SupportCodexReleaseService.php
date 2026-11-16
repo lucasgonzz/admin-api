@@ -21,6 +21,7 @@ class SupportCodexReleaseService
 
     public function work(): array
     {
+        app(SupportUpgradeReconfirmationService::class)->sync_overnight_agreements();
         $work = [];
         $agreements = SupportCodexUpgradeAgreement::select('support_codex_upgrade_agreements.*')
             ->leftJoin('support_codex_release_claims as release_claim', 'release_claim.agreement_id', '=', 'support_codex_upgrade_agreements.id')
@@ -246,7 +247,7 @@ class SupportCodexReleaseService
             return null;
         }
         $case = SupportCodexCase::where('support_ticket_id', $ticket->id)->first();
-        $evidence = SupportCodexMissionFixEvidence::current_for($ticket, $case);
+        $evidence = \App\Models\SupportCodexMission::evidence_for_agreement($agreement);
         if ($evidence === null || (int) $evidence->id !== (int) $agreement->mission_fix_evidence_id
             || array_intersect(array_keys($evidence->payload['commits']), SupportMaintenancePolicy::repos($agreement->target ?: 'sistema')) === []
             || array_diff(array_keys($evidence->payload['commits']), SupportMaintenancePolicy::repos($agreement->target ?: 'sistema')) !== []) {
@@ -259,6 +260,10 @@ class SupportCodexReleaseService
         $messages = SupportMessage::where('support_ticket_id', $ticket->id)->where('sender_type', 'user');
         SupportMessage::apply_mensaje_real_conditions($messages, 'support_messages');
         $inbound = $messages->latest('id')->first();
+        if ($agreement->maintenance_mode === 'overnight') {
+            return app(SupportUpgradeReconfirmationService::class)->valid_overnight_agreement($agreement)
+                && app(SupportUpgradeReconfirmationService::class)->later_messages_allow((int) $ticket->id, (int) $operation->message_id) ? $evidence : null;
+        }
         if ($inbound === null || (int) $inbound->id !== (int) $agreement->confirmation_message_id) {
             return null;
         }
