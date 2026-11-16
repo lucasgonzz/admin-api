@@ -44,8 +44,10 @@ class InicioController extends Controller
             /* Sin los tickets de prueba gratuita (misión prueba-ayuda-unificada-en-soporte, 10/11/2026): los atiende
                Martín y la bandeja los muestra aparte, en «Prueba». La bandeja por defecto los saca con el mismo
                criterio, así que el número de la tarjeta y las filas del deep link siguen coincidiendo. */
-            'tickets_sin_responder' => (int) SupportTicket::query()->sinResponder()->sinPrueba()->count(),
-            'tickets_abiertos_hoy'  => (int) SupportTicket::query()->abiertoHoy()->sinPrueba()->count(),
+            /* Tampoco los de un cliente de ENSAYO (misión soporte-ocultar-tickets-ensayo, 16/11/2026): la bandeja ya
+               no los lista, y una tarjeta que los contara diría un número que el deep link no puede mostrar. */
+            'tickets_sin_responder' => (int) SupportTicket::query()->sinResponder()->sinPrueba()->sinEnsayo()->count(),
+            'tickets_abiertos_hoy'  => (int) SupportTicket::query()->abiertoHoy()->sinPrueba()->sinEnsayo()->count(),
             'leads_sin_responder'   => (int) Lead::query()->requiereRevision(true)->count(),
             /* Momento del cálculo, para el "actualizado hace…" de la vista. Sale de AppTime y no de
                now() para respetar el reloj virtual de local, igual que el resto del sistema. */

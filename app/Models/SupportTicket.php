@@ -187,6 +187,80 @@ class SupportTicket extends Model
         )->withCasts(['es_prueba' => 'boolean']);
     }
 
+    /**
+     * Subconsulta de los ids de clientes de ENSAYO (`clients.es_ensayo = 1`): los negocios de prueba que
+     * maneja una sesión haciendo de cliente (misión soporte-ocultar-tickets-ensayo, 16/11/2026).
+     *
+     * ⚠️ No es lo mismo que «en prueba»: un lead real en su prueba gratuita tiene `clients.estado` en
+     * `prueba` SIN la marca de ensayo, y un ensayo puede estar en cualquier estado. Son dos ejes distintos.
+     *
+     * @return \Illuminate\Database\Query\Builder
+     */
+    protected static function ids_de_clientes_de_ensayo()
+    {
+        return \Illuminate\Support\Facades\DB::table('clients')->select('clients.id')->where('clients.es_ensayo', 1);
+    }
+
+    /**
+     * Todos los tickets MENOS los de un cliente de ensayo: lo que ve y cuenta el operador humano en la bandeja
+     * de Soporte. Martín y los `claude/*` NO pasan por este scope: siguen viendo y atendiendo esos tickets.
+     *
+     * ⚠️ El `whereNull` es la misma DEFENSA que en {@see self::scopeSinPrueba()}: en MySQL `NULL NOT IN (...)`
+     * da NULL y un ticket sin cliente desaparecería de la bandeja.
+     *
+     * @param \Illuminate\Database\Eloquent\Builder $query
+     *
+     * @return \Illuminate\Database\Eloquent\Builder
+     */
+    public function scopeSinEnsayo($query)
+    {
+        return $query->where(function ($fuera) {
+            $fuera->whereNull('support_tickets.client_id')
+                ->orWhereNotIn('support_tickets.client_id', self::ids_de_clientes_de_ensayo());
+        });
+    }
+
+    /**
+     * Suma a la fila la columna calculada `es_ensayo` (booleana), para que el SPA sepa que ese ticket no va
+     * a la bandeja aunque le llegue por un evento en vivo o por un GET puntual. Mismo patrón que
+     * {@see self::scopeWithEsPrueba()} y mismo criterio que {@see self::scopeSinEnsayo()}.
+     *
+     * @param \Illuminate\Database\Eloquent\Builder $query
+     *
+     * @return \Illuminate\Database\Eloquent\Builder
+     */
+    public function scopeWithEsEnsayo($query)
+    {
+        if ($query->getQuery()->columns === null) {
+            $query->select('support_tickets.*');
+        }
+
+        return $query->selectRaw(
+            'EXISTS(SELECT 1 FROM clients WHERE clients.id = support_tickets.client_id AND clients.es_ensayo = 1) as es_ensayo'
+        )->withCasts(['es_ensayo' => 'boolean']);
+    }
+
+    /**
+     * Si ESTE ticket es de un cliente de ensayo.
+     *
+     * Consulta `clients.es_ensayo` por `client_id` y no la relación `client`: los caminos que la usan (el
+     * aviso de atención, el escalado) no siempre la tienen cargada, y una relación cargada antes de que se
+     * marcara el cliente daría la respuesta vieja.
+     *
+     * @return bool
+     */
+    public function es_de_ensayo(): bool
+    {
+        if ($this->client_id === null) {
+            return false;
+        }
+
+        return \Illuminate\Support\Facades\DB::table('clients')
+            ->where('clients.id', $this->client_id)
+            ->where('clients.es_ensayo', 1)
+            ->exists();
+    }
+
     public function es_erp_sin_identidad_verificada(): bool
     {
         return $this->source === 'erp' && ! $this->agentes_erp;

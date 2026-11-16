@@ -43,7 +43,12 @@ class SupportTicketController extends BaseController
 
         // Relaciones de bandeja: preview del último mensaje sin cargar toda la conversación (evita payload enorme).
         // Sin filtro por asignado: `assigned_filter` / `filter` ya no recortan la lista.
+        /* Sin los tickets de un cliente de ENSAYO (misión soporte-ocultar-tickets-ensayo, 16/11/2026): son los
+           negocios de prueba que atiende Martín y el operador nunca los usa. El filtro va ACÁ y no en
+           ticketQueryForInbox(), que también arma la fila que devuelven store/update/attention/toggles con
+           `->where('id')`: ahí un ticket de ensayo tiene que seguir saliendo, no un `model: null`. */
         $query = $this->ticketQueryForInbox()
+            ->sinEnsayo()
             ->orderBy('updated_at', 'desc');
 
         // Responde lista completa, totales legacy (nav global) y filas para botones por operador.
@@ -115,13 +120,17 @@ class SupportTicketController extends BaseController
     /**
      * Subconsulta de ids de tickets: sin los de prueba (lo que cuentan las métricas) o solo los de prueba.
      *
+     * 🔴 En las DOS ramas quedan afuera los tickets de un cliente de ensayo
+     * ({@see SupportTicket::scopeSinEnsayo()}): no cuentan en los no leídos de la bandeja ni en los del botón
+     * «Prueba», aunque el ensayo esté en estado `prueba`.
+     *
      * @param bool $de_prueba
      *
      * @return \Illuminate\Database\Eloquent\Builder
      */
     protected function ids_de_tickets(bool $de_prueba = false)
     {
-        $query = SupportTicket::query()->select('support_tickets.id');
+        $query = SupportTicket::query()->select('support_tickets.id')->sinEnsayo();
 
         return $de_prueba ? $query->dePrueba() : $query->sinPrueba();
     }
@@ -152,6 +161,9 @@ class SupportTicketController extends BaseController
             /* `es_prueba`: el filtro «Prueba» de la bandeja (misión prueba-ayuda-unificada-en-soporte). La lista
                sigue trayendo TODOS los tickets (un SPA viejo no pierde ninguno); el SPA nuevo los separa. */
             ->withEsPrueba()
+            /* `es_ensayo`: la marca viaja en la fila para que el SPA no meta en la bandeja un ticket de ensayo que
+               le llegue por un evento en vivo o por la respuesta de una acción. Acá NO se filtra: ver index(). */
+            ->withEsEnsayo()
             /* `martin_activity_count` / `martin_writes_count`: el puntito de la auditoría de Martín en el encabezado
                de la conversación (misión cruzada auditoria-de-martin). Dos subconsultas que resuelve el índice. */
             ->tap(function ($query) {
@@ -194,7 +206,8 @@ class SupportTicketController extends BaseController
             ];
         }
 
-        $has_unassigned_tickets = SupportTicket::query()->whereNull('assigned_admin_id')->exists();
+        // Sin los de ensayo: si lo único sin asignar es un ticket de ensayo, la fila «Sin asignar» no aparece.
+        $has_unassigned_tickets = SupportTicket::query()->whereNull('assigned_admin_id')->sinEnsayo()->exists();
         $unassigned_unread = (int) ($count_map['unassigned'] ?? 0);
         if ($has_unassigned_tickets || $unassigned_unread > 0) {
             $rows[] = [
@@ -247,8 +260,9 @@ class SupportTicketController extends BaseController
     {
         $aggregates = SupportTicket::query()
             ->where('status', SupportTicket::STATUS_ABIERTO)
-            // Sin los tickets de prueba gratuita, como el resto de los contadores.
+            // Sin los tickets de prueba gratuita ni los de un cliente de ensayo, como el resto de los contadores.
             ->sinPrueba()
+            ->sinEnsayo()
             ->selectRaw('assigned_admin_id as aid, COUNT(*) as cnt')
             ->groupBy('assigned_admin_id')
             ->get();
@@ -294,7 +308,7 @@ class SupportTicketController extends BaseController
             ->where('sender_type', 'user')
             ->whereNull('read_at')
             ->whereHas('ticket', function ($query) use ($admin_id) {
-                $query->where('assigned_admin_id', $admin_id)->sinPrueba();
+                $query->where('assigned_admin_id', $admin_id)->sinPrueba()->sinEnsayo();
             })
             ->count();
 
@@ -307,7 +321,7 @@ class SupportTicketController extends BaseController
                     $sub_query
                         ->where('assigned_admin_id', '<>', $admin_id)
                         ->orWhereNull('assigned_admin_id');
-                })->sinPrueba();
+                })->sinPrueba()->sinEnsayo();
             })
             ->count();
 
@@ -330,6 +344,9 @@ class SupportTicketController extends BaseController
             /* `es_prueba` también acá: la bandeja trae por este GET el ticket nuevo que avisó Pusher, y sin la marca
                un ticket de prueba caería en «Clientes». */
             ->withEsPrueba()
+            /* `es_ensayo` también acá. Este GET sigue devolviendo CUALQUIER ticket por id, incluido uno de ensayo:
+               la marca es lo que le dice al SPA que no lo meta en la bandeja. */
+            ->withEsEnsayo()
             /* Los contadores de la auditoría de Martín, igual que en el listado. */
             ->tap(function ($query) {
                 MartinActivityService::sumar_contadores($query);
