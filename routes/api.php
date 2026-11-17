@@ -795,6 +795,13 @@ Route::middleware('claude.task.key')
            `dry_run` es true por defecto y NO le pega al cliente (solo dice a qué frente se le pediría); con dry_run=false exige
            confirm_client_name. NUNCA lleva la clave del cliente ni el token en un log, un mensaje de error ni una respuesta de error. */
         Route::post('clients/{id}/acceso-soporte', 'Api\ClaudeClientAccesoSoporteController@acceso_soporte_json');
+        /* 🔴 Conexión de WhatsApp (Kapso) de UN cliente, provisionada desde el admin para que las credenciales no pasen por el navegador del
+           dueño (misión `kapso-secretos-fuera-del-navegador`, 17/11/2026). Vive en ClaudeClientWhatsappConexionController
+           (ClientWhatsappConexionService). GET = estado sin secretos; PUT = `phone_number_id`, `webhook_secret`, `is_active`, con `dry_run`
+           (true por defecto) y `confirm_client_name`. La clave de Kapso la inyecta el admin desde su `whatsapp_config`: un `kapso_api_key`
+           en el cuerpo es 422. NUNCA devuelve ni loguea la clave de Kapso, la del cliente ni el webhook_secret. */
+        Route::get('clients/{id}/whatsapp-conexion', 'Api\ClaudeClientWhatsappConexionController@whatsapp_conexion_estado_json');
+        Route::put('clients/{id}/whatsapp-conexion', 'Api\ClaudeClientWhatsappConexionController@whatsapp_conexion_provisionar_json');
         Route::get('versions', 'Api\ClaudeClientOpsController@versions_json');
         Route::post('versions', 'Api\ClaudeClientOpsController@versions_store_json');
         Route::post('versions/{id}/status', 'Api\ClaudeClientOpsController@versions_status_json');
