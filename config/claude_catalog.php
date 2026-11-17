@@ -1840,6 +1840,36 @@ return [
                 ['nombre' => 'motivo', 'obligatorio' => false, 'validacion' => 'string de hasta 120, UTF-8 válido, sin caracteres de control', 'que_es' => 'Para qué se entra (queda en la auditoría del cliente).'],
             ],
         ],
+        'GET api/claude/clients/{id}/whatsapp-conexion' => [
+            'para_que'     => 'Estado de la CONEXIÓN DE WHATSAPP (Kapso) del sistema de UN cliente, leído del empresa-api del cliente (GET /api/admin-sync/whatsapp-bot/conexion, firmado con clients.api_key en X-Admin-Api-Key). Sirve para saber, antes de implementar los Agentes de IA, si el cliente ya tiene el número, la clave y el secreto del webhook cargados y si el bot está activo. 🔴 NUNCA devuelve la clave de Kapso ni el secreto del webhook: solo banderas. Respuesta 200 siempre: {client_id, estado, mensaje, conexion}. `estado`: ok | version_vieja (el cliente todavía no tiene la actualización que trae esta puerta) | sin_clave | clave_rechazada | sin_frente | sin_conexion | rechazada. `conexion` (solo con estado ok): {existe, phone_number_id, kapso_api_key_configurada, webhook_secret_configurado, conexion_configurada, is_active}. Errores: 404 cliente_inexistente.',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; acepta id numérico o uuid', 'que_es' => 'El cliente cuya conexión de WhatsApp se consulta.'],
+            ],
+        ],
+        'PUT api/claude/clients/{id}/whatsapp-conexion' => [
+            'para_que'     => 'PROVISIONA la conexión de WhatsApp (Kapso) en el sistema de UN cliente sin que la clave compartida del proyecto pase por su navegador ni por quien llama: el admin toma la clave de Kapso de su propia whatsapp_config y la envía al empresa-api del cliente (PUT /api/admin-sync/whatsapp-bot/conexion, firmado con clients.api_key en X-Admin-Api-Key). Quien llama aporta solo el phone_number_id, el webhook_secret del número y, si hace falta, is_active. Pedido: {phone_number_id?: string, webhook_secret?: string, is_active?: bool, dry_run?: bool (DEFAULT true), confirm_client_name?: string (obligatorio si dry_run=false)}; al menos uno de phone_number_id, webhook_secret o is_active; lista cerrada: una clave de más es 422, y un `kapso_api_key` en el cuerpo es 422 con su propio motivo (la clave del proyecto la pone el admin). Con dry_run=true NO se le pega al cliente: dice a qué cliente y frente iría y qué cambiaría (el secreto como booleano, la clave de Kapso como texto fijo). 🔴 Ni la clave de Kapso, ni la api_key del cliente, ni el webhook_secret salen jamás en una respuesta, un log o un mensaje de error. Respuesta 200: {client_id, estado, mensaje, conexion}. `estado`: ok | version_vieja | sin_clave | clave_rechazada | sin_frente | sin_conexion | sin_kapso (el admin no tiene UNA clave de Kapso activa y única en whatsapp_config) | rechazada (el cliente contestó 409/422: por ejemplo sin dueño resoluble, o activar sin las tres credenciales). Errores: 404 cliente_inexistente; 422 validacion.',
+            'escribe'      => true,
+            'peligrosidad' => 'alta',
+            'frenos'       => [
+                '`dry_run` es true por defecto y estricto: solo true, false, 1 o 0. Un valor que no se entiende es 422 y NO una escritura.',
+                'confirm_client_name obligatorio con dry_run=false: tiene que coincidir con clients.name (recorte y minúsculas) y el error NO revela el nombre correcto.',
+                'Lista cerrada de parámetros; `kapso_api_key` en el cuerpo se rechaza: la clave del proyecto se toma del admin, nunca de quien llama.',
+                'Campo omitido o vacío no se toca del lado del cliente: esta ruta nunca borra una credencial.',
+                'Sin clave de Kapso única y activa en whatsapp_config el estado es sin_kapso y no se envía nada: no se adivina cuál usar.',
+                'Sin seguir redirecciones y con timeout de 15 s; respuestas con Cache-Control: no-store, private.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; acepta id numérico o uuid', 'que_es' => 'El cliente al que se le provisiona la conexión.'],
+                ['nombre' => 'phone_number_id', 'obligatorio' => false, 'validacion' => 'string de hasta 191', 'que_es' => 'ID del número de WhatsApp en Kapso (no es el teléfono).'],
+                ['nombre' => 'webhook_secret', 'obligatorio' => false, 'validacion' => 'string de hasta 191', 'que_es' => 'Secreto con el que Kapso firma los mensajes entrantes de ese número.'],
+                ['nombre' => 'is_active', 'obligatorio' => false, 'validacion' => 'booleano', 'que_es' => 'Si el bot queda activo. Activarlo exige las tres credenciales ya cargadas.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'booleano estricto (true, false, 1, 0) — 🔴 DEFAULT true', 'que_es' => 'true solo muestra qué se haría. false escribe de verdad.'],
+                ['nombre' => 'confirm_client_name', 'obligatorio' => false, 'validacion' => 'string de hasta 190; tiene que coincidir con clients.name (trim + minúsculas)', 'que_es' => 'Obligatorio con dry_run=false. Redundancia contra provisionar al cliente equivocado.'],
+            ],
+        ],
         'GET api/claude/versions' => [
             'para_que'     => 'Catálogo de versiones con la cantidad de ítems por versión ya contada. Sin paginación: son pocas filas.',
             'escribe'      => false,
