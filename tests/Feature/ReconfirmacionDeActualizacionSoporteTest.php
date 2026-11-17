@@ -128,6 +128,46 @@ class ReconfirmacionDeActualizacionSoporteTest extends TestCase
         Queue::assertPushed(\App\Jobs\RunDeploymentJob::class, 1);
     }
 
+    public function test_reconfirmacion_copiada_con_comillas_conserva_la_pausa_y_rechaza_ambiguedades(): void
+    {
+        foreach (['sistema', 'tienda'] as $target) {
+            [$row, $ticket] = $this->scenario($target);
+            $input = $this->claim($ticket) + ['operation_id' => 'reconfirmacion-copia-' . $ticket->id, 'schedule_id' => $row->id];
+            $this->postJson($this->url($ticket, 'upgrade-reconfirmation'), $input, $this->headers)->assertOk();
+            app(SupportUpgradeReconfirmationService::class)->context($ticket->id);
+            $operation = SupportCodexOperation::findOrFail($row->fresh()->reconfirmation_operation_id);
+            $phrase = 'Confirmo que nadie está usando el sistema y pueden actualizar ahora';
+            $message = $this->inbound($ticket, '«' . $phrase . '».');
+            $accept = $this->claim($ticket) + ['proposal_operation_id' => $operation->operation_id, 'schedule_id' => $row->id];
+            foreach (['Confirmo', 'No ' . $phrase, $phrase . ' pero esperen', '"' . $phrase,
+                str_replace('ahora', 'mañana', $phrase)] as $wrong) {
+                $message->update(['body' => $wrong]);
+                $response = $this->postJson($this->url($ticket, 'upgrade-agreement'), $accept, $this->headers)->assertStatus(422);
+                $this->assertStringContainsString('No se autorizó el corte', $response->json('message'));
+                $this->assertNull($row->fresh()->reconfirmed_at);
+                $this->assertNotNull($row->agreement->fresh()->accepted_at);
+            }
+            $message->update(['body' => '«' . $phrase . '».', 'reply_to_message_id' => $row->agreement->operation->message_id]);
+            $this->postJson($this->url($ticket, 'upgrade-agreement'), $accept, $this->headers)->assertStatus(422);
+            $message->update(['reply_to_message_id' => null]);
+            $notice = SupportMessage::create(['support_ticket_id' => $ticket->id, 'sender_type' => 'admin', 'kind' => 'text',
+                'body' => 'Estamos registrando tu confirmación.', 'whatsapp_message_id' => 'wamid.avance.' . $ticket->id]);
+            SupportCodexCase::where('support_ticket_id', $ticket->id)->update(['expected_message_id' => $notice->id]);
+            $accept['expected_message_id'] = $notice->id;
+            $this->postJson($this->url($ticket, 'upgrade-agreement'), $accept, $this->headers)->assertStatus(422);
+            $accept['confirmation_message_id'] = $message->id;
+            $this->postJson($this->url($ticket, 'upgrade-agreement'), $accept, $this->headers)->assertOk()
+                ->assertJsonPath('upgrade_reconfirmation.confirmation_message_id', $message->id);
+            $this->assertTrue(app(SupportUpgradeReconfirmationService::class)->valid_confirmation($row->fresh(), $message));
+            $later = $this->inbound($ticket, 'No, todavía lo estamos usando');
+            $accept = array_replace($accept, $this->claim($ticket));
+            $this->postJson($this->url($ticket, 'upgrade-agreement'), $accept, $this->headers)->assertStatus(422);
+            $later->update(['body' => 'Gracias']);
+            $this->postJson($this->url($ticket, 'upgrade-agreement'), $accept, $this->headers)->assertStatus(422);
+            Queue::assertNothingPushed();
+        }
+    }
+
     public function test_aprobacion_y_envio_incierto_no_se_interpretan_como_silencio_del_cliente(): void
     {
         [$row, $ticket] = $this->scenario();

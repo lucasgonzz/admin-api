@@ -422,6 +422,100 @@ class SoporteAutomaticoEnCodexTest extends TestCase
             ->assertJsonPath('window.starts_at', '2026-10-26T12:35:00-03:00');
     }
 
+    /** @dataProvider formatos_de_confirmacion_copiada */
+    public function test_tienda_acepta_frase_completa_copiada_con_comillas_y_conserva_guardas(string $opening, string $closing): void
+    {
+        [$ticket, $case, $data] = $this->preparar_propuesta_upgrade();
+        $store = \App\Models\ClientEcommerce::create(['client_id' => $ticket->client_id, 'domain' => 'doblep.test',
+            'spa_url' => 'https://doblep.test', 'api_url' => 'https://api.doblep.test', 'status' => 'active']);
+        $evidence = \App\Models\SupportCodexMissionFixEvidence::where('support_ticket_id', $ticket->id)->firstOrFail();
+        $payload = $evidence->payload; $payload['commits'] = ['tienda-api' => str_repeat('a', 40)]; $evidence->update(['payload' => $payload]);
+        $data = array_replace($data, ['maintenance_mode' => 'coordinated', 'target' => 'tienda', 'client_ecommerce_id' => $store->id,
+            'minimum_minutes' => 30, 'ends_at' => '2026-10-26T13:30:00-03:00']);
+        $base = $this->base . '/tickets/' . $ticket->id;
+        $sent = $this->postJson($base . '/upgrade-proposal', $data, $this->headers)->assertOk()->json('operation');
+        $agreement = SupportCodexUpgradeAgreement::where('support_ticket_id', $ticket->id)->firstOrFail();
+        $mission = \App\Models\SupportCodexMission::where('support_ticket_id', $ticket->id)->firstOrFail();
+        $phrase = $agreement->confirmation_phrase;
+        $message = $this->inbound($ticket, $opening . $phrase . $closing);
+        $message->update(['whatsapp_message_id' => 'wamid.copia-' . $ticket->id]);
+        $claim = $this->claim($ticket);
+        $accept = ['lease_token' => $claim['lease_token'], 'expected_message_id' => $message->id,
+            'proposal_operation_id' => $sent['id'], 'mission_id' => $mission->id];
+        foreach (['Sí, confirmo', 'No ' . $phrase, $phrase . ' pero no ahora', str_replace('26/10/2026', '27/10/2026', $phrase),
+            str_replace('13:00', '14:00', $phrase), str_replace('doblep.test', 'otra.test', $phrase),
+            str_replace('de la tienda', 'del sistema', $phrase), '"' . $phrase, '“' . $phrase . '»'] as $wrong) {
+            $message->update(['body' => $wrong]);
+            $response = $this->postJson($base . '/upgrade-agreement', $accept, $this->headers)->assertStatus(422);
+            $this->assertStringContainsString('No se modificó el acuerdo ni se autorizó el corte', $response->json('message'));
+            $this->assertNull($agreement->fresh()->accepted_at);
+            $this->assertNull($agreement->fresh()->confirmation_message_id);
+        }
+        $message->update(['body' => $opening . $phrase . $closing, 'reply_to_message_id' => $data['expected_message_id']]);
+        $this->postJson($base . '/upgrade-agreement', $accept, $this->headers)->assertStatus(422);
+        $message->update(['reply_to_message_id' => null]);
+        $other_ticket = $this->ticket();
+        $other_message = $this->inbound($other_ticket, $opening . $phrase . $closing);
+        $other_message->update(['whatsapp_message_id' => 'wamid.otro-ticket-' . $ticket->id]);
+        $this->postJson($base . '/upgrade-agreement', array_replace($accept, ['expected_message_id' => $other_message->id]), $this->headers)->assertStatus(409);
+        $this->postJson($base . '/upgrade-agreement', array_replace($accept, ['mission_id' => 999999999]), $this->headers)->assertStatus(409);
+        $outbound = SupportMessage::findOrFail($sent['message_id']);
+        $original_body = $outbound->body;
+        $outbound->update(['body' => $original_body . ' Cambio de horario.']);
+        $this->postJson($base . '/upgrade-agreement', $accept, $this->headers)->assertStatus(422);
+        $outbound->update(['body' => $original_body]);
+        $ticket->update(['source' => 'erp']);
+        $this->postJson($base . '/upgrade-agreement', $accept, $this->headers)->assertStatus(403);
+        $ticket->update(['source' => 'whatsapp']);
+        $notice = SupportMessage::create(['support_ticket_id' => $ticket->id, 'sender_type' => 'admin', 'kind' => 'text',
+            'body' => 'Estamos corrigiendo el registro de tu confirmación.', 'whatsapp_message_id' => 'wamid.avance-' . $ticket->id]);
+        // La reserva vigente ya fue actualizada por el circuito que emitió el aviso.
+        $case->fresh()->update(['expected_message_id' => $notice->id]);
+        $this->getJson($base, $this->headers)->assertOk()->assertJsonPath('ticket.capabilities.upgrade_confirmation_message', true);
+        $this->postJson($base . '/upgrade-agreement', $accept, $this->headers)->assertStatus(409);
+        $accept['expected_message_id'] = $notice->id;
+        $this->postJson($base . '/upgrade-agreement', $accept, $this->headers)->assertStatus(422);
+        $accept['confirmation_message_id'] = $message->id;
+        $this->postJson($base . '/upgrade-agreement', array_replace($accept, ['confirmation_message_id' => $other_message->id]), $this->headers)->assertStatus(422);
+        $this->postJson($base . '/upgrade-agreement', array_replace($accept, ['confirmation_message_id' => $notice->id]), $this->headers)->assertStatus(422);
+        $this->postJson($base . '/upgrade-agreement', array_replace($accept, ['confirmation_message_id' => $data['expected_message_id']]), $this->headers)->assertStatus(422);
+        $this->postJson($base . '/upgrade-agreement', $accept, $this->headers)->assertOk()
+            ->assertJsonPath('upgrade_agreement.status', 'accepted')->assertJsonPath('upgrade_agreement.target', 'tienda')
+            ->assertJsonPath('upgrade_agreement.confirmation_message_id', $message->id);
+        $this->assertNotNull($agreement->fresh()->accepted_at);
+        $this->assertSame($evidence->id, $agreement->fresh()->mission_fix_evidence_id);
+        $this->assertSame($case->mission, $case->fresh()->mission);
+        $this->assertSame('open', $ticket->fresh()->status);
+        $this->assertDatabaseMissing('support_codex_scheduled_upgrades', ['agreement_id' => $agreement->id]);
+        $later = $this->inbound($ticket, 'Esperen, todavía estamos usando la tienda');
+        $later->update(['whatsapp_message_id' => 'wamid.posterior-' . $ticket->id]);
+        $claim = $this->postJson($base . '/claim', ['worker_id' => 'pc-lucas', 'expected_message_id' => $later->id,
+            'lease_token' => $accept['lease_token']], $this->headers)->assertOk()->json();
+        $accept = array_replace($accept, ['lease_token' => $claim['lease_token'], 'expected_message_id' => $later->id]);
+        $this->postJson($base . '/upgrade-agreement', $accept, $this->headers)->assertStatus(422);
+        $later->update(['body' => 'Gracias']);
+        $this->postJson($base . '/upgrade-agreement', $accept, $this->headers)->assertStatus(422);
+        $this->assertSame((int) $message->id, (int) $agreement->fresh()->confirmation_message_id);
+        // Una propuesta nueva enviada invalida la anterior aunque su frase siga siendo exacta.
+        $new_operation = SupportCodexOperation::where('operation_id', $sent['id'])->firstOrFail()->replicate();
+        $new_operation->operation_id = 'propuesta-nueva-' . $ticket->id;
+        $new_operation->save();
+        $new_agreement = $agreement->replicate();
+        $new_agreement->support_codex_operation_id = $new_operation->id;
+        $new_agreement->accepted_at = null;
+        $new_agreement->confirmation_message_id = null;
+        $new_agreement->save();
+        $this->postJson($base . '/upgrade-agreement', $accept, $this->headers)->assertStatus(409)
+            ->assertJsonPath('message', 'proposal_not_current: La propuesta no es la última enviada para esta corrección.');
+        $this->assertNull($new_agreement->fresh()->accepted_at);
+    }
+
+    public function formatos_de_confirmacion_copiada(): array
+    {
+        return ['dobles exteriores y punto' => ['"', '".'], 'punto interior' => ['"', '."'],
+            'angulares' => ['«', '».'], 'tipográficas' => ['“', '”!'], 'simples' => ["'", "'."], 'sin comillas' => ['', '.']];
+    }
+
     public function test_tienda_tiene_destino_visible_release_propio_y_programacion_por_acuerdo(): void
     {
         \Illuminate\Support\Facades\Queue::fake();

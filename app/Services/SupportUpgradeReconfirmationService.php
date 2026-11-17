@@ -151,11 +151,11 @@ class SupportUpgradeReconfirmationService
         abort_unless(! isset($data['schedule_id']) || (int) $data['schedule_id'] === (int) $row->id, 409, 'upgrade_reconfirmation_changed');
         $this->sync($row);
         $this->assert_mission($row, $data);
-        $inbound = SupportMessage::where('support_ticket_id', $ticket->id)->whereKey($data['expected_message_id'])->where('sender_type', 'user')->first();
+        $inbound = SupportCodexUpgradeAgreementService::confirmation_message((int) $ticket->id, $data);
         abort_unless($row->status === Scheduled::SCHEDULED && ! $row->overnight_fallback && $this->sent($operation)
             && $row->reconfirmation_expires_at !== null && Carbon::parse($row->reconfirmation_expires_at, 'UTC')->greaterThan(now())
             && $inbound !== null && (int) $inbound->id > (int) $operation->message_id
-            && $this->confirms($inbound, $operation), 422, 'upgrade_reconfirmation_required');
+            && $this->confirms($inbound, $operation), 422, 'upgrade_reconfirmation_required: No se pudo registrar la confirmación de la pausa vigente. No se autorizó el corte. Revisá el mensaje original del dueño y la propuesta de reconfirmación de esta misión; la aceptación del horario se conserva, pero hace falta una confirmación vigente de que nadie está usando el sistema.');
         if ($row->reconfirmed_at !== null) {
             abort_unless((int) $row->reconfirmation_message_id === (int) $inbound->id, 409, 'upgrade_reconfirmation_changed');
         } else {
@@ -275,8 +275,10 @@ class SupportUpgradeReconfirmationService
 
     private function confirms(SupportMessage $message, SupportCodexOperation $operation): bool
     {
-        $body = Str::ascii(mb_strtolower(rtrim(trim((string) $message->body), '.! ')));
-        return ! empty($message->whatsapp_message_id) && ($body === Str::ascii(mb_strtolower($this->phrase()))
+        $body = SupportCodexUpgradeAgreementService::normalized_confirmation((string) $message->body);
+        return ! empty($message->whatsapp_message_id)
+            && ($message->reply_to_message_id === null || (int) $message->reply_to_message_id === (int) $operation->message_id)
+            && ($body === SupportCodexUpgradeAgreementService::normalized_confirmation($this->phrase())
             || ((int) $message->reply_to_message_id === (int) $operation->message_id
                 && in_array($body, ['si', 'confirmo', 'si, confirmo', 'dale', 'si, dale', 'pueden actualizar', 'nadie lo esta usando'], true)));
     }

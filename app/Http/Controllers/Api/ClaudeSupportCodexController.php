@@ -216,6 +216,7 @@ class ClaudeSupportCodexController extends Controller
         $data = $request->validate([
             'lease_token' => 'required|string|min:32|max:128',
             'expected_message_id' => 'required|integer|min:1',
+            'confirmation_message_id' => 'sometimes|integer|min:1',
             'proposal_operation_id' => 'required|string|max:120|regex:/^[a-zA-Z0-9_-]+$/',
             'schedule_id' => 'sometimes|integer|min:1',
             'mission_id' => 'sometimes|integer|min:1',

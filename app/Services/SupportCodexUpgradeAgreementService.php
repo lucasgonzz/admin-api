@@ -244,10 +244,9 @@ class SupportCodexUpgradeAgreementService
             }
             $outbound = SupportMessage::where('support_ticket_id', $id)->whereKey($proposal->operation->message_id)
                 ->where('sender_type', 'admin')->first();
-            $inbound = SupportMessage::where('support_ticket_id', $id)->whereKey($data['expected_message_id'])
-                ->where('sender_type', 'user')->first();
+            $inbound = self::confirmation_message($id, $data);
             if (! $this->is_exact_confirmation($proposal, $inbound, $outbound)) {
-                $this->fail(422, 'upgrade_confirmation_required', 'Hace falta que el dueño confirme esa propuesta exacta en el ticket.');
+                $this->fail(422, 'upgrade_confirmation_required', 'No se pudo registrar la aceptación: el mensaje no confirma la propuesta exacta vigente. No se modificó el acuerdo ni se autorizó el corte. Revisá el mensaje del dueño y seleccioná la misma propuesta y misión; conservá la confirmación original si ya contiene la frase completa con fecha, hora y destino.');
             }
             $this->assert_valid_proposal($ticket, $case, [
                 'mission_thread_id' => $evidence->mission_thread_id, 'mission_hash' => $evidence->mission_hash,
@@ -281,6 +280,19 @@ class SupportCodexUpgradeAgreementService
             && $this->confirms($inbound, $outbound, $proposal);
     }
 
+    /** Un aviso del admin no reemplaza el sí real; un nuevo mensaje del dueño exige releerlo. */
+    public static function confirmation_message(int $ticket_id, array $data): ?SupportMessage
+    {
+        $message = SupportMessage::where('support_ticket_id', $ticket_id)
+            ->whereKey($data['confirmation_message_id'] ?? $data['expected_message_id'])->where('sender_type', 'user')->first();
+        if (isset($data['confirmation_message_id']) && $message !== null
+            && SupportMessage::where('support_ticket_id', $ticket_id)->where('sender_type', 'user')->where('id', '>', $message->id)->exists()) {
+            return null;
+        }
+
+        return $message;
+    }
+
     private function assert_owner(SupportTicket $ticket): void
     {
         if ($ticket->source !== 'whatsapp' || $ticket->client_employee_id !== null || $ticket->client === null) {
@@ -290,21 +302,30 @@ class SupportCodexUpgradeAgreementService
 
     private function confirms(SupportMessage $inbound, SupportMessage $outbound, SupportCodexUpgradeAgreement $proposal): bool
     {
-        $body = $this->normalized_confirmation((string) $inbound->body);
+        $body = self::normalized_confirmation((string) $inbound->body);
         if ($inbound->reply_to_message_id === null) {
-            return $body === $this->normalized_confirmation($proposal->confirmation_phrase);
+            return $body === self::normalized_confirmation($proposal->confirmation_phrase);
         }
         if ((int) $inbound->reply_to_message_id !== (int) $outbound->id) {
             return false;
         }
 
         return in_array($body, ['si', 'si, confirmo', 'si, acepto', 'confirmo', 'acepto', 'dale', 'si, dale', 'de acuerdo', 'si, pueden actualizarlo'], true)
-            || $body === $this->normalized_confirmation($proposal->confirmation_phrase);
+            || $body === self::normalized_confirmation($proposal->confirmation_phrase);
     }
 
-    private function normalized_confirmation(string $body): string
+    public static function normalized_confirmation(string $body): string
     {
-        return Str::ascii(mb_strtolower(rtrim(trim($body), '.! ')));
+        $body = rtrim(trim($body), '.! ');
+        // Solo se quita un par completo de comillas de presentación, nunca texto adicional.
+        foreach (['"' => '"', "'" => "'", '«' => '»', '“' => '”', '‘' => '’'] as $opening => $closing) {
+            if (mb_substr($body, 0, 1) === $opening && mb_substr($body, -1) === $closing) {
+                $body = rtrim(trim(mb_substr($body, 1, mb_strlen($body) - 2)), '.! ');
+                break;
+            }
+        }
+
+        return Str::ascii(mb_strtolower($body));
     }
 
     private function present(SupportCodexUpgradeAgreement $proposal): array
