@@ -85,5 +85,8 @@ class Kernel extends HttpKernel
         'recursos.escritura' => \App\Http\Middleware\RecursosEscritura::class,
         // Limitador propio del centro: cubetas por grupo de rutas, por IP o por token del centro.
         'recursos.throttle' => \App\Http\Middleware\RecursosThrottle::class,
+        // Perfil «Sólo Leads» (misión embudo-whatsapp-precios, E5): lista blanca de rutas, estado y nota. Va DESPUÉS de
+        // `auth` / `auth:sanctum` y cuelga de toda ruta autenticada (lo verifica un test que recorre las rutas).
+        'admin.solo_leads' => \App\Http\Middleware\SoloLeadsAllowlist::class,
     ];
 }

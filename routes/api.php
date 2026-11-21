@@ -1103,7 +1103,9 @@ Route::prefix('admin')->group(function () {
         ->middleware('signed')
         ->middleware('throttle:adjuntos-firmados');
 
-    Route::middleware('auth:sanctum')->group(function () {
+    // `admin.solo_leads` (E5): perfil «Sólo Leads». Con el flag apagado vuelve en la primera línea; con él
+    // encendido sólo deja pasar lo de AdminSoloLeadsPolicy. Toda ruta autenticada nueva debe pasar por acá.
+    Route::middleware(['auth:sanctum', 'admin.solo_leads'])->group(function () {
         Route::post('logout', [AuthController::class, 'logout']);
         Route::get('me', [AuthController::class, 'me']);
         Route::put('me', [AuthController::class, 'update_profile']);

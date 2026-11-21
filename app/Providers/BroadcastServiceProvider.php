@@ -61,7 +61,10 @@ class BroadcastServiceProvider extends ServiceProvider
         });
 
         // Registra /broadcasting/auth con Sanctum para que los tokens Bearer funcionen en canales privados.
-        Broadcast::routes(['middleware' => ['auth:sanctum']]);
+        //
+        // `admin.solo_leads` (E5): el perfil «Sólo Leads» sólo puede pedir autorización por POST (ver
+        // AdminSoloLeadsPolicy); qué canales se le conceden lo deciden los callbacks de routes/channels.php.
+        Broadcast::routes(['middleware' => ['auth:sanctum', 'admin.solo_leads']]);
 
         require base_path('routes/channels.php');
     }

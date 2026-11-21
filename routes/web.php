@@ -9,7 +9,7 @@ Route::middleware('guest')->group(function () {
 });
 
 Route::post('/logout', 'Auth\LoginController@logout')
-    ->middleware('auth')
+    ->middleware(['auth', 'admin.solo_leads'])
     ->name('logout');
 
 Route::get('/', function () {
@@ -44,7 +44,7 @@ Route::get('/recall', function () {
 });
 
 // Panel admin (autenticado)
-Route::middleware('auth')->group(function () {
+Route::middleware(['auth', 'admin.solo_leads'])->group(function () {
 
     // Versions + subrecursos
     Route::resource('versions', 'VersionController');
