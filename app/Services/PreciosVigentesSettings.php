@@ -374,19 +374,46 @@ class PreciosVigentesSettings
         $lineas[] = '- Agentes de IA Full: ' . self::formato_pesos((float) $contrato['agentes']['full']['mensualidad']) . ' por mes de base.';
 
         $implementaciones = $contrato['implementaciones'];
-        $lineas[] = '- Implementación (pago único, en pesos; se arranca con el ' . self::numero_sin_ceros($implementaciones['anticipo_porcentaje'])
-            . ' %, que es el valor entre paréntesis; '
+
+        /* Anticipo guardado: toda cifra de la implementación sale de acá. Con 0 o 100 no hay «arrancar con una parte». */
+        $anticipo = (float) $implementaciones['anticipo_porcentaje'];
+        $hay_anticipo_parcial = $anticipo > 0 && $anticipo < 100;
+        $anticipo_texto = self::formato_porcentaje($anticipo);
+
+        if ($hay_anticipo_parcial) {
+            $detalle_anticipo = 'se arranca con el ' . $anticipo_texto . ' %, que es el valor entre paréntesis';
+        } elseif ($anticipo >= 100) {
+            $detalle_anticipo = 'se paga completo';
+        } else {
+            $detalle_anticipo = 'sin anticipo';
+        }
+
+        $lineas[] = '- Implementación (pago único, en pesos; ' . $detalle_anticipo . '; '
             . ($implementaciones['reembolsable'] ? 'reembolsable' : 'no reembolsable') . '):';
 
         foreach ($implementaciones['items'] as $item) {
-            $lineas[] = '  - ' . $item['nombre'] . ': ' . self::formato_pesos((float) $item['precio'])
-                . ' (' . self::formato_pesos(self::anticipo_de((float) $item['precio'])) . ').';
+            $linea_item = '  - ' . $item['nombre'] . ': ' . self::formato_pesos((float) $item['precio']);
+
+            /* El valor entre paréntesis sólo existe cuando el anticipo es una parte del precio. */
+            if ($hay_anticipo_parcial) {
+                $linea_item .= ' (' . self::formato_pesos(self::anticipo_de((float) $item['precio'])) . ')';
+            }
+
+            $lineas[] = $linea_item . '.';
+        }
+
+        /* Frase final sobre el anticipo: con 50 dice «la mitad (50 %)»; con otro parcial, su porcentaje; con 0 o 100, nada. */
+        $frase_anticipo = '';
+        if ($hay_anticipo_parcial) {
+            $frase_anticipo = $anticipo === 50.0
+                ? ' Se puede arrancar con la mitad (' . $anticipo_texto . ' %).'
+                : ' Se puede arrancar pagando el ' . $anticipo_texto . ' %.';
         }
 
         /* Frase fija: la implementación asistida NO es obligatoria (la oferta de la prueba dice que se puede arrancar solo). */
         $lineas[] = '  - La implementación asistida es OPCIONAL: el lead puede arrancar por su cuenta gratis con la prueba (crea su prueba y sube su'
             . ' Excel con un video que lo guía). Quien paga la implementación recibe la carga de productos, precios, fotos y descripciones hecha'
-            . ' por ComercioCity y desarrollos a medida de por vida. Se puede arrancar con la mitad.';
+            . ' por ComercioCity y desarrollos a medida de por vida.' . $frase_anticipo;
 
         $meta = $contrato['costos_meta'];
         $desde = \DateTime::createFromFormat('Y-m-d', (string) $meta['vigente_desde']);
