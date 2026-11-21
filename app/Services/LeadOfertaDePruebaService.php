@@ -68,7 +68,7 @@ class LeadOfertaDePruebaService
         . "\n"
         . "Lo mejor es que lo pruebes con tu propio negocio: tenés {dias_prueba} días gratis, sin tarjeta, con el sistema de gestión, la tienda online y los agentes de IA funcionando.\n"
         . "\n"
-        . "Si te gusta y seguís, el sistema de gestión y la implementación son gratis: te cargamos tus productos nosotros y pagás solo el abono mensual, desde {precio_desde}{promo}.";
+        . "Si te gusta y seguís, podés arrancar por tu cuenta sin costo de implementación, o te lo dejamos armado nosotros con un pago único. El abono mensual es desde {precio_desde}{promo}.";
 
     /** Mensaje 2 (texto de Lucas, aprobado el 13/11/2026). */
     public const DEFAULT_MENSAJE_2 = "Tu prueba la creás desde acá, en 2 minutos 👇\n"
@@ -224,7 +224,8 @@ class LeadOfertaDePruebaService
 
     /**
      * El «desde» del abono: el plan Inicial con el descuento de bienvenida, o entero si no hay promo.
-     * Formato de la landing: «$27.950».
+     * Mismo redondeo y formato que el bloque de Martín (`formato_pesos`: 2 decimales, sin ellos si es entero):
+     * «$27.950» o «$27.950,50».
      *
      * @return string
      */
@@ -237,7 +238,7 @@ class LeadOfertaDePruebaService
             $abono = PreciosVigentesSettings::abono_con_descuento($abono);
         }
 
-        return '$' . number_format(round($abono), 0, ',', '.');
+        return PreciosVigentesSettings::formato_pesos($abono);
     }
 
     /**
@@ -254,7 +255,7 @@ class LeadOfertaDePruebaService
         $descuento = PreciosVigentesSettings::to_array()['gestion']['descuento_bienvenida'];
 
         return strtr(self::PLANTILLA_PROMO, [
-            '{porcentaje}' => (string) (int) $descuento['porcentaje'],
+            '{porcentaje}' => PreciosVigentesSettings::formato_porcentaje($descuento['porcentaje']),
             '{meses}'      => (string) (int) $descuento['meses'],
         ]);
     }

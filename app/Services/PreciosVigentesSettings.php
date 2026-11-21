@@ -383,6 +383,11 @@ class PreciosVigentesSettings
                 . ' (' . self::formato_pesos(self::anticipo_de((float) $item['precio'])) . ').';
         }
 
+        /* Frase fija: la implementación asistida NO es obligatoria (la oferta de la prueba dice que se puede arrancar solo). */
+        $lineas[] = '  - La implementación asistida es OPCIONAL: el lead puede arrancar por su cuenta gratis con la prueba (crea su prueba y sube su'
+            . ' Excel con un video que lo guía). Quien paga la implementación recibe la carga de productos, precios, fotos y descripciones hecha'
+            . ' por ComercioCity y desarrollos a medida de por vida. Se puede arrancar con la mitad.';
+
         $meta = $contrato['costos_meta'];
         $desde = \DateTime::createFromFormat('Y-m-d', (string) $meta['vigente_desde']);
         $lineas[] = '- Costos de Meta por WhatsApp (los paga el negocio aparte, en su cuenta de WhatsApp), vigentes desde el '
@@ -420,6 +425,19 @@ class PreciosVigentesSettings
     }
 
     /**
+     * Un porcentaje tal cual está guardado, sin ceros de más: 50 → «50», 12.5 → «12,5». Es la única forma de
+     * mostrarlo, tanto en el bloque de Martín como en la oferta de la prueba.
+     *
+     * @param mixed $valor Porcentaje.
+     *
+     * @return string
+     */
+    public static function formato_porcentaje($valor): string
+    {
+        return self::numero_sin_ceros($valor);
+    }
+
+    /**
      * Un número sin ceros de más: 50 → «50», 12.5 → «12,5».
      *
      * @param mixed $valor Número.
@@ -445,9 +463,47 @@ class PreciosVigentesSettings
      */
     private static function cargar(): array
     {
+        try {
+            return self::cargar_sin_red();
+        } catch (\Throwable $e) {
+            /* Red de seguridad: ningún contenido de la base (ni una falla al leerla) puede tirar abajo a Martín
+               ni al endpoint público. Se registra y se sirven los precios por defecto. */
+            try {
+                Log::warning('PreciosVigentesSettings: no se pudo leer la fuente guardada; se usan los precios por defecto.', [
+                    'key'       => self::KEY,
+                    'excepcion' => get_class($e),
+                    'mensaje'   => $e->getMessage(),
+                ]);
+            } catch (\Throwable $ignorada) {
+                /* Si ni el log responde, igual se devuelven los defaults. */
+            }
+
+            return self::defaults_completos();
+        }
+    }
+
+    /**
+     * Los valores por defecto ya normalizados y con los sellos `actualizado_*` en null.
+     *
+     * @return array<string, mixed>
+     */
+    private static function defaults_completos(): array
+    {
         $defaults = self::normalizar(self::DEFAULTS);
         $defaults['actualizado_en']  = null;
         $defaults['actualizado_por'] = null;
+
+        return $defaults;
+    }
+
+    /**
+     * Lectura de la fuente sin la red de seguridad de {@see cargar()} (que la envuelve).
+     *
+     * @return array<string, mixed>
+     */
+    private static function cargar_sin_red(): array
+    {
+        $defaults = self::defaults_completos();
 
         $crudo = AdminSetting::get(self::KEY);
 
@@ -552,6 +608,22 @@ class PreciosVigentesSettings
             $errores[$ruta] = 'La lista «' . $ruta . '» tiene que ser un arreglo.';
 
             return $base;
+        }
+
+        /* Una lista tiene que llegar como arreglo de objetos: un objeto suelto (`{clave: ...}`) o elementos que
+           no son objetos no se pueden emparejar y antes se ignoraban en silencio con un 200. */
+        if (! empty($nuevo) && array_keys($nuevo) !== range(0, count($nuevo) - 1)) {
+            $errores[$ruta] = 'La lista «' . $ruta . '» tiene que ser un arreglo de objetos, no un objeto suelto.';
+
+            return $base;
+        }
+
+        foreach ($nuevo as $elemento_nuevo) {
+            if (! is_array($elemento_nuevo)) {
+                $errores[$ruta] = 'La lista «' . $ruta . '» tiene que ser un arreglo de objetos.';
+
+                return $base;
+            }
         }
 
         $resultado = [];
@@ -690,7 +762,8 @@ class PreciosVigentesSettings
         foreach ($c['gestion']['planes'] as $plan) {
             $planes[$plan['clave']] = $plan;
             $ruta   = 'gestion.planes.' . $plan['clave'];
-            $nombre = 'Plan ' . $plan['nombre'];
+            /* El nombre puede venir con cualquier tipo (JSON editado a mano): sólo se concatena si es texto. */
+            $nombre = 'Plan ' . self::texto_para_mensaje($plan['nombre'], $plan['clave']);
 
             self::validar_texto($errores, $ruta . '.nombre', $plan['nombre'], 'El nombre del plan ' . $plan['clave']);
             self::validar_entero($errores, $ruta . '.usuarios', $plan['usuarios'], 1, 1000, $nombre . ': los usuarios incluidos');
@@ -722,15 +795,18 @@ class PreciosVigentesSettings
             }
 
             foreach (['inicial', 'intermedio'] as $clave) {
+                /* Nombre del plan para los mensajes, ya a salvo de tipos raros. */
+                $nombre_plan = self::texto_para_mensaje($planes[$clave]['nombre'], $clave);
+
                 if ($planes[$clave]['hasta'] === null) {
-                    $errores['gestion.planes.' . $clave . '.hasta'] = 'El plan ' . $planes[$clave]['nombre'] . ' necesita un fin de rango de operaciones.';
+                    $errores['gestion.planes.' . $clave . '.hasta'] = 'El plan ' . $nombre_plan . ' necesita un fin de rango de operaciones.';
                 } elseif (self::es_entero($planes[$clave]['desde']) && self::es_entero($planes[$clave]['hasta'])
                     && (int) $planes[$clave]['hasta'] < (int) $planes[$clave]['desde']) {
-                    $errores['gestion.planes.' . $clave . '.hasta'] = 'El plan ' . $planes[$clave]['nombre'] . ': el fin del rango no puede ser menor al inicio.';
+                    $errores['gestion.planes.' . $clave . '.hasta'] = 'El plan ' . $nombre_plan . ': el fin del rango no puede ser menor al inicio.';
                 }
 
                 if ($planes[$clave]['excedente'] === null) {
-                    $errores['gestion.planes.' . $clave . '.excedente'] = 'El plan ' . $planes[$clave]['nombre'] . ' necesita el precio de la operación excedente.';
+                    $errores['gestion.planes.' . $clave . '.excedente'] = 'El plan ' . $nombre_plan . ' necesita el precio de la operación excedente.';
                 }
             }
         }
@@ -755,7 +831,7 @@ class PreciosVigentesSettings
 
         foreach ($impl['items'] as $item) {
             self::validar_texto($errores, 'implementaciones.items.' . $item['clave'] . '.nombre', $item['nombre'], 'El nombre de la implementación ' . $item['clave']);
-            self::validar_monto($errores, 'implementaciones.items.' . $item['clave'] . '.precio', $item['precio'], 'El precio de la implementación «' . $item['nombre'] . '»');
+            self::validar_monto($errores, 'implementaciones.items.' . $item['clave'] . '.precio', $item['precio'], 'El precio de la implementación «' . self::texto_para_mensaje($item['nombre'], $item['clave']) . '»');
         }
 
         $meta = $c['costos_meta'];
@@ -768,11 +844,27 @@ class PreciosVigentesSettings
 
         foreach ($meta['tarifas'] as $tarifa) {
             $ruta = 'costos_meta.tarifas.' . $tarifa['clave'];
+            $nombre_tarifa = self::texto_para_mensaje($tarifa['nombre'], $tarifa['clave']);
 
             self::validar_texto($errores, $ruta . '.nombre', $tarifa['nombre'], 'El nombre de la tarifa ' . $tarifa['clave']);
-            self::validar_numero($errores, $ruta . '.usd', $tarifa['usd'], 0, self::MAX_MONTO, 4, 'La tarifa «' . $tarifa['nombre'] . '» en USD');
-            self::validar_monto($errores, $ruta . '.ars', $tarifa['ars'], 'La tarifa «' . $tarifa['nombre'] . '» en pesos');
+            self::validar_numero($errores, $ruta . '.usd', $tarifa['usd'], 0, self::MAX_MONTO, 4, 'La tarifa «' . $nombre_tarifa . '» en USD');
+            self::validar_monto($errores, $ruta . '.ars', $tarifa['ars'], 'La tarifa «' . $nombre_tarifa . '» en pesos');
         }
+    }
+
+    /**
+     * Texto seguro para meter en un mensaje de error: el valor si es un texto, o la alternativa si no.
+     * Motivo: un nombre que llega como arreglo u objeto (JSON editado a mano en la base, o un PUT mal
+     * armado) rompe la concatenación con «Array to string conversion», que Laravel eleva a excepción.
+     *
+     * @param mixed  $valor        Valor que se quiere mostrar.
+     * @param string $alternativa  Texto a usar si el valor no es un texto (la clave fija del ítem).
+     *
+     * @return string
+     */
+    private static function texto_para_mensaje($valor, string $alternativa): string
+    {
+        return is_string($valor) && trim($valor) !== '' ? $valor : $alternativa;
     }
 
     /**
