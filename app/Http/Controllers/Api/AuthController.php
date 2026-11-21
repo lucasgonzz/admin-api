@@ -130,6 +130,9 @@ class AuthController extends Controller
             // Misión ventas-y-comisiones (28/10/2026): la SPA muestra "Mis comisiones" en el menú
             // solo a los vendedores, y lo lee de acá (`auth.admin.es_vendedor`).
             'es_vendedor'               => (bool) ($admin->es_vendedor ?? false),
+            // Misión embudo-whatsapp-precios (E5): la SPA arma el menú y las rutas del perfil «Sólo Leads» con
+            // esto. Un SPA viejo lo ignora; si la columna todavía no existe, vale false.
+            'solo_leads'                => (bool) ($admin->solo_leads ?? false),
             'is_default_support_owner'  => (bool) $admin->is_default_support_owner,
             'is_default_task_assignee'  => (bool) ($admin->is_default_task_assignee ?? false),
         ];
