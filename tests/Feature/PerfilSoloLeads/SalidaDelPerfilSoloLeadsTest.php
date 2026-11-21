@@ -231,7 +231,9 @@ class SalidaDelPerfilSoloLeadsTest extends TestCase
         $cuerpo    = $respuesta->getContent();
 
         $this->assertSinCentinelas($cuerpo, 'GET lead');
-        foreach (['"api_key"', '"inbound_api_key"', '"cobranzas_observaciones"', '"afip_cuit"', '"precio_plan"', '"total_mensualidad"', '"contract_clausulas_particulares"'] as $clave) {
+        foreach (['"api_key"', '"inbound_api_key"', '"cobranzas_observaciones"', '"afip_cuit"', '"precio_plan"', '"total_mensualidad"'] as $clave) {
+            // (`contract_clausulas_particulares` NO va acá: el lead tiene su propia columna con ese nombre, que es
+            // del módulo de leads; la del Client la cubre el centinela `target.contract_clausulas`.)
             $this->assertStringNotContainsString($clave, $cuerpo, 'GET lead: la clave ' . $clave . ' no puede viajar al perfil.');
         }
 
