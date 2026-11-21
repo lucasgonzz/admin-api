@@ -109,6 +109,15 @@ Route::get('landing/prueba/{uuid}/estado', [\App\Http\Controllers\LandingPruebaC
     ->withoutMiddleware('throttle:api')
     ->middleware('throttle:landing-prueba-estado');
 
+/*
+| Precios vigentes y costos de Meta para la landing (misión embudo-whatsapp-precios, etapa E1): sólo lectura,
+| pública, con cubeta propia por IP (`RouteServiceProvider`) y sin la de todo /api, como las demás `landing/*`.
+| La respuesta no incluye `actualizado_por`. Contrato en `LandingPreciosController` y §2.6 del PLAN.
+*/
+Route::get('landing/precios', [\App\Http\Controllers\LandingPreciosController::class, 'show'])
+    ->withoutMiddleware('throttle:api')
+    ->middleware('throttle:landing-precios');
+
 Route::post('webhook/whatsapp', [WhatsappWebhookController::class, 'receive'])
     ->withoutMiddleware('throttle:api')
     ->middleware('throttle:whatsapp-webhook');

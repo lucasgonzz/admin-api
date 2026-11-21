@@ -81,6 +81,11 @@ class RouteServiceProvider extends ServiceProvider
             return Limit::perMinute(max(1, (int) config('landing_agenda.turnos_por_minuto', 30)))
                 ->by('landing-prueba-estado:' . $request->ip());
         });
+        /* Precios vigentes para la landing (misión embudo-whatsapp-precios, E1): sólo lectura y cacheable 5 min,
+           así que 60 por minuto por IP sobra para cualquier visitante legítimo. */
+        RateLimiter::for('landing-precios', function (Request $request) {
+            return Limit::perMinute(60)->by('landing-precios:' . $request->ip());
+        });
         RateLimiter::for('demo-chat', function (Request $request) {
             // Todas las demos del VPS comparten IP: cada conversación necesita su propia cuota.
             // Throttle puede ejecutarse antes del middleware de identidad. El hash no revela la clave;
