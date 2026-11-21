@@ -1737,6 +1737,11 @@ Route::prefix('admin')->group(function () {
         Route::get('settings/cotizador', [\App\Http\Controllers\Api\CotizadorSettingsController::class, 'show']);
         Route::put('settings/cotizador', [\App\Http\Controllers\Api\CotizadorSettingsController::class, 'update']);
 
+        // Fuente única de precios vigentes (misión embudo-whatsapp-precios, etapa E1): planes de gestión,
+        // adicionales, implementaciones y costos de Meta. La leen Martín, la oferta de la prueba y la landing.
+        Route::get('settings/precios-vigentes', [\App\Http\Controllers\Api\PreciosVigentesSettingsController::class, 'show']);
+        Route::put('settings/precios-vigentes', [\App\Http\Controllers\Api\PreciosVigentesSettingsController::class, 'update']);
+
         // Multimedia editable de la demo (grupo 300, prompt 02): un GET pinta toda la pantalla
         // (slots del catálogo sincronizado + URLs cargadas) y un PUT guarda/borra la URL de un slot.
         Route::get('demo-media', [\App\Http\Controllers\Api\DemoMediaController::class, 'index_json']);
