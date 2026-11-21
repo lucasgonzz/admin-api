@@ -25,8 +25,8 @@ use Illuminate\Support\Facades\Log;
  * 🔴 ESTE ARCHIVO ES EL ÚNICO PUNTO DE CAMBIO de los dos mensajes. Los textos por defecto son las
  * constantes de abajo; se pueden pisar sin deploy con las claves `KEY_MENSAJE_1` / `KEY_MENSAJE_2`
  * de `admin_settings`. El monto y la promo NO se escriben en el texto: salen de
- * `ContractPreciosService` (el plan Inicial y el descuento de bienvenida, lo mismo que publica la
- * landing) por los placeholders `{precio_desde}` y `{promo}`, y los días de la prueba de
+ * `PreciosVigentesSettings` (la fuente única de precios del admin: el plan Inicial y el descuento de
+ * bienvenida, lo mismo que publica la landing; desde E1 de embudo-whatsapp-precios ya no de `ContractPreciosService`) por los placeholders `{precio_desde}` y `{promo}`, y los días de la prueba de
  * `PruebaSettings::dias_default()` por `{dias_prueba}`. Si el precio o la promo cambian ahí, el
  * mensaje cambia solo; si la promo se apaga (porcentaje 0), el paréntesis desaparece y el precio es
  * el abono entero.
@@ -230,9 +230,11 @@ class LeadOfertaDePruebaService
      */
     public static function precio_desde(): string
     {
-        $abono = (float) ContractPreciosService::PLANES_GESTION[self::PLAN_DESDE]['abono'];
+        /* Desde la fuente única de precios vigentes (editable en Cuenta → Precios vigentes). */
+        $plan  = PreciosVigentesSettings::plan(self::PLAN_DESDE);
+        $abono = (float) $plan['abono'];
         if (self::hay_promo()) {
-            $abono = ContractPreciosService::abono_con_descuento_inicial($abono);
+            $abono = PreciosVigentesSettings::abono_con_descuento($abono);
         }
 
         return '$' . number_format(round($abono), 0, ',', '.');
@@ -249,9 +251,11 @@ class LeadOfertaDePruebaService
             return '';
         }
 
+        $descuento = PreciosVigentesSettings::to_array()['gestion']['descuento_bienvenida'];
+
         return strtr(self::PLANTILLA_PROMO, [
-            '{porcentaje}' => (string) (int) ContractPreciosService::DESCUENTO_INICIAL['porcentaje'],
-            '{meses}'      => (string) (int) ContractPreciosService::DESCUENTO_INICIAL['meses'],
+            '{porcentaje}' => (string) (int) $descuento['porcentaje'],
+            '{meses}'      => (string) (int) $descuento['meses'],
         ]);
     }
 
@@ -317,8 +321,7 @@ class LeadOfertaDePruebaService
      */
     private static function hay_promo(): bool
     {
-        return (int) ContractPreciosService::DESCUENTO_INICIAL['porcentaje'] > 0
-            && (int) ContractPreciosService::DESCUENTO_INICIAL['meses'] > 0;
+        return PreciosVigentesSettings::hay_descuento_de_bienvenida();
     }
 
     /**
