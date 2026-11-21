@@ -79,6 +79,17 @@ class AdminProperties
                 'description' => 'Se le liquida comisión por las ventas que se le asignan. Si hay un solo vendedor, las ventas nuevas se le asignan solas.',
             ],
             [
+                // Perfil restringido a Leads (misión embudo-whatsapp-precios, E5). El alta y la edición de
+                // Usuarios admin ya guardan toda propiedad de este catálogo; la restricción real la hace
+                // el middleware `admin.solo_leads` (AdminSoloLeadsPolicy), no esta casilla.
+                'key'   => 'solo_leads',
+                'text'  => 'Sólo Leads',
+                'type'  => 'boolean',
+                'value' => false,
+                'show'  => true,
+                'description' => 'Sólo ve el módulo de Leads: las conversaciones (sin escribirle al lead), el estado y la nota. No ve ni puede abrir nada más del admin. Le llegan los avisos de las tareas del embudo.',
+            ],
+            [
                 // Flag para asignación automática al crear nuevas tareas internas manualmente.
                 'key'   => 'is_default_task_assignee',
                 'text'  => 'Asignado por defecto en tareas nuevas',
