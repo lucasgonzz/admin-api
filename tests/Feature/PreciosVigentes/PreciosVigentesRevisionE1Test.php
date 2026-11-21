@@ -277,6 +277,83 @@ class PreciosVigentesRevisionE1Test extends TestCase
     }
 
     /**
+     * Guarda un anticipo de implementación y devuelve el bloque de Martín armado con él.
+     *
+     * @param int|float $anticipo Porcentaje de anticipo guardado (0 a 100).
+     *
+     * @return string
+     */
+    private function bloque_con_anticipo($anticipo): string
+    {
+        $this->guardar_crudo(array_replace_recursive(PreciosVigentesSettingsTest::contrato_por_defecto(), [
+            'implementaciones' => ['anticipo_porcentaje' => $anticipo],
+        ]));
+
+        return PreciosVigentesSettings::bloque_para_el_agente();
+    }
+
+    /**
+     * Con un anticipo de 40 la cabecera y la frase final dicen el mismo 40 % y el bloque no habla de «la mitad».
+     *
+     * @return void
+     */
+    public function test_con_anticipo_40_el_bloque_no_dice_la_mitad_y_la_cifra_coincide(): void
+    {
+        $bloque = $this->bloque_con_anticipo(40);
+
+        $this->assertStringContainsString('se arranca con el 40 %', $bloque);
+        $this->assertStringContainsString('Se puede arrancar pagando el 40 %.', $bloque);
+        $this->assertStringNotContainsString('la mitad', $bloque);
+        $this->assertStringNotContainsString('50 %', str_replace('50 % de descuento', '', $bloque));
+        $this->assertStringContainsString('desarrollos a medida de por vida', $bloque);
+    }
+
+    /**
+     * Con un anticipo de 50 la frase final dice «la mitad (50 %)» y coincide con la cabecera.
+     *
+     * @return void
+     */
+    public function test_con_anticipo_50_la_frase_dice_la_mitad_con_su_porcentaje(): void
+    {
+        $bloque = $this->bloque_con_anticipo(50);
+
+        $this->assertStringContainsString('se arranca con el 50 %', $bloque);
+        $this->assertStringContainsString('Se puede arrancar con la mitad (50 %).', $bloque);
+    }
+
+    /**
+     * Con un anticipo de 0 no hay «arrancar con una parte»: ni la cabecera ni la frase final lo prometen.
+     *
+     * @return void
+     */
+    public function test_con_anticipo_0_el_bloque_no_promete_arrancar_con_una_parte(): void
+    {
+        $bloque = $this->bloque_con_anticipo(0);
+
+        $this->assertStringNotContainsString('la mitad', $bloque);
+        $this->assertStringNotContainsString('Se puede arrancar', $bloque);
+        $this->assertStringNotContainsString('se arranca con el', $bloque);
+        $this->assertStringNotContainsString('entre paréntesis', $bloque);
+        $this->assertStringContainsString('desarrollos a medida de por vida', $bloque);
+    }
+
+    /**
+     * Con un anticipo de 100 no hay «arrancar con una parte»: ni la cabecera ni la frase final lo prometen.
+     *
+     * @return void
+     */
+    public function test_con_anticipo_100_el_bloque_no_promete_arrancar_con_una_parte(): void
+    {
+        $bloque = $this->bloque_con_anticipo(100);
+
+        $this->assertStringNotContainsString('la mitad', $bloque);
+        $this->assertStringNotContainsString('Se puede arrancar', $bloque);
+        $this->assertStringNotContainsString('se arranca con el', $bloque);
+        $this->assertStringNotContainsString('entre paréntesis', $bloque);
+        $this->assertStringContainsString('desarrollos a medida de por vida', $bloque);
+    }
+
+    /**
      * El mensaje por defecto de la oferta ya no promete que la implementación es gratis, y conserva sus
      * placeholders.
      *
