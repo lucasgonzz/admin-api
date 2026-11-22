@@ -912,17 +912,17 @@ class EsperaDeLaFotoTest extends BaseDelCanal
     }
 
     /**
-     * 12. La ventana de reintentos del temporizador suma la espera, y un job viejo cae en 600.
+     * 12. La ventana de reintentos del temporizador suma la espera, y un job viejo cae en 720.
      *
      * @return void
      */
     public function test_el_retry_until_del_temporizador_suma_la_espera(): void
     {
         $this->assertTrue(
-            now()->addSeconds(630)->equalTo((new EnviarMensajeAlAsistenteJob(1, [], 30))->retryUntil())
+            now()->addSeconds(750)->equalTo((new EnviarMensajeAlAsistenteJob(1, [], 30))->retryUntil())
         );
         $this->assertTrue(
-            now()->addSeconds(600)->equalTo((new EnviarMensajeAlAsistenteJob(1))->retryUntil())
+            now()->addSeconds(720)->equalTo((new EnviarMensajeAlAsistenteJob(1))->retryUntil())
         );
 
         /* 🔴 Un job serializado ANTES del deploy no trae la propiedad nueva. Se lo reconstruye como
@@ -934,7 +934,7 @@ class EsperaDeLaFotoTest extends BaseDelCanal
         $viejo->__unserialize($datos);
 
         $this->assertSame(0, $this->segundos_del_job($viejo));
-        $this->assertTrue(now()->addSeconds(600)->equalTo($viejo->retryUntil()));
+        $this->assertTrue(now()->addSeconds(720)->equalTo($viejo->retryUntil()));
     }
 
     /**
