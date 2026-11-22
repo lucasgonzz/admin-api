@@ -843,6 +843,11 @@ TXT;
             $gate_rechazo
         );
 
+        /* Flujo de entrada nuevo (E2 de embudo-whatsapp-precios, PLAN §2.2.2): DESPUÉS del gate de respaldo, el chequeo
+         * determinista agrega, sin repetir, lo obligatorio que el agente no cubrió. Si el gate frenó el paquete o pide
+         * intervención humana, queda intacto: esto nunca lo destraba. Con el flujo apagado no hace nada. */
+        $parsed = LeadFlujoEntradaService::completar_paquete($lead, $parsed, $gate_rechazo);
+
         /*
          * Determinar si hay que hacer la segunda llamada con slots disponibles.
          *
@@ -6450,6 +6455,11 @@ TXT;
             $lead->status = 'solicita_disponibilidad';
         }
 
+        /* Embudo nuevo (E2 de embudo-whatsapp-precios): `implementacion_pedida` es la otra transición inmediata. El lead
+         * quiere que se lo carguemos nosotros: pasa YA a ese estado, aunque el mensaje quede esperando aprobación, y se
+         * crea la tarea del vendedor (una sola por lead). Sólo mueve desde los estados del embudo; no toca la demo. */
+        LeadFlujoEntradaService::aplicar_implementacion_pedida($lead, $estado);
+
         $lead->save();
 
         if (! $espera_humana) {
@@ -11601,7 +11611,11 @@ TXT;
         /* La oferta de la prueba gratis al lead de la web (misión martin-link-prueba-landing, 13/11/2026):
          * va ÚLTIMA, después de los bloques de la demo, porque los pisa (calificar, ofrecer y agendar la
          * demo). Vacío para el lead al que no se le hizo la oferta y que no tiene prueba. */
-        $txt .= LeadOfertaDePruebaService::bloque_para_el_agente($lead);
+        /* Con el flujo de entrada nuevo prendido (E2 de embudo-whatsapp-precios), su bloque REEMPLAZA al de la oferta de la
+         * web: trae los puntos obligatorios del turno, el link a pedido y la implementación pedida. Vacío si el flujo está
+         * apagado o el lead está en otro estado (con su prueba, rige «YA CREO SU PRUEBA»; en la demo, el flujo de la demo). */
+        $bloque_del_flujo = LeadFlujoEntradaService::bloque_para_el_agente($lead);
+        $txt .= $bloque_del_flujo !== '' ? $bloque_del_flujo : LeadOfertaDePruebaService::bloque_para_el_agente($lead);
 
         $txt .= "\n¿Qué respuesta sugerís y en qué estado debería quedar el lead?";
 

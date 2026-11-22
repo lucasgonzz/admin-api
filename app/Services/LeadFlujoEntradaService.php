@@ -647,16 +647,17 @@ class LeadFlujoEntradaService
             $txt .= "  - Si dice que quiere probar, empezar o hacerlo por su cuenta: mandale el link de la prueba textual, en un mensaje corto,\n"
                 . "    con estado_sugerido: \"link_enviado\". Link (copiar textual, sin cambiarle nada): " . $link . "\n";
         } else {
-            $txt .= "  - Hoy NO hay lugar para crear pruebas nuevas: si quiere probar, NO le pases ningún link. Decile «Juan te escribe para darte el\n"
-                . "    acceso» y devolvé requiere_intervencion_humana: true con el motivo.\n";
+            $txt .= "  - Hoy NO hay lugar para crear pruebas nuevas: si quiere probar, NO le pases ningún link.\n"
+                . "    Decile: Juan te escribe para darte el acceso. Y devolvé requiere_intervencion_humana: true con el motivo.\n";
         }
 
         $txt .= "  - Si quiere que se lo carguen nosotros o pide la implementación: decile que lo llama Juan, del equipo, hoy, sin pedirle hora y\n"
             . "    sin cobrar, y devolvé estado_sugerido: \"implementacion_pedida\".\n"
             . "  - No le pidas hora. No le pidas datos para calificarlo más allá de lo que ya pide el flujo.\n"
             . "  - Si pregunta precios, dale los de PRECIOS VIGENTES (citá \"" . PreciosVigentesSettings::FUENTE_PARA_EL_GATE . "\" en fuentes_kb).\n"
-            . "  - NO le ofrezcas la demo ni una llamada, NO devuelvas agendar_demo y NO le pidas disponibilidad, SALVO que el lead pida\n"
-            . "    EXPLICITAMENTE una DEMO con sus palabras (un mensaje suyo, no el texto de un botón): ahí seguí el flujo de la demo de arriba.\n"
+            . "  - NO le ofrezcas la demo ni una llamada, NO devuelvas agendar_demo y NO le pidas disponibilidad.\n"
+            . "    SALVO que el lead pida EXPLICITAMENTE una DEMO con sus palabras (un mensaje suyo, no el texto de un botón): ahí seguí el\n"
+            . "    flujo de la demo de arriba.\n"
             . "  - La prueba se crea sólo desde el link: no la crees por WhatsApp ni le pidas la contraseña.\n";
 
         return $txt;

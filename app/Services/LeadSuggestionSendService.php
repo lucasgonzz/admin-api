@@ -661,6 +661,10 @@ class LeadSuggestionSendService
         // enviado) deja el pipeline intacto.
         $this->apply_suggested_pipeline_status($lead, $message);
 
+        /* Embudo nuevo (E2 de embudo-whatsapp-precios): si lo que SALIÓ lleva el link de la prueba, el lead pasa a
+         * `link_enviado`. Mira el texto efectivamente enviado, así que cubre al agente y al setter que edita la sugerencia. */
+        LeadFlujoEntradaService::marcar_link_enviado($lead, $body);
+
         if ($is_partial_send) {
             // Un envío parcial siempre necesita ojo humano: marca el lead en la fila destacada de
             // la grilla (mismo mecanismo que ya usa el respaldo automático sin revisión, prompt 337).
@@ -1238,6 +1242,12 @@ class LeadSuggestionSendService
         $slug = trim((string) ($message->suggested_lead_status ?? ''));
         if ($slug === '') {
             return;
+        }
+
+        /* Embudo nuevo (E2 de embudo-whatsapp-precios): el lead que pidió que se lo carguemos tiene su tarea para el
+         * vendedor. Si el estado se aplicó antes (mensaje retenido) la tarea ya existe; si no, se crea acá. Idempotente. */
+        if ($slug === 'implementacion_pedida') {
+            LeadTareaVendedorService::crear($lead, LeadTareaVendedorService::MOTIVO_IMPLEMENTACION_PEDIDA);
         }
 
         /*
