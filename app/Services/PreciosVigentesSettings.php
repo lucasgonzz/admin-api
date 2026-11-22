@@ -518,12 +518,22 @@ class PreciosVigentesSettings
                 . ' % de descuento (' . self::formato_pesos((float) $tres_juntos['precio']) . ')';
         }
 
+        /* Días de la prueba gratis: los mismos que usa la oferta de la prueba (fuente única). Si la lectura falla, 7. */
+        try {
+            $dias_de_prueba = (int) \App\Services\Prueba\PruebaSettings::dias_default();
+        } catch (\Throwable $e) {
+            $dias_de_prueba = 7;
+        }
+
         $lineas   = [];
         $lineas[] = 'CUANDO EL LEAD PREGUNTA PRECIOS (por ejemplo «quiero saber el precio del sistema»), no contestes sólo la cifra. En el mismo mensaje y en este orden:';
         $lineas[] = '1. Si todavía no te presentaste en esta conversación: «Hola, soy Martín, de ComercioCity».';
         $lineas[] = '2. Contale que tenemos 3 productos: el sistema de gestión, la tienda online y los agentes de IA, que automatizan la mayor parte de los procesos digitales del negocio.';
         $lineas[] = '3. Respondé lo que preguntó: ' . $frase_precio . $frase_tres . '. Si preguntó por la mensualidad, dala también.';
-        $lineas[] = '4. Cerrá con un siguiente paso concreto: ofrecele la prueba gratuita guiada de la plataforma para conocer los 3 productos (dura alrededor de 1 hora) y también la prueba gratis de 7 días.';
+        $lineas[] = '4. Cerrá con un siguiente paso concreto, sólo si el lead todavía no tiene una demo agendada o hecha ni una prueba creada: ofrecele la demo'
+            . ' (decile «prueba gratuita guiada de la plataforma», para conocer los 3 productos; dura alrededor de 1 hora) y también la prueba gratis de '
+            . $dias_de_prueba . ' días. Si acepta la demo, seguí las reglas de la demo para agendarla (horario y mail antes de pasar links).'
+            . ' Si más abajo hay un bloque de la oferta de la prueba, ese bloque manda sobre este paso.';
 
         return $lineas;
     }
