@@ -626,4 +626,13 @@ return [
         'default_creator_admin_id' => env('CLAUDE_TASK_INGEST_CREATOR_ADMIN_ID'),
     ],
 
+    // Transcripción con OpenAI de los audios de WhatsApp que MANDA el equipo (leads y tickets de soporte).
+    // Los entrantes los transcribe Kapso; los salientes no. APAGADO por defecto: sin el interruptor en true
+    // y sin clave, los audios salientes quedan como hoy y no se llama a OpenAI.
+    'openai_transcription' => [
+        'enabled' => filter_var(env('WHATSAPP_OUTBOUND_AUDIO_TRANSCRIPTION', false), FILTER_VALIDATE_BOOLEAN),
+        'api_key' => env('OPENAI_TRANSCRIPTION_API_KEY'),
+        'model'   => env('OPENAI_TRANSCRIPTION_MODEL', 'gpt-4o-mini-transcribe'),
+    ],
+
 ];

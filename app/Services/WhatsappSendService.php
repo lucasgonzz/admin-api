@@ -686,6 +686,65 @@ class WhatsappSendService
     }
 
     /**
+     * Segundos de timeout del pedido del indicador de "escribiendo…".
+     *
+     * Corto a propósito: el indicador es un adorno y corre dentro del turno del asistente; si Kapso
+     * está lento, es mejor perderlo que demorar la respuesta de verdad.
+     */
+    const SEGUNDOS_DEL_INDICADOR = 3;
+
+    /**
+     * Marca como leído el mensaje del dueño y le muestra "escribiendo…" (misión
+     * asistente-whatsapp-velocidad).
+     *
+     * Es UN `POST` al mismo endpoint de envío, con el cuerpo que documenta Kapso (`status: read` más
+     * `typing_indicator`). Meta lo apaga solo a los ~25 s o cuando sale la respuesta.
+     *
+     * 🔴 Best-effort: sin `retry()` (un reintento duplicaría la espera del turno), con timeout de
+     * {@see SEGUNDOS_DEL_INDICADOR} s, sin `context` (no es una respuesta citada) y sin avisar a los
+     * admins si falla (`resolve_send_context(true)`): un indicador que no salió no es un fallo de
+     * envío. Nunca lanza.
+     *
+     * @param string $wamid ID de WhatsApp del mensaje del dueño al que se le muestra el indicador.
+     *
+     * @return bool true si Kapso lo aceptó; false si no hay wamid, si el número está inactivo o en
+     *              `test_mode` (no sale a la red) o si el pedido falló.
+     */
+    public function send_typing_indicator(string $wamid): bool
+    {
+        // Sin wamid no hay mensaje al que aplicarlo: no se sale a la red.
+        $wamid = trim($wamid);
+        if ($wamid === '') {
+            return false;
+        }
+
+        // Sin contexto (config inactiva o test_mode) tampoco se sale a la red, y sin avisar a admins.
+        $send_context = $this->resolve_send_context(true);
+        if ($send_context === null) {
+            return false;
+        }
+
+        try {
+            // Un solo POST, sin retry(), con timeout corto.
+            $response = KapsoHttpClient::make($send_context['api_key'], self::SEGUNDOS_DEL_INDICADOR)
+                ->post($this->messages_endpoint($send_context['phone_number_id']), [
+                    'messaging_product' => 'whatsapp',
+                    'status'            => 'read',
+                    'message_id'        => $wamid,
+                    'typing_indicator'  => ['type' => 'text'],
+                ]);
+
+            return $response->successful();
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->warning('WhatsappSendService: no se pudo mostrar el indicador de escribiendo.', [
+                'error' => $exception->getMessage(),
+            ]);
+
+            return false;
+        }
+    }
+
+    /**
      * Busca la primera variable de plantilla que llegó vacía y devuelve el motivo legible.
      *
      * Se compara con `trim()` y no con `empty()`: `'   '` no está vacío para PHP y sí lo está para

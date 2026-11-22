@@ -206,6 +206,17 @@ class SupportMessageController extends BaseController
 
         $message = SupportMessage::where('id', $message->id)->withAll()->first();
 
+        // Transcripción del audio del operador (OpenAI) en segundo plano, sólo en tickets de WhatsApp y con el
+        // interruptor prendido. Un fallo al encolar no puede cambiar la respuesta del envío.
+        try {
+            if ($kind === 'audio' && $prepared_attachment !== null && $ticket->source === 'whatsapp'
+                && app(\App\Services\WhatsappOutboundAudioTranscriptionService::class)->is_enabled()) {
+                \App\Jobs\TranscribeOutboundWhatsappAudioJob::dispatch('support', (int) $message->id)->onConnection('database');
+            }
+        } catch (\Throwable $e) {
+            Log::warning('SupportMessageController@store: no se pudo encolar la transcripción.', ['message_id' => $message->id]);
+        }
+
         $this->deliver_saved_admin_message($ticket, $message, $sync_service);
 
         $message = SupportMessage::where('id', $message->id)->withAll()->first();

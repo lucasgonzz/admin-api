@@ -247,12 +247,15 @@ class DegradacionesDelCanalTest extends BaseDelCanal
     {
         $this->assertSame(180, array_sum(EnviarMensajeAlAsistenteJob::ESPERAS_DE_POLLING));
 
-        /* Y las esperas crecen: las primeras respuestas llegan casi de una y no tiene sentido hacer
-         * esperar diez segundos a quien ya tiene la respuesta lista. */
+        /* Escalera de la misión asistente-whatsapp-velocidad: las doce primeras consultas valen 2 s
+         * (las respuestas llegan casi de una y no tiene sentido hacer esperar a quien ya tiene la
+         * suya lista) y después la espera nunca decrece. */
         $esperas = EnviarMensajeAlAsistenteJob::ESPERAS_DE_POLLING;
-        $this->assertSame(3, $esperas[0]);
-        $this->assertGreaterThan($esperas[0], $esperas[1]);
-        $this->assertGreaterThan($esperas[1], $esperas[2]);
+        $this->assertSame(array_fill(0, 12, 2), array_slice($esperas, 0, 12));
+
+        for ($i = 1; $i < count($esperas); $i++) {
+            $this->assertGreaterThanOrEqual($esperas[$i - 1], $esperas[$i], 'La espera ' . $i . ' no puede ser menor que la anterior.');
+        }
     }
 
     /**
