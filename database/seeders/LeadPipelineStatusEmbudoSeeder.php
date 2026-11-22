@@ -28,9 +28,9 @@ class LeadPipelineStatusEmbudoSeeder extends Seeder
      * Estados nuevos y el estado detrás del cual se insertan en el orden del catálogo.
      *
      * 🔴 El orden NO es cosmético: `LeadAiService` compara `sort_order` para el guardia de «no retroceder de tramo»
-     * (un lead entre `solicita_disponibilidad` y `closer_activo` no vuelve atrás). `link_enviado` va detrás de
+     * (un lead entre `solicita_disponibilidad` y el estado del closer no vuelve atrás). `link_enviado` va detrás de
      * `calificado`, ANTES del tramo de la demo, para que el lead que recibió el link y después pide la demo pueda
-     * pasar a `solicita_disponibilidad`. `implementacion_pedida` va detrás de `prueba_activa`, antes de `closer_activo`.
+     * pasar a `solicita_disponibilidad`. `implementacion_pedida` va detrás de `prueba_activa`, antes del estado del closer.
      *
      * @var array<string, string> slug nuevo => slug detrás del cual va
      */
