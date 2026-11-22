@@ -45,7 +45,7 @@ class OfertaDePruebaAlLeadDeLaLandingTest extends TestCase
         . "\n"
         . "Lo mejor es que lo pruebes con tu propio negocio: tenés 7 días gratis, sin tarjeta, con el sistema de gestión, la tienda online y los agentes de IA funcionando.\n"
         . "\n"
-        . "Si te gusta y seguís, el sistema de gestión y la implementación son gratis: te cargamos tus productos nosotros y pagás solo el abono mensual, desde $27.950 (con 50 % off los primeros 3 meses).";
+        . "Si te gusta y seguís, podés arrancar por tu cuenta sin costo de implementación, o te lo dejamos armado nosotros con un pago único. El abono mensual es desde $27.950 (con 50 % off los primeros 3 meses).";
 
     const MENSAJE_2_DE_LUCAS = "Tu prueba la creás desde acá, en 2 minutos 👇\n"
         . "https://comerciocity.com/prueba?utm_source=whatsapp&utm_medium=martin\n"

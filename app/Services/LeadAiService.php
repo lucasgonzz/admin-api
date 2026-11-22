@@ -47,6 +47,13 @@ class LeadAiService
         'reglas', 'referidos',
     ];
 
+    /**
+     * Fuente que el agente cita en `fuentes_kb` para respaldar un precio: el bloque «PRECIOS VIGENTES» que el
+     * sistema le inyecta en cada turno (E1 de embudo-whatsapp-precios). No es un recurso del protocolo ni se
+     * lee con una tool: cuenta como leída desde el arranque de cada llamada porque ya está en su contexto.
+     */
+    public const FUENTE_PRECIOS_VIGENTES = PreciosVigentesSettings::FUENTE_PARA_EL_GATE;
+
     /** Máximo de iteraciones del agentic loop de tools. */
     private const MAX_TOOL_ITERATIONS = 10;
 
@@ -495,8 +502,9 @@ TXT;
             'fuentes_servidas' => $servidos,
         ]);
 
-        /* Arranca con lo que el sistema le sirvió; si además pide una tool, se suma sola. */
-        $leidos_reintento = $servidos;
+        /* Arranca con lo que el sistema le sirvió; si además pide una tool, se suma sola. El bloque de
+         * precios vigentes sigue en su contexto aunque no lo haya citado, así que también cuenta. */
+        $leidos_reintento = array_values(array_unique(array_merge($servidos, [self::FUENTE_PRECIOS_VIGENTES])));
 
         try {
             $text_reintento = $this->run_with_tools(
@@ -696,6 +704,11 @@ TXT;
     {
         $en_minusculas = mb_strtolower($nombre);
 
+        /* Los precios vigentes salen de la fuente del admin, no del protocolo ni del manual. */
+        if ($en_minusculas === self::FUENTE_PRECIOS_VIGENTES) {
+            return PreciosVigentesSettings::bloque_para_el_agente();
+        }
+
         if (in_array($en_minusculas, self::PROTOCOLO_RECURSOS, true)) {
             return app(WhatsappProtocolService::class)->getRecurso($en_minusculas, $lead->demo_experiencia_efectiva());
         }
@@ -807,8 +820,9 @@ TXT;
         ];
 
         /* Recursos del protocolo que el agente consultó con éxito en esta llamada. Lo llena el
-         * ejecutor de tools; es la evidencia contra la que el gate verifica sus citas. */
-        $recursos_leidos = [];
+         * ejecutor de tools; es la evidencia contra la que el gate verifica sus citas. Arranca con los
+         * precios vigentes: ese bloque se inyecta en el contexto de TODA llamada (build_user_content). */
+        $recursos_leidos = [self::FUENTE_PRECIOS_VIGENTES];
 
         /* Respaldo documental: si el agente afirmó algo del sistema que no puede citar, el sistema
          * le sirve lo que citó y lo hace responder una segunda vez; si tampoco queda respaldado, el
@@ -1475,8 +1489,8 @@ TXT;
 
         /* Recursos consultados con éxito en ESTA llamada. Arranca vacío a propósito: lo que el
          * agente haya leído en la primera no está en su contexto ahora, así que tampoco puede
-         * usarlo como respaldo acá. */
-        $recursos_leidos = [];
+         * usarlo como respaldo acá. Salvo los precios vigentes, que esta llamada también lleva en su contexto. */
+        $recursos_leidos = [self::FUENTE_PRECIOS_VIGENTES];
 
         /* Mismo gate que en la primera llamada, con el mismo segundo intento cuando frena.
          * Este tramo fuerza revisión humana por estado
@@ -11578,6 +11592,11 @@ TXT;
                 $txt .= $coordinacion_llamada_context;
             }
         }
+
+        /* Precios vigentes, desde la fuente del admin (E1 de embudo-whatsapp-precios): en TODAS las llamadas y
+         * ANTES del bloque de la oferta, que tiene que seguir siendo el último. Cuenta como respaldo del gate
+         * bajo `precios_vigentes` (FUENTE_PRECIOS_VIGENTES). */
+        $txt .= "\n\n" . PreciosVigentesSettings::bloque_para_el_agente() . "\n";
 
         /* La oferta de la prueba gratis al lead de la web (misión martin-link-prueba-landing, 13/11/2026):
          * va ÚLTIMA, después de los bloques de la demo, porque los pisa (calificar, ofrecer y agendar la
