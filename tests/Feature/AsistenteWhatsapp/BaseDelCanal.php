@@ -342,6 +342,42 @@ abstract class BaseDelCanal extends TestCase
              */
             public $falla_transitoria_veces = 0;
 
+            /**
+             * @var array<int, array<string, mixed>> Indicadores de "escribiendo…" pedidos, en orden. Cada
+             *                                       uno guarda el wamid al que se aplicó y el
+             *                                       `phone_number_id` por el que SALDRÍA. No pasan por HTTP
+             *                                       a propósito: así los `assertSentCount` de las pruebas
+             *                                       que ya cuentan pedidos no cambian.
+             */
+            public $indicadores = [];
+
+            /** @var bool Si Kapso acepta el indicador (true) o lo rechaza devolviendo false. */
+            public $confirma_indicador = true;
+
+            /** @var bool Si pedir el indicador revienta con una excepción en vez de devolver false. */
+            public $explota_indicador = false;
+
+            /**
+             * Anota el indicador de "escribiendo…" en vez de mandarlo a Kapso.
+             *
+             * @param string $wamid ID del mensaje del dueño al que se le muestra el indicador.
+             *
+             * @return bool
+             */
+            public function send_typing_indicator(string $wamid): bool
+            {
+                $this->indicadores[] = [
+                    'wamid'           => $wamid,
+                    'phone_number_id' => $this->phone_number_id_de_destino(),
+                ];
+
+                if ($this->explota_indicador) {
+                    throw new \RuntimeException('Kapso reventó con el indicador (simulado en la prueba).');
+                }
+
+                return $this->confirma_indicador;
+            }
+
             public function send_text(string $to, string $body, ?string $context = null, bool $skip_failure_notification = false): ?string
             {
                 $this->textos[]  = ['to' => $to, 'body' => $body, 'context' => $context];
