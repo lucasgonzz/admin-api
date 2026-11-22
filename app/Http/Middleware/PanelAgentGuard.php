@@ -178,13 +178,14 @@ class PanelAgentGuard
         try {
             return $this->logger->open([
                 'admin_id'        => (int) $user->id,
-                'agent_name'      => mb_substr((string) $user->name, 0, 120),
+                'agent_name'      => $this->redactor->clean_text($user->name, 120),
                 'agent_client'    => $this->header_or_null($request, 'X-Agente-Cliente', 40),
                 'method'          => $method,
-                'route_uri'       => mb_substr($this->classifier->panel_path($route->uri()), 0, 255),
-                'path'            => mb_substr($request->path(), 0, 500),
-                'route_name'      => $route->getName() ? mb_substr($route->getName(), 0, 150) : null,
-                'action'          => mb_substr($this->classifier->action_label($route), 0, 200),
+                'route_uri'       => $this->redactor->clean_text($this->classifier->panel_path($route->uri()), 255),
+                // El path viene del pedido: puede traer bytes que no son UTF-8, y la columna es utf8mb4 estricta.
+                'path'            => $this->redactor->clean_text($request->path(), 500),
+                'route_name'      => $route->getName() ? $this->redactor->clean_text($route->getName(), 150) : null,
+                'action'          => $this->redactor->clean_text($this->classifier->action_label($route), 200),
                 'category'        => $category,
                 'braked'          => $braked,
                 'dry_run'         => $dry_run,
@@ -297,17 +298,21 @@ class PanelAgentGuard
     }
 
     /**
-     * Header recortado, o null si no vino o está vacío.
+     * Header saneado para la auditoría, o null si no vino o quedó vacío.
+     *
+     * Contrato: el cliente manda el texto UTF-8 percent-encoded (así un acento o una raya viajan en un header
+     * ASCII); se decodifica, se convierte desde latin-1 si no es UTF-8 válido (cliente viejo), se sacan los
+     * controles y se recorta por caracteres. Ver `PanelAgentPayloadRedactor::clean_text()`.
      *
      * @param  Request $request Pedido.
      * @param  string  $name    Nombre del header.
-     * @param  int     $max     Largo máximo.
+     * @param  int     $max     Largo máximo en caracteres.
      * @return string|null
      */
     private function header_or_null(Request $request, string $name, int $max)
     {
-        $value = trim((string) $request->header($name));
+        $value = $this->redactor->clean_text($request->header($name), $max, true);
 
-        return $value === '' ? null : mb_substr($value, 0, $max);
+        return $value === '' ? null : $value;
     }
 }
