@@ -406,7 +406,9 @@ class TranscripcionDeAudiosSalientesTest extends TestCase
     private function job_encolado(string $canal, int $message_id): TranscribeOutboundWhatsappAudioJob
     {
         Queue::assertPushed(TranscribeOutboundWhatsappAudioJob::class, 1);
-        Queue::assertPushedOn('database', TranscribeOutboundWhatsappAudioJob::class);
+        Queue::assertPushed(TranscribeOutboundWhatsappAudioJob::class, function ($job) {
+            return $job->connection === 'database';
+        });
 
         $esperado = (new TranscribeOutboundWhatsappAudioJob($canal, $message_id))->onConnection('database');
         $pusheado = Queue::pushed(TranscribeOutboundWhatsappAudioJob::class)->first();
