@@ -118,6 +118,15 @@ Este número queda para hablar con el equipo de ComercioCity.";
     /** Idioma por defecto de la plantilla de los recordatorios. */
     private const DEFAULT_RECORDATORIO_TEMPLATE_LANGUAGE = 'es_AR';
 
+    /** Clave: nombre de la plantilla de Meta propia de las tareas programadas del asistente. */
+    public const KEY_TAREA_TEMPLATE_NAME = 'asistente_tarea_template_name';
+
+    /** Clave: idioma con el que esa plantilla quedó aprobada en Meta. */
+    public const KEY_TAREA_TEMPLATE_LANGUAGE = 'asistente_tarea_template_language';
+
+    /** Idioma por defecto de la plantilla de las tareas del asistente. */
+    private const DEFAULT_TAREA_TEMPLATE_LANGUAGE = 'es_AR';
+
     /**
      * Indica si un mensaje de cliente por WhatsApp todavía abre un ticket de soporte.
      *
@@ -261,5 +270,30 @@ Este número queda para hablar con el equipo de ComercioCity.";
         $idioma = trim((string) AdminSetting::get(self::KEY_RECORDATORIO_TEMPLATE_LANGUAGE, ''));
 
         return $idioma !== '' ? $idioma : self::DEFAULT_RECORDATORIO_TEMPLATE_LANGUAGE;
+    }
+
+    /**
+     * Nombre de la plantilla de Meta propia de las tareas programadas del asistente, para la ventana cerrada.
+     *
+     * 🔴 Es OPCIONAL y no tiene valor por defecto: cadena vacía significa «no hay plantilla de tareas» y
+     * las tareas salen por la plantilla de recordatorios, exactamente como antes de existir esta clave.
+     *
+     * @return string Cadena vacía si no hay ninguna configurada.
+     */
+    public static function plantilla_de_tareas(): string
+    {
+        return trim((string) AdminSetting::get(self::KEY_TAREA_TEMPLATE_NAME, ''));
+    }
+
+    /**
+     * Idioma con el que la plantilla de tareas quedó aprobada en Meta.
+     *
+     * @return string `es_AR` si no hay uno cargado.
+     */
+    public static function idioma_de_la_plantilla_de_tareas(): string
+    {
+        $idioma = trim((string) AdminSetting::get(self::KEY_TAREA_TEMPLATE_LANGUAGE, ''));
+
+        return $idioma !== '' ? $idioma : self::DEFAULT_TAREA_TEMPLATE_LANGUAGE;
     }
 }
