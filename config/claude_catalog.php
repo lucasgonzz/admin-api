@@ -1070,6 +1070,12 @@ return [
             'peligrosidad' => 'lectura',
             'frenos'       => [],
         ],
+        'GET api/claude/leads/{id}/attachments/{attachment_id}' => [
+            'para_que'     => 'Descarga el archivo de un adjunto (audio, imagen, documento) de un mensaje de ese lead. El id del adjunto sale de claude/query?model=lead_message_attachment&lead_message_id=…',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+        ],
         'GET api/claude/messages' => [
             'para_que'     => 'Mensajes CRUZADOS entre leads. Es la consulta que resuelve el caso de los seguimientos que no se pudieron entregar.',
             'escribe'      => false,
