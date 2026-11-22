@@ -20,7 +20,7 @@ use Illuminate\Support\Facades\Schema;
 class CreateClientDataResetsTable extends Migration
 {
     /**
-     * Crea la tabla (idempotente: si ya existe no hace nada).
+     * Crea la tabla; si ya existe no hace nada.
      *
      * @return void
      */

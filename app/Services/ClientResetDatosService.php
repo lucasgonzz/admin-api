@@ -41,8 +41,8 @@ use Illuminate\Support\Facades\Log;
  * entero de un 200) pasa por `limpiar_valor()`, que tapa la clave y el token que se mandó; el log y `client_data_resets` llevan sólo
  * conteos, códigos y el `registro_id` de empresa.
  *
- * PHP 7.4: sin `?->`, `match`, `str_contains`, argumentos nombrados, union types, promoción en constructor, `readonly`, `enum`,
- * atributos, `mixed` ni `never`.
+ * PHP 7.4 estricto, sin ninguna sintaxis de PHP 8 (nullsafe, match, argumentos nombrados, propiedades de sólo lectura, enums, atributos,
+ * union types, promoción en el constructor ni los tipos mixed y never).
  */
 class ClientResetDatosService
 {
