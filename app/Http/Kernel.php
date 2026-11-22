@@ -12,6 +12,8 @@ class Kernel extends HttpKernel
         // Laravel adelanta los throttle de ruta al ordenar SubstituteBindings. El limitador
         // del catálogo necesita primero la identidad validada del negocio, nunca su IP.
         $this->prependToMiddlewarePriority(\App\Http\Middleware\StrictAdminInboundKey::class);
+        // El guard de agentes del panel necesita al usuario ya autenticado: corre después de `auth`.
+        $this->appendToMiddlewarePriority(\App\Http\Middleware\PanelAgentGuard::class);
     }
 
     /**
@@ -51,6 +53,8 @@ class Kernel extends HttpKernel
             // \Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful::class,
             'throttle:api',
             \Illuminate\Routing\Middleware\SubstituteBindings::class,
+            // Audita y frena a los agentes (admins con es_agente); a un admin humano no le hace nada.
+            \App\Http\Middleware\PanelAgentGuard::class,
         ],
     ];
 
