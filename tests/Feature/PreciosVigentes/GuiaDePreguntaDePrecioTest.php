@@ -3,6 +3,7 @@
 namespace Tests\Feature\PreciosVigentes;
 
 use App\Models\AdminSetting;
+use App\Services\Prueba\PruebaSettings;
 use App\Services\PreciosVigentesSettings;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Tests\TestCase;
@@ -136,5 +137,40 @@ class GuiaDePreguntaDePrecioTest extends TestCase
 
         $this->assertStringNotContainsString('USD', $guia);
         $this->assertStringNotContainsStringIgnoringCase('ganancia', $guia);
+    }
+
+    /**
+     * Ronda 1 de revisión. El paso 4 llama «demo» a la prueba guiada, la condiciona a que el lead no tenga
+     * demo ni prueba, remite a las reglas de la demo y cede ante el bloque de la oferta de la prueba.
+     *
+     * @return void
+     */
+    public function test_el_paso_4_respeta_la_demo_y_la_oferta_de_prueba(): void
+    {
+        $guia = $this->guia();
+
+        $this->assertStringContainsString('ofrecele la demo', $guia);
+        $this->assertStringContainsString(
+            'sólo si el lead todavía no tiene una demo agendada o hecha ni una prueba creada',
+            $guia
+        );
+        $this->assertStringContainsString('seguí las reglas de la demo', $guia);
+        $this->assertStringContainsString('horario y mail antes de pasar links', $guia);
+        $this->assertStringContainsString('ese bloque manda sobre este paso', $guia);
+    }
+
+    /**
+     * Ronda 1 de revisión. Los días de la prueba gratis salen de `PruebaSettings`, no están fijos.
+     *
+     * @return void
+     */
+    public function test_los_dias_de_la_prueba_salen_de_la_configuracion(): void
+    {
+        AdminSetting::set(PruebaSettings::KEY_DIAS_DEFAULT, '14');
+
+        $guia = $this->guia();
+
+        $this->assertStringContainsString('prueba gratis de 14 días', $guia);
+        $this->assertStringNotContainsString('prueba gratis de 7 días', $guia);
     }
 }
