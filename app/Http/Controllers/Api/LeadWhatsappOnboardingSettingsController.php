@@ -54,6 +54,11 @@ class LeadWhatsappOnboardingSettingsController extends Controller
             'auto_message_landing'          => 'sometimes|nullable|string|max:4000',
             'welcome_delay_seconds_landing' => 'sometimes|nullable|integer|min:' . LeadWhatsappOnboardingSettings::DELAY_MIN_SECONDS
                 . '|max:' . LeadWhatsappOnboardingSettings::DELAY_MAX_SECONDS,
+            /* Flujo de entrada nuevo (misión embudo-whatsapp-precios, E2): el interruptor y los textos precargados de los
+             * anuncios. OPCIONALES por la misma razón: un SPA que no los manda no puede apagar el flujo (`persist_from_request`
+             * los escribe sólo si vinieron). */
+            'flujo_entrada_activo'          => 'sometimes|nullable|boolean',
+            'flujo_textos_precargados'      => 'sometimes|nullable|string|max:8000',
         ]);
 
         // La variante con nombre debe incluir el placeholder para personalizar saludos.
