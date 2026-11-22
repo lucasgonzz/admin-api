@@ -63,7 +63,7 @@ class PanelAgentCatalog
             'operaciones'    => $operations,
             'resumen'        => ['total' => count($operations), 'por_categoria' => $by_category],
             'como_confirmar' => 'Las operaciones con frenada=true devuelven 428 con un codigo_confirmacion. Repetí el MISMO pedido '
-                . '(método, ruta y cuerpo) con el header X-Agente-Confirmar: <codigo>. Con X-Agente-Dry-Run: si se ve el preview sin ejecutar.',
+                . '(método, ruta y cuerpo) con el header X-Agente-Confirmar: <codigo>; el código vale una sola vez y 15 minutos. Con X-Agente-Dry-Run: si se ve el preview sin ejecutar.',
         ];
     }
 

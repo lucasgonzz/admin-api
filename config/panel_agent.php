@@ -16,8 +16,8 @@ return [
     'rate_limit_per_minute' => (int) env('PANEL_AGENT_RATE_LIMIT_PER_MINUTE', 120),
 
     /*
-    | Ventana del código de confirmación, en minutos. Se acepta la ventana actual y la anterior: un código
-    | vale entre `ttl` y `2 * ttl` minutos y sólo para el mismo método, ruta y cuerpo.
+    | Vida del código de confirmación, en minutos. Cada preview emite un código nuevo que vale UNA sola vez,
+    | hasta `ttl` minutos después del preview, y sólo para el mismo método, ruta y cuerpo.
     */
     'confirmation_ttl_minutes' => 15,
 

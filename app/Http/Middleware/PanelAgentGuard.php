@@ -138,9 +138,15 @@ class PanelAgentGuard
         // Categoría frenada: sólo se ejecuta con el código del preview de ESTE pedido.
         $confirmed = false;
         if ($braked) {
-            $confirmed = $this->confirmation->matches($confirm_code, (int) $user->id, $method, $request->path(), $payload);
+            // El código se consume acá: es de un solo uso, así que un reintento con el mismo código no ejecuta de nuevo.
+            $confirmation_result = $this->confirmation->consume($confirm_code, (int) $user->id, $method, $request->path(), $payload);
+            $confirmed           = $confirmation_result === PanelAgentConfirmation::OK;
             if (! $confirmed) {
                 $preview = $this->preview($request, $route, $category, true, 'agente_confirmacion_requerida', $payload, true);
+                if ($confirmation_result === PanelAgentConfirmation::USED) {
+                    // Aviso explícito: el código ya se usó, éste es un preview nuevo con otro código.
+                    $preview['confirmacion_usada'] = true;
+                }
                 $this->close_audit($log, 'frenada', 428, $this->redactor->to_json_excerpt($preview, $this->excerpt_limit()), $started);
 
                 return response()->json($preview, 428);
@@ -252,14 +258,15 @@ class PanelAgentGuard
         ];
 
         if ($with_code) {
-            $preview['codigo_confirmacion'] = $this->confirmation->code_for(
+            // Código NUEVO en cada preview, de un solo uso y ligado a este pedido exacto.
+            $preview['codigo_confirmacion'] = $this->confirmation->issue_code(
                 (int) $request->user()->id,
                 $request->method(),
                 $request->path(),
                 $payload
             );
             $preview['como_confirmar'] = 'Repetí el MISMO pedido con el header X-Agente-Confirmar: <codigo_confirmacion>. '
-                . 'Vale entre 15 y 30 minutos y sólo para este método, ruta y cuerpo.';
+                . 'El código vale una sola vez, 15 minutos, y sólo para este método, ruta y cuerpo.';
         }
 
         return $preview;

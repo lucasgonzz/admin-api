@@ -3,72 +3,154 @@
 namespace App\Services\PanelAgent;
 
 use Carbon\Carbon;
+use Illuminate\Support\Facades\Cache;
 
 /**
- * Código de confirmación de las operaciones frenadas del agente.
+ * Código de confirmación de las operaciones frenadas del agente: de UN solo uso.
  *
- * El código es un HMAC del agente, el método, la ruta REAL y el cuerpo exacto, más una ventana de tiempo.
- * Por eso sólo vale para ese pedido y obliga a haber visto el preview que lo entrega: cambiar la ruta, el
- * cuerpo o esperar demasiado lo invalida.
+ * Cada preview (428 o dry run de una categoría frenada) emite un código NUEVO, aleatorio. El servidor guarda en
+ * el cache, bajo ese código, el HMAC(código | agente | método | ruta real | cuerpo exacto, app.key) y el
+ * vencimiento (`confirmation_ttl_minutes`, 15). Al confirmar se recalcula el HMAC con lo que llegó, se compara
+ * con `hash_equals` y el código se CONSUME con una marca atómica (`Cache::add`): reusarlo da «usado» y el guard
+ * responde 428 con un preview nuevo. Así un reintento ciego del agente (por ejemplo tras un timeout del MCP)
+ * nunca duplica un pago, un mensaje ni un borrado.
+ *
+ * El cache de producción (`CACHE_DRIVER`, `file` en `.env.example`) alcanza: si se vacía, los códigos pendientes
+ * dejan de valer y el agente pide un preview nuevo (falla cerrado).
  */
 class PanelAgentConfirmation
 {
+    /** Resultado de consume(): el código era válido y quedó consumido; se puede ejecutar. */
+    const OK = 'ok';
+
+    /** Resultado de consume(): el código ya se había usado. */
+    const USED = 'usado';
+
+    /** Resultado de consume(): código ausente, inventado, vencido o de otro pedido. */
+    const INVALID = 'invalido';
+
+    /** Minutos que el cache conserva el registro: más que la ventana, para distinguir «vencido» y «usado». */
+    const RETENTION_MINUTES = 120;
+
     /**
-     * Código de 16 caracteres para un pedido.
+     * Emite un código nuevo de un solo uso para un pedido y lo deja registrado.
      *
      * @param  int                  $admin_id Agente que pide.
      * @param  string               $method   Verbo HTTP.
      * @param  string               $path     Camino real pedido (ej. `api/admin/message-variant/5`).
-     * @param  array<string, mixed> $payload  Query + body SIN redactar (si no, dos cuerpos que sólo difieren en un secreto darían el mismo código).
-     * @param  int|null             $window   Ventana de tiempo; null = la actual.
-     * @return string
+     * @param  array<string, mixed> $payload  Query + body SIN redactar (si no, dos cuerpos que sólo difieren en un secreto darían el mismo vínculo).
+     * @return string Código de 16 caracteres hexadecimales.
      */
-    public function code_for(int $admin_id, string $method, string $path, array $payload, $window = null): string
+    public function issue_code(int $admin_id, string $method, string $path, array $payload): string
     {
-        $window = $window === null ? $this->current_window() : (int) $window;
+        // Nonce aleatorio: es el código que ve el agente.
+        $code = bin2hex(random_bytes(8));
 
-        $material = implode('|', [$admin_id, strtoupper($method), $path, $this->canonical($payload), $window]);
+        // Vínculo del código con el pedido exacto y vencimiento lógico (se verifica con Carbon, no con el TTL del cache).
+        $record = [
+            'binding'    => $this->binding_for($code, $admin_id, $method, $path, $payload),
+            'expires_at' => Carbon::now()->getTimestamp() + $this->ttl_seconds(),
+        ];
 
-        return substr(hash_hmac('sha256', $material, (string) config('app.key')), 0, 16);
+        Cache::put($this->issued_key($admin_id, $code), $record, Carbon::now()->addMinutes(self::RETENTION_MINUTES));
+
+        return $code;
     }
 
     /**
-     * Indica si el código recibido corresponde al pedido (ventana actual o la anterior).
+     * Valida el código recibido contra el pedido y, si corresponde, lo consume de forma atómica.
+     *
+     * Un código que no corresponde al pedido (otra ruta, otro cuerpo) NO se consume: sigue sirviendo para el suyo.
      *
      * @param  string|null          $code     Código recibido en `X-Agente-Confirmar`.
      * @param  int                  $admin_id Agente que pide.
      * @param  string               $method   Verbo HTTP.
      * @param  string               $path     Camino real pedido.
      * @param  array<string, mixed> $payload  Query + body sin redactar.
-     * @return bool
+     * @return string OK (ejecutar), USED (ya se usó) o INVALID.
      */
-    public function matches($code, int $admin_id, string $method, string $path, array $payload): bool
+    public function consume($code, int $admin_id, string $method, string $path, array $payload): string
     {
-        if (! is_string($code) || $code === '') {
-            return false;
+        // Sólo se aceptan los 16 hexadecimales que emite issue_code().
+        if (! is_string($code) || preg_match('/^[0-9a-f]{16}$/', $code) !== 1) {
+            return self::INVALID;
         }
 
-        $current = $this->current_window();
-
-        foreach ([$current, $current - 1] as $window) {
-            if (hash_equals($this->code_for($admin_id, $method, $path, $payload, $window), $code)) {
-                return true;
-            }
+        // Registro emitido para ese código; si no está puede ser un código ya consumido o uno inventado.
+        $record = Cache::get($this->issued_key($admin_id, $code));
+        if (! is_array($record)) {
+            return Cache::has($this->used_key($admin_id, $code)) ? self::USED : self::INVALID;
         }
 
-        return false;
+        // Vencido (más de `confirmation_ttl_minutes` desde el preview).
+        if (Carbon::now()->getTimestamp() > (int) ($record['expires_at'] ?? 0)) {
+            return self::INVALID;
+        }
+
+        // Ligado al pedido exacto: otra ruta u otro cuerpo no coinciden.
+        $expected = $this->binding_for($code, $admin_id, $method, $path, $payload);
+        if (! hash_equals((string) ($record['binding'] ?? ''), $expected)) {
+            return self::INVALID;
+        }
+
+        // Consumo atómico: sólo el primero que logra agregar la marca ejecuta; el resto ve «usado».
+        if (! Cache::add($this->used_key($admin_id, $code), 1, Carbon::now()->addMinutes(self::RETENTION_MINUTES))) {
+            return self::USED;
+        }
+        Cache::forget($this->issued_key($admin_id, $code));
+
+        return self::OK;
     }
 
     /**
-     * Número de la ventana de tiempo actual (cada `confirmation_ttl_minutes` minutos).
+     * HMAC que liga un código con el pedido exacto.
+     *
+     * @param  string               $code     Nonce del código.
+     * @param  int                  $admin_id Agente.
+     * @param  string               $method   Verbo HTTP.
+     * @param  string               $path     Camino real pedido.
+     * @param  array<string, mixed> $payload  Query + body sin redactar.
+     * @return string
+     */
+    private function binding_for(string $code, int $admin_id, string $method, string $path, array $payload): string
+    {
+        $material = implode('|', [$code, $admin_id, strtoupper($method), $path, $this->canonical($payload)]);
+
+        return hash_hmac('sha256', $material, (string) config('app.key'));
+    }
+
+    /**
+     * Clave de cache del registro de un código emitido.
+     *
+     * @param  int    $admin_id Agente.
+     * @param  string $code     Código.
+     * @return string
+     */
+    private function issued_key(int $admin_id, string $code): string
+    {
+        return 'panel_agent_confirm:' . $admin_id . ':' . $code;
+    }
+
+    /**
+     * Clave de cache de la marca «código usado».
+     *
+     * @param  int    $admin_id Agente.
+     * @param  string $code     Código.
+     * @return string
+     */
+    private function used_key(int $admin_id, string $code): string
+    {
+        return 'panel_agent_confirm_used:' . $admin_id . ':' . $code;
+    }
+
+    /**
+     * Segundos de vida de un código (`confirmation_ttl_minutes`, 15 por defecto).
      *
      * @return int
      */
-    private function current_window(): int
+    private function ttl_seconds(): int
     {
-        $seconds = max(1, (int) config('panel_agent.confirmation_ttl_minutes', 15)) * 60;
-
-        return intdiv(Carbon::now()->getTimestamp(), $seconds);
+        return max(1, (int) config('panel_agent.confirmation_ttl_minutes', 15)) * 60;
     }
 
     /**
