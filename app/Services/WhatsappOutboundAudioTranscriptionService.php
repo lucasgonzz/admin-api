@@ -67,7 +67,7 @@ class WhatsappOutboundAudioTranscriptionService
 
             $response = Http::withToken((string) config('services.openai_transcription.api_key'))
                 ->timeout(30)
-                ->connectTimeout(10)
+                ->withOptions(['connect_timeout' => 10])
                 ->attach('file', $contents, $filename)
                 ->post(self::OPENAI_URL, [
                     'model'           => (string) config('services.openai_transcription.model', 'gpt-4o-mini-transcribe'),
