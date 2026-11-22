@@ -858,7 +858,7 @@ class PreciosVigentesSettings
      * precio de los tres juntos. A pesos enteros.
      *
      *  - `paquete.mensualidad = round(ganancia_por_paquete + tokens_usd * cotizacion_usd.valor)`
-     *  - `tres_juntos.precio_lista = suma de los precios de los tres items`
+     *  - `tres_juntos.precio_lista = suma de los precios de los tres items` (a 2 decimales, sin redondear a enteros)
      *  - `tres_juntos.precio = round(precio_lista * (100 - descuento_porcentaje) / 100)`
      *
      * Se aplica a un contrato ya validado (los campos de origen son números). Es la única fórmula: la usan la
@@ -882,10 +882,12 @@ class PreciosVigentesSettings
             $lista += (float) $item['precio'];
         }
 
-        $lista     = round($lista);
+        /* La lista es la suma exacta de los tres items (a 2 decimales, como la vista previa del SPA): redondearla a
+           pesos enteros desviaba el descuento. Sólo el precio con descuento va a pesos enteros. */
+        $lista     = round($lista, 2);
         $descuento = (float) $contrato['implementaciones']['tres_juntos']['descuento_porcentaje'];
 
-        $contrato['implementaciones']['tres_juntos']['precio_lista'] = (int) $lista;
+        $contrato['implementaciones']['tres_juntos']['precio_lista'] = $lista;
         $contrato['implementaciones']['tres_juntos']['precio']       = (int) round($lista * (100 - $descuento) / 100);
 
         return $contrato;
