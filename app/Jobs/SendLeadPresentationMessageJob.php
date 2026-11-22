@@ -22,6 +22,11 @@ use Illuminate\Support\Facades\Log;
  * oferta de la prueba gratis, sin variante, y eso lo decide el encolado y viaja en
  * `$oferta_de_prueba`. Default false: un job encolado antes del deploy se deserializa sin la
  * propiedad y sigue como siempre.
+ *
+ * Segunda excepción (misión embudo-whatsapp-precios, E2, 21/11/2026): con el flujo de entrada nuevo prendido, la
+ * presentación son los puntos del paso 1 que todavía no salieron (`LeadFlujoEntradaService`), y eso viaja en
+ * `$modo = 'flujo_entrada'`. Default null: un job encolado antes del deploy se deserializa sin la propiedad y
+ * sigue como siempre.
  */
 class SendLeadPresentationMessageJob implements ShouldQueue
 {
@@ -43,14 +48,21 @@ class SendLeadPresentationMessageJob implements ShouldQueue
     private $oferta_de_prueba = false;
 
     /**
+     * @var string|null `flujo_entrada` = mandar los puntos del paso 1 del flujo de entrada nuevo; null = como siempre.
+     */
+    private $modo = null;
+
+    /**
      * @param int         $lead_id
      * @param string|null $display_name
      * @param bool        $oferta_de_prueba
+     * @param string|null $modo Modo especial de la presentación (`flujo_entrada`) o null.
      */
-    public function __construct(int $lead_id, ?string $display_name = null, bool $oferta_de_prueba = false)
+    public function __construct(int $lead_id, ?string $display_name = null, bool $oferta_de_prueba = false, ?string $modo = null)
     {
         $this->lead_id = $lead_id;
         $this->oferta_de_prueba = $oferta_de_prueba;
+        $this->modo = $modo;
         $this->display_name = $display_name !== null && trim($display_name) !== ''
             ? trim($display_name)
             : null;
@@ -74,7 +86,15 @@ class SendLeadPresentationMessageJob implements ShouldQueue
             return;
         }
 
-        $onboarding_service->send_presentation_message($lead, $this->display_name, (bool) $this->oferta_de_prueba);
+        $onboarding_service->send_presentation_message($lead, $this->display_name, (bool) $this->oferta_de_prueba, $this->modo);
+    }
+
+    /**
+     * @return bool Para los tests: si este job manda el paso 1 del flujo de entrada nuevo.
+     */
+    public function es_flujo_de_entrada(): bool
+    {
+        return $this->modo === LeadWhatsappOnboardingService::MODO_FLUJO_ENTRADA;
     }
 
     /**

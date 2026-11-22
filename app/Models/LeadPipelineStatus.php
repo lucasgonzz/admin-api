@@ -24,8 +24,14 @@ class LeadPipelineStatus extends Model
      */
     public const DEFAULT_STATUSES = [
         'nuevo'                        => 'Nuevo',
-        'contactado'                   => 'Contactado',
+        // El slug `contactado` NO se renombró (lo leen la API, el SPA y 48 tests): sólo su etiqueta pasó a «Conversando»
+        // (misión embudo-whatsapp-precios, E2). Ya significaba «respondió a la presentación».
+        'contactado'                   => 'Conversando',
         'calificado'                   => 'Calificado',
+        // Embudo nuevo (E2): al lead se le envió el link de la prueba. Va ANTES del tramo de la demo en el orden, a propósito:
+        // el guardia de «no retroceder de tramo» compara `sort_order`, y un lead con el link que después pide la demo tiene
+        // que poder pasar a `solicita_disponibilidad`.
+        'link_enviado'                 => 'Link enviado',
         'solicita_disponibilidad'      => 'Solicita disponibilidad',
         'demo_agendada'                => 'Demo agendada',
         // Subestado automatizado por el agente.
@@ -37,7 +43,10 @@ class LeadPipelineStatus extends Model
         // Prueba gratuita de 7 días en curso (misión prueba-alta-instancia, 3/11/2026): el lead tiene su
         // propia instancia y un Client en estado `prueba`. Sale de acá al contratar (cerrado_ganado) o
         // cuando se borra la instancia sin contratar (cerrado_perdido).
-        'prueba_activa'                => 'Prueba activa',
+        // Sólo su etiqueta cambió a «En prueba» (E2): lo leen cinco servicios por el slug.
+        'prueba_activa'                => 'En prueba',
+        // Embudo nuevo (E2): el lead pidió que se lo carguemos nosotros; lo llama el vendedor.
+        'implementacion_pedida'        => 'Implementación pedida',
         'closer_activo'                => 'Closer activo',
         'mail2_enviado'                => 'Mail2 enviado',
         'cerrado_ganado'               => 'Cerrado ganado',
@@ -60,6 +69,7 @@ class LeadPipelineStatus extends Model
         'nuevo'                        => '#adb5bd',
         'contactado'                   => '#adb5bd',
         'calificado'                   => '#28a745',
+        'link_enviado'                 => '#0dcaf0',
         'solicita_disponibilidad'      => '#0d6efd',
         'demo_agendada'                => '#0a58ca',
         'demo_en_curso'                => '#ffc107',
@@ -67,6 +77,7 @@ class LeadPipelineStatus extends Model
         'demo_pendiente_de_terminar'   => '#dc3545',
         'demo_realizada'               => '#0d6efd',
         'prueba_activa'                => '#20c997',
+        'implementacion_pedida'        => '#fd7e14',
         'closer_activo'                => '#6f42c1',
         'mail2_enviado'                => '#adb5bd',
         'cerrado_ganado'               => '#495057',
@@ -88,6 +99,8 @@ class LeadPipelineStatus extends Model
         'demo_pendiente_de_terminar' => 'Demo',
         'demo_realizada'             => 'Demo',
         'prueba_activa'              => 'Prueba',
+        'link_enviado'               => 'Prueba',
+        'implementacion_pedida'      => 'Cierre',
         'closer_activo'              => 'Cierre',
         'cerrado_ganado'             => 'Cierre',
         'cerrado_perdido'            => 'Fin',

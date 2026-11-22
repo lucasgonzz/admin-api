@@ -20,6 +20,12 @@ class LeadAiSuggestionScheduler
     /** Prefijo de clave de caché por lead. */
     private const CACHE_KEY_PREFIX = 'lead_ai_suggestion_schedule_token:';
 
+    /** Prefijo de la marca «hay una generación agendada» por lead: guarda el token y el último mensaje al agendar. */
+    private const CACHE_KEY_GENERACION_PREFIX = 'lead_ai_suggestion_generacion_agendada:';
+
+    /** Segundos extra sobre la demora que dura esa marca (cubre cola lenta y la generación en curso). */
+    private const GENERACION_MARGEN_SEGUNDOS = 900;
+
     /** TTL de la clave de token (cubre demoras largas y cola lenta). */
     private const CACHE_TTL_SECONDS = 7200;
 
@@ -91,6 +97,7 @@ class LeadAiSuggestionScheduler
         $schedule_token = $this->bump_schedule_token($lead_id);
 
         $this->dispatch_generate_job($lead_id, $schedule_token, $delay_seconds);
+        $this->marcar_generacion_agendada($lead_id, $schedule_token, $delay_seconds);
 
         Log::channel('daily')->debug('LeadAiSuggestionScheduler: sugerencia IA reprogramada.', [
             'lead_id'                => $lead_id,
@@ -102,8 +109,88 @@ class LeadAiSuggestionScheduler
     }
 
     /**
+     * ¿Hay una generación de la IA agendada o en curso, con el token vigente, para este lead? (DECISIONES-E2 punto 16.)
+     *
+     * Es la generación que el debounce ya tiene en marcha: si se toma el camino literal mientras tanto, se renovaría el token y
+     * esa generación se descartaría sin que nadie conteste lo que el lead preguntó. Deja de haber una cuando el token cambió
+     * o cuando ya salió su producto: un mensaje del sistema posterior al agendado que no sea un automático del flujo.
+     *
+     * @param int $lead_id
+     *
+     * @return bool
+     */
+    public function hay_generacion_agendada(int $lead_id): bool
+    {
+        $marca = Cache::get(self::CACHE_KEY_GENERACION_PREFIX . $lead_id);
+        if (! is_array($marca) || ! isset($marca['token'], $marca['ultimo_mensaje_id'])) {
+            return false;
+        }
+
+        if (! $this->is_schedule_token_current($lead_id, (int) $marca['token'])) {
+            return false;
+        }
+
+        $termino = LeadMessage::query()
+            ->where('lead_id', $lead_id)
+            ->where('sender', 'sistema')
+            ->where('is_status_event', false)
+            ->where('id', '>', (int) $marca['ultimo_mensaje_id'])
+            ->where(function ($query) {
+                $query->whereNull('system_message_kind')
+                    ->orWhereNotIn('system_message_kind', LeadFlujoEntradaService::kinds_automaticos());
+            })
+            ->exists();
+
+        return ! $termino;
+    }
+
+    /**
+     * Deja la marca de que hay una generación agendada para el lead.
+     *
+     * @param int $lead_id
+     * @param int $schedule_token
+     * @param int $delay_seconds
+     *
+     * @return void
+     */
+    private function marcar_generacion_agendada(int $lead_id, int $schedule_token, int $delay_seconds): void
+    {
+        Cache::put(self::CACHE_KEY_GENERACION_PREFIX . $lead_id, [
+            'token'             => $schedule_token,
+            'ultimo_mensaje_id' => (int) LeadMessage::query()->where('lead_id', $lead_id)->max('id'),
+        ], $delay_seconds + self::GENERACION_MARGEN_SEGUNDOS);
+    }
+
+    /**
+     * Prepara el terreno para que un inbound lo conteste el camino LITERAL del flujo de entrada (en vez de la IA), con las mismas
+     * defensas que {@see schedule_after_lead_inbound()} (misión embudo-whatsapp-precios, E2, DECISIONES-E2 punto 13):
+     *  - descarta las sugerencias viejas sin enviar (nunca los seguimientos ni las que se están enviando en este momento);
+     *  - renueva el token del debounce, para que una generación de la IA que ya arrancó se descarte al terminar y el lead no
+     *    reciba dos veces lo mismo.
+     *
+     * Si una sugerencia se está enviando ahora mismo NO se toma el literal: devuelve false y el llamador sigue el camino normal
+     * (`schedule_after_lead_inbound`), que anota el inbound durante el envío.
+     *
+     * @param int $lead_id
+     *
+     * @return bool true si puede salir el literal; false si hay un envío en curso.
+     */
+    public function preparar_para_el_literal(int $lead_id): bool
+    {
+        if ($this->clear_stale_pending_suggestions($lead_id)) {
+            return false;
+        }
+
+        $this->bump_schedule_token($lead_id);
+
+        return true;
+    }
+
+    /**
      * ¿El agente contesta el PRIMER mensaje de este lead? Solo si reservó su demo desde la landing
-     * (misión demo-autogestionada-landing, 22/10/2026, D11 del plan).
+     * (misión demo-autogestionada-landing, 22/10/2026, D11 del plan) o, con el flujo de entrada nuevo prendido,
+     * si ese primer mensaje es una PREGUNTA y se le deben puntos (misión embudo-whatsapp-precios, E2, §2.2.2): a ese
+     * lead no le sale ningún literal, así que le contesta la IA ya en su primer mensaje.
      *
      * 🔴 POR QUÉ el gate «la IA espera al segundo mensaje» no aplica a este lead. El gate existe porque al
      * primer mensaje de un lead nuevo lo contesta el onboarding (bienvenida + presentación), y el agente
@@ -119,7 +206,11 @@ class LeadAiSuggestionScheduler
      */
     public static function responde_el_primer_mensaje(int $lead_id): bool
     {
-        return Lead::query()->whereKey($lead_id)->whereNotNull('demo_reservada_desde_landing_at')->exists();
+        if (Lead::query()->whereKey($lead_id)->whereNotNull('demo_reservada_desde_landing_at')->exists()) {
+            return true;
+        }
+
+        return LeadFlujoEntradaService::ia_contesta_el_primer_mensaje($lead_id);
     }
 
     /**

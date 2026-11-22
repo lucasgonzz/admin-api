@@ -187,7 +187,7 @@ class OportunidadesDelSujetoYCandidatosTest extends BaseDePipelines
 
         $estados = $respuesta->json('lead_statuses');
         $this->assertContains(['slug' => 'nuevo', 'label' => 'Nuevo'], $estados);
-        $this->assertContains(['slug' => 'contactado', 'label' => 'Contactado'], $estados);
+        $this->assertContains(['slug' => 'contactado', 'label' => 'Conversando'], $estados);
         $this->assertNotContains('mail2_enviado', array_column($estados, 'slug'), 'Oculto de filtros en todo el admin.');
         $this->assertSame($this->opciones_del_catalogo(), $estados, 'Los estados salen de options_for_meta(), no de una copia.');
 

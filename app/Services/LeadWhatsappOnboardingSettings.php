@@ -171,6 +171,10 @@ class LeadWhatsappOnboardingSettings
             'verificacion_agendamiento_auto_send_delay_minutes' => self::get_verificacion_agendamiento_auto_send_delay_minutes(),
             'auto_activar_verificacion_al_solicitar_disponibilidad' => self::get_auto_activar_verificacion_al_solicitar_disponibilidad(),
             'placeholder_nombre'                  => self::PLACEHOLDER_NOMBRE,
+            /* Flujo de entrada nuevo (misión embudo-whatsapp-precios, E2): el interruptor (apagado por defecto) y los
+             * textos precargados de los anuncios (uno por línea; no cuentan como pregunta). El SPA de hoy los ignora. */
+            'flujo_entrada_activo'                => LeadFlujoEntradaService::activo(),
+            'flujo_textos_precargados'            => (string) AdminSetting::get(LeadFlujoEntradaService::KEY_TEXTOS_PRECARGADOS, ''),
         ];
     }
 
@@ -199,6 +203,21 @@ class LeadWhatsappOnboardingSettings
                 self::KEY_WELCOME_DELAY_SECONDS_LANDING,
                 (string) self::clamp_welcome_delay((int) $data['welcome_delay_seconds_landing'])
             );
+        }
+        /* Las dos claves del flujo de entrada nuevo (E2 de embudo-whatsapp-precios) son OPCIONALES en el PUT: un SPA que no
+         * las manda no puede apagar el flujo ni borrar los textos precargados. Se escriben sólo si vinieron. */
+        if (array_key_exists('flujo_entrada_activo', $data) && $data['flujo_entrada_activo'] !== null) {
+            /* Al PRENDERLO (apagado → prendido) se sella el encendido: sólo los leads creados desde ahora entran al flujo.
+               Guardar con el flujo ya prendido no renueva el sello; apagar no lo borra. */
+            $estaba_prendido = LeadFlujoEntradaService::activo();
+            AdminSetting::set(LeadFlujoEntradaService::KEY_ACTIVO, $data['flujo_entrada_activo'] ? '1' : '0');
+            if ($data['flujo_entrada_activo'] && ! $estaba_prendido) {
+                LeadFlujoEntradaService::sellar_encendido();
+            }
+        }
+        /* La textarea vacía llega como null (el middleware convierte '' en null): con la clave presente es «borrar los textos». */
+        if (array_key_exists('flujo_textos_precargados', $data)) {
+            AdminSetting::set(LeadFlujoEntradaService::KEY_TEXTOS_PRECARGADOS, trim((string) $data['flujo_textos_precargados']));
         }
         AdminSetting::set(self::KEY_AI_SUGGESTION_DELAY_SECONDS, (string) (int) $data['ai_suggestion_delay_seconds']);
         AdminSetting::set(
@@ -253,6 +272,11 @@ class LeadWhatsappOnboardingSettings
                 self::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD,
                 self::DEFAULT_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD
             );
+        }
+        /* El flujo de entrada nuevo nace APAGADO (E2 de embudo-whatsapp-precios): lo prende Lucas desde Cuenta, después de
+           aplicar el conocimiento nuevo. Sólo se siembra la clave si falta, para que el GET la muestre. */
+        if (AdminSetting::get(LeadFlujoEntradaService::KEY_ACTIVO) === null) {
+            AdminSetting::set(LeadFlujoEntradaService::KEY_ACTIVO, '0');
         }
     }
 

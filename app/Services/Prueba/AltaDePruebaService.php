@@ -19,6 +19,7 @@ use App\Services\DemoIndustriaCatalogo;
 use App\Services\LeadAtribucionService;
 use App\Services\LeadDocNumberGenerator;
 use App\Services\LeadOrigenService;
+use App\Services\LeadTareaVendedorService;
 use App\Services\MetaConversionesService;
 use App\Services\SystemErrorWhatsappService;
 use App\Services\UserIdBlockAllocatorService;
@@ -110,6 +111,15 @@ class AltaDePruebaService
         // El worker puede tomar el Lead inmediatamente: el fbclid debe estar persistido antes.
         $this->dejar_evento_en_el_hilo($lead_listo, $datos, $instancia);
         $meta_eventos = $this->registrar_conversiones($lead_listo, $contexto_web);
+
+        /* La tarea del embudo (misión embudo-whatsapp-precios, E2): alguien del equipo tiene que llamar al lead que
+           acaba de crear su prueba. Es un aviso interno que corre siempre, con o sin el flujo de entrada nuevo. El
+           servicio no tira (la prueba ya está creada), pero se envuelve igual: un aviso caído no puede cambiar el 201. */
+        try {
+            LeadTareaVendedorService::crear($lead_listo, LeadTareaVendedorService::MOTIVO_PRUEBA_CREADA);
+        } catch (\Throwable $e) {
+            Log::error('AltaDePrueba: no se pudo crear la tarea del embudo.', ['lead_id' => $lead_listo->id, 'error' => $e->getMessage()]);
+        }
 
         /* A la cola (`database` en producción), NO `afterResponse()`: eso correría los ~3 minutos del armado adentro
            del proceso del request, después de contestar. La transacción ya commiteó. */

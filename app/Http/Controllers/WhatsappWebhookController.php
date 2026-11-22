@@ -2231,6 +2231,21 @@ class WhatsappWebhookController extends Controller
         // Si se detecta una confirmación de fin, la IA no debe generar sugerencias sobre ese mensaje.
         $this->handle_demo_confirmation_if_needed($lead, (string) $content);
 
+        // 2c) Flujo de entrada nuevo (misión embudo-whatsapp-precios, E2, 21/11/2026), sólo con el interruptor prendido: el
+        //     lead contestó lo que se le preguntó SIN preguntar nada y se le deben las dos formas de arrancar y la página
+        //     (y el link, si es de la web). Eso sale LITERAL por el job, con 3 s de demora, y ese inbound NO agenda la IA:
+        //     lo que había que decir ya sale. El siguiente inbound sí. Si el inbound pregunta algo, o se le debe todavía
+        //     algo del paso 1, no entra acá: sigue la IA de siempre, que recibe los puntos obligatorios (PLAN §2.2.2).
+        //     Antes de tomar el literal se replican las defensas del scheduler (descartar sugerencias viejas, renovar el token
+        //     del debounce y no tocar un envío en curso): si hay una sugerencia saliendo, sigue el camino normal.
+        if (\App\Services\LeadFlujoEntradaService::corresponde_el_literal_del_paso_2($lead, (string) $content)
+            && (new LeadAiSuggestionScheduler())->preparar_para_el_literal((int) $lead->id)) {
+            \App\Services\LeadFlujoEntradaService::marcar_literal_encolado($lead);
+            \App\Jobs\SendLeadDosFormasJob::dispatch((int) $lead->id)->delay(now()->addSeconds(3));
+
+            return;
+        }
+
         // Sugerencia IA con debounce: espera configurable tras el último inbound (2º mensaje o más).
         (new LeadAiSuggestionScheduler())->schedule_after_lead_inbound((int) $lead->id);
     }
