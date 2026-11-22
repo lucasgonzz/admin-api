@@ -48,9 +48,11 @@ class StatusCardsAgrupadaOtrosTest extends TestCase
     private const SLUGS_OTROS_POR_DEFECTO = [
         'nuevo',
         'contactado',
+        'link_enviado',
         'demo_pendiente_de_terminar',
         'demo_realizada',
         'prueba_activa',
+        'implementacion_pedida',
         'mail2_enviado',
         'cerrado_ganado',
         'cerrado_perdido',

@@ -282,7 +282,8 @@ class PuntosObligatoriosDelFlujoTest extends TestCase
 
         $this->assertSame(LeadAiService::MENSAJE_DE_ESPERA_SIN_RESPALDO, (string) $mensaje->content, 'El gate frena y no se agrega nada.');
         $this->assertTrue((bool) $mensaje->requiere_verificacion);
-        $this->assertTrue((bool) $lead->fresh()->requiere_intervencion_humana);
+        /* La derivación vive en el paquete retenido del mensaje (pending_actions); la marca del lead se escribe recién al aprobar. */
+        $this->assertTrue((bool) ($mensaje->pending_actions['requiere_intervencion_humana'] ?? false));
         $this->assertStringNotContainsString('Tenés dos formas de arrancar', (string) $mensaje->content);
         $this->assertStringNotContainsString('comerciocity.com', (string) $mensaje->content);
 

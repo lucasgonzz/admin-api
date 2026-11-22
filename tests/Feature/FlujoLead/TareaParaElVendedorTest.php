@@ -38,7 +38,7 @@ class TareaParaElVendedorTest extends BaseDePruebaGratuita
 
         /* El Http de la base ya atiende Meta y los ERP: acá sólo se suma la IA simulada. El resto del armado del
            flujo (pool propio, variantes) no se usa: el alta trae su propia instancia libre. */
-        $this->fakear_http_del_flujo(false);
+        $this->fakear_http_del_flujo(true);
         $this->sembrar_protocolo_de_leads();
         AdminSetting::set('lead_whatsapp_flujo_entrada_activo', '0');
         $this->limpiar_roles_de_admins();
