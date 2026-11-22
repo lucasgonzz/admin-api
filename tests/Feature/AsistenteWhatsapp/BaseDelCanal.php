@@ -351,6 +351,13 @@ abstract class BaseDelCanal extends TestCase
              */
             public $indicadores = [];
 
+            /**
+             * @var int Cuántos envíos de TEXTO seguidos fallan como TRANSITORIOS (el 409 "otro mensaje
+             *          en vuelo" de Kapso, status 409) antes de empezar a confirmar. En 0 no cambia
+             *          nada de lo que el espía hacía. Es lo que dispara el reintento de la respuesta.
+             */
+            public $falla_texto_transitoria_veces = 0;
+
             /** @var bool Si Kapso acepta el indicador (true) o lo rechaza devolviendo false. */
             public $confirma_indicador = true;
 
@@ -383,6 +390,14 @@ abstract class BaseDelCanal extends TestCase
                 $this->textos[]  = ['to' => $to, 'body' => $body, 'context' => $context];
                 $this->orden[]   = 'texto';
                 $this->destinos[] = $this->phone_number_id_de_destino();
+
+                if ($this->falla_texto_transitoria_veces > 0) {
+                    $this->falla_texto_transitoria_veces--;
+                    $this->last_send_error       = 'Kapso: otro mensaje en vuelo para esta conversación (409, simulado en la prueba).';
+                    $this->last_send_status_code = 409;
+
+                    return null;
+                }
 
                 if (! $this->confirma) {
                     $this->last_send_error = 'Meta rechazó el envío (simulado en la prueba).';
