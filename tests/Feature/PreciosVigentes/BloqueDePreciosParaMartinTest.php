@@ -72,7 +72,7 @@ class BloqueDePreciosParaMartinTest extends TestCase
 
         $this->assertStringContainsString('PRECIOS VIGENTES', $contexto);
         $this->assertStringContainsString('Inicial: hasta 200 operaciones por mes, 1 usuario: $55.900 ($27.950 los primeros 3 meses)', $contexto);
-        $this->assertStringContainsString('Sistema + Agentes Full: $1.254.600 ($627.300)', $contexto);
+        $this->assertStringContainsString('Los tres juntos: 30 % de descuento, $1.319.640 en lugar de $1.885.200 ($659.820)', $contexto);
         $this->assertStringContainsString('Plantilla de marketing: USD 0,0618 (unos $89,56)', $contexto);
         $this->assertStringContainsString('Plus y A medida ya no se ofrecen', $contexto);
         $this->assertStringEndsWith(self::PREGUNTA_FINAL, $contexto);
@@ -232,7 +232,7 @@ class BloqueDePreciosParaMartinTest extends TestCase
         $bloque = (string) $metodo->invoke(app(LeadAiService::class), 'precios_vigentes', $lead);
 
         $this->assertStringContainsString('PRECIOS VIGENTES', $bloque);
-        $this->assertStringContainsString('Sistema + Agentes Full: $1.254.600 ($627.300)', $bloque);
+        $this->assertStringContainsString('Los tres juntos: 30 % de descuento, $1.319.640 en lugar de $1.885.200 ($659.820)', $bloque);
     }
 
     /* ==================================================================================

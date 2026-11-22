@@ -54,7 +54,7 @@ class PreciosVigentesSettingsTest extends TestCase
     public static function contrato_por_defecto(): array
     {
         return [
-            'version' => 1,
+            'version' => 2,
             'moneda'  => 'ARS',
             'gestion' => [
                 'planes' => [
@@ -67,8 +67,16 @@ class PreciosVigentesSettingsTest extends TestCase
             ],
             'tienda'  => ['mensualidad' => 44900],
             'agentes' => [
-                'lite' => ['mensualidad' => 30000, 'implementacion' => 0],
-                'full' => ['mensualidad' => 94700],
+                'incluye'                  => 'Agente de WhatsApp con la migración o configuración inicial del número',
+                'uso_de_tokens'            => 'Hacerle preguntas y pedirle cosas a los agentes, y generar imágenes para el negocio',
+                'cotizacion_usd'           => ['valor' => 1675, 'referencia' => 'Dólar blue, venta', 'fecha' => '2026-11-20'],
+                'ganancia_por_paquete'     => 30000,
+                'aviso_consumo_porcentaje' => 80,
+                'paquetes'                 => [
+                    ['clave' => 'inicial', 'nombre' => 'Inicial', 'tokens_usd' => 10, 'mensualidad' => 46750],
+                    ['clave' => 'pro', 'nombre' => 'Pro', 'tokens_usd' => 30, 'mensualidad' => 80250],
+                    ['clave' => 'max', 'nombre' => 'Max', 'tokens_usd' => 70, 'mensualidad' => 147250],
+                ],
             ],
             'implementaciones' => [
                 'anticipo_porcentaje' => 50,
@@ -76,11 +84,9 @@ class PreciosVigentesSettingsTest extends TestCase
                 'items'               => [
                     ['clave' => 'gestion', 'nombre' => 'Sistema de gestión', 'precio' => 628400],
                     ['clave' => 'tienda', 'nombre' => 'Tienda online', 'precio' => 628400],
-                    ['clave' => 'agentes_full', 'nombre' => 'Agentes Full', 'precio' => 938600],
-                    ['clave' => 'gestion_tienda', 'nombre' => 'Sistema + tienda', 'precio' => 946800],
-                    ['clave' => 'gestion_agentes_full', 'nombre' => 'Sistema + Agentes Full', 'precio' => 1254600],
-                    ['clave' => 'gestion_tienda_agentes_full', 'nombre' => 'Sistema + tienda + Agentes Full', 'precio' => 1574300],
+                    ['clave' => 'agentes', 'nombre' => 'Agentes', 'precio' => 628400],
                 ],
+                'tres_juntos'         => ['descuento_porcentaje' => 30, 'precio_lista' => 1885200, 'precio' => 1319640],
             ],
             'costos_meta' => [
                 'vigente_desde'                  => '2026-10-01',
@@ -130,7 +136,8 @@ class PreciosVigentesSettingsTest extends TestCase
     /**
      * CA1. Con la base vacía el GET devuelve exactamente el JSON de §2.6 con los valores del pedido:
      * planes Inicial 0-200 / Intermedio 201-600 / Empresa ilimitado, usuario extra, descuento, tienda,
-     * agentes Lite y Full, las seis implementaciones y las cuatro tarifas de Meta.
+     * agentes (un solo paquete con tres paquetes de tokens), las tres implementaciones con los tres
+     * juntos y las cuatro tarifas de Meta.
      *
      * @return void
      */
@@ -159,9 +166,11 @@ class PreciosVigentesSettingsTest extends TestCase
         $this->assertSame(30400, $contrato['gestion']['usuario_extra']);
         $this->assertSame(['porcentaje' => 50, 'meses' => 3], $contrato['gestion']['descuento_bienvenida']);
         $this->assertSame(44900, $contrato['tienda']['mensualidad']);
-        $this->assertSame(['mensualidad' => 30000, 'implementacion' => 0], $contrato['agentes']['lite']);
-        $this->assertSame(94700, $contrato['agentes']['full']['mensualidad']);
-        $this->assertCount(6, $contrato['implementaciones']['items']);
+        $this->assertSame(2, $contrato['version']);
+        $this->assertArrayNotHasKey('lite', $contrato['agentes']);
+        $this->assertArrayNotHasKey('full', $contrato['agentes']);
+        $this->assertSame(46750, $contrato['agentes']['paquetes'][0]['mensualidad']);
+        $this->assertCount(3, $contrato['implementaciones']['items']);
         $this->assertCount(4, $contrato['costos_meta']['tarifas']);
         $this->assertSame(1000, $contrato['costos_meta']['mensajes_libres_gratis_por_mes']);
     }
