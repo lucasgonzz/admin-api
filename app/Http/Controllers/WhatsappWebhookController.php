@@ -20,7 +20,9 @@ use App\Models\LeadPipelineStatus;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
 use App\Models\WhatsappConfig;
+use App\Jobs\ReenviarReaccionAlAsistenteJob;
 use App\Services\AsistenteDemoLeadService;
+use App\Services\AsistenteReaccionService;
 use App\Services\BuscadorDeLeadPorTelefono;
 use App\Services\AsistenteWhatsappService;
 use App\Services\Prueba\PruebaAsistenteService;
@@ -144,6 +146,24 @@ class WhatsappWebhookController extends Controller
         $reaction_data = $reaction_service->extract_reaction($payload, $parsed);
         if ($reaction_data !== null) {
             try {
+                /* 🔴 Reacción del DUEÑO a un mensaje de SU asistente (un 👎 a una respuesta): no es de un
+                   lead ni de soporte, se le reenvía al empresa-api del cliente para valorar la respuesta.
+                   Va ANTES del camino de leads y vale por los dos números (el del asistente y el principal
+                   de un dueño sin segundo número). No crea fila del hilo ni despacha un turno del asistente.
+                   Si el wamid no es de un saliente del asistente (o reacciona otro teléfono, o es demo),
+                   `saliente_reaccionado()` da null y todo sigue exactamente como antes. */
+                $saliente_del_asistente = (new AsistenteReaccionService())->saliente_reaccionado($reaction_data);
+                if ($saliente_del_asistente !== null) {
+                    ReenviarReaccionAlAsistenteJob::dispatch(
+                        (int) $saliente_del_asistente->id,
+                        (string) ($reaction_data['emoji'] ?? ''),
+                        (string) $reaction_data['target_whatsapp_message_id'],
+                        (string) ($reaction_data['reaction_message_id'] ?? '')
+                    );
+
+                    return response()->json(['ok' => true], 200);
+                }
+
                 /* 🔴 Una reacción que entra por el número del ASISTENTE (un 👍 al informe de la mañana)
                    no es de ningún lead: el asistente no tiene leads ni los crea. Sin esta guarda, la
                    reacción de un dueño que no es contacto de soporte iría a
