@@ -554,6 +554,9 @@ Route::middleware('claude.task.key')
         Route::get('schema', 'Api\ClaudeLeadsAnalyticsController@schema_json');
         Route::get('leads', 'Api\ClaudeLeadsAnalyticsController@leads_json');
         Route::get('leads/{id}/messages', 'Api\ClaudeLeadsAnalyticsController@lead_messages_json');
+        Route::get('leads/{id}/attachments/{attachment_id}', 'Api\ClaudeLeadsAnalyticsController@lead_attachment')
+            ->whereNumber('id')
+            ->whereNumber('attachment_id');
         Route::get('messages', 'Api\ClaudeLeadsAnalyticsController@messages_json');
         Route::get('metrics', 'Api\ClaudeLeadsAnalyticsController@metrics_json');
         Route::get('templates', 'Api\ClaudeLeadsAnalyticsController@templates_json');
