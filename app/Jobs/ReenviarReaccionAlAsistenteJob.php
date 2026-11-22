@@ -89,7 +89,10 @@ class ReenviarReaccionAlAsistenteJob implements ShouldQueue
         $this->target_whatsapp_message_id  = $target_whatsapp_message_id;
         $this->reaction_message_id         = $reaction_message_id;
 
-        // Misma cola que el resto del canal: es la que tiene worker garantizado.
+        /* 🔴 Conexión Y cola, las dos, como el resto del canal. Sin `onConnection()` el job usa la conexión
+           por defecto de admin-api, que es `sync`: el POST correría dentro del webhook de Kapso y
+           `release()` sobre un SyncJob no reencola, o sea que los reintentos del 5xx no ocurrirían. */
+        $this->onConnection(AsistenteWhatsappService::CONEXION_DE_COLA);
         $this->onQueue(AsistenteWhatsappService::COLA_DEL_ASISTENTE);
     }
 
