@@ -43,6 +43,19 @@ class RouteServiceProvider extends ServiceProvider
                 ->namespace($this->namespace)
                 ->group(base_path('routes/api.php'));
 
+            // Acceso de agentes al panel (misión admin-control-total): catálogo y auditoría, con Sanctum y,
+            // si ya existe el alias del perfil «Sólo Leads», también con él. Se instancia el Kernel HTTP
+            // antes de preguntar: es quien registra los alias, y en consola/tests todavía no existe.
+            $this->app->make(\Illuminate\Contracts\Http\Kernel::class);
+            $agent_middleware = ['api', 'auth:sanctum'];
+            if (array_key_exists('admin.solo_leads', $this->app['router']->getMiddleware())) {
+                $agent_middleware[] = 'admin.solo_leads';
+            }
+            Route::prefix('api/admin/agente')
+                ->middleware($agent_middleware)
+                ->namespace($this->namespace)
+                ->group(base_path('routes/agente.php'));
+
             Route::middleware('web')
                 ->namespace($this->namespace)
                 ->group(base_path('routes/web.php'));
