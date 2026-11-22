@@ -1351,7 +1351,7 @@ return [
                 'creado_hasta'    => ['columna' => 'created_at',      'tipo' => 'fecha_hasta'],
             ],
             'relaciones'      => [],
-            'nota' => 'Esto dice QUE hay un adjunto y de qué tipo, no cómo abrirlo: la ruta al archivo no se sirve a propósito (ver el comentario de arriba). Para el mensaje que lo trajo está GET claude/messages.',
+            'nota' => 'Esto dice QUE hay un adjunto y de qué tipo; la ruta al archivo no se publica a propósito (ver el comentario de arriba). Para bajar el archivo: GET claude/leads/{lead_id}/attachments/{id} (lead_id sale del mensaje, id de esta fila). Para el mensaje que lo trajo está GET claude/messages.',
         ],
 
         /* ---------------------------------------------------------------

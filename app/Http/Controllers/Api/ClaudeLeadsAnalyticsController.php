@@ -719,6 +719,43 @@ class ClaudeLeadsAnalyticsController extends Controller
     }
 
     /**
+     * Descarga el archivo de un adjunto de un mensaje de un lead (audio, imagen, documento).
+     *
+     * Es el equivalente para leads de `GET claude/support-codex/tickets/{id}/attachments/{attachment_id}`:
+     * mismo nombre de descarga (`adjunto-{id}`) y mismas cabeceras. Los ids de adjunto se descubren con
+     * `GET claude/query?model=lead_message_attachment&lead_message_id=…`.
+     *
+     * 404 si el adjunto no existe, es de OTRO lead, el archivo no está en disco o la ruta guardada sale del
+     * disco `public`. 🔴 El disco es SIEMPRE `public` y la columna `disk` se ignora a propósito: se resuelve
+     * con {@see \App\Services\SupportAttachmentFileResolver} (rechaza `..`, rutas absolutas y directorios),
+     * igual que los adjuntos de leads servidos por URL firmada. La autorización la da el middleware
+     * `claude.task.key` del grupo (sin clave, 401).
+     *
+     * @param  int|string $id            Id del lead.
+     * @param  int|string $attachment_id Id del `LeadMessageAttachment`.
+     * @return \Symfony\Component\HttpFoundation\BinaryFileResponse
+     */
+    public function lead_attachment($id, $attachment_id)
+    {
+        // El adjunto tiene que colgar de un mensaje de ESTE lead: si no, 404 (no se filtra que existe).
+        $attachment = \App\Models\LeadMessageAttachment::query()
+            ->where('id', (int) $attachment_id)
+            ->whereHas('message', function ($query) use ($id) {
+                $query->where('lead_id', (int) $id);
+            })
+            ->firstOrFail();
+
+        // Ruta absoluta segura dentro del disco `public`; null = no existe o intenta salirse.
+        $absolute_path = app(\App\Services\SupportAttachmentFileResolver::class)->resolve((string) $attachment->path);
+        abort_if($absolute_path === null, 404);
+
+        return response()->download($absolute_path, 'adjunto-' . (int) $attachment->id, [
+            'Content-Type'           => $attachment->mime ?: 'application/octet-stream',
+            'X-Content-Type-Options' => 'nosniff',
+        ]);
+    }
+
+    /**
      * Consulta de mensajes CRUZADA entre leads. Es la que resuelve el caso de los
      * seguimientos que no se pudieron entregar.
      *
