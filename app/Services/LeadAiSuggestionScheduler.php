@@ -103,7 +103,9 @@ class LeadAiSuggestionScheduler
 
     /**
      * ¿El agente contesta el PRIMER mensaje de este lead? Solo si reservó su demo desde la landing
-     * (misión demo-autogestionada-landing, 22/10/2026, D11 del plan).
+     * (misión demo-autogestionada-landing, 22/10/2026, D11 del plan) o, con el flujo de entrada nuevo prendido,
+     * si ese primer mensaje es una PREGUNTA y se le deben puntos (misión embudo-whatsapp-precios, E2, §2.2.2): a ese
+     * lead no le sale ningún literal, así que le contesta la IA ya en su primer mensaje.
      *
      * 🔴 POR QUÉ el gate «la IA espera al segundo mensaje» no aplica a este lead. El gate existe porque al
      * primer mensaje de un lead nuevo lo contesta el onboarding (bienvenida + presentación), y el agente
@@ -119,7 +121,11 @@ class LeadAiSuggestionScheduler
      */
     public static function responde_el_primer_mensaje(int $lead_id): bool
     {
-        return Lead::query()->whereKey($lead_id)->whereNotNull('demo_reservada_desde_landing_at')->exists();
+        if (Lead::query()->whereKey($lead_id)->whereNotNull('demo_reservada_desde_landing_at')->exists()) {
+            return true;
+        }
+
+        return LeadFlujoEntradaService::ia_contesta_el_primer_mensaje($lead_id);
     }
 
     /**

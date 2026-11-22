@@ -8,6 +8,7 @@ use App\Models\LeadMessage;
 use App\Models\LeadPipelineStatus;
 use App\Services\Prueba\PruebaPoolService;
 use App\Services\Prueba\PruebaSettings;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -98,6 +99,12 @@ class LeadFlujoEntradaService
         'como', 'cuanto', 'cual', 'donde', 'cuando', 'por que', 'que es', 'que son', 'que incluye', 'que hace',
         'que tiene', 'en que consiste', 'precio', 'costo', 'cuesta', 'vale', 'sirve', 'funciona', 'se puede',
     ];
+
+    /** Prefijo de la marca de caché «ya hay un literal del paso 2 en camino para este lead». */
+    private const CACHE_LITERAL_ENCOLADO = 'lead_flujo_entrada_literal_encolado:';
+
+    /** Cuánto dura esa marca (segundos): lo que tarda el job (3 s) con holgura para una cola lenta. */
+    private const CACHE_LITERAL_ENCOLADO_SEGUNDOS = 180;
 
     /** Texto por defecto del mensaje 1 de la llegada (§9 del informe de Lucas). */
     public const DEFAULT_LLEGADA_1 = '¡Hola! Soy Martín, de ComercioCity, una plataforma de gestión con sistema, tienda online y agentes de IA para comercios.';
@@ -490,6 +497,12 @@ class LeadFlujoEntradaService
      */
     public static function corresponde_el_literal_del_paso_2(Lead $lead, string $texto): bool
     {
+        /* Ya hay un literal en camino (el job tarda 3 s): este inbound es el SIGUIENTE y lo sigue la IA, que recibe los
+           puntos que falten. Sin la marca, dos mensajes seguidos encolarían dos veces lo mismo. */
+        if (self::literal_encolado($lead)) {
+            return false;
+        }
+
         $debidos = self::puntos_debidos($lead);
         if (empty($debidos) || self::tiene_pregunta($texto)) {
             return false;
@@ -502,6 +515,42 @@ class LeadFlujoEntradaService
         }
 
         return true;
+    }
+
+    /**
+     * Deja marcado que hay un literal del paso 2 en camino para el lead. Lo llama el webhook al encolar el job.
+     *
+     * @param Lead $lead
+     *
+     * @return void
+     */
+    public static function marcar_literal_encolado(Lead $lead): void
+    {
+        Cache::put(self::CACHE_LITERAL_ENCOLADO . (int) $lead->id, 1, self::CACHE_LITERAL_ENCOLADO_SEGUNDOS);
+    }
+
+    /**
+     * ¿Hay un literal del paso 2 en camino para el lead?
+     *
+     * @param Lead $lead
+     *
+     * @return bool
+     */
+    public static function literal_encolado(Lead $lead): bool
+    {
+        return Cache::has(self::CACHE_LITERAL_ENCOLADO . (int) $lead->id);
+    }
+
+    /**
+     * Saca la marca de «literal en camino». Lo llama el job de las dos formas al terminar.
+     *
+     * @param Lead $lead
+     *
+     * @return void
+     */
+    public static function limpiar_literal_encolado(Lead $lead): void
+    {
+        Cache::forget(self::CACHE_LITERAL_ENCOLADO . (int) $lead->id);
     }
 
     /**

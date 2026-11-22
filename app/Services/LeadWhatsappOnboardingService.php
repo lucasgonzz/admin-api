@@ -32,6 +32,9 @@ class LeadWhatsappOnboardingService
      */
     public const KIND_PRUEBA_LINK = 'whatsapp_prueba_link';
 
+    /** Modo del job de la presentación para el flujo de entrada nuevo (E2 de embudo-whatsapp-precios). */
+    public const MODO_FLUJO_ENTRADA = 'flujo_entrada';
+
     /** `message_type` de las variantes A/B de la presentación genérica (lead que escribe lo suyo). */
     public const VARIANT_TYPE_WELCOME = 'welcome';
 
@@ -245,6 +248,30 @@ class LeadWhatsappOnboardingService
         }
 
         /*
+         * FLUJO DE ENTRADA NUEVO (misión embudo-whatsapp-precios, E2, 21/11/2026), sólo con el interruptor prendido: a
+         * TODO lead nuevo (del anuncio o de la web) cuyo primer mensaje NO pregunta nada le salen los dos mensajes de
+         * la llegada (presentación; rubro y productos), sin auto y sin variante A/B, con la demora landing (10 s). Si el
+         * primer mensaje SÍ pregunta, no sale ningún literal: le contesta la IA, que recibe los puntos obligatorios
+         * (LeadFlujoEntradaService, PLAN §2.2.2). Apagado, ni se mira: todo sigue como hoy.
+         */
+        if ($primer_mensaje !== null && trim($primer_mensaje) !== ''
+            && LeadFlujoEntradaService::activo()
+            && (string) $lead->status === 'nuevo'
+            && ! LeadOfertaDePruebaService::tiene_prueba($lead)) {
+            if (LeadFlujoEntradaService::tiene_pregunta($primer_mensaje)) {
+                Log::channel('daily')->info('LeadWhatsappOnboarding: flujo de entrada; el primer mensaje pregunta, le contesta la IA.', [
+                    'lead_id' => $lead->id,
+                ]);
+
+                return;
+            }
+
+            $this->programar_presentacion($lead, $display_name, LeadWhatsappOnboardingSettings::get_welcome_delay_seconds_landing(), false, self::MODO_FLUJO_ENTRADA);
+
+            return;
+        }
+
+        /*
          * Lead de la WEB (misión martin-link-prueba-landing, 13/11/2026): en vez del auto landing y la
          * variante que pregunta el rubro, Martín le pasa la oferta de la prueba gratis en dos mensajes
          * (ver LeadOfertaDePruebaService). Sin auto: el primer mensaje de Martín ya saluda, y con el
@@ -286,12 +313,13 @@ class LeadWhatsappOnboardingService
      * @param string|null $display_name
      * @param int         $delay_seconds
      * @param bool        $oferta_de_prueba true = la presentación es la oferta de la prueba gratis.
+     * @param string|null $modo `flujo_entrada` = el paso 1 del flujo de entrada nuevo; null = como siempre.
      *
      * @return void
      */
-    private function programar_presentacion(Lead $lead, ?string $display_name, int $delay_seconds, bool $oferta_de_prueba): void
+    private function programar_presentacion(Lead $lead, ?string $display_name, int $delay_seconds, bool $oferta_de_prueba, ?string $modo = null): void
     {
-        $pending_dispatch = SendLeadPresentationMessageJob::dispatch((int) $lead->id, $display_name, $oferta_de_prueba);
+        $pending_dispatch = SendLeadPresentationMessageJob::dispatch((int) $lead->id, $display_name, $oferta_de_prueba, $modo);
 
         if ($delay_seconds > 0) {
             $pending_dispatch->delay(now()->addSeconds($delay_seconds));
@@ -307,11 +335,21 @@ class LeadWhatsappOnboardingService
      * @param string|null $display_name     Nombre capturado al momento del primer contacto.
      * @param bool        $oferta_de_prueba true = mandar la oferta de la prueba gratis (dos mensajes)
      *                                      en vez de la variante A/B. Lo decidió el encolado.
+     * @param string|null $modo `flujo_entrada` = mandar los puntos del paso 1 del flujo de entrada nuevo.
      *
      * @return void
      */
-    public function send_presentation_message(Lead $lead, ?string $display_name, bool $oferta_de_prueba = false): void
+    public function send_presentation_message(Lead $lead, ?string $display_name, bool $oferta_de_prueba = false, ?string $modo = null): void
     {
+        /* Flujo de entrada nuevo: lo que se manda es lo que todavía se le debe del paso 1, recalculado al enviar. No mira el
+           estado del lead (si se cayó entre los dos mensajes y el lead ya contestó, falta igual el segundo): lo decide
+           `puntos_debidos()`, que también corta si el flujo se apagó o el lead ya tiene su prueba. */
+        if ($modo === self::MODO_FLUJO_ENTRADA) {
+            $this->enviar_puntos_del_flujo($lead);
+
+            return;
+        }
+
         if ((string) $lead->status !== 'nuevo') {
             Log::channel('daily')->info('LeadWhatsappOnboarding: presentación omitida (lead ya no está en nuevo).', [
                 'lead_id' => $lead->id,
@@ -379,6 +417,35 @@ class LeadWhatsappOnboardingService
         }
 
         $this->persistir_y_enviar_con_un_reintento($lead, $mensajes[1], self::KIND_PRUEBA_LINK);
+    }
+
+    /**
+     * Manda los puntos del flujo de entrada que se le deben al lead AHORA, en orden y uno por mensaje (misión
+     * embudo-whatsapp-precios, E2). Los puntos debidos se recalculan acá, al enviar: si el job se reintenta, o se cayó
+     * entre dos mensajes, manda sólo lo que falta; y si la IA ya cubrió un punto en un mensaje que salió, no se repite.
+     *
+     * Mismo mecanismo que {@see enviar_oferta_de_prueba()} y no una copia: la misma pausa de 1,2 s entre mensajes (el 409 de
+     * Kapso) y el mismo reintento por mensaje. Cada uno sale con el `system_message_kind` de su punto.
+     *
+     * @param Lead $lead
+     *
+     * @return void
+     */
+    public function enviar_puntos_del_flujo(Lead $lead): void
+    {
+        $debidos = LeadFlujoEntradaService::puntos_debidos($lead);
+
+        foreach ($debidos as $indice => $punto) {
+            if ($indice > 0) {
+                usleep(static::PAUSA_ENTRE_MENSAJES_US);
+            }
+
+            $this->persistir_y_enviar_con_un_reintento(
+                $lead,
+                LeadFlujoEntradaService::texto_del_punto($punto),
+                (string) LeadFlujoEntradaService::kind_del_punto($punto)
+            );
+        }
     }
 
     /**
