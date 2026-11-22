@@ -51,7 +51,8 @@ class PreciosVigentesSettings
      * @var array<string, mixed>
      */
     public const DEFAULTS = [
-        'version' => 1,
+        /* Versión 2 (21/11/2026): oferta simple. Sin compatibilidad hacia atrás con la forma 1 (lite/full, seis items). */
+        'version' => 2,
         'moneda'  => 'ARS',
         'gestion' => [
             'planes' => [
@@ -63,21 +64,32 @@ class PreciosVigentesSettings
             'descuento_bienvenida' => ['porcentaje' => 50, 'meses' => 3],
         ],
         'tienda'  => ['mensualidad' => 44900],
+        /* Agentes: UN solo paquete (incluye el agente de WhatsApp). La mensualidad depende del paquete de tokens:
+           ganancia fija + los USD de tokens cotizados al dólar blue de venta. 🔴 `mensualidad` es de SÓLO LECTURA:
+           la calcula la API en `recalcular()`; lo que valga acá es sólo el punto de partida. */
         'agentes' => [
-            'lite' => ['mensualidad' => 30000, 'implementacion' => 0],
-            'full' => ['mensualidad' => 94700],
+            'incluye'                  => 'Agente de WhatsApp con la migración o configuración inicial del número',
+            'uso_de_tokens'            => 'Hacerle preguntas y pedirle cosas a los agentes, y generar imágenes para el negocio',
+            'cotizacion_usd'           => ['valor' => 1675, 'referencia' => 'Dólar blue, venta', 'fecha' => '2026-11-20'],
+            'ganancia_por_paquete'     => 30000,
+            'aviso_consumo_porcentaje' => 80,
+            'paquetes'                 => [
+                ['clave' => 'inicial', 'nombre' => 'Inicial', 'tokens_usd' => 10, 'mensualidad' => 46750],
+                ['clave' => 'pro', 'nombre' => 'Pro', 'tokens_usd' => 30, 'mensualidad' => 80250],
+                ['clave' => 'max', 'nombre' => 'Max', 'tokens_usd' => 70, 'mensualidad' => 147250],
+            ],
         ],
+        /* Implementación: tres productos al mismo precio; los tres juntos con descuento. No hay combos de dos.
+           🔴 `precio_lista` y `precio` de `tres_juntos` son de SÓLO LECTURA (los calcula `recalcular()`). */
         'implementaciones' => [
             'anticipo_porcentaje' => 50,
             'reembolsable'        => false,
             'items'               => [
                 ['clave' => 'gestion', 'nombre' => 'Sistema de gestión', 'precio' => 628400],
                 ['clave' => 'tienda', 'nombre' => 'Tienda online', 'precio' => 628400],
-                ['clave' => 'agentes_full', 'nombre' => 'Agentes Full', 'precio' => 938600],
-                ['clave' => 'gestion_tienda', 'nombre' => 'Sistema + tienda', 'precio' => 946800],
-                ['clave' => 'gestion_agentes_full', 'nombre' => 'Sistema + Agentes Full', 'precio' => 1254600],
-                ['clave' => 'gestion_tienda_agentes_full', 'nombre' => 'Sistema + tienda + Agentes Full', 'precio' => 1574300],
+                ['clave' => 'agentes', 'nombre' => 'Agentes', 'precio' => 628400],
             ],
+            'tres_juntos'         => ['descuento_porcentaje' => 30, 'precio_lista' => 1885200, 'precio' => 1319640],
         ],
         'costos_meta' => [
             'vigente_desde'                  => '2026-10-01',
@@ -166,7 +178,7 @@ class PreciosVigentesSettings
     /**
      * Un ítem de implementación por su clave fija.
      *
-     * @param string $clave Clave del ítem (`gestion`, `tienda`, `agentes_full`, `gestion_tienda`, ...).
+     * @param string $clave Clave del ítem (`gestion`, `tienda`, `agentes`).
      *
      * @return array<string, mixed>|null null si la clave no existe.
      */
@@ -365,13 +377,30 @@ class PreciosVigentesSettings
         $lineas[] = '  - Usuario extra: ' . self::formato_pesos((float) $gestion['usuario_extra']) . ' por mes, en cualquier plan.';
         $lineas[] = '- Tienda online: ' . self::formato_pesos((float) $contrato['tienda']['mensualidad']) . ' por mes.';
 
-        $lite = $contrato['agentes']['lite'];
-        $lineas[] = '- Agentes de IA Lite: ' . self::formato_pesos((float) $lite['mensualidad']) . ' por mes de base, '
-            . ((float) $lite['implementacion'] > 0
-                ? 'implementación ' . self::formato_pesos((float) $lite['implementacion'])
-                : 'sin costo de implementación')
-            . '.';
-        $lineas[] = '- Agentes de IA Full: ' . self::formato_pesos((float) $contrato['agentes']['full']['mensualidad']) . ' por mes de base.';
+        /* Agentes: un solo paquete. 🔴 Martín NUNCA dice los USD de tokens ni la ganancia: sólo la mensualidad en
+           pesos y cuántas veces los tokens del primer paquete tiene cada uno (calculado sobre `tokens_usd`, que no
+           se muestra). */
+        $agentes  = $contrato['agentes'];
+        $paquetes = $agentes['paquetes'];
+        $base_tokens = (float) $paquetes[0]['tokens_usd'];
+
+        $lineas[] = '- Agentes de IA: un solo paquete, incluye: ' . self::minuscula_inicial((string) $agentes['incluye'])
+            . '. La mensualidad depende del paquete de tokens. Los tokens sirven para ' . self::minuscula_inicial((string) $agentes['uso_de_tokens']) . ':';
+
+        foreach ($paquetes as $indice => $paquete) {
+            $linea_paquete = '  - ' . $paquete['nombre'] . ': ' . self::formato_pesos((float) $paquete['mensualidad']) . ' por mes';
+
+            /* El paréntesis compara contra el primer paquete; si ese tuviera 0 tokens no hay con qué comparar. */
+            if ($indice > 0 && $base_tokens > 0) {
+                $linea_paquete .= ' (' . self::numero_sin_ceros((float) $paquete['tokens_usd'] / $base_tokens)
+                    . ' veces los tokens de ' . $paquetes[0]['nombre'] . ')';
+            }
+
+            $lineas[] = $linea_paquete . '.';
+        }
+
+        $lineas[] = '  - Al llegar al ' . self::numero_sin_ceros($agentes['aviso_consumo_porcentaje']) . ' % de los tokens del mes se le avisa'
+            . ' y se le propone pasar al paquete siguiente, con su OK; el agente no se corta.';
 
         $implementaciones = $contrato['implementaciones'];
 
@@ -402,6 +431,23 @@ class PreciosVigentesSettings
             $lineas[] = $linea_item . '.';
         }
 
+        /* Los tres juntos: con descuento > 0 se dice el precio y el de lista; sin descuento no hay línea de promo.
+           No hay combos de dos: dos productos se suman. */
+        $tres_juntos = $implementaciones['tres_juntos'];
+
+        if ((float) $tres_juntos['descuento_porcentaje'] > 0) {
+            $linea_tres = '  - Los tres juntos: ' . self::numero_sin_ceros($tres_juntos['descuento_porcentaje']) . ' % de descuento, '
+                . self::formato_pesos((float) $tres_juntos['precio']) . ' en lugar de ' . self::formato_pesos((float) $tres_juntos['precio_lista']);
+
+            if ($hay_anticipo_parcial) {
+                $linea_tres .= ' (' . self::formato_pesos(self::anticipo_de((float) $tres_juntos['precio'])) . ')';
+            }
+
+            $lineas[] = $linea_tres . '. No hay combos de dos: dos productos se suman sin descuento.';
+        } else {
+            $lineas[] = '  - No hay combos: cada producto se suma.';
+        }
+
         /* Frase final sobre el anticipo: con 50 dice «la mitad (50 %)»; con otro parcial, su porcentaje; con 0 o 100, nada. */
         $frase_anticipo = '';
         if ($hay_anticipo_parcial) {
@@ -428,6 +474,21 @@ class PreciosVigentesSettings
         }
 
         return implode("\n", $lineas);
+    }
+
+    /**
+     * Pone en minúscula la primera letra de un texto (multibyte): «Hacerle preguntas…» → «hacerle preguntas…».
+     * Se usa para insertar los textos editables de Agentes en medio de una oración del bloque de Martín.
+     *
+     * @param string $texto Texto original.
+     *
+     * @return string
+     */
+    private static function minuscula_inicial(string $texto): string
+    {
+        $texto = trim($texto);
+
+        return mb_strtolower(mb_substr($texto, 0, 1)) . mb_substr($texto, 1);
     }
 
     /**
@@ -548,6 +609,15 @@ class PreciosVigentesSettings
             return $defaults;
         }
 
+        /* JSON de la forma 1 (Agentes Lite/Full, seis items): lo que no encaja en la forma nueva se descarta y se
+           completa con los defaults (lo hace `fusionar`, que sólo toma las claves que conoce). Queda registrado. */
+        if (self::es_forma_vieja($guardado)) {
+            Log::warning('PreciosVigentesSettings: el JSON guardado tiene la forma vieja (version 1: Agentes Lite/Full, seis implementaciones); se normaliza a la oferta simple y lo que no encaja se completa con los precios por defecto.', [
+                'key'     => self::KEY,
+                'version' => $guardado['version'] ?? null,
+            ]);
+        }
+
         $errores = [];
 
         $contrato = self::fusionar($defaults, $guardado, 'contrato', $errores);
@@ -569,6 +639,38 @@ class PreciosVigentesSettings
         $contrato['actualizado_por'] = isset($guardado['actualizado_por']) && is_string($guardado['actualizado_por']) ? $guardado['actualizado_por'] : null;
 
         return $contrato;
+    }
+
+    /**
+     * ¿El JSON guardado es de la forma 1 (antes de la oferta simple)? Sí si trae `agentes.lite` / `agentes.full`,
+     * items de implementación que ya no existen, o una versión distinta de la actual.
+     *
+     * @param array<string, mixed> $guardado JSON decodificado de `admin_settings`.
+     *
+     * @return bool
+     */
+    private static function es_forma_vieja(array $guardado): bool
+    {
+        if (isset($guardado['version']) && (int) $guardado['version'] !== (int) self::DEFAULTS['version']) {
+            return true;
+        }
+
+        if (isset($guardado['agentes']) && is_array($guardado['agentes'])
+            && (array_key_exists('lite', $guardado['agentes']) || array_key_exists('full', $guardado['agentes']))) {
+            return true;
+        }
+
+        $claves_vigentes = array_column(self::DEFAULTS['implementaciones']['items'], 'clave');
+
+        if (isset($guardado['implementaciones']['items']) && is_array($guardado['implementaciones']['items'])) {
+            foreach ($guardado['implementaciones']['items'] as $item) {
+                if (is_array($item) && isset($item['clave']) && is_string($item['clave']) && ! in_array($item['clave'], $claves_vigentes, true)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -695,6 +797,10 @@ class PreciosVigentesSettings
      */
     private static function normalizar(array $contrato): array
     {
+        /* 🔴 Primero lo calculado: mensualidades de Agentes y tres juntos salen SIEMPRE de la API, ignorando
+           lo que haya llegado en el request o estuviera guardado. */
+        $contrato = self::recalcular($contrato);
+
         $numero = function ($valor) {
             if ($valor === null) {
                 return null;
@@ -717,9 +823,14 @@ class PreciosVigentesSettings
 
         $contrato['tienda']['mensualidad'] = $numero($contrato['tienda']['mensualidad']);
 
-        $contrato['agentes']['lite']['mensualidad']    = $numero($contrato['agentes']['lite']['mensualidad']);
-        $contrato['agentes']['lite']['implementacion'] = $numero($contrato['agentes']['lite']['implementacion']);
-        $contrato['agentes']['full']['mensualidad']    = $numero($contrato['agentes']['full']['mensualidad']);
+        $contrato['agentes']['cotizacion_usd']['valor']  = $numero($contrato['agentes']['cotizacion_usd']['valor']);
+        $contrato['agentes']['ganancia_por_paquete']     = $numero($contrato['agentes']['ganancia_por_paquete']);
+        $contrato['agentes']['aviso_consumo_porcentaje'] = $numero($contrato['agentes']['aviso_consumo_porcentaje']);
+
+        foreach ($contrato['agentes']['paquetes'] as $i => $paquete) {
+            $contrato['agentes']['paquetes'][$i]['tokens_usd']  = $numero($paquete['tokens_usd']);
+            $contrato['agentes']['paquetes'][$i]['mensualidad'] = $numero($paquete['mensualidad']);
+        }
 
         $contrato['implementaciones']['anticipo_porcentaje'] = $numero($contrato['implementaciones']['anticipo_porcentaje']);
         $contrato['implementaciones']['reembolsable']        = (bool) $contrato['implementaciones']['reembolsable'];
@@ -728,12 +839,54 @@ class PreciosVigentesSettings
             $contrato['implementaciones']['items'][$i]['precio'] = $numero($item['precio']);
         }
 
+        foreach (['descuento_porcentaje', 'precio_lista', 'precio'] as $campo) {
+            $contrato['implementaciones']['tres_juntos'][$campo] = $numero($contrato['implementaciones']['tres_juntos'][$campo]);
+        }
+
         $contrato['costos_meta']['mensajes_libres_gratis_por_mes'] = $numero($contrato['costos_meta']['mensajes_libres_gratis_por_mes']);
 
         foreach ($contrato['costos_meta']['tarifas'] as $i => $tarifa) {
             $contrato['costos_meta']['tarifas'][$i]['usd'] = $numero($tarifa['usd']);
             $contrato['costos_meta']['tarifas'][$i]['ars'] = $numero($tarifa['ars']);
         }
+
+        return $contrato;
+    }
+
+    /**
+     * Calcula lo que la API decide (y las puntas sólo muestran): la mensualidad de cada paquete de Agentes y el
+     * precio de los tres juntos. A pesos enteros.
+     *
+     *  - `paquete.mensualidad = round(ganancia_por_paquete + tokens_usd * cotizacion_usd.valor)`
+     *  - `tres_juntos.precio_lista = suma de los precios de los tres items`
+     *  - `tres_juntos.precio = round(precio_lista * (100 - descuento_porcentaje) / 100)`
+     *
+     * Se aplica a un contrato ya validado (los campos de origen son números). Es la única fórmula: la usan la
+     * lectura, el PUT y los defaults, así que un valor calculado que llegue en un PUT se pisa siempre.
+     *
+     * @param array<string, mixed> $contrato Contrato validado.
+     *
+     * @return array<string, mixed> El mismo contrato con los campos calculados al día.
+     */
+    private static function recalcular(array $contrato): array
+    {
+        $cotizacion = (float) $contrato['agentes']['cotizacion_usd']['valor'];
+        $ganancia   = (float) $contrato['agentes']['ganancia_por_paquete'];
+
+        foreach ($contrato['agentes']['paquetes'] as $i => $paquete) {
+            $contrato['agentes']['paquetes'][$i]['mensualidad'] = (int) round($ganancia + (float) $paquete['tokens_usd'] * $cotizacion);
+        }
+
+        $lista = 0.0;
+        foreach ($contrato['implementaciones']['items'] as $item) {
+            $lista += (float) $item['precio'];
+        }
+
+        $lista     = round($lista);
+        $descuento = (float) $contrato['implementaciones']['tres_juntos']['descuento_porcentaje'];
+
+        $contrato['implementaciones']['tres_juntos']['precio_lista'] = (int) $lista;
+        $contrato['implementaciones']['tres_juntos']['precio']       = (int) round($lista * (100 - $descuento) / 100);
 
         return $contrato;
     }
@@ -845,9 +998,29 @@ class PreciosVigentesSettings
         self::validar_entero($errores, 'gestion.descuento_bienvenida.meses', $descuento['meses'], 0, self::MAX_MESES_DESCUENTO, 'Los meses del descuento de bienvenida');
 
         self::validar_monto($errores, 'tienda.mensualidad', $c['tienda']['mensualidad'], 'La mensualidad de la tienda online');
-        self::validar_monto($errores, 'agentes.lite.mensualidad', $c['agentes']['lite']['mensualidad'], 'La mensualidad de Agentes Lite');
-        self::validar_monto($errores, 'agentes.lite.implementacion', $c['agentes']['lite']['implementacion'], 'La implementación de Agentes Lite');
-        self::validar_monto($errores, 'agentes.full.mensualidad', $c['agentes']['full']['mensualidad'], 'La mensualidad de Agentes Full');
+        $agentes = $c['agentes'];
+
+        self::validar_texto($errores, 'agentes.incluye', $agentes['incluye'], 'Lo que incluye el paquete de Agentes', 300);
+        self::validar_texto($errores, 'agentes.uso_de_tokens', $agentes['uso_de_tokens'], 'Para qué sirven los tokens', 300);
+
+        $cotizacion = $agentes['cotizacion_usd'];
+        self::validar_positivo($errores, 'agentes.cotizacion_usd.valor', $cotizacion['valor'], 2, 'La cotización del dólar');
+        self::validar_texto($errores, 'agentes.cotizacion_usd.referencia', $cotizacion['referencia'], 'La referencia de la cotización', 60);
+
+        $fecha_cotizacion = is_string($cotizacion['fecha']) ? \DateTime::createFromFormat('Y-m-d', $cotizacion['fecha']) : false;
+        if (! $fecha_cotizacion || $fecha_cotizacion->format('Y-m-d') !== $cotizacion['fecha']) {
+            $errores['agentes.cotizacion_usd.fecha'] = 'La fecha de la cotización tiene que tener el formato AAAA-MM-DD.';
+        }
+
+        self::validar_monto($errores, 'agentes.ganancia_por_paquete', $agentes['ganancia_por_paquete'], 'La ganancia por paquete');
+        self::validar_entero($errores, 'agentes.aviso_consumo_porcentaje', $agentes['aviso_consumo_porcentaje'], 1, 100, 'El porcentaje de consumo que dispara el aviso');
+
+        foreach ($agentes['paquetes'] as $paquete) {
+            $ruta_paquete = 'agentes.paquetes.' . $paquete['clave'];
+
+            self::validar_texto($errores, $ruta_paquete . '.nombre', $paquete['nombre'], 'El nombre del paquete ' . $paquete['clave'], 40);
+            self::validar_positivo($errores, $ruta_paquete . '.tokens_usd', $paquete['tokens_usd'], 4, 'Los USD de tokens del paquete ' . $paquete['clave']);
+        }
 
         $impl = $c['implementaciones'];
         self::validar_numero($errores, 'implementaciones.anticipo_porcentaje', $impl['anticipo_porcentaje'], 0, 100, 2, 'El porcentaje de anticipo de la implementación');
@@ -855,6 +1028,8 @@ class PreciosVigentesSettings
         if (! is_bool($impl['reembolsable'])) {
             $errores['implementaciones.reembolsable'] = 'El dato «reembolsable» de la implementación tiene que ser verdadero o falso.';
         }
+
+        self::validar_numero($errores, 'implementaciones.tres_juntos.descuento_porcentaje', $impl['tres_juntos']['descuento_porcentaje'], 0, 100, 2, 'El descuento de los tres juntos');
 
         foreach ($impl['items'] as $item) {
             self::validar_texto($errores, 'implementaciones.items.' . $item['clave'] . '.nombre', $item['nombre'], 'El nombre de la implementación ' . $item['clave']);
@@ -999,13 +1174,37 @@ class PreciosVigentesSettings
      * @param string                $ruta     Ruta del campo.
      * @param mixed                 $valor    Valor a validar.
      * @param string                $etiqueta Cómo se nombra el campo en el mensaje.
+     * @param int                   $maximo   Largo máximo en caracteres (80 por defecto).
      *
      * @return void
      */
-    private static function validar_texto(array &$errores, string $ruta, $valor, string $etiqueta): void
+    private static function validar_texto(array &$errores, string $ruta, $valor, string $etiqueta, int $maximo = 80): void
     {
-        if (! is_string($valor) || trim($valor) === '' || mb_strlen($valor) > 80) {
-            $errores[$ruta] = $etiqueta . ' tiene que ser un texto de 1 a 80 caracteres.';
+        if (! is_string($valor) || trim($valor) === '' || mb_strlen($valor) > $maximo) {
+            $errores[$ruta] = $etiqueta . ' tiene que ser un texto de 1 a ' . $maximo . ' caracteres.';
         }
+    }
+
+    /**
+     * Valida un número ESTRICTAMENTE mayor a cero (cotización, USD de tokens), hasta MAX_MONTO y con
+     * decimales máximos.
+     *
+     * @param array<string, string> $errores   Errores acumulados (por referencia).
+     * @param string                $ruta      Ruta del campo.
+     * @param mixed                 $valor     Valor a validar.
+     * @param int                   $decimales Decimales máximos.
+     * @param string                $etiqueta  Cómo se nombra el campo en el mensaje.
+     *
+     * @return void
+     */
+    private static function validar_positivo(array &$errores, string $ruta, $valor, int $decimales, string $etiqueta): void
+    {
+        if (! is_bool($valor) && is_numeric($valor) && is_finite((float) $valor) && (float) $valor <= 0) {
+            $errores[$ruta] = $etiqueta . ' tiene que ser mayor a cero.';
+
+            return;
+        }
+
+        self::validar_numero($errores, $ruta, $valor, 0, self::MAX_MONTO, $decimales, $etiqueta);
     }
 }
