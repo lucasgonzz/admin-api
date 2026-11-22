@@ -46,6 +46,11 @@ use Illuminate\Support\Facades\Log;
 class AsistenteRecordatoriosService
 {
     /**
+     * Valor del campo `plantilla` con el que el `empresa-api` marca un ítem como tarea programada del asistente.
+     */
+    const MARCA_TAREA_DEL_ASISTENTE = 'tarea_del_asistente';
+
+    /**
      * Ruta de los recordatorios que el `empresa-api` tiene vencidos y sin avisar.
      */
     const RUTA_PENDIENTES = 'api/admin-sync/asistente/recordatorios-pendientes';
@@ -55,6 +60,16 @@ class AsistenteRecordatoriosService
      * string con `:` adentro (`"recordatorio:{pending_id}-{created_at unix}:{Y-m-d}:{HHMM}"`).
      */
     const RUTA_AVISADO = 'api/admin-sync/asistente/recordatorios/avisado';
+
+    /**
+     * Valor de `via` en el sello cuando salió el texto completo (ventana de 24 hs abierta).
+     */
+    const VIA_TEXTO = 'texto';
+
+    /**
+     * Valor de `via` en el sello cuando salió sólo una plantilla (la de tareas o la de recordatorio).
+     */
+    const VIA_PLANTILLA = 'plantilla';
 
     /**
      * Minutos sin volver a consultar a un cliente cuyo sistema no tiene la ruta (404).
@@ -260,6 +275,28 @@ class AsistenteRecordatoriosService
     }
 
     /**
+     * La plantilla propia de las tareas del asistente, o null si no hay una que sirva.
+     *
+     * Mismo criterio que `plantilla_configurada()`: el nombre cargado en `AdminSetting` Y la fila activa
+     * en `client_templates`. Sin una de las dos mitades no hay plantilla de tareas y las tareas salen
+     * por la de recordatorios, como antes.
+     *
+     * @return ClientTemplate|null
+     */
+    public static function plantilla_de_tareas_configurada(): ?ClientTemplate
+    {
+        $nombre = AsistenteWhatsappSettings::plantilla_de_tareas();
+        if ($nombre === '') {
+            return null;
+        }
+
+        return ClientTemplate::query()
+            ->where('template_name', $nombre)
+            ->where('activa', true)
+            ->first();
+    }
+
+    /**
      * Manda los recordatorios vencidos de todos los clientes que pueden tenerlos.
      *
      * Cada cliente va en su propio try: el que falla no puede dejar sin recordatorio a los que vienen
@@ -369,10 +406,14 @@ class AsistenteRecordatoriosService
         $efectivo = WhatsappConfig::propositoEfectivoDelAsistente();
         $abierta  = $this->ventana_abierta($client, $telefono, $efectivo, app(WhatsappSessionWindowService::class));
 
+        /* Plantilla propia de las tareas del asistente (opcional): se resuelve una vez por cliente y
+         * sólo la usan los ítems que la piden y sólo con la ventana cerrada. */
+        $plantilla_de_tareas = $abierta ? null : self::plantilla_de_tareas_configurada();
+
         $enviados = 0;
         $estados  = [];
         foreach ($recordatorios as $recordatorio) {
-            $estado = $this->recordar($client, $recordatorio, $telefono, $efectivo, $abierta, $plantilla);
+            $estado = $this->recordar($client, $recordatorio, $telefono, $efectivo, $abierta, $plantilla, $plantilla_de_tareas);
 
             $estados[] = $recordatorio['id'] . '=' . $estado;
             if ($estado === 'enviado_texto' || $estado === 'enviado_plantilla') {
@@ -405,6 +446,7 @@ class AsistenteRecordatoriosService
      * @param string               $efectivo     Propósito por el que sale de verdad.
      * @param bool                 $abierta      Si la ventana de 24 hs de ese número está abierta.
      * @param ClientTemplate|null  $plantilla    Plantilla para la ventana cerrada, o null.
+     * @param ClientTemplate|null  $plantilla_de_tareas Plantilla propia de las tareas del asistente, o null.
      *
      * @return string enviado_texto | enviado_plantilla | remarcado | ya_avisado | en_curso
      *                | turno_en_curso | sin_plantilla | error | fallido
@@ -415,7 +457,8 @@ class AsistenteRecordatoriosService
         string $telefono,
         string $efectivo,
         bool $abierta,
-        ?ClientTemplate $plantilla
+        ?ClientTemplate $plantilla,
+        ?ClientTemplate $plantilla_de_tareas = null
     ): string {
         $clave = $this->clave_de_reclamo($client, (string) $recordatorio['id']);
 
@@ -434,22 +477,43 @@ class AsistenteRecordatoriosService
             return 'turno_en_curso';
         }
 
+        /* Plantilla con la que va a salir (sólo se usa con la ventana cerrada). */
+        $plantilla_a_usar = $plantilla;
+        /* Idioma con el que sale esa plantilla. */
+        $idioma = '';
+
         if ($abierta) {
             $mensaje = (string) $recordatorio['texto'];
         } else {
-            /* 🔴 Ventana cerrada y sin plantilla: NO se manda texto libre (Meta lo rechaza y el dueño
-             * no ve nada). Sigue pendiente; si la ventana se abre antes de que el `empresa-api` lo
-             * venza, sale como texto. */
-            if ($plantilla === null) {
-                return 'sin_plantilla';
+            $mensaje = '';
+
+            /* Ítem de tarea del asistente con plantilla propia disponible: sale por ella, con el
+             * resumen y la hora. Si la variable no se puede armar, cae al camino de siempre. */
+            if ($plantilla_de_tareas !== null && $this->es_tarea_del_asistente($recordatorio)) {
+                $mensaje = $this->armar_variable_de_tarea($recordatorio);
+                if ($mensaje !== '') {
+                    $plantilla_a_usar = $plantilla_de_tareas;
+                    $idioma           = $this->idioma_de_tarea($plantilla_de_tareas);
+                }
             }
 
-            $mensaje = $this->armar_variable_de_plantilla($recordatorio);
-
-            /* Variable vacía = Meta la descarta con `(#131008) Required parameter is missing` (ver
-             * `WhatsappSendService::send_template()`). Sin nada que poner adentro, no se manda. */
             if ($mensaje === '') {
-                return 'sin_plantilla';
+                /* 🔴 Ventana cerrada y sin plantilla: NO se manda texto libre (Meta lo rechaza y el dueño
+                 * no ve nada). Sigue pendiente; si la ventana se abre antes de que el `empresa-api` lo
+                 * venza, sale como texto. */
+                if ($plantilla === null) {
+                    return 'sin_plantilla';
+                }
+
+                $plantilla_a_usar = $plantilla;
+                $idioma           = $this->idioma_de($plantilla);
+                $mensaje          = $this->armar_variable_de_plantilla($recordatorio);
+
+                /* Variable vacía = Meta la descarta con `(#131008) Required parameter is missing` (ver
+                 * `WhatsappSendService::send_template()`). Sin nada que poner adentro, no se manda. */
+                if ($mensaje === '') {
+                    return 'sin_plantilla';
+                }
             }
         }
 
@@ -471,9 +535,9 @@ class AsistenteRecordatoriosService
             } else {
                 $whatsapp_message_id = $this->sender->send_template(
                     $telefono,
-                    (string) $plantilla->template_name,
+                    (string) $plantilla_a_usar->template_name,
                     [$mensaje],
-                    $this->idioma_de($plantilla),
+                    $idioma,
                     $contexto
                 );
             }
@@ -497,11 +561,16 @@ class AsistenteRecordatoriosService
             return $this->registrar_fallo($client, (string) $recordatorio['id'], $clave, (string) $this->sender->last_send_error);
         }
 
-        /* Desde acá el recordatorio YA salió: el reclamo pasa a guardar con qué salió, para que una
-         * marca fallida se pueda reintentar sin mandárselo dos veces al dueño. */
+        /* Por dónde salió: texto libre (ventana abierta) o plantilla. Es lo que el sello le cuenta al
+         * `empresa-api` en el campo `via`. */
+        $via = $abierta ? self::VIA_TEXTO : self::VIA_PLANTILLA;
+
+        /* Desde acá el recordatorio YA salió: el reclamo pasa a guardar con qué salió (wamid y `via`),
+         * para que una marca fallida se pueda reintentar sin mandárselo dos veces al dueño y con el
+         * mismo `via` que el envío original. */
         Cache::put(
             $clave,
-            ['estado' => self::RECLAMO_ENVIADO, 'whatsapp_message_id' => $whatsapp_message_id],
+            ['estado' => self::RECLAMO_ENVIADO, 'whatsapp_message_id' => $whatsapp_message_id, 'via' => $via],
             now()->addDays(self::DIAS_DEL_RECLAMO)
         );
 
@@ -533,7 +602,7 @@ class AsistenteRecordatoriosService
             ]);
         }
 
-        $this->marcar_y_cerrar_el_reclamo($client, (string) $recordatorio['id'], $clave, $whatsapp_message_id);
+        $this->marcar_y_cerrar_el_reclamo($client, (string) $recordatorio['id'], $clave, $whatsapp_message_id, $via);
 
         return $abierta ? 'enviado_texto' : 'enviado_plantilla';
     }
@@ -572,6 +641,54 @@ class AsistenteRecordatoriosService
         }
 
         return $this->opener->sanitize_template_variable($detalle . $sufijo);
+    }
+
+    /**
+     * Si el ítem es una tarea programada del asistente con resumen para la plantilla propia.
+     *
+     * Requiere la marca `plantilla = tarea_del_asistente` Y un resumen no vacío: una fila de una
+     * empresa-api vieja (sin esos campos) nunca califica y sale por el camino de siempre.
+     *
+     * @param array<string, mixed> $recordatorio Recordatorio normalizado.
+     *
+     * @return bool
+     */
+    private function es_tarea_del_asistente(array $recordatorio): bool
+    {
+        return (string) $recordatorio['plantilla'] === self::MARCA_TAREA_DEL_ASISTENTE
+            && $this->opener->sanitize_template_variable((string) $recordatorio['resumen']) !== '';
+    }
+
+    /**
+     * La variable de la plantilla de tareas: el resumen y cuándo, ««Título» (hoy 17:00)».
+     *
+     * Misma regla de recorte que los recordatorios (se recorta el resumen y no la hora), con el
+     * resumen en lugar del detalle.
+     *
+     * @param array<string, mixed> $recordatorio Recordatorio normalizado, con `resumen` no vacío.
+     *
+     * @return string Cadena vacía si no quedó nada que mandar.
+     */
+    private function armar_variable_de_tarea(array $recordatorio): string
+    {
+        $recordatorio['detalle'] = (string) $recordatorio['resumen'];
+
+        return $this->armar_variable_de_plantilla($recordatorio);
+    }
+
+    /**
+     * Idioma de la plantilla de tareas: el de su fila en `client_templates` o, si no lo tiene, el
+     * configurado para las tareas (`es_AR` por defecto).
+     *
+     * @param ClientTemplate $plantilla Plantilla de tareas.
+     *
+     * @return string
+     */
+    private function idioma_de_tarea(ClientTemplate $plantilla): string
+    {
+        $idioma = trim((string) $plantilla->language_code);
+
+        return $idioma !== '' ? $idioma : AsistenteWhatsappSettings::idioma_de_la_plantilla_de_tareas();
     }
 
     /**
@@ -686,7 +803,9 @@ class AsistenteRecordatoriosService
                 $client,
                 $recordatorio_id,
                 $clave,
-                isset($previo['whatsapp_message_id']) ? (string) $previo['whatsapp_message_id'] : ''
+                isset($previo['whatsapp_message_id']) ? (string) $previo['whatsapp_message_id'] : '',
+                /* Un reclamo de antes del deploy no guardó `via`: el sello sale sin el campo. */
+                isset($previo['via']) ? (string) $previo['via'] : ''
             );
 
             return $marcado ? 'remarcado' : 'ya_avisado';
@@ -710,12 +829,13 @@ class AsistenteRecordatoriosService
      * @param string $recordatorio_id     Id del recordatorio (string del contrato).
      * @param string $clave               Clave del reclamo.
      * @param string $whatsapp_message_id wamid con el que salió.
+     * @param string $via                 `texto` | `plantilla`, o vacío si no se sabe (reclamo viejo).
      *
      * @return bool True si el `empresa-api` ya no lo va a volver a ofrecer.
      */
-    private function marcar_y_cerrar_el_reclamo(Client $client, string $recordatorio_id, string $clave, string $whatsapp_message_id): bool
+    private function marcar_y_cerrar_el_reclamo(Client $client, string $recordatorio_id, string $clave, string $whatsapp_message_id, string $via = ''): bool
     {
-        if (! $this->marcar_avisado($client, $recordatorio_id, $whatsapp_message_id)) {
+        if (! $this->marcar_avisado($client, $recordatorio_id, $whatsapp_message_id, $via)) {
             return false;
         }
 
@@ -811,6 +931,9 @@ class AsistenteRecordatoriosService
                     ? (int) $fila['ai_conversation_id']
                     : null,
                 'ruta'               => isset($fila['ruta']) ? trim((string) $fila['ruta']) : '',
+                /* Opcionales: una empresa-api vieja no los manda y quedan vacíos (camino de siempre). */
+                'plantilla'          => isset($fila['plantilla']) && is_string($fila['plantilla']) ? trim($fila['plantilla']) : '',
+                'resumen'            => isset($fila['resumen']) && is_string($fila['resumen']) ? trim($fila['resumen']) : '',
             ];
         }
 
@@ -948,10 +1071,11 @@ class AsistenteRecordatoriosService
      * @param Client $client              Cliente.
      * @param string $recordatorio_id     Id del contrato.
      * @param string $whatsapp_message_id wamid con el que salió, o vacío.
+     * @param string $via                 `texto` | `plantilla`, o vacío para no mandar el campo.
      *
      * @return bool True si ya no hay que volver a marcarlo.
      */
-    private function marcar_avisado(Client $client, string $recordatorio_id, string $whatsapp_message_id): bool
+    private function marcar_avisado(Client $client, string $recordatorio_id, string $whatsapp_message_id, string $via = ''): bool
     {
         $url = $this->urls->admin_sync_url($client, self::RUTA_AVISADO);
         if ($url === '') {
@@ -961,6 +1085,10 @@ class AsistenteRecordatoriosService
         $cuerpo = ['id' => $recordatorio_id];
         if ($whatsapp_message_id !== '') {
             $cuerpo['whatsapp_message_id'] = $whatsapp_message_id;
+        }
+        /* Campo opcional: por dónde salió el ítem. La `empresa-api` vieja lo ignora. */
+        if ($via !== '') {
+            $cuerpo['via'] = $via;
         }
 
         try {

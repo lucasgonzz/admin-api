@@ -55,6 +55,13 @@ class ConversionDeFotosDelAsistenteTest extends BaseDelCanal
     {
         parent::setUp();
 
+        /* Estas pruebas miden las pausas de las FOTOS. El indicador de "escribiendo…" deja una marca
+         * que separa el texto de la respuesta (1,5 s), y como acá la ida y la respuesta corren con
+         * milisegundos de diferencia —cosa que en producción no pasa, la primera consulta llega a los
+         * 2 s— esa pausa se colaría en la cuenta. La separación tiene sus pruebas en
+         * IndicadorNoPisaLaRespuestaTest. */
+        config(['asistente_whatsapp.indicador_escribiendo' => false]);
+
         $this->pausas = [];
 
         /* Los dominios `.test` de estas pruebas no resuelven a nada, y el control de destino

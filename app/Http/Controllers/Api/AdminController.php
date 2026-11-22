@@ -20,7 +20,9 @@ class AdminController extends Controller
     public function index()
     {
         // Solo exponer campos necesarios para asignación; nunca credenciales.
-        $admins = Admin::orderBy('name')
+        // Los agentes (es_agente) no se ofrecen: no se les asignan tareas humanas.
+        $admins = Admin::where('es_agente', false)
+            ->orderBy('name')
             ->get(['id', 'name', 'email', 'is_default_task_assignee']);
 
         return response()->json(['admins' => $admins], 200);

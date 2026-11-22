@@ -1076,6 +1076,13 @@ Route::middleware('claude.task.key')
            Solo filas del admin: no toca el sistema de ningún cliente. `resumen` son los totales, sin entrar al panel. */
         Route::post('recursos/catalogo', [\App\Http\Controllers\Api\RecursosClaudeController::class, 'catalogo_json']);
         Route::get('recursos/resumen', [\App\Http\Controllers\Api\RecursosClaudeController::class, 'resumen_json']);
+
+        /* 🔴 Reset de datos de negocio de UN cliente (misión `reset-datos-cliente`, 21/11/2026). Vive en ClaudeClientResetDatosController
+           (ClientResetDatosService). POST = simula (dry_run, true por defecto) o ejecuta contra el empresa-api del cliente, firmando con
+           `clients.api_key`; ejecutar exige confirm_client_name, confirmar_base_de_datos y el token_de_simulacion de una simulación previa.
+           GET registros = los últimos 10 del admin + lo que cuenta el cliente. NUNCA devuelve ni loguea la clave del cliente. */
+        Route::post('clients/{id}/reset-datos', 'Api\\ClaudeClientResetDatosController@reset_datos_json');
+        Route::get('clients/{id}/reset-datos/registros', 'Api\\ClaudeClientResetDatosController@registros_json');
     });
 
 /*
@@ -1987,6 +1994,13 @@ Route::prefix('admin')->group(function () {
         Route::get('recursos/clientes/{client_id}', [\App\Http\Controllers\Api\RecursosPanelController::class, 'cliente_json'])->whereNumber('client_id');
         Route::post('recursos/clientes/{client_id}/link-dueno', [\App\Http\Controllers\Api\RecursosPanelController::class, 'link_dueno_json'])->whereNumber('client_id');
 
+
+        /* Reset de datos de negocio del cliente (misión `reset-datos-cliente`, 21/11/2026): solapa "Reiniciar datos" de la ficha. Simular
+           no borra nada y entrega el token; ejecutar exige el nombre del cliente, la base y ese token. Misma operación que
+           `claude/clients/{id}/reset-datos`, con origen `panel`. */
+        Route::post('client/{clientId}/reset-datos/simular', [\App\Http\Controllers\ClientResetDatosController::class, 'simular_json']);
+        Route::post('client/{clientId}/reset-datos/ejecutar', [\App\Http\Controllers\ClientResetDatosController::class, 'ejecutar_json']);
+        Route::get('client/{clientId}/reset-datos/registros', [\App\Http\Controllers\ClientResetDatosController::class, 'registros_json']);
     });
 });
 
