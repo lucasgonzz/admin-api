@@ -20,6 +20,7 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -36,8 +37,8 @@ use Illuminate\Support\Facades\Log;
  *      `pendiente`, y ahí el texto sale por WhatsApp — seguido de las fotos que la respuesta traiga
  *      en `adjuntos`, una por mensaje y por link (ver `mandar_fotos_de_la_respuesta()`).
  *
- * 🔴 **La espera se hace con `release()`, no durmiendo.** El asistente tiene un presupuesto de 150
- * segundos y un job con `timeout` 240 del lado del cliente: tres minutos de `sleep()` acá serían
+ * 🔴 **La espera se hace con `release()`, no durmiendo.** El asistente tiene un presupuesto de 105
+ * o 165 segundos (según el turno) y un job con `timeout` 300 del lado del cliente: tres minutos de `sleep()` acá serían
  * tres minutos con un worker del admin tomado, y la cola del canal la atiende UN worker permanente
  * que tiene que seguir levantando los mensajes de los demás dueños. `release($delay)` devuelve el
  * job a la cola con fecha y libera el worker; cuando le toca, vuelve a entrar por `handle()` y sigue
@@ -78,19 +79,40 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
     /**
      * Esperas entre una consulta y la siguiente, en segundos.
      *
-     * Arranca corto y se va estirando (3, 5, 8, 13, 21, 34, 55) porque la mayoría de las
-     * respuestas del asistente llegan en los primeros segundos —una pregunta sin herramientas se
-     * contesta casi de una— y no tiene sentido hacer esperar diez segundos a quien ya tiene la
-     * respuesta lista. Las esperas largas del final son para el caso caro: el asistente que usa
-     * varias herramientas de lectura antes de contestar.
+     * Doce esperas de 2 s al principio y después se va estirando (3, 4, 5, 6, 8, 10, 13, 17, 22,
+     * 28, 40), misión asistente-whatsapp-velocidad. Cada ciclo real dura entre 2 y 3,5 s (el
+     * `release(2)`, el sondeo del worker y el GET), así que las doce primeras cubren los primeros
+     * 36-40 s: ahí cae la respuesta lista de casi todos los turnos, y quien ya la tiene no espera
+     * más de ~1,5 s de más. Las esperas largas del final son para el caso caro: el asistente que
+     * usa varias herramientas de lectura antes de contestar. No se usa `release(1)`: duplicaría los
+     * GET contra el hosting del cliente por menos de un segundo de ganancia.
      *
      * 🔴 **La suma da exactamente 180**, y ese es el tope de polling. No es un número redondo
-     * elegido de arriba: del otro lado el job del asistente tiene `timeout` 240 y un presupuesto
-     * interno de 150 segundos, así que a los 180 o ya contestó, o falló y el estado lo dice, o se
-     * colgó de una forma que esperar más no arregla. El último valor es 41 y no 89 justamente para
-     * que cierre en 180 y no en 228.
+     * elegido de arriba: del otro lado el job del asistente tiene un presupuesto interno de 105 o
+     * 165 segundos y un `timeout` 300, así que a los 180 o ya contestó, o falló y el estado lo
+     * dice, o se colgó de una forma que esperar más no arregla. El texto "no contestó en 180
+     * segundos" sale de `array_sum()` y la empresa mide su presupuesto contra este número: no se
+     * cambia la suma sin cambiar ese contrato.
      */
-    const ESPERAS_DE_POLLING = [3, 5, 8, 13, 21, 34, 55, 41];
+    const ESPERAS_DE_POLLING = [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 4, 5, 6, 8, 10, 13, 17, 22, 28, 40];
+
+    /**
+     * Piso de espera, en segundos, cuando el reingreso es por un FALLO transitorio.
+     *
+     * Con la escalera densa, doce reintentos en ~36 s contra un hosting que ya devuelve 503 al
+     * instante serían golpear a un servidor caído. El piso sólo afecta a `reintentar_o_rendirse()`:
+     * el índice sigue avanzando de a uno, así que el presupuesto se agota en la misma cantidad de
+     * ingresos.
+     */
+    const ESPERA_MINIMA_TRAS_FALLO = 5;
+
+    /**
+     * Cada cuántos segundos se renueva el indicador de "escribiendo…" mientras el turno sigue pendiente.
+     *
+     * El indicador de Meta dura ~25 s; renovarlo a los 20 lo mantiene sin cortes durante la franja
+     * densa de la escalera. Es el TTL de la marca de `Cache::add()` de `mostrar_escribiendo()`.
+     */
+    const SEGUNDOS_ENTRE_INDICADORES = 20;
 
     /**
      * Tope de fotos que se mandan por respuesta del asistente.
@@ -256,10 +278,13 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
      * Momento hasta el cual el worker deja que este job se siga reencolando.
      *
      * Laravel lo resuelve UNA vez, al despachar, y lo guarda en el payload; los `release()`
-     * posteriores reencolan ese mismo payload, así que la ventana no se renueva sola. 600 y no
-     * 180: tiene que entrar el polling entero (180 s) más las llamadas HTTP y la espera en cola de
-     * cada ingreso, y este es el techo de último recurso, no el que gobierna la lógica. El tope
-     * que manda es `ESPERAS_DE_POLLING`, que se aplica en código y se puede probar.
+     * posteriores reencolan ese mismo payload, así que la ventana no se renueva sola. 720 y no
+     * 180: tiene que entrar el polling entero más las llamadas HTTP y la espera en cola de cada
+     * ingreso. Peor caso con fallos lentos: la suma de `max(espera, ESPERA_MINIMA_TRAS_FALLO)` da
+     * 219 s y los 24 ingresos con 15 s de timeout más 1 s de toma suman 384 s, o sea 603 s, que ya
+     * no entraba en los 600 de antes; con 720 queda un margen de ~117 s. Es el techo de último
+     * recurso, no el que gobierna la lógica: el tope que manda es `ESPERAS_DE_POLLING`, que se
+     * aplica en código y se puede probar.
      *
      * Se le suma la espera de la foto porque la ventana arranca al DESPACHAR, y el temporizador se
      * despacha con `delay`: sin la suma, los segundos que la foto pasa esperando se le comerían al
@@ -269,7 +294,7 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
      */
     public function retryUntil()
     {
-        return now()->addSeconds(600 + (int) $this->segundos_de_espera);
+        return now()->addSeconds(720 + (int) $this->segundos_de_espera);
     }
 
     /**
@@ -567,6 +592,10 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
 
             return;
         }
+
+        /* El indicador de "escribiendo…" sale ANTES de bajar las fotos y del POST a la empresa: es
+         * lo que el dueño ve en los primeros segundos. Nunca rompe ni demora el turno. */
+        $this->mostrar_escribiendo($sender, $fila);
 
         $cuerpo = [
             'texto'               => (string) ($fila->texto !== null ? $fila->texto : ''),
@@ -998,6 +1027,8 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
         }
 
         if ($estado === 'pendiente') {
+            /* Si ya pasaron 20 s desde el último indicador, se renueva (dura ~25 s). */
+            $this->mostrar_escribiendo($sender, $fila);
             $this->esperar_y_volver($asistente, $fila, $client, $sender);
 
             return;
@@ -1564,7 +1595,44 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
 
         $this->esperas_usadas = $this->indice_de_espera() + 1;
 
-        $this->release($espera);
+        /* Piso ante fallos: no se golpea a un hosting saturado cada 2 s. */
+        $this->release(max($espera, self::ESPERA_MINIMA_TRAS_FALLO));
+    }
+
+    /**
+     * Muestra "escribiendo…" en el WhatsApp del dueño, como mucho una vez cada 20 segundos.
+     *
+     * 🔴 Es un adorno: no puede romper ni demorar el turno ni cambiar el estado de la fila, por eso
+     * todo va en un try que atrapa `\Throwable`. Se apaga con
+     * `config('asistente_whatsapp.indicador_escribiendo')`.
+     *
+     * La marca va en Cache y no en una propiedad del job porque `release()` reencola el payload
+     * original: una propiedad no sobrevive al reingreso. `Cache::add()` sólo escribe si la clave no
+     * existe, así que devuelve true una sola vez por ventana.
+     *
+     * @param WhatsappSendService    $sender Servicio de envío, ya fijado al número de entrada.
+     * @param ClientAssistantMessage $fila   Fila del mensaje del dueño (de ahí sale el wamid).
+     *
+     * @return void
+     */
+    private function mostrar_escribiendo(WhatsappSendService $sender, ClientAssistantMessage $fila): void
+    {
+        try {
+            if (! config('asistente_whatsapp.indicador_escribiendo', true)) {
+                return;
+            }
+
+            if (! Cache::add('asistente_whatsapp:escribiendo:' . $fila->id, 1, self::SEGUNDOS_ENTRE_INDICADORES)) {
+                return;
+            }
+
+            $sender->send_typing_indicator((string) $fila->whatsapp_message_id);
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->warning('AsistenteWhatsapp: no se pudo mostrar el indicador de escribiendo.', [
+                'assistant_message_id' => $fila->id,
+                'error'                => $exception->getMessage(),
+            ]);
+        }
     }
 
     /**
