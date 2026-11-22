@@ -142,6 +142,31 @@ class OfertaSimpleDePreciosTest extends TestCase
     }
 
     /**
+     * Revisión ronda 1. Con un item con centavos la lista se suma SIN redondear a pesos enteros (a 2 decimales,
+     * como la vista previa del SPA) y sólo el precio con descuento se redondea a pesos enteros. Items 628400,
+     * 628400 y 628400,50 con 30 %: lista 1885200,5 y precio 1319640. El bloque de Martín muestra la lista
+     * coherente con ese valor.
+     *
+     * @return void
+     */
+    public function test_la_lista_de_los_tres_juntos_conserva_los_centavos(): void
+    {
+        $this->admin_autenticado();
+
+        $cuerpo = PreciosVigentesSettingsTest::contrato_por_defecto();
+        $cuerpo['implementaciones']['items'][2]['precio'] = 628400.5;
+
+        $r = $this->putJson(PreciosVigentesSettingsTest::RUTA, $cuerpo)->assertStatus(200);
+
+        $this->assertSame(1885200.5, $r->json('implementaciones.tres_juntos.precio_lista'));
+        $this->assertSame(1319640, $r->json('implementaciones.tres_juntos.precio'));
+
+        $bloque = PreciosVigentesSettings::bloque_para_el_agente();
+
+        $this->assertStringContainsString('Los tres juntos: 30 % de descuento, $1.319.640 en lugar de $1.885.200,50 ($659.820).', $bloque);
+    }
+
+    /**
      * CA2-bis. Si el PUT manda `mensualidad` o `tres_juntos.precio` a mano, se ignoran y se recalculan.
      *
      * @return void
