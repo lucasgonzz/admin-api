@@ -103,12 +103,31 @@ return [
                 '~^(POST|PUT|PATCH) .*(send-|-mail$|/messages$|/message$|/enviar$|deploy/|/sync$|start|advance-stage|actions/\{action\}$|apply-diff|run-|promote|approve|recall-bot|calls/|offer-demo|avisar|prueba/instancias/|extensiones/acceso|agentes-ia$|link-dueno|pending-seeders/run|demo-token/reemitir|force-|check-demo|simulate-inbound|resume-with-claude|retry|reaction|modelos-ia|candado-sesion$|horarios$|followup-template|scheduled-messages|whatsapp-onboarding)~',
                 '~^POST (clients/\{client\}/)?installations$~',
                 '~^POST demo-installation$~',
+                // Actualizar el sistema del cliente: con status=terminada se encola el aviso al dueño (mail + WhatsApp).
+                '~^PUT update/\{id\}$~',
+                // Encola RunDemoUpdateJob: actualiza una instancia de demo en su servidor.
+                '~^POST demo-update$~',
                 '~^POST support-ticket$~',
             ],
             'except' => [
                 '~cancel-auto-send~',
                 '~^POST calendar/google/~',
             ],
+        ],
+    ],
+
+    /*
+    | Freno por CAMPO: una operación de ruta libre sube a la categoría indicada si el pedido trae alguno de estos
+    | campos (query o body, por nombre). Clave «MÉTODO ruta» => [campo => categoría]. El catálogo lo muestra como
+    | `campos_frenados`. Sólo sube: lo que ya frena por su ruta no se rebaja.
+    |  - `api_url`, `client_apis`, `active_client_api_id`: a dónde el admin manda la api_key del cliente (sincronizaciones,
+    |    deploys, avisos). Cambiarlos redirige esas llamadas.
+    */
+    'field_brakes' => [
+        'PUT client/{id}' => [
+            'api_url'              => 'credenciales',
+            'client_apis'          => 'credenciales',
+            'active_client_api_id' => 'credenciales',
         ],
     ],
 
@@ -127,6 +146,12 @@ return [
     | catálogo para que el agente no tropiece con una trampa conocida.
     */
     'notes' => [
+        // Excepción aceptada (es el comportamiento normal del panel): se deja libre y se avisa acá.
+        'PUT lead/{id}' => 'Un cambio de status puede reportar la conversión del lead a Meta (Conversions API); es el comportamiento normal del panel y no frena.',
+        // Interruptores de respuesta automática: no mandan nada ahora, pero habilitan mensajes futuros sin una persona.
+        'POST support-ticket/{id}/toggle-claude-auto-reply' => 'Es un interruptor: al activarlo, Claude puede programar una respuesta automática al cliente de ese ticket.',
+        'POST lead/{id}/toggle-claude-auto-reply' => 'Es un interruptor: al activarlo, Claude vuelve a contestar solo a ese lead por WhatsApp cuando escriba.',
+        'PUT support-ticket/{id}' => 'Replica el cambio del ticket (estado, nombre) en el sistema del cliente por HTTP; no manda ningún mensaje.',
         'PUT ai-system-prompt' => 'Se pisa cada 10 minutos por agent-prompts:sync; el prompt se edita en el repo de conocimiento, no acá.',
         'PUT settings/agent-identity' => 'Se pisa cada 10 minutos por agent-prompts:sync; la identidad se edita en el repo de conocimiento, no acá.',
     ],

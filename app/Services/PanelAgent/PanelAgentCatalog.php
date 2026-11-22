@@ -103,6 +103,8 @@ class PanelAgentCatalog
                     'frenada'      => $braked,
                     'motivo_freno' => ($braked || $category === 'excluida') ? config('panel_agent.reasons.' . $category) : null,
                     'nota'         => $notes[$method . ' ' . $panel_uri] ?? null,
+                    // Campos del cuerpo que suben el pedido de categoría aunque la ruta sea libre (campo => categoría).
+                    'campos_frenados' => $this->classifier->field_brakes($method, $route->uri()),
                 ];
             }
         }

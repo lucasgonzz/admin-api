@@ -80,9 +80,10 @@ class PanelAgentGuard
 
         // Datos del pedido que sirven para clasificar, auditar y calcular el código de confirmación.
         $method   = strtoupper($request->method());
-        $category = $this->classifier->classify($method, $route->uri());
-        $braked   = $this->classifier->is_braked($category);
         $payload  = $request->all();
+        // La categoría mira también el cuerpo: algunos campos (p. ej. `api_url` del cliente) frenan una ruta libre.
+        $category = $this->classifier->classify($method, $route->uri(), $payload);
+        $braked   = $this->classifier->is_braked($category);
         $started  = microtime(true);
 
         // Throttle propio del agente: se mide antes de abrir la auditoría, que igual registra el corte.

@@ -21,9 +21,12 @@ class PanelAgentOperationClassifier
      *
      * @param  string $method    Verbo HTTP (cualquier capitalización).
      * @param  string $route_uri URI completa del router, con `api/admin/` (ej. `api/admin/client/{id}`).
+     * @param  array<string, mixed> $payload Query + body del pedido: si trae un campo de `field_brakes` de esa ruta,
+     *                                       la categoría sube a la que indica ese campo. Sin payload (catálogo) se
+     *                                       devuelve la categoría base.
      * @return string lectura|escritura|credenciales|borrado|masiva|plata|terceros|excluida
      */
-    public function classify(string $method, string $route_uri): string
+    public function classify(string $method, string $route_uri, array $payload = []): string
     {
         // Cerrado por defecto: lo que no es del panel no se ejecuta con un token de agente.
         if (strpos($route_uri, self::PANEL_PREFIX) !== 0) {
@@ -35,14 +38,40 @@ class PanelAgentOperationClassifier
         $key = $method . ' ' . $this->panel_path($route_uri);
 
         // Gana la primera categoría (en el orden del config) cuyo patrón coincide y que no tiene una excepción.
+        $base_category = $method === 'GET' ? 'lectura' : 'escritura';
         foreach ((array) config('panel_agent.categories', []) as $category => $rules) {
             if ($this->matches_any($key, (array) ($rules['patterns'] ?? []))
                 && ! $this->matches_any($key, (array) ($rules['except'] ?? []))) {
-                return (string) $category;
+                $base_category = (string) $category;
+                break;
             }
         }
 
-        return $method === 'GET' ? 'lectura' : 'escritura';
+        // Freno por campo: una operación libre sube de categoría si el cuerpo toca un campo con efecto delicado.
+        // Lo que ya frena por su ruta (o está excluida) no se rebaja ni se cambia.
+        if (! $this->is_braked($base_category) && $base_category !== 'excluida') {
+            foreach ($this->field_brakes($method, $route_uri) as $field => $field_category) {
+                if (array_key_exists($field, $payload)) {
+                    return (string) $field_category;
+                }
+            }
+        }
+
+        return $base_category;
+    }
+
+    /**
+     * Campos que frenan una operación aunque su ruta sea libre (`panel_agent.field_brakes`).
+     *
+     * @param  string $method    Verbo HTTP (cualquier capitalización).
+     * @param  string $route_uri URI completa del router, con `api/admin/`.
+     * @return array<string, string> campo => categoría a la que sube el pedido; vacío si la operación no tiene.
+     */
+    public function field_brakes(string $method, string $route_uri): array
+    {
+        $key = strtoupper($method) . ' ' . $this->panel_path($route_uri);
+
+        return (array) (config('panel_agent.field_brakes', [])[$key] ?? []);
     }
 
     /**
