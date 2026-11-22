@@ -8,6 +8,7 @@ use App\Models\LeadMessage;
 use App\Models\LeadPipelineStatus;
 use App\Services\Prueba\PruebaPoolService;
 use App\Services\Prueba\PruebaSettings;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
@@ -34,6 +35,13 @@ class LeadFlujoEntradaService
 {
     /** Clave del interruptor del flujo: '1' prende, '0' (default) deja todo como hoy. */
     public const KEY_ACTIVO = 'lead_whatsapp_flujo_entrada_activo';
+
+    /**
+     * Clave del sello de encendido: fecha y hora (ISO 8601) en que el interruptor pasó de apagado a prendido. Sólo están «en el
+     * flujo» los leads creados desde ese momento: prender el flujo no le cambia la conversación a quien ya estaba hablando con
+     * Martín (DECISIONES-E2 punto 10). Apagar no lo borra; volver a prender lo renueva.
+     */
+    public const KEY_ACTIVADO_EN = 'lead_whatsapp_flujo_entrada_activado_en';
 
     /** Clave opcional que pisa el texto del mensaje 1 de la llegada (presentación). */
     public const KEY_LLEGADA_1 = 'lead_whatsapp_flujo_llegada_1';
@@ -134,6 +142,64 @@ class LeadFlujoEntradaService
     public static function activo(): bool
     {
         return (string) AdminSetting::get(self::KEY_ACTIVO, '0') === '1';
+    }
+
+    /**
+     * Sella el encendido del flujo (ahora). Lo llama el guardado de Cuenta cuando el interruptor pasa de apagado a prendido.
+     *
+     * @return void
+     */
+    public static function sellar_encendido(): void
+    {
+        AdminSetting::set(self::KEY_ACTIVADO_EN, Carbon::now()->toIso8601String());
+    }
+
+    /**
+     * Desde cuándo está prendido el flujo: el sello guardado; si el interruptor se prendió sin pasar por el guardado de Cuenta
+     * (a mano en la base, un seeder), la fecha de última escritura de la clave del interruptor. Sin interruptor prendido, o sin
+     * ninguna de las dos, null: nadie está en el flujo.
+     *
+     * @return Carbon|null
+     */
+    public static function activado_en(): ?Carbon
+    {
+        if (! self::activo()) {
+            return null;
+        }
+
+        $sello = trim((string) AdminSetting::get(self::KEY_ACTIVADO_EN, ''));
+        if ($sello === '') {
+            $sello = (string) AdminSetting::query()->where('key', self::KEY_ACTIVO)->value('updated_at');
+        }
+
+        if ($sello === '') {
+            return null;
+        }
+
+        try {
+            return Carbon::parse($sello);
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    /**
+     * ¿El lead está en el flujo nuevo? Sí si el interruptor está prendido, el lead se creó desde el encendido
+     * ({@see activado_en()}) y no tiene demo asignada (la demo sigue su flujo de siempre).
+     *
+     * @param Lead $lead
+     *
+     * @return bool
+     */
+    public static function en_el_flujo(Lead $lead): bool
+    {
+        if ($lead->demo_id) {
+            return false;
+        }
+
+        $desde = self::activado_en();
+
+        return $desde !== null && $lead->created_at !== null && Carbon::parse($lead->created_at)->greaterThanOrEqualTo($desde);
     }
 
     /**
@@ -375,7 +441,7 @@ class LeadFlujoEntradaService
      */
     public static function puntos_debidos(Lead $lead): array
     {
-        if (! self::activo()) {
+        if (! self::en_el_flujo($lead)) {
             return [];
         }
 
@@ -504,6 +570,16 @@ class LeadFlujoEntradaService
         }
 
         $debidos = self::puntos_debidos($lead);
+
+        /* Literal o IA, nunca los dos: si la IA ya dejó una sugerencia sin enviar (retenida, pendiente de aprobación o
+           programada) que cubre TODO lo que se debe, mandar el literal haría que el lead lo reciba dos veces cuando se
+           apruebe. Sigue el camino normal: el scheduler la descarta y la IA regenera completando lo que falte
+           (DECISIONES-E2 punto 11). Si cubre sólo una parte, sale el literal y la vieja se descarta
+           ({@see descartar_sugerencias_sin_enviar()}). */
+        if (! empty($debidos) && self::las_sugerencias_sin_enviar_cubren($lead, $debidos)) {
+            return false;
+        }
+
         if (empty($debidos) || self::tiene_pregunta($texto)) {
             return false;
         }
@@ -515,6 +591,67 @@ class LeadFlujoEntradaService
         }
 
         return true;
+    }
+
+    /**
+     * Las sugerencias de la IA todavía sin enviar del lead (estado `sugerido`: pendientes de aprobación, retenidas o
+     * programadas).
+     *
+     * @param Lead $lead
+     *
+     * @return \Illuminate\Support\Collection
+     */
+    private static function sugerencias_sin_enviar(Lead $lead)
+    {
+        return LeadMessage::query()
+            ->where('lead_id', (int) $lead->id)
+            ->where('sender', 'sistema')
+            ->where('status', 'sugerido')
+            ->where('is_status_event', false)
+            ->get();
+    }
+
+    /**
+     * ¿Las sugerencias sin enviar del lead cubren, juntas, TODOS los puntos dados (por ancla)?
+     *
+     * @param Lead                $lead
+     * @param array<int, string>  $puntos Puntos debidos.
+     *
+     * @return bool false si no hay ninguna sugerencia sin enviar.
+     */
+    public static function las_sugerencias_sin_enviar_cubren(Lead $lead, array $puntos): bool
+    {
+        $pendientes = self::sugerencias_sin_enviar($lead);
+        if ($pendientes->isEmpty() || empty($puntos)) {
+            return false;
+        }
+
+        $texto = $pendientes->map(function ($mensaje) {
+            return (string) $mensaje->content;
+        })->implode("\n");
+
+        foreach ($puntos as $punto) {
+            if (! self::cumple_el_ancla($punto, $texto)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Descarta las sugerencias sin enviar del lead: el literal que sale ahora las reemplaza y, si se aprobaran después, el
+     * lead recibiría dos veces lo mismo.
+     *
+     * @param Lead $lead
+     *
+     * @return void
+     */
+    public static function descartar_sugerencias_sin_enviar(Lead $lead): void
+    {
+        foreach (self::sugerencias_sin_enviar($lead) as $mensaje) {
+            (new LeadAiSuggestionScheduler())->discard_obsolete_suggestion($mensaje);
+        }
     }
 
     /**
@@ -564,12 +701,8 @@ class LeadFlujoEntradaService
      */
     public static function ia_contesta_el_primer_mensaje(int $lead_id): bool
     {
-        if (! self::activo()) {
-            return false;
-        }
-
         $lead = Lead::query()->find($lead_id);
-        if ($lead === null || (string) $lead->status !== 'nuevo') {
+        if ($lead === null || ! self::en_el_flujo($lead) || (string) $lead->status !== 'nuevo') {
             return false;
         }
 
@@ -596,11 +729,11 @@ class LeadFlujoEntradaService
      */
     public static function bloque_para_el_agente(Lead $lead): string
     {
-        if (! self::activo()) {
+        if (! self::en_el_flujo($lead)) {
             return '';
         }
 
-        if (! in_array((string) $lead->status, self::ESTADOS_CON_EL_BLOQUE, true) || $lead->demo_id || LeadOfertaDePruebaService::tiene_prueba($lead)) {
+        if (! in_array((string) $lead->status, self::ESTADOS_CON_EL_BLOQUE, true) || LeadOfertaDePruebaService::tiene_prueba($lead)) {
             return '';
         }
 
@@ -707,6 +840,11 @@ class LeadFlujoEntradaService
      */
     public static function completar_paquete(Lead $lead, array $parsed, bool $gate_rechazo): array
     {
+        /* Un estado del embudo no retrocede (DECISIONES-E2 punto 9): vale también si el gate frenó el paquete. */
+        if (isset($parsed['estado_sugerido'])) {
+            $parsed['estado_sugerido'] = self::estado_sin_retroceso($lead, (string) $parsed['estado_sugerido']);
+        }
+
         if ($gate_rechazo || ! empty($parsed['requiere_intervencion_humana'])) {
             return $parsed;
         }
@@ -744,6 +882,37 @@ class LeadFlujoEntradaService
     // ------------------------------------------------------------------------------------------
 
     /**
+     * Estados de ANTES, por estado del embudo, sobre los que un `estado_sugerido` no se aplica: `link_enviado` e
+     * `implementacion_pedida` no retroceden. Avanzar (demo, prueba, cierre) sí se aplica.
+     */
+    public const ESTADOS_QUE_NO_RETROCEDEN = [
+        'link_enviado'          => ['nuevo', 'contactado', 'calificado'],
+        'implementacion_pedida' => ['nuevo', 'contactado', 'calificado', 'link_enviado'],
+    ];
+
+    /**
+     * El estado que corresponde aplicar: el sugerido, salvo que baje a un lead de `link_enviado` o `implementacion_pedida` a un
+     * estado de antes (el bloque de la demo directa le hace pedir `calificado` al agente en el turno siguiente al link). En ese
+     * caso, el estado actual: ni se aplica ni queda el chip de cambio en el mensaje.
+     *
+     * @param Lead   $lead
+     * @param string $estado_sugerido Slug que sugirió el agente.
+     *
+     * @return string
+     */
+    public static function estado_sin_retroceso(Lead $lead, string $estado_sugerido): string
+    {
+        $actual = (string) $lead->status;
+
+        if (isset(self::ESTADOS_QUE_NO_RETROCEDEN[$actual])
+            && in_array(trim($estado_sugerido), self::ESTADOS_QUE_NO_RETROCEDEN[$actual], true)) {
+            return $actual;
+        }
+
+        return $estado_sugerido;
+    }
+
+    /**
      * Si el texto que se envió lleva el link de la prueba, pasa al lead de `nuevo`, `contactado` o `calificado` a
      * `link_enviado` y deja el evento de estado en el hilo. Sólo con el flujo prendido (el lead que no está en el
      * flujo no cambia de estado por esto). Cubre al agente y al setter que edita la sugerencia: lo que cuenta es
@@ -756,7 +925,7 @@ class LeadFlujoEntradaService
      */
     public static function marcar_link_enviado(Lead $lead, string $texto): bool
     {
-        if (! self::activo() || strpos($texto, LeadOfertaDePruebaService::link()) === false) {
+        if (! self::en_el_flujo($lead) || strpos($texto, LeadOfertaDePruebaService::link()) === false) {
             return false;
         }
 

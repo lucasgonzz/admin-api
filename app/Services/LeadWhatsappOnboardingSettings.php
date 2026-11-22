@@ -207,7 +207,13 @@ class LeadWhatsappOnboardingSettings
         /* Las dos claves del flujo de entrada nuevo (E2 de embudo-whatsapp-precios) son OPCIONALES en el PUT: un SPA que no
          * las manda no puede apagar el flujo ni borrar los textos precargados. Se escriben sólo si vinieron. */
         if (array_key_exists('flujo_entrada_activo', $data) && $data['flujo_entrada_activo'] !== null) {
+            /* Al PRENDERLO (apagado → prendido) se sella el encendido: sólo los leads creados desde ahora entran al flujo.
+               Guardar con el flujo ya prendido no renueva el sello; apagar no lo borra. */
+            $estaba_prendido = LeadFlujoEntradaService::activo();
             AdminSetting::set(LeadFlujoEntradaService::KEY_ACTIVO, $data['flujo_entrada_activo'] ? '1' : '0');
+            if ($data['flujo_entrada_activo'] && ! $estaba_prendido) {
+                LeadFlujoEntradaService::sellar_encendido();
+            }
         }
         /* La textarea vacía llega como null (el middleware convierte '' en null): con la clave presente es «borrar los textos». */
         if (array_key_exists('flujo_textos_precargados', $data)) {

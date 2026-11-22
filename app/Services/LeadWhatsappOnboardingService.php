@@ -255,7 +255,7 @@ class LeadWhatsappOnboardingService
          * (LeadFlujoEntradaService, PLAN §2.2.2). Apagado, ni se mira: todo sigue como hoy.
          */
         if ($primer_mensaje !== null && trim($primer_mensaje) !== ''
-            && LeadFlujoEntradaService::activo()
+            && LeadFlujoEntradaService::en_el_flujo($lead)
             && (string) $lead->status === 'nuevo'
             && ! LeadOfertaDePruebaService::tiene_prueba($lead)) {
             if (LeadFlujoEntradaService::tiene_pregunta($primer_mensaje)) {

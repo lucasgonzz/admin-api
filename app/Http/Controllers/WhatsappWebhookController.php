@@ -2217,6 +2217,7 @@ class WhatsappWebhookController extends Controller
         //     lo que había que decir ya sale. El siguiente inbound sí. Si el inbound pregunta algo, o se le debe todavía
         //     algo del paso 1, no entra acá: sigue la IA de siempre, que recibe los puntos obligatorios (PLAN §2.2.2).
         if (\App\Services\LeadFlujoEntradaService::corresponde_el_literal_del_paso_2($lead, (string) $content)) {
+            \App\Services\LeadFlujoEntradaService::descartar_sugerencias_sin_enviar($lead);
             \App\Services\LeadFlujoEntradaService::marcar_literal_encolado($lead);
             \App\Jobs\SendLeadDosFormasJob::dispatch((int) $lead->id)->delay(now()->addSeconds(3));
 
