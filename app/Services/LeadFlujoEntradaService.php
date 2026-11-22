@@ -591,6 +591,12 @@ class LeadFlujoEntradaService
             return false;
         }
 
+        /* Tampoco mientras la IA tenga una generación agendada o en curso con el token vigente: tomar el literal renovaría el
+           token y la descartaría, y lo que el lead dijo antes quedaría sin respuesta (DECISIONES-E2 punto 16). */
+        if ((new LeadAiSuggestionScheduler())->hay_generacion_agendada((int) $lead->id)) {
+            return false;
+        }
+
         foreach ($debidos as $punto) {
             if (self::PUNTOS[$punto]['paso'] !== 2) {
                 return false;
@@ -616,6 +622,9 @@ class LeadFlujoEntradaService
             ->where('sender', 'sistema')
             ->where('status', 'enviado')
             ->where('is_status_event', false)
+            ->where(function ($query) {
+                $query->whereNull('system_message_kind')->orWhereNotIn('system_message_kind', self::kinds_automaticos());
+            })
             ->max('id');
 
         $ultima_pregunta = 0;
@@ -640,6 +649,9 @@ class LeadFlujoEntradaService
             ->where('sender', 'sistema')
             ->where('is_status_event', false)
             ->where('is_followup', false)
+            ->where(function ($query) {
+                $query->whereNull('system_message_kind')->orWhereNotIn('system_message_kind', self::kinds_automaticos());
+            })
             ->where('id', '>', $ultima_pregunta)
             ->exists();
     }
@@ -661,6 +673,20 @@ class LeadFlujoEntradaService
         }
 
         return false;
+    }
+
+    /**
+     * Los `system_message_kind` de los mensajes automáticos del flujo (los literales de {@see PUNTOS}, que incluyen la
+     * bienvenida, y el auto de siempre). No son una respuesta a lo que el lead preguntó.
+     *
+     * @return array<int, string>
+     */
+    public static function kinds_automaticos(): array
+    {
+        $kinds = array_column(self::PUNTOS, 'kind');
+        $kinds[] = LeadWhatsappOnboardingService::KIND_AUTO;
+
+        return array_values(array_unique($kinds));
     }
 
     /**
