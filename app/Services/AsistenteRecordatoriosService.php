@@ -62,6 +62,16 @@ class AsistenteRecordatoriosService
     const RUTA_AVISADO = 'api/admin-sync/asistente/recordatorios/avisado';
 
     /**
+     * Valor de `via` en el sello cuando salió el texto completo (ventana de 24 hs abierta).
+     */
+    const VIA_TEXTO = 'texto';
+
+    /**
+     * Valor de `via` en el sello cuando salió sólo una plantilla (la de tareas o la de recordatorio).
+     */
+    const VIA_PLANTILLA = 'plantilla';
+
+    /**
      * Minutos sin volver a consultar a un cliente cuyo sistema no tiene la ruta (404).
      *
      * Una hora, el doble de largo que la de los avisos, y por el mismo motivo multiplicado: acá no
@@ -551,11 +561,16 @@ class AsistenteRecordatoriosService
             return $this->registrar_fallo($client, (string) $recordatorio['id'], $clave, (string) $this->sender->last_send_error);
         }
 
-        /* Desde acá el recordatorio YA salió: el reclamo pasa a guardar con qué salió, para que una
-         * marca fallida se pueda reintentar sin mandárselo dos veces al dueño. */
+        /* Por dónde salió: texto libre (ventana abierta) o plantilla. Es lo que el sello le cuenta al
+         * `empresa-api` en el campo `via`. */
+        $via = $abierta ? self::VIA_TEXTO : self::VIA_PLANTILLA;
+
+        /* Desde acá el recordatorio YA salió: el reclamo pasa a guardar con qué salió (wamid y `via`),
+         * para que una marca fallida se pueda reintentar sin mandárselo dos veces al dueño y con el
+         * mismo `via` que el envío original. */
         Cache::put(
             $clave,
-            ['estado' => self::RECLAMO_ENVIADO, 'whatsapp_message_id' => $whatsapp_message_id],
+            ['estado' => self::RECLAMO_ENVIADO, 'whatsapp_message_id' => $whatsapp_message_id, 'via' => $via],
             now()->addDays(self::DIAS_DEL_RECLAMO)
         );
 
@@ -587,7 +602,7 @@ class AsistenteRecordatoriosService
             ]);
         }
 
-        $this->marcar_y_cerrar_el_reclamo($client, (string) $recordatorio['id'], $clave, $whatsapp_message_id);
+        $this->marcar_y_cerrar_el_reclamo($client, (string) $recordatorio['id'], $clave, $whatsapp_message_id, $via);
 
         return $abierta ? 'enviado_texto' : 'enviado_plantilla';
     }
@@ -788,7 +803,9 @@ class AsistenteRecordatoriosService
                 $client,
                 $recordatorio_id,
                 $clave,
-                isset($previo['whatsapp_message_id']) ? (string) $previo['whatsapp_message_id'] : ''
+                isset($previo['whatsapp_message_id']) ? (string) $previo['whatsapp_message_id'] : '',
+                /* Un reclamo de antes del deploy no guardó `via`: el sello sale sin el campo. */
+                isset($previo['via']) ? (string) $previo['via'] : ''
             );
 
             return $marcado ? 'remarcado' : 'ya_avisado';
@@ -812,12 +829,13 @@ class AsistenteRecordatoriosService
      * @param string $recordatorio_id     Id del recordatorio (string del contrato).
      * @param string $clave               Clave del reclamo.
      * @param string $whatsapp_message_id wamid con el que salió.
+     * @param string $via                 `texto` | `plantilla`, o vacío si no se sabe (reclamo viejo).
      *
      * @return bool True si el `empresa-api` ya no lo va a volver a ofrecer.
      */
-    private function marcar_y_cerrar_el_reclamo(Client $client, string $recordatorio_id, string $clave, string $whatsapp_message_id): bool
+    private function marcar_y_cerrar_el_reclamo(Client $client, string $recordatorio_id, string $clave, string $whatsapp_message_id, string $via = ''): bool
     {
-        if (! $this->marcar_avisado($client, $recordatorio_id, $whatsapp_message_id)) {
+        if (! $this->marcar_avisado($client, $recordatorio_id, $whatsapp_message_id, $via)) {
             return false;
         }
 
@@ -1053,10 +1071,11 @@ class AsistenteRecordatoriosService
      * @param Client $client              Cliente.
      * @param string $recordatorio_id     Id del contrato.
      * @param string $whatsapp_message_id wamid con el que salió, o vacío.
+     * @param string $via                 `texto` | `plantilla`, o vacío para no mandar el campo.
      *
      * @return bool True si ya no hay que volver a marcarlo.
      */
-    private function marcar_avisado(Client $client, string $recordatorio_id, string $whatsapp_message_id): bool
+    private function marcar_avisado(Client $client, string $recordatorio_id, string $whatsapp_message_id, string $via = ''): bool
     {
         $url = $this->urls->admin_sync_url($client, self::RUTA_AVISADO);
         if ($url === '') {
@@ -1066,6 +1085,10 @@ class AsistenteRecordatoriosService
         $cuerpo = ['id' => $recordatorio_id];
         if ($whatsapp_message_id !== '') {
             $cuerpo['whatsapp_message_id'] = $whatsapp_message_id;
+        }
+        /* Campo opcional: por dónde salió el ítem. La `empresa-api` vieja lo ignora. */
+        if ($via !== '') {
+            $cuerpo['via'] = $via;
         }
 
         try {
