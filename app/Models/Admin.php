@@ -45,6 +45,9 @@ class Admin extends Authenticatable
         // le liquida comisión por las ventas que se le asignan y ve su módulo "Mis comisiones".
         // Si hay un solo vendedor, las ventas nuevas se le asignan solas.
         'es_vendedor'              => 'boolean',
+        // Perfil restringido (misión embudo-whatsapp-precios, E5): el admin sólo ve Leads (lectura, estado y
+        // nota) y Cuenta. Lo hace cumplir el middleware `admin.solo_leads`; nace apagado para todos.
+        'solo_leads'               => 'boolean',
         // Flag para recibir WhatsApp cuando el agente escala una conversación de lead.
         'notify_lead_escalation_whatsapp' => 'boolean',
         // Flag para recibir WhatsApp cuando el agente escala un ticket de soporte de un cliente.

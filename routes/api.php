@@ -109,6 +109,15 @@ Route::get('landing/prueba/{uuid}/estado', [\App\Http\Controllers\LandingPruebaC
     ->withoutMiddleware('throttle:api')
     ->middleware('throttle:landing-prueba-estado');
 
+/*
+| Precios vigentes y costos de Meta para la landing (misión embudo-whatsapp-precios, etapa E1): sólo lectura,
+| pública, con cubeta propia por IP (`RouteServiceProvider`) y sin la de todo /api, como las demás `landing/*`.
+| La respuesta no incluye `actualizado_por`. Contrato en `LandingPreciosController` y §2.6 del PLAN.
+*/
+Route::get('landing/precios', [\App\Http\Controllers\LandingPreciosController::class, 'show'])
+    ->withoutMiddleware('throttle:api')
+    ->middleware('throttle:landing-precios');
+
 Route::post('webhook/whatsapp', [WhatsappWebhookController::class, 'receive'])
     ->withoutMiddleware('throttle:api')
     ->middleware('throttle:whatsapp-webhook');
@@ -1094,7 +1103,9 @@ Route::prefix('admin')->group(function () {
         ->middleware('signed')
         ->middleware('throttle:adjuntos-firmados');
 
-    Route::middleware('auth:sanctum')->group(function () {
+    // `admin.solo_leads` (E5): perfil «Sólo Leads». Con el flag apagado vuelve en la primera línea; con él
+    // encendido sólo deja pasar lo de AdminSoloLeadsPolicy. Toda ruta autenticada nueva debe pasar por acá.
+    Route::middleware(['auth:sanctum', 'admin.solo_leads'])->group(function () {
         Route::post('logout', [AuthController::class, 'logout']);
         Route::get('me', [AuthController::class, 'me']);
         Route::put('me', [AuthController::class, 'update_profile']);
@@ -1736,6 +1747,11 @@ Route::prefix('admin')->group(function () {
         // devuelve `mercado_pago_configurado` (booleano derivado; el access token nunca viaja).
         Route::get('settings/cotizador', [\App\Http\Controllers\Api\CotizadorSettingsController::class, 'show']);
         Route::put('settings/cotizador', [\App\Http\Controllers\Api\CotizadorSettingsController::class, 'update']);
+
+        // Fuente única de precios vigentes (misión embudo-whatsapp-precios, etapa E1): planes de gestión,
+        // adicionales, implementaciones y costos de Meta. La leen Martín, la oferta de la prueba y la landing.
+        Route::get('settings/precios-vigentes', [\App\Http\Controllers\Api\PreciosVigentesSettingsController::class, 'show']);
+        Route::put('settings/precios-vigentes', [\App\Http\Controllers\Api\PreciosVigentesSettingsController::class, 'update']);
 
         // Multimedia editable de la demo (grupo 300, prompt 02): un GET pinta toda la pantalla
         // (slots del catálogo sincronizado + URLs cargadas) y un PUT guarda/borra la URL de un slot.
