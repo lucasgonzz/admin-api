@@ -102,6 +102,31 @@ class LeadAiSuggestionScheduler
     }
 
     /**
+     * Prepara el terreno para que un inbound lo conteste el camino LITERAL del flujo de entrada (en vez de la IA), con las mismas
+     * defensas que {@see schedule_after_lead_inbound()} (misión embudo-whatsapp-precios, E2, DECISIONES-E2 punto 13):
+     *  - descarta las sugerencias viejas sin enviar (nunca los seguimientos ni las que se están enviando en este momento);
+     *  - renueva el token del debounce, para que una generación de la IA que ya arrancó se descarte al terminar y el lead no
+     *    reciba dos veces lo mismo.
+     *
+     * Si una sugerencia se está enviando ahora mismo NO se toma el literal: devuelve false y el llamador sigue el camino normal
+     * (`schedule_after_lead_inbound`), que anota el inbound durante el envío.
+     *
+     * @param int $lead_id
+     *
+     * @return bool true si puede salir el literal; false si hay un envío en curso.
+     */
+    public function preparar_para_el_literal(int $lead_id): bool
+    {
+        if ($this->clear_stale_pending_suggestions($lead_id)) {
+            return false;
+        }
+
+        $this->bump_schedule_token($lead_id);
+
+        return true;
+    }
+
+    /**
      * ¿El agente contesta el PRIMER mensaje de este lead? Solo si reservó su demo desde la landing
      * (misión demo-autogestionada-landing, 22/10/2026, D11 del plan) o, con el flujo de entrada nuevo prendido,
      * si ese primer mensaje es una PREGUNTA y se le deben puntos (misión embudo-whatsapp-precios, E2, §2.2.2): a ese

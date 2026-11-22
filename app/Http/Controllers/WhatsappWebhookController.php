@@ -2216,8 +2216,10 @@ class WhatsappWebhookController extends Controller
         //     (y el link, si es de la web). Eso sale LITERAL por el job, con 3 s de demora, y ese inbound NO agenda la IA:
         //     lo que había que decir ya sale. El siguiente inbound sí. Si el inbound pregunta algo, o se le debe todavía
         //     algo del paso 1, no entra acá: sigue la IA de siempre, que recibe los puntos obligatorios (PLAN §2.2.2).
-        if (\App\Services\LeadFlujoEntradaService::corresponde_el_literal_del_paso_2($lead, (string) $content)) {
-            \App\Services\LeadFlujoEntradaService::descartar_sugerencias_sin_enviar($lead);
+        //     Antes de tomar el literal se replican las defensas del scheduler (descartar sugerencias viejas, renovar el token
+        //     del debounce y no tocar un envío en curso): si hay una sugerencia saliendo, sigue el camino normal.
+        if (\App\Services\LeadFlujoEntradaService::corresponde_el_literal_del_paso_2($lead, (string) $content)
+            && (new LeadAiSuggestionScheduler())->preparar_para_el_literal((int) $lead->id)) {
             \App\Services\LeadFlujoEntradaService::marcar_literal_encolado($lead);
             \App\Jobs\SendLeadDosFormasJob::dispatch((int) $lead->id)->delay(now()->addSeconds(3));
 

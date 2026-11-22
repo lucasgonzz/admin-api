@@ -574,8 +574,8 @@ class LeadFlujoEntradaService
         /* Literal o IA, nunca los dos: si la IA ya dejó una sugerencia sin enviar (retenida, pendiente de aprobación o
            programada) que cubre TODO lo que se debe, mandar el literal haría que el lead lo reciba dos veces cuando se
            apruebe. Sigue el camino normal: el scheduler la descarta y la IA regenera completando lo que falte
-           (DECISIONES-E2 punto 11). Si cubre sólo una parte, sale el literal y la vieja se descarta
-           ({@see descartar_sugerencias_sin_enviar()}). */
+           (DECISIONES-E2 punto 11). Si cubre sólo una parte, sale el literal y el webhook descarta
+           la vieja con las defensas del scheduler (`preparar_para_el_literal`). */
         if (! empty($debidos) && self::las_sugerencias_sin_enviar_cubren($lead, $debidos)) {
             return false;
         }
@@ -607,6 +607,7 @@ class LeadFlujoEntradaService
             ->where('lead_id', (int) $lead->id)
             ->where('sender', 'sistema')
             ->where('status', 'sugerido')
+            ->where('is_followup', false)
             ->where('is_status_event', false)
             ->get();
     }
@@ -637,21 +638,6 @@ class LeadFlujoEntradaService
         }
 
         return true;
-    }
-
-    /**
-     * Descarta las sugerencias sin enviar del lead: el literal que sale ahora las reemplaza y, si se aprobaran después, el
-     * lead recibiría dos veces lo mismo.
-     *
-     * @param Lead $lead
-     *
-     * @return void
-     */
-    public static function descartar_sugerencias_sin_enviar(Lead $lead): void
-    {
-        foreach (self::sugerencias_sin_enviar($lead) as $mensaje) {
-            (new LeadAiSuggestionScheduler())->discard_obsolete_suggestion($mensaje);
-        }
     }
 
     /**
