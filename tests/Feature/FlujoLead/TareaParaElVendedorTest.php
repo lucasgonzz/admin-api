@@ -51,7 +51,7 @@ class TareaParaElVendedorTest extends BaseDePruebaGratuita
     /**
      * CA12. El agente devuelve `estado_sugerido: "implementacion_pedida"` con verificación pendiente: el lead queda
      * en `implementacion_pedida` ANTES de aprobar (la sugerencia sigue pendiente), se crea UNA `AdminTask` con
-     * `created_via = embudo_implementacion_pedida` y el `lead_id`, asignada al perfil Leads (Juan) y con su aviso
+     * `created_via = embudo_impl_pedida` y el `lead_id`, asignada al perfil Leads (Juan) y con su aviso
      * (push y pila) creado por `AdminTaskNotificationService`.
      *
      * @return void
@@ -72,7 +72,7 @@ class TareaParaElVendedorTest extends BaseDePruebaGratuita
             'El estado se aplica apenas el agente lo sugiere, sin esperar la aprobación.'
         );
 
-        $tareas = AdminTask::query()->where('lead_id', $lead->id)->where('created_via', 'embudo_implementacion_pedida')->get();
+        $tareas = AdminTask::query()->where('lead_id', $lead->id)->where('created_via', 'embudo_impl_pedida')->get();
         $this->assertCount(1, $tareas, 'Tiene que crearse una sola tarea del embudo.');
         $this->assertStringContainsString('pidió la implementación', (string) $tareas[0]->title);
         $this->assertSame([(int) $juan->id], $this->asignados_de($tareas[0]), 'La tarea va al perfil Leads.');
@@ -87,7 +87,7 @@ class TareaParaElVendedorTest extends BaseDePruebaGratuita
         app(LeadAiService::class)->generate_suggestion($lead->fresh(), false);
         $this->assertSame(
             1,
-            AdminTask::query()->where('lead_id', $lead->id)->where('created_via', 'embudo_implementacion_pedida')->count(),
+            AdminTask::query()->where('lead_id', $lead->id)->where('created_via', 'embudo_impl_pedida')->count(),
             'Repetir el pedido no duplica la tarea.'
         );
     }
@@ -108,7 +108,7 @@ class TareaParaElVendedorTest extends BaseDePruebaGratuita
         LeadTareaVendedorService::crear($lead, 'implementacion_pedida');
         LeadTareaVendedorService::crear($lead->fresh(), 'implementacion_pedida');
 
-        $this->assertSame(1, AdminTask::query()->where('lead_id', $lead->id)->where('created_via', 'embudo_implementacion_pedida')->count());
+        $this->assertSame(1, AdminTask::query()->where('lead_id', $lead->id)->where('created_via', 'embudo_impl_pedida')->count());
 
         LeadTareaVendedorService::crear($lead->fresh(), 'prueba_creada');
 
@@ -131,7 +131,7 @@ class TareaParaElVendedorTest extends BaseDePruebaGratuita
         $this->fakear_ia([$this->paquete_de_implementacion_pedida()]);
         app(LeadAiService::class)->generate_suggestion($lead, false);
 
-        $tarea = AdminTask::query()->where('lead_id', $lead->id)->where('created_via', 'embudo_implementacion_pedida')->first();
+        $tarea = AdminTask::query()->where('lead_id', $lead->id)->where('created_via', 'embudo_impl_pedida')->first();
         $this->assertNotNull($tarea, 'Tiene que haberse creado la tarea.');
         $this->assertSame([(int) $setter->id], $this->asignados_de($tarea));
     }
