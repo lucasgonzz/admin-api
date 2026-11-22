@@ -584,6 +584,13 @@ class LeadFlujoEntradaService
             return false;
         }
 
+        /* No se toma el literal si hay una pregunta anterior todavía sin contestar (tomarlo cancelaría la generación que la iba
+           a contestar) ni si hay un pase a una persona pendiente (se perdería). Sigue el camino normal, que agenda la IA
+           (DECISIONES-E2 punto 14). */
+        if (self::hay_pregunta_sin_contestar($lead) || self::hay_sugerencia_que_pide_intervencion($lead)) {
+            return false;
+        }
+
         foreach ($debidos as $punto) {
             if (self::PUNTOS[$punto]['paso'] !== 2) {
                 return false;
@@ -591,6 +598,69 @@ class LeadFlujoEntradaService
         }
 
         return true;
+    }
+
+    /**
+     * ¿Hay una pregunta del lead que todavía no tuvo ninguna respuesta generada? Mira los mensajes del lead posteriores al último
+     * saliente enviado: si alguno es una pregunta y después de ella no hay ningún mensaje del sistema (ni enviado, ni sugerido ni
+     * rechazado; los seguimientos no cuentan), la IA todavía tiene que contestarla (su generación está agendada o en curso).
+     *
+     * @param Lead $lead
+     *
+     * @return bool
+     */
+    public static function hay_pregunta_sin_contestar(Lead $lead): bool
+    {
+        $ultimo_saliente = (int) LeadMessage::query()
+            ->where('lead_id', (int) $lead->id)
+            ->where('sender', 'sistema')
+            ->where('status', 'enviado')
+            ->where('is_status_event', false)
+            ->max('id');
+
+        $ultima_pregunta = 0;
+        $mensajes = LeadMessage::query()
+            ->where('lead_id', (int) $lead->id)
+            ->where('sender', 'lead')
+            ->where('id', '>', $ultimo_saliente)
+            ->get();
+
+        foreach ($mensajes as $mensaje) {
+            if (self::tiene_pregunta((string) $mensaje->content)) {
+                $ultima_pregunta = max($ultima_pregunta, (int) $mensaje->id);
+            }
+        }
+
+        if ($ultima_pregunta === 0) {
+            return false;
+        }
+
+        return ! LeadMessage::query()
+            ->where('lead_id', (int) $lead->id)
+            ->where('sender', 'sistema')
+            ->where('is_status_event', false)
+            ->where('is_followup', false)
+            ->where('id', '>', $ultima_pregunta)
+            ->exists();
+    }
+
+    /**
+     * ¿Hay una sugerencia sin enviar que pide intervención humana (el mensaje de espera del gate, por ejemplo)?
+     *
+     * @param Lead $lead
+     *
+     * @return bool
+     */
+    public static function hay_sugerencia_que_pide_intervencion(Lead $lead): bool
+    {
+        foreach (self::sugerencias_sin_enviar($lead) as $mensaje) {
+            $acciones = $mensaje->pending_actions;
+            if (is_array($acciones) && ! empty($acciones['requiere_intervencion_humana'])) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
