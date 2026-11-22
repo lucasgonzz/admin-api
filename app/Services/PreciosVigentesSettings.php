@@ -473,7 +473,59 @@ class PreciosVigentesSettings
                 . ' (unos ' . self::formato_pesos((float) $tarifa['ars']) . ') por mensaje.';
         }
 
+        /* Guía de respuesta cuando el lead pregunta precios (Lucas, 21/11/2026): no se contesta sólo la cifra, se
+           presenta, se cuentan los 3 productos, se responde y se cierra con un siguiente paso. Las frases son
+           fijas; las cifras salen siempre de la fuente. Sin USD ni ganancia, como el resto del bloque. */
+        $lineas = array_merge($lineas, self::guia_de_pregunta_de_precio($implementaciones));
+
         return implode("\n", $lineas);
+    }
+
+    /**
+     * Arma las líneas de la guía «CUANDO EL LEAD PREGUNTA PRECIOS» que va al final del bloque de Martín.
+     *
+     * - Si los tres items cuestan lo mismo se dice una sola cifra («cada producto se implementa por $X»); si
+     *   difieren, se nombra cada uno con su precio.
+     * - La frase de «los tres juntos» sale de `tres_juntos` y se omite con descuento 0.
+     *
+     * @param array<string, mixed> $implementaciones Sección `implementaciones` del contrato.
+     *
+     * @return array<int, string> Líneas de texto de la guía.
+     */
+    private static function guia_de_pregunta_de_precio(array $implementaciones): array
+    {
+        /* Precio de cada item por clave (gestion, tienda, agentes) y si todos coinciden. */
+        $precios = [];
+        foreach ($implementaciones['items'] as $item) {
+            $precios[$item['clave']] = (float) $item['precio'];
+        }
+
+        $todos_iguales = count(array_unique(array_values($precios))) === 1;
+
+        if ($todos_iguales) {
+            $frase_precio = 'cada producto se implementa por ' . self::formato_pesos((float) reset($precios));
+        } else {
+            $frase_precio = 'el sistema de gestión ' . self::formato_pesos((float) ($precios['gestion'] ?? 0))
+                . ', la tienda online ' . self::formato_pesos((float) ($precios['tienda'] ?? 0))
+                . ' y los Agentes ' . self::formato_pesos((float) ($precios['agentes'] ?? 0));
+        }
+
+        /* Los tres juntos: sólo si hay descuento. */
+        $tres_juntos = $implementaciones['tres_juntos'];
+        $frase_tres = '';
+        if ((float) $tres_juntos['descuento_porcentaje'] > 0) {
+            $frase_tres = '; los tres juntos tienen ' . self::numero_sin_ceros($tres_juntos['descuento_porcentaje'])
+                . ' % de descuento (' . self::formato_pesos((float) $tres_juntos['precio']) . ')';
+        }
+
+        $lineas   = [];
+        $lineas[] = 'CUANDO EL LEAD PREGUNTA PRECIOS (por ejemplo «quiero saber el precio del sistema»), no contestes sólo la cifra. En el mismo mensaje y en este orden:';
+        $lineas[] = '1. Si todavía no te presentaste en esta conversación: «Hola, soy Martín, de ComercioCity».';
+        $lineas[] = '2. Contale que tenemos 3 productos: el sistema de gestión, la tienda online y los agentes de IA, que automatizan la mayor parte de los procesos digitales del negocio.';
+        $lineas[] = '3. Respondé lo que preguntó: ' . $frase_precio . $frase_tres . '. Si preguntó por la mensualidad, dala también.';
+        $lineas[] = '4. Cerrá con un siguiente paso concreto: ofrecele la prueba gratuita guiada de la plataforma para conocer los 3 productos (dura alrededor de 1 hora) y también la prueba gratis de 7 días.';
+
+        return $lineas;
     }
 
     /**
