@@ -8,6 +8,7 @@ use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Services\KnowledgeGroundingGate;
 use App\Services\LeadAiService;
+use App\Services\LeadAiSuggestionScheduler;
 use App\Services\LeadSuggestionEnvioEnCurso;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Tests\TestCase;
@@ -44,13 +45,14 @@ class RevisionRonda3DelFlujoTest extends TestCase
     }
 
     /**
-     * Generación en curso + «dale»: el lead (con el escudo prendido y el paso 1 entregado) pregunta, arranca la generación de la
-     * IA y, mientras genera, escribe «dale» (sin fila `sugerido` todavía). Sale el literal y la generación, al terminar, se
-     * descarta: no queda ninguna sugerencia con las dos formas.
+     * Generación en curso + «dale» (DECISIONES-E2 punto 15a): el lead (con el escudo prendido y el paso 1 entregado) pregunta,
+     * arranca la generación de la IA y, mientras genera, escribe «dale». La pregunta sigue sin contestar, así que no sale el
+     * literal; la generación en curso se descarta al terminar (no queda su sugerencia) y queda una generación nueva agendada con
+     * el token vigente, que es la que contesta. Nunca salen los dos con los mismos textos.
      *
      * @return void
      */
-    public function test_una_generacion_en_curso_se_descarta_cuando_sale_el_literal(): void
+    public function test_una_generacion_en_curso_se_descarta_y_contesta_la_ia(): void
     {
         [$telefono, $lead] = $this->lead_que_pregunto_el_precio();
 
@@ -83,11 +85,21 @@ class RevisionRonda3DelFlujoTest extends TestCase
 
         $this->correr_job($generacion);
 
-        $this->assertCount(1, $this->jobs_encolados(SendLeadDosFormasJob::class), 'Sale el literal.');
+        $this->assertCount(0, $this->jobs_encolados(SendLeadDosFormasJob::class), 'No sale el literal: la pregunta sigue sin contestar.');
         $this->assertSame(
             0,
             LeadMessage::query()->where('lead_id', $lead->id)->where('status', 'sugerido')->count(),
             'La generación en curso se descarta al terminar: el lead no puede recibir las dos formas dos veces.'
+        );
+
+        /* Queda una generación nueva agendada, con el token vigente: es la que contesta la pregunta. */
+        $agendadas = $this->jobs_encolados(GenerateLeadAiSuggestionJob::class);
+        $this->assertGreaterThanOrEqual(2, $agendadas->count(), 'Además de la que estaba en curso, hay una nueva agendada.');
+        $token = new \ReflectionProperty(GenerateLeadAiSuggestionJob::class, 'schedule_token');
+        $token->setAccessible(true);
+        $this->assertTrue(
+            app(LeadAiSuggestionScheduler::class)->is_schedule_token_current((int) $lead->id, (int) $token->getValue($agendadas->last())),
+            'La generación nueva tiene el token vigente.'
         );
     }
 
