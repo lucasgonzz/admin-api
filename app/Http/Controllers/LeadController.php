@@ -2900,6 +2900,16 @@ class LeadController extends Controller
             'size'            => Storage::disk('public')->size($stored_path),
         ]);
 
+        // Transcripción del audio (OpenAI) en segundo plano: sólo si está prendida; si el envío falla y el
+        // mensaje se borra, el job no hace nada. Un fallo al encolar no puede cambiar la respuesta del envío.
+        try {
+            if (app(\App\Services\WhatsappOutboundAudioTranscriptionService::class)->is_enabled()) {
+                \App\Jobs\TranscribeOutboundWhatsappAudioJob::dispatch('lead', (int) $message->id)->onConnection('database');
+            }
+        } catch (\Throwable $e) {
+            Log::warning('LeadController@send_direct_audio_json: no se pudo encolar la transcripción.', ['lead_id' => $lead->id]);
+        }
+
         // Envío real por WhatsApp reutilizando el servicio de audio existente (sube media + envía type audio).
         $phone = trim((string) ($lead->phone ?? ''));
         if ($phone !== '') {
