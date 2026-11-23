@@ -70,6 +70,13 @@ class LeadFlujoEntradaService
     /** `system_message_kind` de la página. */
     public const KIND_PAGINA = 'whatsapp_pagina';
 
+    /**
+     * `system_message_kind` del mensaje que sale de un paso de seguimiento del embudo (E3). Es automático del sistema: cuenta
+     * para `puntos_entregados` (por ancla, como cualquier mensaje del sistema) pero NO como respuesta a una pregunta del lead
+     * ({@see kinds_automaticos()}).
+     */
+    public const KIND_EMBUDO_PASO = 'whatsapp_embudo_paso';
+
     /** Clave de implementación que se nombra por defecto en las dos formas. */
     public const CLAVE_IMPLEMENTACION_DEFAULT = 'gestion';
 
@@ -685,6 +692,7 @@ class LeadFlujoEntradaService
     {
         $kinds = array_column(self::PUNTOS, 'kind');
         $kinds[] = LeadWhatsappOnboardingService::KIND_AUTO;
+        $kinds[] = self::KIND_EMBUDO_PASO;
 
         return array_values(array_unique($kinds));
     }
@@ -706,6 +714,19 @@ class LeadFlujoEntradaService
             ->where('is_followup', false)
             ->where('is_status_event', false)
             ->get();
+    }
+
+    /**
+     * ¿El lead tiene alguna sugerencia de la IA sin enviar (pendiente de aprobación, retenida o programada)? Lo usa el
+     * despacho de los pasos del embudo (E3): con una sugerencia en camino, el paso espera.
+     *
+     * @param Lead $lead
+     *
+     * @return bool
+     */
+    public static function hay_sugerencia_sin_enviar(Lead $lead): bool
+    {
+        return self::sugerencias_sin_enviar($lead)->isNotEmpty();
     }
 
     /**
@@ -1033,6 +1054,11 @@ class LeadFlujoEntradaService
         ]);
 
         LeadBroadcastService::emit_conversation_updated((int) $lead->id);
+
+        /* E3: el lead entra en `link_enviado`: se cancelan los pasos de los estados anteriores y se programan los del link
+           (2 h, 22 h y, con plantilla, día 3), anclados en el momento en que salió. Sale por el camino que sea (la IA, el
+           setter o el literal del paso 2). */
+        LeadEmbudoSeguimientosService::programar_para_estado($lead, Carbon::now());
 
         return true;
     }

@@ -3,6 +3,7 @@
 namespace App\Jobs;
 
 use App\Models\Lead;
+use App\Services\LeadEmbudoSeguimientosService;
 use App\Services\LeadFlujoEntradaService;
 use App\Services\LeadWhatsappOnboardingService;
 use Illuminate\Bus\Queueable;
@@ -58,6 +59,13 @@ class SendLeadDosFormasJob implements ShouldQueue
 
         try {
             $onboarding_service->enviar_puntos_del_flujo($lead);
+
+            /* E3: el lead que contestó está en `contactado` (si el literal no le dio el link): se programan sus pasos de
+               seguimiento. Idempotente: el webhook ya los anclé en su mensaje y acá se vuelven a anclar en el mismo. */
+            $lead = $lead->fresh();
+            if ($lead !== null && (string) $lead->status === 'contactado') {
+                LeadEmbudoSeguimientosService::programar_para_estado($lead, null);
+            }
         } finally {
             /* Termine como termine, el literal ya no está «en camino»: si falló, el próximo inbound lo sigue la IA, que
                recibe los puntos que falten. */

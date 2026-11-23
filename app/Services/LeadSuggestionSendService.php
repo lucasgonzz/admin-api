@@ -665,6 +665,10 @@ class LeadSuggestionSendService
          * `link_enviado`. Mira el texto efectivamente enviado, así que cubre al agente y al setter que edita la sugerencia. */
         LeadFlujoEntradaService::marcar_link_enviado($lead, $body);
 
+        /* E3: si lo que salió trae `llegada_2` (la IA se la dio al lead que preguntó) y el lead sigue en `nuevo`, se programan
+           los seguimientos de `nuevo`. */
+        LeadEmbudoSeguimientosService::al_salir_un_mensaje($lead, $body);
+
         if ($is_partial_send) {
             // Un envío parcial siempre necesita ojo humano: marca el lead en la fila destacada de
             // la grilla (mismo mecanismo que ya usa el respaldo automático sin revisión, prompt 337).
