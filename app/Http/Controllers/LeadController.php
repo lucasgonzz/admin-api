@@ -4495,6 +4495,12 @@ class LeadController extends Controller
      */
     public function status_cards_json(Request $request)
     {
+        /* Versión 2 (embudo simplificado de Juan): 10 tarjetas más «Archivados». Sin el parámetro, la respuesta es la de
+           siempre (un SPA viejo no manda `version`; una API vieja lo ignoraría). */
+        if ((int) $request->query('version', 1) === 2) {
+            return response()->json(['cards' => $this->tarjetas_de_estado_v2()], 200);
+        }
+
         $cards = [
             LeadStatusCardsService::card_for_group(
                 LeadPipelineStatus::TARJETA_OTROS_VALUE,
@@ -4518,6 +4524,35 @@ class LeadController extends Controller
         $cards = array_merge($cards, LeadStatusCardsService::cards_for_statuses(['closer_activo']));
 
         return response()->json(['cards' => $cards], 200);
+    }
+
+    /**
+     * Las tarjetas de estado de la versión 2 (`?version=2`): las 10 de `LeadPipelineStatus::TARJETAS_V2`, en orden, más
+     * «Archivados» sólo si hay algún lead en un estado archivado.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function tarjetas_de_estado_v2(): array
+    {
+        $cards = [];
+
+        foreach (LeadPipelineStatus::TARJETAS_V2 as $valor => $definicion) {
+            $cards[] = LeadStatusCardsService::card_for_group($valor, $definicion[0], $definicion[1], null, $definicion[2]);
+        }
+
+        $archivados = LeadStatusCardsService::card_for_group(
+            LeadPipelineStatus::TARJETA_ARCHIVADOS_VALUE,
+            LeadPipelineStatus::TARJETA_ARCHIVADOS_LABEL,
+            LeadPipelineStatus::TARJETA_ARCHIVADOS_COLOR,
+            null,
+            LeadPipelineStatus::slugs_tarjeta_archivados()
+        );
+
+        if ($archivados['total'] > 0) {
+            $cards[] = $archivados;
+        }
+
+        return $cards;
     }
 
     /**

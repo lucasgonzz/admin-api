@@ -10,7 +10,7 @@ class PruebaChatAcceso
 {
     public static function vigente(Lead $lead, Client $client): bool
     {
-        if ($lead->status !== LeadPipelineStatus::PRUEBA_ACTIVA || (int) $lead->promoted_client_id !== (int) $client->id) {
+        if (! in_array((string) $lead->status, LeadPipelineStatus::ESTADOS_CON_PRUEBA_VIGENTE, true) || (int) $lead->promoted_client_id !== (int) $client->id) {
             return false;
         }
 

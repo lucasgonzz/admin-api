@@ -31,7 +31,7 @@ class LeadPipelineStatus extends Model
         // Embudo nuevo (E2): al lead se le envió el link de la prueba. Va ANTES del tramo de la demo en el orden, a propósito:
         // el guardia de «no retroceder de tramo» compara `sort_order`, y un lead con el link que después pide la demo tiene
         // que poder pasar a `solicita_disponibilidad`.
-        'link_enviado'                 => 'Link enviado',
+        'link_enviado'                 => 'Quiere probar',
         'solicita_disponibilidad'      => 'Solicita disponibilidad',
         'demo_agendada'                => 'Demo agendada',
         // Subestado automatizado por el agente.
@@ -50,10 +50,12 @@ class LeadPipelineStatus extends Model
         'prueba_vencida'               => 'Prueba vencida',
         // Embudo nuevo (E2): el lead pidió que se lo carguemos nosotros; lo llama el vendedor.
         'implementacion_pedida'        => 'Implementación pedida',
+        // Embudo de Juan (E1): ya pagó la mitad y se le está cargando el sistema. Lo pone «Registrar llamada» con «Pagó la mitad».
+        'en_implementacion'            => 'En implementación',
         'closer_activo'                => 'Closer activo',
         'mail2_enviado'                => 'Mail2 enviado',
-        'cerrado_ganado'               => 'Cerrado ganado',
-        'cerrado_perdido'              => 'Cerrado perdido',
+        'cerrado_ganado'               => 'Cliente',
+        'cerrado_perdido'              => 'Perdido',
         'en_pausa'                     => 'En pausa',
     ];
 
@@ -85,6 +87,7 @@ class LeadPipelineStatus extends Model
         'prueba_activa'                => '#20c997',
         'prueba_vencida'               => '#adb5bd',
         'implementacion_pedida'        => '#fd7e14',
+        'en_implementacion'            => '#6610f2',
         'closer_activo'                => '#6f42c1',
         'mail2_enviado'                => '#adb5bd',
         'cerrado_ganado'               => '#495057',
@@ -109,6 +112,7 @@ class LeadPipelineStatus extends Model
         'prueba_vencida'             => 'Prueba',
         'link_enviado'               => 'Prueba',
         'implementacion_pedida'      => 'Cierre',
+        'en_implementacion'          => 'Cierre',
         'closer_activo'              => 'Cierre',
         'cerrado_ganado'             => 'Cierre',
         'cerrado_perdido'            => 'Fin',
@@ -125,6 +129,81 @@ class LeadPipelineStatus extends Model
      * el lead aparezca en la columna "Hoy" del panel del closer.
      */
     public const SLUGS_HIDDEN_FROM_SELECT = ['mail2_enviado'];
+
+    /**
+     * Estados que el embudo simplificado de Juan (E1) ya no ofrece en el select del modal del lead. Siguen existiendo en el
+     * catálogo (un lead que ya está en uno lo conserva y se sigue viendo con su etiqueta): sólo dejan de poder asignarse
+     * desde el select. {@see self::options_for_select()}.
+     */
+    public const SLUGS_ARCHIVADOS = [
+        'calificado',
+        'solicita_disponibilidad',
+        'demo_agendada',
+        'demo_en_curso',
+        'demo_pendiente_de_ingreso',
+        'demo_pendiente_de_terminar',
+        'demo_realizada',
+        'closer_activo',
+        'mail2_enviado',
+    ];
+
+    /**
+     * Estados con una prueba vigente: el lead de un cliente en prueba, con su chat de Soporte dentro del sistema. Pasar a
+     * «implementación pedida» o «en implementación» no la corta.
+     */
+    public const ESTADOS_CON_PRUEBA_VIGENTE = [
+        'prueba_activa',
+        'en_implementacion',
+        'implementacion_pedida',
+    ];
+
+    /**
+     * Las tarjetas de la versión 2 de `GET lead/status-cards`, en orden: valor => [etiqueta, color, slugs que agrupa].
+     * Una tarjeta con un solo slug lleva ese slug como valor; «conversando» agrupa dos.
+     */
+    public const TARJETAS_V2 = [
+        'nuevo'                 => ['Nuevo', '#adb5bd', ['nuevo']],
+        'conversando'           => ['Conversando', '#adb5bd', ['contactado', 'calificado']],
+        'link_enviado'          => ['Quiere probar', '#0dcaf0', ['link_enviado']],
+        'implementacion_pedida' => ['Implementación pedida', '#fd7e14', ['implementacion_pedida']],
+        'prueba_activa'         => ['En prueba', '#20c997', ['prueba_activa']],
+        'en_implementacion'     => ['En implementación', '#6610f2', ['en_implementacion']],
+        'prueba_vencida'        => ['Prueba vencida', '#adb5bd', ['prueba_vencida']],
+        'cerrado_ganado'        => ['Cliente', '#495057', ['cerrado_ganado']],
+        'cerrado_perdido'       => ['Perdido', '#adb5bd', ['cerrado_perdido']],
+        'en_pausa'              => ['En pausa', '#adb5bd', ['en_pausa']],
+    ];
+
+    /** Tarjeta «Archivados» de la versión 2: todo slug del catálogo que no está en ninguna de las 10. */
+    public const TARJETA_ARCHIVADOS_VALUE = 'archivados';
+    public const TARJETA_ARCHIVADOS_LABEL = 'Archivados';
+    public const TARJETA_ARCHIVADOS_COLOR = '#6c757d';
+    public const TARJETA_CONVERSANDO_VALUE = 'conversando';
+
+    /**
+     * Slugs que agrupa la tarjeta «Archivados» de la versión 2: el catálogo completo menos los de las 10 tarjetas.
+     *
+     * @return array<int, string>
+     */
+    public static function slugs_tarjeta_archivados(): array
+    {
+        $cubiertos = [];
+        foreach (static::TARJETAS_V2 as $definicion) {
+            $cubiertos = array_merge($cubiertos, $definicion[2]);
+        }
+
+        return array_values(array_diff(static::all_slugs(), $cubiertos));
+    }
+
+    /**
+     * Los slugs de la tarjeta «conversando».
+     *
+     * @return array<int, string>
+     */
+    public static function slugs_tarjeta_conversando(): array
+    {
+        return static::TARJETAS_V2[static::TARJETA_CONVERSANDO_VALUE][2];
+    }
 
     /** Estados que muestran tarjeta propia arriba de la grilla de leads (misión tarjetas-estado). */
     public const SLUGS_TARJETAS_ESTADO = [
@@ -313,6 +392,19 @@ class LeadPipelineStatus extends Model
         }
 
         return $options;
+    }
+
+    /**
+     * Opciones del select de estado del modal del lead: las de `options_for_meta()` sin los estados archivados. Las
+     * etiquetas de las otras pantallas siguen saliendo de `options_for_meta()`, que no se toca.
+     *
+     * @return array<int, array{value: string, text: string, color: string, group: string|null}>
+     */
+    public static function options_for_select(): array
+    {
+        return array_values(array_filter(static::options_for_meta(), function ($opcion) {
+            return ! in_array($opcion['value'], static::SLUGS_ARCHIVADOS, true);
+        }));
     }
 
     /**

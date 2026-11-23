@@ -193,7 +193,7 @@ class PruebaDelClienteService
         }
 
         $candidatos = Lead::query()
-            ->where('status', self::LEAD_STATUS_PRUEBA)
+            ->whereIn('status', \App\Models\LeadPipelineStatus::ESTADOS_CON_PRUEBA_VIGENTE)
             ->whereNotNull('phone')
             ->orderByDesc('id')
             ->limit(200)
