@@ -148,10 +148,10 @@ class LlamadaDesdeAudioDeJuanTest extends BaseDelTableroDeJuan
 
         /* La auditoría del agente. */
         $auditoria = $this->auditoria_de($this->agente)->filter(function ($fila_de_auditoria) {
-            return $this->contiene($fila_de_auditoria->ruta, 'llamadas');
+            return $this->contiene($fila_de_auditoria->route_uri, 'llamadas');
         });
         $this->assertCount(1, $auditoria, 'El guard del agente audita el pedido.');
-        $this->assertSame('escritura', $auditoria->first()->categoria);
+        $this->assertSame('escritura', $auditoria->first()->category);
     }
 
     // ------------------------------------------------------------------------------------------
@@ -351,11 +351,14 @@ class LlamadaDesdeAudioDeJuanTest extends BaseDelTableroDeJuan
             'opened_at'          => now(),
         ]);
 
+        /* El guard de Sanctum cachea al agente del pedido anterior: la ruta `claude/*` es de otra autenticación. */
+        $this->app['auth']->forgetGuards();
+
         $respuesta = $this->getJson(
             '/api/claude/support-codex/tickets/' . $ticket->id,
             ['X-Claude-Task-Key' => self::CLAVE_DE_INGESTA, 'Accept' => 'application/json']
         );
-        $respuesta->assertStatus(200);
+        $this->assertSame(200, $respuesta->getStatusCode(), substr((string) $respuesta->getContent(), 0, 400));
 
         $llamada = $respuesta->json('ticket.lead_del_cliente.llamadas.0');
         $this->assertNotNull($llamada, 'Soporte recibe la llamada.');
