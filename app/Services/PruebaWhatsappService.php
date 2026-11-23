@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Events\SupportMessageReceived;
 use App\Helpers\WhatsappNormalizer;
 use App\Models\Admin;
+use App\Models\AdminSetting;
 use App\Models\Client;
 use App\Models\Lead;
 use App\Models\PruebaWhatsappEnvio;
@@ -543,6 +544,13 @@ class PruebaWhatsappService
         $datos = $datos !== null ? $datos : $this->pruebas->datos($client);
 
         if ($datos['vencida'] === true) {
+            /* E3 (misión embudo-whatsapp-precios): después de vencer ya no se empuja por hito, pero sí hay recordatorios del
+               negocio con la prueba terminada, los días 8, 14 y 30 desde el alta (si hay plantilla configurada). */
+            $post_vencimiento = $this->empujar_despues_de_vencer($client, $lead, $datos);
+            if ($post_vencimiento !== null) {
+                return $post_vencimiento;
+            }
+
             return ['estado' => 'vencida', 'detalle' => 'La prueba venció: no se empuja más.'];
         }
 
@@ -600,6 +608,58 @@ class PruebaWhatsappService
         }
 
         return ['estado' => $envio['estado'] === 'enviado' ? 'enviado' : $envio['estado'], 'detalle' => $envio['detalle'] !== null ? $envio['detalle'] : $eleccion['plantilla']];
+    }
+
+    /** Días desde el alta de la prueba en los que, ya vencida, se manda un recordatorio (E3). */
+    const DIAS_DESPUES_DE_VENCER = [8, 14, 30];
+
+    /**
+     * Los recordatorios de una prueba VENCIDA: las plantillas `admin_settings` `prueba_vencida_plantilla_dia_8/14/30`, por el
+     * ticket del dueño. Por UMBRAL, no por igualdad: se manda el hito más alto ya alcanzado (según el día de la prueba, el
+     * mismo contador que `dia_actual`) que todavía no se mandó, así una corrida perdida se recupera; los hitos anteriores
+     * salteados no se mandan. Deduplicado por `prueba_whatsapp_envios.plantilla`. Sin plantilla configurada para ese hito no
+     * hay paso. El día 30 cae antes del borrado (gracia de 30 días desde el vencimiento).
+     *
+     * @param Client                    $client
+     * @param Lead|null                 $lead
+     * @param array<string, mixed>      $datos `PruebaDelClienteService::datos()`.
+     *
+     * @return array{estado: string, detalle: string|null}|null Null si no corresponde ningún envío (sigue `vencida`).
+     */
+    private function empujar_despues_de_vencer(Client $client, ?Lead $lead, array $datos): ?array
+    {
+        if ($datos['dia_actual'] === null) {
+            return null;
+        }
+
+        $hito = null;
+        foreach (self::DIAS_DESPUES_DE_VENCER as $dia) {
+            if ((int) $datos['dia_actual'] >= $dia) {
+                $hito = $dia;
+            }
+        }
+        if ($hito === null) {
+            return null;
+        }
+
+        $plantilla = trim((string) AdminSetting::get('prueba_vencida_plantilla_dia_' . $hito, ''));
+        if ($plantilla === '') {
+            return null;
+        }
+
+        /* `enviando` también cuenta: una fila reservada puede haber salido y nunca se reintenta. */
+        $ya_mandada = PruebaWhatsappEnvio::query()
+            ->where('client_id', (int) $client->id)
+            ->where('plantilla', $plantilla)
+            ->whereIn('estado', [PruebaWhatsappEnvio::ESTADO_ENVIADO, PruebaWhatsappEnvio::ESTADO_ENVIANDO])
+            ->exists();
+        if ($ya_mandada) {
+            return null;
+        }
+
+        $envio = $this->enviar_plantilla_por_ticket($client, $lead, $plantilla, 'vencida_dia_' . $hito, false);
+
+        return ['estado' => $envio['estado'], 'detalle' => $envio['detalle'] !== null ? $envio['detalle'] : $plantilla];
     }
 
     /**
