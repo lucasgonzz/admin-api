@@ -150,7 +150,7 @@ TXT;
      * a propósito: el nombre aparece en lo que el agente le dice al lead y en los recursos `.md`, y
      * los dos tienen que decir lo mismo; si un día cambia, se cambia acá y en los recursos.
      */
-    public const NOMBRE_DEL_CLOSER = 'Thomás';
+    public const NOMBRE_DEL_CLOSER = 'Juan';
 
     /**
      * Minutos mínimos entre "ahora" y el inicio de una demo pedida para un momento concreto

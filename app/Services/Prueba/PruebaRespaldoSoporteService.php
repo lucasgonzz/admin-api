@@ -159,7 +159,9 @@ class PruebaRespaldoSoporteService
                     }
 
                     return $this->mandar($ticket, $message_id, [
-                        'contenido' => 'Recibí tu archivo. Martín lo revisa y te lo carga desde las ' . self::hora_de_martin() . '; te avisa por acá.',
+                        'contenido' => app(\App\Services\ImplementacionContratadaService::class)->importa_soporte($ticket->client)
+                            ? 'Recibí tu archivo. Martín lo revisa y te lo carga desde las ' . self::hora_de_martin() . '; te avisa por acá.'
+                            : 'Recibí tu archivo. Martín lo mira desde las ' . self::hora_de_martin() . ' y te dice cómo seguir.',
                         'videos' => [], 'sin_cierre' => true,
                     ], self::PLANTILLA_ACUSE);
                 }
@@ -179,16 +181,26 @@ class PruebaRespaldoSoporteService
             if (preg_match(self::PATRON_CARGA_DE_ARCHIVO, implode("\n", $turno->pluck('body')->map(function ($body) {
                 return (string) $body;
             })->all())) === 1) {
+                /* E3: según la implementación contratada. Con implementación se lo cargamos (sin prometer que es gratis); sin ella, lo sube él
+                   con el video y se le cuenta que existe el servicio de implementación. */
+                if (app(\App\Services\ImplementacionContratadaService::class)->importa_soporte($ticket->client)) {
+                    return $this->mandar($ticket, $message_id, [
+                        'contenido' => 'Eso te lo cargamos nosotros. Adjuntá el Excel o el PDF de tu proveedor '
+                            . ($ticket->source === 'erp' ? 'con el clip, acá abajo' : 'por acá') . ', y Martín lo toma apenas vuelve.',
+                        'videos' => ['prueba:' . self::VIDEO_DE_IMPORTAR],
+                        'intro_del_video' => 'Si preferís hacerlo vos, acá te muestra cómo',
+                    ]);
+                }
+
                 return $this->mandar($ticket, $message_id, [
-                    'contenido' => 'Eso te lo cargamos nosotros, sin costo. Adjuntá el Excel o el PDF de tu proveedor '
-                        . ($ticket->source === 'erp' ? 'con el clip, acá abajo' : 'por acá') . ', y Martín lo toma apenas vuelve.',
+                    'contenido' => 'Lo podés subir vos mismo con el video de importar. Si preferís que te lo dejemos armado, Martín te cuenta del servicio de implementación cuando vuelve.',
                     'videos' => ['prueba:' . self::VIDEO_DE_IMPORTAR],
-                    'intro_del_video' => 'Si preferís hacerlo vos, acá te muestra cómo',
+                    'intro_del_video' => 'Acá te muestra cómo hacerlo',
                 ]);
             }
 
             try {
-                $respuesta = app(DemoChatAiService::class)->responder_soporte_de_prueba($this->historial($ticket), $ticket->source === 'erp' ? 'sistema' : 'whatsapp');
+                $respuesta = app(DemoChatAiService::class)->responder_soporte_de_prueba($this->historial($ticket), $ticket->source === 'erp' ? 'sistema' : 'whatsapp', $ticket->client);
             } catch (\Throwable $e) {
                 Log::channel('daily')->warning('PruebaRespaldoSoporte: el modelo no respondió; no se manda nada.', [
                     'ticket_id' => (int) $ticket->id,

@@ -58,6 +58,12 @@ class PipelineLeadTableroJuanSeeder extends Seeder
         }
 
         DB::transaction(function () use ($pipeline, $campos) {
+            /* El subtítulo del pipeline hablaba de «después de la demo»: sólo se cambia si sigue con el texto sembrado viejo. */
+            if ((string) $pipeline->description === 'Cierre de los leads que confirmaron interés después de la demo.') {
+                $pipeline->description = 'Tablero de Juan: de los leads que piden probar o implementar, hasta que son clientes.';
+                $pipeline->save();
+            }
+
             $orden = 0;
 
             foreach (self::COLUMNAS as $clave => $definicion) {

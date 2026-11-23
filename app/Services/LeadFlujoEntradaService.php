@@ -887,8 +887,9 @@ class LeadFlujoEntradaService
                 . "    Decile: Juan te escribe para darte el acceso. Y devolvé requiere_intervencion_humana: true con el motivo.\n";
         }
 
-        $txt .= "  - Si quiere que se lo carguen nosotros o pide la implementación: decile que lo llama Juan, del equipo, hoy, sin pedirle hora y\n"
-            . "    sin cobrar, y devolvé estado_sugerido: \"implementacion_pedida\".\n"
+        $txt .= "  - Si quiere que se lo carguen nosotros o pide la implementación: decile que lo llama Juan, del equipo, hoy, para contarle cómo es\n"
+            . "    la implementación (la llamada no tiene costo; la implementación es un pago único de PRECIOS VIGENTES), sin pedirle hora, y\n"
+            . "    devolvé estado_sugerido: \"implementacion_pedida\".\n"
             . "  - No le pidas hora. No le pidas datos para calificarlo más allá de lo que ya pide el flujo.\n"
             . "  - Si pregunta precios, dale los de PRECIOS VIGENTES (citá \"" . PreciosVigentesSettings::FUENTE_PARA_EL_GATE . "\" en fuentes_kb).\n"
             . "  - NO le ofrezcas la demo ni una llamada, NO devuelvas agendar_demo y NO le pidas disponibilidad.\n"
