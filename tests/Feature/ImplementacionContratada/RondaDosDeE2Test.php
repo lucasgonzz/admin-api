@@ -51,9 +51,9 @@ class RondaDosDeE2Test extends BaseDeLaImplementacion
         $filtrado = (new AdminSoloLeadsPolicy())->filtrar_salida($cuerpo);
 
         $this->assertSame(['Elegí al menos un paquete.'], $filtrado->errors->paquetes);
-        $this->assertObjectNotHasAttribute('token', $filtrado->errors, 'Una clave secreta sigue filtrada.');
-        $this->assertObjectNotHasAttribute('anidado', $filtrado->errors, 'Un objeto anidado se descarta.');
-        $this->assertObjectNotHasAttribute('objetos', $filtrado->errors, 'Una lista de objetos se descarta.');
+        $this->assertFalse(property_exists($filtrado->errors, 'token'), 'Una clave secreta sigue filtrada.');
+        $this->assertFalse(property_exists($filtrado->errors, 'anidado'), 'Un objeto anidado se descarta.');
+        $this->assertFalse(property_exists($filtrado->errors, 'objetos'), 'Una lista de objetos se descarta.');
         $this->assertSame('Revisá los datos.', $filtrado->message);
     }
 
