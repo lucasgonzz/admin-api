@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Events\SupportMessageReceived;
+use App\Helpers\AppTime;
 use App\Helpers\WhatsappNormalizer;
 use App\Models\Admin;
 use App\Models\AdminSetting;
@@ -507,7 +508,8 @@ class PruebaWhatsappService
                 $lead  = $this->pruebas->lead_del_cliente($client);
                 $datos = $this->pruebas->datos($client);
 
-                $tomas = $this->avisar_a_tomas_si_es_el_dia_5($client, $lead, $datos);
+                /* E2: una prueba pausada (se está implementando) no tiene día 5 ni hitos. */
+                $tomas = ! empty($datos['pausada']) ? null : $this->avisar_a_tomas_si_es_el_dia_5($client, $lead, $datos);
                 $paso  = $this->empujar($client, $lead, $datos);
 
                 $resultados[] = [
@@ -542,6 +544,11 @@ class PruebaWhatsappService
     public function empujar(Client $client, ?Lead $lead, ?array $datos = null): array
     {
         $datos = $datos !== null ? $datos : $this->pruebas->datos($client);
+
+        /* E2: pausada por la implementación. No se empuja ningún hito: sólo el recordatorio de los archivos (días 1, 3 y 6). */
+        if (! empty($datos['pausada'])) {
+            return $this->recordar_los_archivos($client, $lead);
+        }
 
         if ($datos['vencida'] === true) {
             /* E3 (misión embudo-whatsapp-precios): después de vencer ya no se empuja por hito, pero sí hay recordatorios del
@@ -608,6 +615,48 @@ class PruebaWhatsappService
         }
 
         return ['estado' => $envio['estado'] === 'enviado' ? 'enviado' : $envio['estado'], 'detalle' => $envio['detalle'] !== null ? $envio['detalle'] : $eleccion['plantilla']];
+    }
+
+    /** Días calendario desde el pago de la mitad en los que se recuerdan los archivos de la implementación (E2). */
+    const DIAS_DEL_RECORDATORIO_DE_ARCHIVOS = [1, 3, 6];
+
+    /**
+     * El recordatorio de archivos de una prueba pausada: si pagó la mitad y todavía no se recibió el Excel de artículos, los días
+     * 1, 3 y 6 desde el pago sale la plantilla `cc_impl_archivos_recordatorio` por el ticket del dueño, una vez por día
+     * (deduplicada por `prueba_whatsapp_envios.hito`). Mientras Meta no la apruebe, queda en cola (comportamiento de siempre).
+     *
+     * @param Client    $client
+     * @param Lead|null $lead
+     *
+     * @return array{estado: string, detalle: string|null}
+     */
+    private function recordar_los_archivos(Client $client, ?Lead $lead): array
+    {
+        if ($client->implementacion_mitad_pagada_at === null || $client->implementacion_articulos_recibidos_at !== null) {
+            return ['estado' => 'pausada', 'detalle' => 'Prueba pausada: sin recordatorio pendiente.'];
+        }
+
+        $pago = $client->implementacion_mitad_pagada_at->copy()->setTimezone(AppTime::now()->getTimezone())->startOfDay();
+        $dia  = (int) $pago->diffInDays(AppTime::now()->startOfDay(), false);
+
+        if (! in_array($dia, self::DIAS_DEL_RECORDATORIO_DE_ARCHIVOS, true)) {
+            return ['estado' => 'pausada', 'detalle' => 'Prueba pausada: hoy no toca recordatorio de archivos.'];
+        }
+
+        $hito = 'archivos_dia_' . $dia;
+        $ya   = PruebaWhatsappEnvio::query()
+            ->where('client_id', (int) $client->id)
+            ->where('plantilla', PruebaPlantillasService::ARCHIVOS_RECORDATORIO)
+            ->where('hito', $hito)
+            ->whereIn('estado', [PruebaWhatsappEnvio::ESTADO_ENVIADO, PruebaWhatsappEnvio::ESTADO_ENVIANDO])
+            ->exists();
+        if ($ya) {
+            return ['estado' => 'pausada', 'detalle' => 'El recordatorio de hoy ya salió.'];
+        }
+
+        $envio = $this->enviar_plantilla_por_ticket($client, $lead, PruebaPlantillasService::ARCHIVOS_RECORDATORIO, $hito, false);
+
+        return ['estado' => $envio['estado'], 'detalle' => $envio['detalle'] !== null ? $envio['detalle'] : PruebaPlantillasService::ARCHIVOS_RECORDATORIO];
     }
 
     /** Días desde el alta de la prueba en los que, ya vencida, se manda un recordatorio (E3). */

@@ -36,6 +36,38 @@ class ImplementationStage extends Model
      *
      * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
      */
+    /**
+     * Al completarse la etapa 5 («Entrega») de la implementación de un cliente con la prueba pausada, la prueba se reanuda: siete
+     * días desde la entrega (misión embudo-juan-pipeline, E2). Cubre al panel y a Claude, que completan la etapa con `->save()`.
+     *
+     * Va envuelto en try/catch: un error de la reanudación no puede tirar el avance de la etapa.
+     *
+     * @return void
+     */
+    protected static function booted()
+    {
+        static::saved(function (ImplementationStage $etapa) {
+            if ((int) $etapa->stage_number !== 5 || ! $etapa->wasChanged('status') || (string) $etapa->status !== 'completed') {
+                return;
+            }
+
+            try {
+                $implementacion = Implementation::query()->find((int) $etapa->implementation_id);
+                $cliente        = $implementacion !== null ? Client::query()->find((int) $implementacion->client_id) : null;
+                $servicio       = app(\App\Services\ImplementacionContratadaService::class);
+
+                if ($cliente !== null && $servicio->esta_pausada($cliente)) {
+                    $servicio->reanudar_prueba($cliente, \App\Helpers\AppTime::now());
+                }
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::channel('daily')->error('ImplementationStage: no se pudo reanudar la prueba al entregar.', [
+                    'implementation_id' => $etapa->implementation_id,
+                    'error'             => $e->getMessage(),
+                ]);
+            }
+        });
+    }
+
     public function implementation()
     {
         return $this->belongsTo(Implementation::class);

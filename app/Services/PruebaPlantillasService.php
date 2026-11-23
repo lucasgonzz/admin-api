@@ -261,6 +261,22 @@ class PruebaPlantillasService
         return $this->estado_para_enviar($v2)['motivo'] === null ? $v2 : $v1;
     }
 
+    /** Recordatorio de archivos para quien pagó la implementación y todavía no mandó el Excel de artículos (E2). */
+    const ARCHIVOS_RECORDATORIO = 'cc_impl_archivos_recordatorio';
+
+    /**
+     * Plantillas de la implementación contratada (misión embudo-juan-pipeline, E2). Se crean con el mismo comando que las demás
+     * (`prueba:crear-plantillas --crear`) y, como todas, salen recién cuando Meta las aprueba.
+     *
+     * @var array<string, array{body: string, uso: string}>
+     */
+    const PLANTILLAS_IMPLEMENTACION = [
+        self::ARCHIVOS_RECORDATORIO => [
+            'body' => 'Hola {{1}}, ¿cómo vas con los archivos para tu implementación? Apenas nos pases el Excel de artículos (y si tenés, los de clientes y proveedores y los PDF o páginas de tus proveedores), arrancamos a cargarlos. Si algo se te complica, decime y lo vemos.',
+            'uso'  => 'Implementación contratada: recordatorio de los archivos a quien pagó la mitad y todavía no mandó el Excel de artículos (días 1, 3 y 6 desde el pago).',
+        ],
+    ];
+
     /**
      * Todas las plantillas de la prueba que se crean en Meta.
      *
@@ -268,7 +284,7 @@ class PruebaPlantillasService
      */
     public static function todas(): array
     {
-        return self::PLANTILLAS + self::PLANTILLAS_V2;
+        return self::PLANTILLAS + self::PLANTILLAS_V2 + self::PLANTILLAS_IMPLEMENTACION;
     }
 
     /**
