@@ -193,7 +193,7 @@ class PruebaDelClienteService
         }
 
         $candidatos = Lead::query()
-            ->where('status', self::LEAD_STATUS_PRUEBA)
+            ->whereIn('status', \App\Models\LeadPipelineStatus::ESTADOS_CON_PRUEBA_VIGENTE)
             ->whereNotNull('phone')
             ->orderByDesc('id')
             ->limit(200)
@@ -237,6 +237,20 @@ class PruebaDelClienteService
 
         $vence = $this->a_carbon($client->trial_ends_at);
 
+        /* E2: una prueba PAUSADA (se está implementando) no tiene día ni días restantes y no está vencida; su vencimiento real es
+           el horizonte de la pausa, que no le dice nada al negocio. */
+        if ($client->prueba_pausada_at !== null && $client->prueba_reanudada_at === null) {
+            return [
+                'dias'           => $dias,
+                'vence_at'       => $vence !== null ? $vence->toIso8601String() : null,
+                'inicio_at'      => null,
+                'dias_restantes' => null,
+                'dia_actual'     => null,
+                'vencida'        => false,
+                'pausada'        => true,
+            ];
+        }
+
         if ($vence === null) {
             return [
                 'dias'           => $dias,
@@ -245,6 +259,7 @@ class PruebaDelClienteService
                 'dias_restantes' => $vencida_por_estado ? 0 : null,
                 'dia_actual'     => null,
                 'vencida'        => $vencida_por_estado,
+                'pausada'        => false,
             ];
         }
 
@@ -267,6 +282,7 @@ class PruebaDelClienteService
             'dias_restantes' => $vencida_por_estado ? 0 : $restantes,
             'dia_actual'     => $dia_actual,
             'vencida'        => $vence->isPast() || $vencida_por_estado,
+            'pausada'        => false,
         ];
     }
 

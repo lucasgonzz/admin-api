@@ -225,7 +225,33 @@ class PruebaCicloService
         $inicio   = $client->created_at instanceof Carbon ? $client->created_at->copy() : Carbon::now();
         $vence_at = $inicio->addDays($dias);
 
-        $client->trial_days    = $dias;
+        /* E2: cambiar los días de una prueba pausada por la implementación es fijarle un vencimiento real: se limpia la marca de pausa. */
+        if ($client->prueba_pausada_at !== null && $client->prueba_reanudada_at === null) {
+            $client->prueba_pausada_at = null;
+        }
+
+        return $this->fijar_vencimiento($client, $vence_at, $dias);
+    }
+
+    /**
+     * Fija el vencimiento de la prueba de un cliente y lo propaga: `trial_ends_at`, la reactivación de una prueba vencida, el
+     * despertar de la instancia, el lead (`trial_days` y el vencimiento del token de ingreso) y C3 hacia el ERP.
+     *
+     * Es el cuerpo de {@see self::cambiar_dias()}, sacado sin cambiar su comportamiento para que lo use también la pausa de la
+     * implementación (misión embudo-juan-pipeline, E2): pausar es llevar el vencimiento al horizonte, y reanudar es fijar siete
+     * días desde la entrega.
+     *
+     * @param Client   $client
+     * @param Carbon   $vence_at Nuevo vencimiento.
+     * @param int|null $dias     Nuevos `trial_days` (null = no se tocan: la pausa conserva los días de la prueba).
+     *
+     * @return array<string, mixed> El resultado de C3.
+     */
+    public function fijar_vencimiento(Client $client, Carbon $vence_at, ?int $dias = null): array
+    {
+        if ($dias !== null) {
+            $client->trial_days = $dias;
+        }
         $client->trial_ends_at = $vence_at;
 
         /* Si con los días nuevos todavía no venció, vuelve a `prueba` y se despierta. */
@@ -251,7 +277,11 @@ class PruebaCicloService
 
         $lead = Lead::where('promoted_client_id', $client->id)->first();
         if ($lead !== null) {
-            Lead::query()->whereKey($lead->id)->update(['trial_days' => $dias, 'demo_ingreso_token_expira_at' => $vence_at]);
+            $cambios = ['demo_ingreso_token_expira_at' => $vence_at];
+            if ($dias !== null) {
+                $cambios['trial_days'] = $dias;
+            }
+            Lead::query()->whereKey($lead->id)->update($cambios);
         }
 
         return app(PruebaVencimientoService::class)->enviar_vencimiento($client, $vence_at);

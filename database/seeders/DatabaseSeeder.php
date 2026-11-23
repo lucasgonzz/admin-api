@@ -26,6 +26,8 @@ class DatabaseSeeder extends Seeder
             ClientSeeder::class,
             DemoSeeder::class,
             LeadPipelineStatusSeeder::class,
+            // Estados simplificados del lead (embudo de Juan): en_implementacion y etiquetas nuevas.
+            LeadPipelineStatusJuanSeeder::class,
             LeadSeeder::class,
             FollowupRulesSeeder::class,
             // Plantillas Meta aprobadas para seguimientos automáticos directos.
@@ -62,6 +64,8 @@ class DatabaseSeeder extends Seeder
             /* Pipeline "Leads" del CRM: el embudo de cierre de Tomás, que se alimenta solo desde
                el estado del lead y sus llamadas. Idempotente por slug, igual que el de arriba. */
             PipelineLeadSeeder::class,
+            // Las 8 columnas del tablero de Juan sobre el pipeline anterior (idempotente).
+            PipelineLeadTableroJuanSeeder::class,
         ]);
 
         // Plantilla base de variables .env de empresa-api: solo siembra si no hay filas de ese scope.

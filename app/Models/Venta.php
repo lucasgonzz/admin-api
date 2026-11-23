@@ -47,6 +47,9 @@ class Venta extends Model
     /** Desarrollo a medida: importe libre. */
     const PRODUCTO_DESARROLLO = 'desarrollo';
 
+    /** Implementación del sistema (la carga de datos que hacemos nosotros; misión embudo-juan-pipeline, E2): importe libre. */
+    const PRODUCTO_IMPLEMENTACION = 'implementacion';
+
     /** Cualquier otro motivo: importe libre. */
     const PRODUCTO_OTRO = 'otro';
 
@@ -62,6 +65,7 @@ class Venta extends Model
         self::PRODUCTO_ECOMMERCE  => 'E-commerce',
         self::PRODUCTO_AGENTES    => 'Agentes de IA',
         self::PRODUCTO_DESARROLLO => 'Desarrollo a medida',
+        self::PRODUCTO_IMPLEMENTACION => 'Implementación',
         self::PRODUCTO_OTRO       => 'Otro',
     ];
 

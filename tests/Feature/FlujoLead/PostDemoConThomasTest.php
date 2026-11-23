@@ -65,14 +65,14 @@ class PostDemoConThomasTest extends TestCase
         $metodo->setAccessible(true);
         $bloque = (string) $metodo->invoke(new LeadAiService(), $lead);
 
-        $this->assertSame('Thomás', LeadAiService::NOMBRE_DEL_CLOSER);
-        $this->assertStringContainsString('COORDINACIÓN DE LA LLAMADA CON THOMÁS (asesor comercial)', $bloque);
-        $this->assertStringContainsString('videollamada de 20 a 40 minutos con Thomás', $bloque);
+        $this->assertSame('Juan', LeadAiService::NOMBRE_DEL_CLOSER);
+        $this->assertStringContainsString('COORDINACIÓN DE LA LLAMADA CON JUAN (asesor comercial)', $bloque);
+        $this->assertStringContainsString('videollamada de 20 a 40 minutos con Juan', $bloque);
         $this->assertStringContainsString('en menos de una semana', $bloque);
         $this->assertStringContainsString('confirmar_interes_closer: true', $bloque);
         $this->assertStringContainsString('NO ofrezcas horarios ni links de reunión', $bloque);
         $this->assertStringContainsString('descartar_llamada_closer: {"motivo": "..."}', $bloque);
-        $this->assertStringContainsString('lo evalúa Thomás en la llamada', $bloque);
+        $this->assertStringContainsString('lo evalúa Juan en la llamada', $bloque);
         $this->assertStringContainsString('se desarrolla a medida', $bloque);
         $this->assertStringContainsString('posponer_check_fin_demo', $bloque);
 
@@ -168,7 +168,7 @@ class PostDemoConThomasTest extends TestCase
         $this->assertDatabaseHas('lead_messages', [
             'lead_id'         => $lead->id,
             'is_status_event' => true,
-            'content'         => 'El lead no quiere avanzar con la llamada con Thomás. Motivo: Lo quiere pensar con su socio',
+            'content'         => 'El lead no quiere avanzar con la llamada con Juan. Motivo: Lo quiere pensar con su socio',
         ]);
 
         /* «Terminé, pero no me interesa»: llega con el lead todavía en demo_en_curso y el descarte vale
@@ -185,7 +185,7 @@ class PostDemoConThomasTest extends TestCase
         $this->assertDatabaseHas('lead_messages', [
             'lead_id'         => $en_curso->id,
             'is_status_event' => true,
-            'content'         => 'El lead no quiere avanzar con la llamada con Thomás. Motivo: Dice que no le interesa',
+            'content'         => 'El lead no quiere avanzar con la llamada con Juan. Motivo: Dice que no le interesa',
         ]);
 
         /* La forma vieja (true + motivo_descarte_llamada) sigue valiendo. */
@@ -200,7 +200,7 @@ class PostDemoConThomasTest extends TestCase
         $this->assertDatabaseHas('lead_messages', [
             'lead_id'         => $otro->id,
             'is_status_event' => true,
-            'content'         => 'El lead no quiere avanzar con la llamada con Thomás. Motivo: No le interesa por ahora',
+            'content'         => 'El lead no quiere avanzar con la llamada con Juan. Motivo: No le interesa por ahora',
         ]);
     }
 

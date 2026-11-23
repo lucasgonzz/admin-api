@@ -8,6 +8,7 @@ use App\Models\Lead;
 use App\Models\LeadCall;
 use App\Models\LeadPipelineStatus;
 use App\Models\Pipeline;
+use App\Models\LeadLlamada;
 use App\Models\PipelineActivity;
 use App\Models\PipelineOpportunity;
 use App\Models\PipelineStage;
@@ -355,11 +356,19 @@ class PipelinePresenter
 
         $llamadas = $llamada ? $this->ultimas_llamadas($oportunidades->pluck('lead_id')->all()) : [];
 
+        /* Tablero de Juan (E1): lo último que se cotizó y la última llamada de cada lead, con dos consultas para todo el tablero. */
+        $telefonicas = $this->llamadas_de_juan($oportunidades->pluck('lead_id')->filter()->all());
+
         $salida = [];
 
         foreach ($oportunidades as $oportunidad) {
             $ultima = isset($ultimas[$oportunidad->id]) ? $ultimas[$oportunidad->id] : null;
             $json   = $this->armar_oportunidad($oportunidad, $ultima, $contacto, $ahora);
+
+            /* Claves nuevas, opcionales para quien las lea: en la tarjeta de un cliente viajan en null. */
+            $lead_de_la_tarjeta   = $oportunidad->lead_id === null ? null : (int) $oportunidad->lead_id;
+            $json['cotizado']      = $lead_de_la_tarjeta !== null && isset($telefonicas[$lead_de_la_tarjeta]) ? $telefonicas[$lead_de_la_tarjeta]['cotizado'] : null;
+            $json['ultima_llamada'] = $lead_de_la_tarjeta !== null && isset($telefonicas[$lead_de_la_tarjeta]) ? $telefonicas[$lead_de_la_tarjeta]['ultima'] : null;
 
             if ($modo !== null) {
                 $json['pipeline'] = $this->pipeline_de_la_oportunidad($oportunidad, $modo, $pipelines_completos);
@@ -373,6 +382,53 @@ class PipelinePresenter
             }
 
             $salida[] = $json;
+        }
+
+        return $salida;
+    }
+
+    /**
+     * Lo último que se cotizó y la última llamada de Juan de cada lead (misión embudo-juan-pipeline, E1).
+     *
+     * Dos consultas para todos los leads del tablero (una por la última llamada de cada uno y otra por la última que trae
+     * `cotizado` no vacío), no una por tarjeta.
+     *
+     * @param array<int, mixed> $lead_ids Ids de lead (se descartan los repetidos).
+     *
+     * @return array<int, array{cotizado: string|null, ultima: array<string, mixed>|null}> Indexado por id de lead.
+     */
+    private function llamadas_de_juan(array $lead_ids)
+    {
+        $lead_ids = array_values(array_unique(array_map('intval', $lead_ids)));
+        if ($lead_ids === []) {
+            return [];
+        }
+
+        $salida = [];
+
+        $ids_de_las_ultimas = LeadLlamada::query()->whereIn('lead_id', $lead_ids)->groupBy('lead_id')->selectRaw('MAX(id) as id')->pluck('id')->all();
+        foreach (LeadLlamada::query()->whereIn('id', $ids_de_las_ultimas)->get() as $llamada) {
+            $salida[(int) $llamada->lead_id] = [
+                'cotizado' => null,
+                'ultima'   => [
+                    'fecha'           => self::fecha($llamada->created_at),
+                    'atendio'         => (bool) $llamada->atendio,
+                    'resultado'       => $llamada->resultado,
+                    'resultado_label' => $llamada->resultado_label(),
+                ],
+            ];
+        }
+
+        $ids_de_las_cotizadas = LeadLlamada::query()
+            ->whereIn('lead_id', $lead_ids)
+            ->whereNotNull('cotizado')
+            ->where('cotizado', '!=', '')
+            ->groupBy('lead_id')
+            ->selectRaw('MAX(id) as id')
+            ->pluck('id')
+            ->all();
+        foreach (LeadLlamada::query()->whereIn('id', $ids_de_las_cotizadas)->get() as $llamada) {
+            $salida[(int) $llamada->lead_id]['cotizado'] = (string) $llamada->cotizado;
         }
 
         return $salida;

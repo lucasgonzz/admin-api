@@ -150,7 +150,7 @@ TXT;
      * a propósito: el nombre aparece en lo que el agente le dice al lead y en los recursos `.md`, y
      * los dos tienen que decir lo mismo; si un día cambia, se cambia acá y en los recursos.
      */
-    public const NOMBRE_DEL_CLOSER = 'Thomás';
+    public const NOMBRE_DEL_CLOSER = 'Juan';
 
     /**
      * Minutos mínimos entre "ahora" y el inicio de una demo pedida para un momento concreto
@@ -11460,6 +11460,12 @@ Notas internas: {$lead->notes}
 Demo fecha: {$demo}
 {$extra}
 TXT;
+
+        /* Tablero de Juan (E1): lo que Juan habló por teléfono con el lead (las últimas 5 llamadas), para no repreguntarlo. */
+        $bloque_de_llamadas = app(LeadLlamadaService::class)->bloque_para_agente($lead);
+        if ($bloque_de_llamadas !== '') {
+            $txt .= "\n\n" . $bloque_de_llamadas;
+        }
 
         /* Inyectar disponibilidad de demos si se provee (segunda llamada con slots). */
         if ($availability_context !== '') {

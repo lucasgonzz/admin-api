@@ -123,7 +123,7 @@ class EnsayoYResumenDeLaPruebaTest extends BaseDeLaPrueba
                 ->where('estado', PruebaWhatsappEnvio::ESTADO_ENVIADO)->orderBy('id')->get();
         };
         $this->assertCount(0, $espia->plantillas);
-        $this->assertSame(['cc_prueba_paso_importo'], $del_sistema()->pluck('plantilla')->all());
+        $this->assertSame(['cc_prueba_paso_importo_v2'], $del_sistema()->pluck('plantilla')->all());
 
         /* Día 5: el aviso de que termina ocupa el lugar del empujón. Sin aviso al closer. */
         $this->assertSame(0, Artisan::call('pruebas:ensayo', ['cliente' => $client->id, '--dia' => '5', '--correr' => 'empujar']), Artisan::output());

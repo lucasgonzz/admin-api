@@ -334,6 +334,10 @@ class LeadChatsController extends Controller
                 $slugs = array_merge($slugs, LeadPipelineStatus::TARJETA_DEMO_SLUGS);
             } elseif ($pedido === LeadPipelineStatus::TARJETA_OTROS_VALUE) {
                 $slugs = array_merge($slugs, LeadPipelineStatus::slugs_tarjeta_otros());
+            } elseif ($pedido === LeadPipelineStatus::TARJETA_CONVERSANDO_VALUE) {
+                $slugs = array_merge($slugs, LeadPipelineStatus::slugs_tarjeta_conversando());
+            } elseif ($pedido === LeadPipelineStatus::TARJETA_ARCHIVADOS_VALUE) {
+                $slugs = array_merge($slugs, LeadPipelineStatus::slugs_tarjeta_archivados());
             } else {
                 $slugs[] = $pedido;
             }

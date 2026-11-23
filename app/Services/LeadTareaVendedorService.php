@@ -45,10 +45,11 @@ class LeadTareaVendedorService
      *
      * @param Lead   $lead
      * @param string $motivo `prueba_creada` o `implementacion_pedida`.
+     * @param bool   $avisar false = no crea el aviso (push y pila) de la tarea: la tarea nace para quedar cerrada en el mismo pedido.
      *
      * @return AdminTask|null La tarea (nueva o existente); null si el motivo no existe o no se pudo crear.
      */
-    public static function crear(Lead $lead, string $motivo): ?AdminTask
+    public static function crear(Lead $lead, string $motivo, bool $avisar = true): ?AdminTask
     {
         if (! isset(self::MOTIVOS[$motivo])) {
             Log::channel('daily')->warning('LeadTareaVendedor: motivo desconocido.', ['lead_id' => $lead->id, 'motivo' => $motivo]);
@@ -99,7 +100,9 @@ class LeadTareaVendedorService
                 $task->save();
             }
 
-            AdminTaskNotificationService::create_for_task($task);
+            if ($avisar) {
+                AdminTaskNotificationService::create_for_task($task);
+            }
         } catch (\Throwable $e) {
             Log::channel('daily')->error('LeadTareaVendedor: la tarea quedó creada pero la asignación o el aviso fallaron.', [
                 'task_id' => $task->id,

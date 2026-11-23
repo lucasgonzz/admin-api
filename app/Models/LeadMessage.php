@@ -436,7 +436,7 @@ class LeadMessage extends Model
          * LeadAiService (decisión D4: «Thomás», con TH, en un solo lugar); el `defined()` es para que
          * este archivo no reviente si esa constante se renombra antes de que el modelo se entere. */
         if (! empty($parsed['confirmar_interes_closer'])) {
-            $closer     = defined('\App\Services\LeadAiService::NOMBRE_DEL_CLOSER') ? \App\Services\LeadAiService::NOMBRE_DEL_CLOSER : 'Thomás';
+            $closer     = \App\Services\LeadAiService::NOMBRE_DEL_CLOSER;
             $acciones[] = "Confirmar interés en la llamada con {$closer}";
         }
 

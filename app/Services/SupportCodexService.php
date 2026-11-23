@@ -398,6 +398,8 @@ class SupportCodexService
                 'soporte_import_pdf' => $soporte_activo, 'soporte_import_clientes' => $soporte_activo,
                 'soporte_import_web' => $soporte_activo,
                 // Ronda 8: clientes y proveedores se cargan solos en la prueba; la ganancia viaja al lanzar artículos.
+                'lead_context' => true, // E1 del tablero de Juan: el contexto trae `lead_del_cliente`.
+                'implementacion_gate' => true, // E2: el contexto trae `implementacion_contratada` y la importación tiene compuerta.
                 'prueba_import_clientes' => in_array(PruebaImportacionService::CAPACIDAD_CONTACTOS, $anunciadas_en_la_prueba, true),
                 'prueba_import_margen' => in_array(PruebaImportacionService::CAPACIDAD_MARGEN_PREVIO, $anunciadas_en_la_prueba, true),
                 'support_tour_consent' => true, 'support_dynamic_tour' => $robotito_disponible
@@ -428,6 +430,8 @@ class SupportCodexService
              * claves (día actual, próximo paso, hitos en vivo por C3, bienvenida) por
              * `PruebaContextoSoporteService::extender()`, registrada en `SupportPruebaContextService::registrar()`. */
             'prueba' => app(PruebaContextoSoporteService::class)->bloque_para_el_cliente($ticket->client),
+            'lead_del_cliente' => app(LeadContextoParaSoporteService::class)->bloque($ticket->client),
+            'implementacion_contratada' => app(ImplementacionContratadaService::class)->bloque_para_soporte($ticket->client),
             'importaciones_prueba_pendientes' => $soporte_activo ? [] : $importaciones['pendientes'],
             'importaciones_prueba_en_proceso' => $soporte_activo ? false : $importaciones['en_proceso'],
             'importaciones_soporte_pendientes' => $soporte_activo ? $importaciones['pendientes'] : [],

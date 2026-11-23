@@ -175,14 +175,14 @@ class HitosNuevosYCorreoPorPasoTest extends BaseDeLaPrueba
 
         $servicio = app(PruebaWhatsappService::class);
         $this->assertSame('enviado', $servicio->empujar($client, $lead)['estado']);
-        $this->assertSame('cc_prueba_paso_importo', $espia->plantillas[0]['template_name']);
+        $this->assertSame('cc_prueba_paso_importo_v2', $espia->plantillas[0]['template_name']);
 
         Mail::assertSent(ComercioCityMail::class, 1);
         Mail::assertSent(ComercioCityMail::class, function (ComercioCityMail $mail) use ($client) {
             $html = view($mail->build()->view, ['payload' => $mail->payload])->render();
 
             return $mail->hasTo($client->email)
-                && $mail->payload->subject === 'Te cargamos tu catálogo sin costo'
+                && $mail->payload->subject === 'Subí tus artículos a tu prueba'
                 && strpos($html, 'Hola Marcela, soy Martín') !== false
                 && strpos($html, PruebaVideoCatalogoService::URLS_APROBADAS['05']) !== false
                 && strpos($html, 'Te dejo un video que te puede servir:') !== false

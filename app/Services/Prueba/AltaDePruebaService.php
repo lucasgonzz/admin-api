@@ -121,6 +121,10 @@ class AltaDePruebaService
             Log::error('AltaDePrueba: no se pudo crear la tarea del embudo.', ['lead_id' => $lead_listo->id, 'error' => $e->getMessage()]);
         }
 
+        /* Tablero de Juan (E1): el estado `prueba_activa` se escribe por query builder y no dispara `Lead::saved`, así que la
+           tarjeta del lead en «Interesados» se pide de forma explícita. El servicio se traga sus errores. */
+        app(\App\Services\Pipelines\TableroDeJuanService::class)->al_crear_la_prueba($lead_listo);
+
         /* A la cola (`database` en producción), NO `afterResponse()`: eso correría los ~3 minutos del armado adentro
            del proceso del request, después de contestar. La transacción ya commiteó. */
         ArmarPruebaJob::dispatch($instancia->id);
@@ -324,6 +328,8 @@ class AltaDePruebaService
             'email'              => $email !== '' ? $email : null,
             'tiene_ecommerce'    => true,
             'current_version_id' => $latest_version ? $latest_version->id : null,
+            /* E2: la prueba nueva nace sin implementación (los clientes que ya existían quedan `incluida`, el default de la columna). */
+            'implementacion_contratada' => 'no',
         ]);
 
         /* Un alta con un correo de la lista `prueba_ensayo_correos` nace marcada como ensayo, ANTES de que se arme la

@@ -163,7 +163,7 @@ class RecorridoYBarridosDeLaPruebaTest extends BaseDeLaPrueba
         $servicio = app(PruebaWhatsappService::class);
 
         $recorrido = [
-            'cc_prueba_paso_importo', 'cc_prueba_paso_articulo_creado_v2', 'cc_prueba_paso_articulo_actualizado', 'cc_prueba_paso_venta',
+            'cc_prueba_paso_importo_v2', 'cc_prueba_paso_articulo_creado_v2', 'cc_prueba_paso_articulo_actualizado', 'cc_prueba_paso_venta',
             'cc_prueba_paso_agente', 'cc_prueba_paso_tienda_pedido', 'cc_prueba_paso_venta_cc', 'cc_prueba_paso_pago_cc',
             'cc_prueba_paso_compra', 'cc_prueba_paso_cliente_creado', 'cc_prueba_paso_gasto',
         ];
@@ -209,7 +209,7 @@ class RecorridoYBarridosDeLaPruebaTest extends BaseDeLaPrueba
     {
         $espia = $this->espiar_sender();
         $this->todo_aprobado();
-        FollowupTemplate::where('template_name', 'cc_prueba_paso_importo')->update(['activa' => false, 'meta_status' => 'PENDING']);
+        FollowupTemplate::where('template_name', 'cc_prueba_paso_importo_v2')->update(['activa' => false, 'meta_status' => 'PENDING']);
         /* La variante corregida todavía sin aprobar: sale la de siempre. */
         FollowupTemplate::where('template_name', 'cc_prueba_paso_articulo_creado_v2')->update(['activa' => false, 'meta_status' => 'PENDING']);
         [$client, $lead] = $this->negocio();
@@ -248,7 +248,7 @@ class RecorridoYBarridosDeLaPruebaTest extends BaseDeLaPrueba
         /* Pasadas las 24 horas vuelve el paso. */
         SupportMessage::whereKey($mensaje->id)->update(['created_at' => now()->subHours(30)]);
         $this->assertSame('enviado', $servicio->empujar($client, $lead)['estado']);
-        $this->assertSame('cc_prueba_paso_importo', $espia->plantillas[0]['template_name']);
+        $this->assertSame('cc_prueba_paso_importo_v2', $espia->plantillas[0]['template_name']);
     }
 
     /** @test */
@@ -358,7 +358,7 @@ class RecorridoYBarridosDeLaPruebaTest extends BaseDeLaPrueba
         $antes = $this->hoy_de($client)['hoy'];
         $this->assertSame([
             'paso' => 'importo', 'paso_en_el_correo' => null, 'motivo_sin_paso' => null, 'aviso_dia_5' => false, 'vence_hoy' => false,
-            'encuesta_pendiente' => false, 'plantilla' => 'cc_prueba_paso_importo', 'video_codigo' => '05',
+            'encuesta_pendiente' => false, 'plantilla' => 'cc_prueba_paso_importo_v2', 'video_codigo' => '05',
         ], $antes);
 
         /* Lo que dijo es lo que sale. */

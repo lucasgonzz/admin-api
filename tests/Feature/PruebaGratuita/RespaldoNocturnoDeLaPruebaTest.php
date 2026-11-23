@@ -127,7 +127,7 @@ class RespaldoNocturnoDeLaPruebaTest extends BaseDeLaPrueba
         $this->assertSame('enviado', $this->responder($ticket, $entrante)['estado']);
 
         $texto = $this->respuesta_en($ticket);
-        $this->assertStringStartsWith('Respuesta automática: Eso te lo cargamos nosotros, sin costo. Adjuntá el Excel o el PDF de tu proveedor con el clip, acá abajo, y Martín lo toma apenas vuelve.', $texto);
+        $this->assertStringStartsWith('Respuesta automática: Eso te lo cargamos nosotros. Adjuntá el Excel o el PDF de tu proveedor con el clip, acá abajo, y Martín lo toma apenas vuelve.', $texto);
         $this->assertStringContainsString('Si preferís hacerlo vos, acá te muestra cómo: ' . PruebaVideoCatalogoService::URLS_APROBADAS['05'], $texto);
         $this->assertStringEndsWith('Martín te sigue desde las 7 de la mañana.', $texto);
         foreach (['mapeo', 'Importar con IA', 'columnas', 'propiedades', 'duplicados'] as $jerga) {

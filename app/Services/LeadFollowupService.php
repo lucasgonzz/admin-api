@@ -309,6 +309,14 @@ class LeadFollowupService
         }
 
         /*
+         * E3 de embudo-juan-pipeline: un lead del flujo de entrada NUNCA recibe las plantillas de seguimiento de la demo (`cc_seg_*`):
+         * ese cron habla de la demo, que el flujo nuevo no ofrece. Con el flujo apagado `en_el_flujo` da false y todo queda como hoy.
+         */
+        if (LeadFlujoEntradaService::en_el_flujo($lead)) {
+            return 'embudo';
+        }
+
+        /*
          * Embudo nuevo (misión embudo-whatsapp-precios, E3): un lead que tiene pasos de seguimiento del embudo en un estado con
          * pasos (`nuevo`, `contactado`, `link_enviado`) lo llevan ellos, no este cron: si no, recibiría dos cadencias a la vez
          * (la de 48 h de este cron encima de la de 3 h y 22 h). Sale un resultado propio, `embudo`, para el log de la corrida.

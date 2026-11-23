@@ -84,8 +84,11 @@ class PruebaContextoSoporteService
             }
         }
 
+        /* E2: una prueba pausada (se está implementando) no tiene días restantes ni está vencida. */
+        $pausada = $client->prueba_pausada_at !== null && $client->prueba_reanudada_at === null;
+
         $dias_restantes = null;
-        if ($vence !== null) {
+        if ($vence !== null && ! $pausada) {
             $dias_restantes = $vence->isPast() ? 0 : (int) ceil($ahora->floatDiffInDays($vence, false));
         }
 
@@ -99,7 +102,8 @@ class PruebaContextoSoporteService
             'trial_days'     => $client->trial_days === null ? null : (int) $client->trial_days,
             'trial_ends_at'  => $vence ? $vence->toIso8601String() : null,
             'dias_restantes' => $dias_restantes,
-            'vencida'        => $vence !== null && $vence->isPast(),
+            'vencida'        => ! $pausada && $vence !== null && $vence->isPast(),
+            'pausada'        => $pausada,
             'inicio_at'      => $client->created_at ? $client->created_at->toIso8601String() : null,
             'url'            => $slug ? 'https://' . PruebaNombres::hosts_del_slug($slug)['erp_spa'] : null,
             'url_ingreso'    => $slug && $token_vigente ? PruebaNombres::url_ingreso($slug, (string) $lead->demo_ingreso_token) : null,

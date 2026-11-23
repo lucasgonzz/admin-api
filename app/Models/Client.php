@@ -128,6 +128,13 @@ class Client extends Model
          * `desde` es la fecha en que se encendió la marca; `motivo`, la nota libre (sin cast: es texto). */
         'cobro_dudoso'                       => 'boolean',
         'cobro_dudoso_desde'                 => 'date',
+        /* Implementación contratada y pausa de la prueba (misión embudo-juan-pipeline, E2). */
+        'implementacion_paquetes'            => 'array',
+        'implementacion_mitad_pagada_at'     => 'datetime',
+        'implementacion_articulos_recibidos_at' => 'datetime',
+        'implementacion_articulos_ok_at'     => 'datetime',
+        'prueba_pausada_at'                  => 'datetime',
+        'prueba_reanudada_at'                => 'datetime',
     ];
 
     /**

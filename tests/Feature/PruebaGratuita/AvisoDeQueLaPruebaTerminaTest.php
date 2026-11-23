@@ -95,7 +95,7 @@ class AvisoDeQueLaPruebaTerminaTest extends BaseDeLaPrueba
         $otro = $servicio->empujar($client, $lead);
         $this->assertSame('enviado', $otro['estado']);
         $this->assertCount(2, $espia->plantillas);
-        $this->assertSame('cc_prueba_paso_importo', $espia->plantillas[1]['template_name']);
+        $this->assertSame('cc_prueba_paso_importo_v2', $espia->plantillas[1]['template_name']);
         Mail::assertSent(ComercioCityMail::class, function (ComercioCityMail $mail) {
             return strpos($mail->payload->subject, 'termina en') !== false;
         });
@@ -112,7 +112,7 @@ class AvisoDeQueLaPruebaTerminaTest extends BaseDeLaPrueba
         $resultado = app(PruebaWhatsappService::class)->empujar($client, $lead);
 
         $this->assertSame('enviado', $resultado['estado']);
-        $this->assertSame('cc_prueba_paso_importo', $espia->plantillas[0]['template_name']);
+        $this->assertSame('cc_prueba_paso_importo_v2', $espia->plantillas[0]['template_name']);
         $this->assertSame(0, PruebaWhatsappEnvio::where('client_id', $client->id)->where('plantilla', 'correo_dia_5')->count());
     }
 
@@ -127,7 +127,7 @@ class AvisoDeQueLaPruebaTerminaTest extends BaseDeLaPrueba
 
         $this->assertSame('enviado', $resultado['estado']);
         $this->assertCount(1, $espia->plantillas);
-        $this->assertSame('cc_prueba_paso_importo', $espia->plantillas[0]['template_name']);
+        $this->assertSame('cc_prueba_paso_importo_v2', $espia->plantillas[0]['template_name']);
         Mail::assertSent(ComercioCityMail::class, function (ComercioCityMail $mail) {
             return $mail->payload->subject === 'Tu prueba de ComercioCity termina en 2 días';
         });

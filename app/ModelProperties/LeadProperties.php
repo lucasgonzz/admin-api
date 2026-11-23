@@ -47,7 +47,7 @@ class LeadProperties
                 'show' => true,
                 'use_to_filter_in_search' => true,
                 'width' => 150,
-                'options' => LeadPipelineStatus::options_for_meta(),
+                'options' => LeadPipelineStatus::options_for_select(),
             ],
             // [
             //     'key' => 'tiene_sugerencia_pendiente',

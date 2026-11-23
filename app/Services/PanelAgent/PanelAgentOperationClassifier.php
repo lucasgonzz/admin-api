@@ -57,6 +57,16 @@ class PanelAgentOperationClassifier
             }
         }
 
+        // Freno por VALOR de un campo (`panel_agent.field_value_brakes`): sólo sube si el campo trae uno de los valores listados.
+        if (! $this->is_braked($base_category) && $base_category !== 'excluida') {
+            $por_valor = (array) (config('panel_agent.field_value_brakes', [])[$key] ?? []);
+            foreach ($por_valor as $field => $valores) {
+                if (isset($payload[$field]) && is_scalar($payload[$field]) && isset($valores[(string) $payload[$field]])) {
+                    return (string) $valores[(string) $payload[$field]];
+                }
+            }
+        }
+
         return $base_category;
     }
 

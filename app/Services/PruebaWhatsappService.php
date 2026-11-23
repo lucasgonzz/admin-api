@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Events\SupportMessageReceived;
+use App\Helpers\AppTime;
 use App\Helpers\WhatsappNormalizer;
 use App\Models\Admin;
 use App\Models\AdminSetting;
@@ -285,10 +286,10 @@ class PruebaWhatsappService
     {
         $url = (string) Prueba\PruebaCorreoService::url_del_sistema($client);
 
-        if ($plantilla === PruebaPlantillasService::BIENVENIDA_V2) {
+        if (in_array($plantilla, [PruebaPlantillasService::BIENVENIDA_V2, PruebaPlantillasService::BIENVENIDA_V5], true)) {
             return $url;
         }
-        if (in_array($plantilla, [PruebaPlantillasService::BIENVENIDA_CON_ASISTENTE_V2, PruebaPlantillasService::BIENVENIDA_CON_ASISTENTE_V3], true)) {
+        if (in_array($plantilla, [PruebaPlantillasService::BIENVENIDA_CON_ASISTENTE_V2, PruebaPlantillasService::BIENVENIDA_CON_ASISTENTE_V3, PruebaPlantillasService::BIENVENIDA_CON_ASISTENTE_V5], true)) {
             return [$url, (string) $numero_asistente];
         }
 
@@ -364,7 +365,8 @@ class PruebaWhatsappService
             }
 
             $url   = Prueba\PruebaCorreoService::url_del_sistema($client);
-            $texto = PruebaPlantillasService::cuerpo_de(PruebaPlantillasService::BIENVENIDA_V2);
+            /* E3: la copia para el sistema usa el texto sin carga gratis (v5), con la dirección del sistema. */
+            $texto = PruebaPlantillasService::cuerpo_de(PruebaPlantillasService::BIENVENIDA_V5);
             if ($url === null) {
                 $texto = str_replace(PruebaPlantillasService::COMO_ENTRAR . ' ', '', $texto);
             }
@@ -507,7 +509,8 @@ class PruebaWhatsappService
                 $lead  = $this->pruebas->lead_del_cliente($client);
                 $datos = $this->pruebas->datos($client);
 
-                $tomas = $this->avisar_a_tomas_si_es_el_dia_5($client, $lead, $datos);
+                /* E2: una prueba pausada (se está implementando) no tiene día 5 ni hitos. */
+                $tomas = ! empty($datos['pausada']) ? null : $this->avisar_a_tomas_si_es_el_dia_5($client, $lead, $datos);
                 $paso  = $this->empujar($client, $lead, $datos);
 
                 $resultados[] = [
@@ -542,6 +545,11 @@ class PruebaWhatsappService
     public function empujar(Client $client, ?Lead $lead, ?array $datos = null): array
     {
         $datos = $datos !== null ? $datos : $this->pruebas->datos($client);
+
+        /* E2: pausada por la implementación. No se empuja ningún hito: sólo el recordatorio de los archivos (días 1, 3 y 6). */
+        if (! empty($datos['pausada'])) {
+            return $this->recordar_los_archivos($client, $lead);
+        }
 
         if ($datos['vencida'] === true) {
             /* E3 (misión embudo-whatsapp-precios): después de vencer ya no se empuja por hito, pero sí hay recordatorios del
@@ -608,6 +616,48 @@ class PruebaWhatsappService
         }
 
         return ['estado' => $envio['estado'] === 'enviado' ? 'enviado' : $envio['estado'], 'detalle' => $envio['detalle'] !== null ? $envio['detalle'] : $eleccion['plantilla']];
+    }
+
+    /** Días calendario desde el pago de la mitad en los que se recuerdan los archivos de la implementación (E2). */
+    const DIAS_DEL_RECORDATORIO_DE_ARCHIVOS = [1, 3, 6];
+
+    /**
+     * El recordatorio de archivos de una prueba pausada: si pagó la mitad y todavía no se recibió el Excel de artículos, los días
+     * 1, 3 y 6 desde el pago sale la plantilla `cc_impl_archivos_recordatorio` por el ticket del dueño, una vez por día
+     * (deduplicada por `prueba_whatsapp_envios.hito`). Mientras Meta no la apruebe, queda en cola (comportamiento de siempre).
+     *
+     * @param Client    $client
+     * @param Lead|null $lead
+     *
+     * @return array{estado: string, detalle: string|null}
+     */
+    private function recordar_los_archivos(Client $client, ?Lead $lead): array
+    {
+        if ($client->implementacion_mitad_pagada_at === null || $client->implementacion_articulos_recibidos_at !== null) {
+            return ['estado' => 'pausada', 'detalle' => 'Prueba pausada: sin recordatorio pendiente.'];
+        }
+
+        $pago = $client->implementacion_mitad_pagada_at->copy()->setTimezone(AppTime::now()->getTimezone())->startOfDay();
+        $dia  = (int) $pago->diffInDays(AppTime::now()->startOfDay(), false);
+
+        if (! in_array($dia, self::DIAS_DEL_RECORDATORIO_DE_ARCHIVOS, true)) {
+            return ['estado' => 'pausada', 'detalle' => 'Prueba pausada: hoy no toca recordatorio de archivos.'];
+        }
+
+        $hito = 'archivos_dia_' . $dia;
+        $ya   = PruebaWhatsappEnvio::query()
+            ->where('client_id', (int) $client->id)
+            ->where('plantilla', PruebaPlantillasService::ARCHIVOS_RECORDATORIO)
+            ->where('hito', $hito)
+            ->whereIn('estado', [PruebaWhatsappEnvio::ESTADO_ENVIADO, PruebaWhatsappEnvio::ESTADO_ENVIANDO])
+            ->exists();
+        if ($ya) {
+            return ['estado' => 'pausada', 'detalle' => 'El recordatorio de hoy ya salió.'];
+        }
+
+        $envio = $this->enviar_plantilla_por_ticket($client, $lead, PruebaPlantillasService::ARCHIVOS_RECORDATORIO, $hito, false);
+
+        return ['estado' => $envio['estado'], 'detalle' => $envio['detalle'] !== null ? $envio['detalle'] : PruebaPlantillasService::ARCHIVOS_RECORDATORIO];
     }
 
     /** Días desde el alta de la prueba en los que, ya vencida, se manda un recordatorio (E3). */
@@ -694,7 +744,8 @@ class PruebaWhatsappService
                 return ['paso' => null, 'plantilla' => null, 'estado' => 'sin_hito_faltante', 'detalle' => 'Pasó por todos los hitos.', 'sin_plantilla' => null];
             }
 
-            $plantilla = PruebaPlantillasService::plantilla_del_paso($proximo);
+            /* E3: «importó» va siempre con la v2 (la vieja prometía cargar sin costo y está retirada). */
+            $plantilla = $proximo === 'importo' ? PruebaPlantillasService::PASO_IMPORTO_V2 : PruebaPlantillasService::plantilla_del_paso($proximo);
             $estado    = $this->plantillas->estado_para_enviar($plantilla);
             if ($estado['motivo'] !== null) {
                 return ['paso' => null, 'plantilla' => $plantilla, 'estado' => 'plantilla_no_disponible', 'detalle' => $plantilla . ': ' . $estado['motivo'], 'sin_plantilla' => $proximo];
@@ -1418,7 +1469,9 @@ class PruebaWhatsappService
             }
         }
 
-        $closer = Admin::query()->where('is_closer', true)->whereNotNull('phone_number')->first();
+        /* P4 (E3): el aviso va primero a Juan (perfil «Sólo Leads» con teléfono), después a un vendedor que no sea closer y, si no hay, al
+           closer como hasta ahora. Los identificadores (`aviso_tomas`, `TOMAS_*`) no cambian: son contrato con el SPA. */
+        $closer = AdminTaskAssignmentResolver::vendedor_de_juan(true);
         if ($closer === null) {
             /* Un solo `fallido` por motivo: el job diario pasa por acá cada mañana y no tiene que dejar una fila por día. */
             $ya_fallido = PruebaWhatsappEnvio::query()
@@ -1444,12 +1497,12 @@ class PruebaWhatsappService
         $texto  = $this->texto_para_tomas($client, $lead, $motivo, $datos);
         $titulo = 'Prueba gratuita: ' . $client->resolve_display_name();
 
-        $wamid = $this->sender->send_text(trim((string) $closer->phone_number), $texto, 'Aviso a Tomás - prueba gratuita - cliente #' . $client->id, true);
+        $wamid = $this->sender->send_text(trim((string) $closer->phone_number), $texto, 'Aviso a Juan - prueba gratuita - cliente #' . $client->id, true);
 
         try {
             AdminPushNotificationService::send_to_admin((int) $closer->id, $titulo, $texto, ['url' => $this->link_al_lead($lead)]);
         } catch (\Throwable $e) {
-            Log::channel('daily')->warning('PruebaWhatsapp: falló el push a Tomás.', ['client_id' => $client->id, 'error' => $e->getMessage()]);
+            Log::channel('daily')->warning('PruebaWhatsapp: falló el push a Juan.', ['client_id' => $client->id, 'error' => $e->getMessage()]);
         }
 
         $estado = $wamid !== null ? PruebaWhatsappEnvio::ESTADO_ENVIADO : PruebaWhatsappEnvio::ESTADO_FALLIDO;

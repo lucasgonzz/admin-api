@@ -49,6 +49,8 @@ use App\Http\Controllers\LeadChatsController;
 use App\Http\Controllers\LeadController;
 use App\Http\Controllers\MetaRawWebhookController;
 use App\Http\Controllers\PipelineActivityController;
+use App\Http\Controllers\LeadLlamadaController;
+use App\Http\Controllers\LeadTableroController;
 use App\Http\Controllers\PipelineController;
 use App\Http\Controllers\PipelineOpportunityController;
 use App\Http\Controllers\PipelineStageController;
@@ -454,6 +456,9 @@ Route::middleware('claude.task.key')
         /* Martín deja asentada una nota en la implementación del cliente del ticket: solo agrega a data.actions[]
            de la etapa, con reserva vigente (misión hitos-de-implementacion-por-soporte, 26/10/2026). */
         Route::post('support-codex/tickets/{id}/implementation-note', 'Api\ClaudeSupportCodexController@implementation_note')
+            ->whereNumber('id');
+        /* El dueño de una prueba sin implementación la pide por Soporte (misión embudo-juan-pipeline, E2). */
+        Route::post('support-codex/tickets/{id}/implementacion-pedida', 'Api\ClaudeImplementacionPedidaController@pedida_json')
             ->whereNumber('id');
         /* Seguimiento proactivo de las implementaciones (misión cruzada seguimiento-de-implementaciones, 11/11/2026):
            el monitor pide los vencidos, reserva uno con su contexto, guarda los hitos de uso que midió y manda (o
@@ -1207,6 +1212,10 @@ Route::prefix('admin')->group(function () {
            `prueba-NN` del VPS con sus acciones (dormir, despertar, borrar con respaldo, reintentar, mantener). */
         Route::get('client/{clientId}/prueba', [\App\Http\Controllers\PruebaInstanciaController::class, 'prueba_del_cliente_json']);
         Route::put('client/{clientId}/prueba', [\App\Http\Controllers\PruebaInstanciaController::class, 'cambiar_dias_del_cliente_json']);
+        /* Implementación contratada y pausa de la prueba (misión embudo-juan-pipeline, E2). */
+        Route::put('client/{id}/implementacion-contratada', [\App\Http\Controllers\ClientImplementacionContratadaController::class, 'fijar_json'])->whereNumber('id');
+        Route::post('client/{id}/implementacion/articulos-importados', [\App\Http\Controllers\ClientImplementacionContratadaController::class, 'articulos_importados_json'])->whereNumber('id');
+        Route::post('client/{id}/prueba/reanudar', [\App\Http\Controllers\ClientImplementacionContratadaController::class, 'reanudar_json'])->whereNumber('id');
         Route::get('lead/{leadId}/prueba', [\App\Http\Controllers\PruebaInstanciaController::class, 'prueba_del_lead_json']);
         Route::put('lead/{leadId}/prueba', [\App\Http\Controllers\PruebaInstanciaController::class, 'cambiar_dias_del_lead_json']);
         Route::get('prueba/instancias', [\App\Http\Controllers\PruebaInstanciaController::class, 'index_json']);
@@ -1977,6 +1986,13 @@ Route::prefix('admin')->group(function () {
         Route::post('pipeline-opportunities/{id}/move', [PipelineOpportunityController::class, 'move_json'])->whereNumber('id');
         Route::post('pipeline-opportunities/{id}/notes', [PipelineOpportunityController::class, 'store_note_json'])->whereNumber('id');
         Route::delete('pipeline-opportunities/{id}', [PipelineOpportunityController::class, 'destroy_json'])->whereNumber('id');
+
+        /* Tablero de Juan (misión embudo-juan-pipeline): «Registrar llamada», «Mis tareas» y la búsqueda de candidatos. */
+        Route::post('lead/{id}/llamadas', [LeadLlamadaController::class, 'store_json'])->whereNumber('id');
+        Route::get('lead/{id}/llamadas', [LeadLlamadaController::class, 'index_json'])->whereNumber('id');
+        Route::get('lead-tablero/mis-tareas', [LeadTableroController::class, 'mis_tareas_json']);
+        Route::get('lead-tablero/candidatos', [LeadTableroController::class, 'candidatos_json']);
+        Route::post('lead-tablero/tareas/{id}/hecha', [LeadTableroController::class, 'tarea_hecha_json'])->whereNumber('id');
 
         Route::delete('pipeline-activities/{id}', [PipelineActivityController::class, 'destroy_json'])->whereNumber('id');
 
