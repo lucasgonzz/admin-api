@@ -49,6 +49,9 @@ class ContractPreciosService
     /** El descuento de bienvenida: 50 % del abono durante los primeros 3 meses (Lucas, 3/11/2026). */
     const DESCUENTO_INICIAL = ['porcentaje' => 50, 'meses' => 3];
 
+    /** Atributo del request donde `preparar_request` deja la foto armada por el servidor. */
+    const FOTO_ATRIBUTO = 'contract_plan_gestion_foto_del_servidor';
+
     /** Política de precios con la que se toman las fotos de plan (oferta del 21/11/2026, etapa E4). */
     const POLITICA_DE_LA_FOTO = '2026-11-21';
 
@@ -334,8 +337,6 @@ class ContractPreciosService
             'contract_descuento_conjunto' => ['nullable', 'numeric', 'min:0', 'max:999999999', $centavos],
             'contract_mes_gratis' => ['nullable', 'boolean'],
             'contract_plan_gestion' => ['nullable', 'string', 'in:'.implode(',', $planes)],
-            /* La foto la arma el servidor en `preparar_request`; acá sólo se acepta ya armada. */
-            'contract_plan_gestion_foto' => ['nullable', 'array'],
             'contract_pago_anual' => ['nullable', 'boolean'],
             'contract_descuento_anual' => ['nullable', 'numeric', 'min:0', 'max:100', $centavos],
             'contract_meses_actualizacion' => ['nullable', 'integer', 'min:1', 'max:60'],
@@ -354,8 +355,15 @@ class ContractPreciosService
     /** Valida antes de escribir y deriva los totales históricos para cobranzas. */
     public static function preparar_request(Request $request, $contrato): void
     {
-        /* La foto del plan nunca viene del cliente HTTP: se descarta lo que llegue y se arma acá. */
+        /* 🔴 La foto del plan NUNCA viene del cliente HTTP: se descarta lo que llegue en el cuerpo (form o JSON) y
+           en la query string ANTES de cualquier has/input/validate, y no hay regla de validación que la acepte. La
+           arma el servidor en `preparar_foto_del_plan` y la deja en un atributo del request (ver `FOTO_ATRIBUTO`)
+           para que el controlador la escriba él mismo. Ver ContratoFotoDelPlanNoSeFalsificaTest. */
         $request->request->remove('contract_plan_gestion_foto');
+        $request->query->remove('contract_plan_gestion_foto');
+        if ($request->isJson()) {
+            $request->json()->remove('contract_plan_gestion_foto');
+        }
         $request->validate(self::reglas());
         self::preparar_foto_del_plan($request, $contrato);
         $precios = $request->input('contract_precios_sistemas', $contrato->contract_precios_sistemas);
@@ -408,7 +416,20 @@ class ContractPreciosService
         if ($foto === null && $contrato->contract_plan_gestion_foto === null) {
             return;
         }
-        $request->merge(['contract_plan_gestion_foto' => $foto]);
+        $request->attributes->set(self::FOTO_ATRIBUTO, $foto);
+    }
+
+    /**
+     * La foto que armó `preparar_request` para este guardado: un array (foto nueva), null (quitarla) o false si
+     * el guardado no tiene que tocarla. Es lo único que el controlador escribe en `contract_plan_gestion_foto`.
+     *
+     * @param Request $request
+     *
+     * @return array|null|false
+     */
+    public static function foto_para_escribir(Request $request)
+    {
+        return $request->attributes->get(self::FOTO_ATRIBUTO, false);
     }
 
     private static function preparar_anual(Request $request, $contrato, $precios): void

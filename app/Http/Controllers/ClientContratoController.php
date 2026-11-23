@@ -87,6 +87,12 @@ class ClientContratoController extends Controller
             $client->{$campo} = $valor;
         }
 
+        /* La foto del plan la escribe el servidor (nunca viene del request): ver ContractPreciosService. */
+        $foto_del_plan = \App\Services\ContractPreciosService::foto_para_escribir($request);
+        if ($foto_del_plan !== false) {
+            $client->contract_plan_gestion_foto = $foto_del_plan;
+        }
+
         $client->save();
 
         return response()->json($this->respuesta($client->refresh(), $cobranzas));

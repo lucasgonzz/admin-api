@@ -753,6 +753,12 @@ class LeadController extends Controller
 
         // Seteamos campos usando helper declarativo para respetar properties().
         ModelPropertiesHelper::set_from_request($lead, $request, 'lead');
+        /* La foto del plan la escribe el servidor (nunca viene del request): ver ContractPreciosService. */
+        $foto_del_plan = \App\Services\ContractPreciosService::foto_para_escribir($request);
+        if ($foto_del_plan !== false) {
+            $lead->contract_plan_gestion_foto = $foto_del_plan;
+            $lead->save();
+        }
         $this->sync_personalized_demo_videos_from_request($lead, $request);
 
         // Si se reagendó la demo, resetear flags para que el nuevo horario reciba automatizaciones.
