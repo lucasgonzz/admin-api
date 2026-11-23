@@ -95,6 +95,13 @@ class LeadLlamadaService
             throw new PipelineRuleException('El pipeline de leads todavía no está sembrado.');
         }
 
+        /* Un audio ya cargado se reconoce ANTES de validar: reprocesarlo cuando su `proxima_llamada_at` ya pasó tiene que
+           responder «duplicada», no un 422 por fecha vencida. Se vuelve a chequear adentro del candado. */
+        $previa = $this->llamada_ya_cargada($lead, $datos);
+        if ($previa !== null) {
+            return ['llamada' => $previa->load(['admin', 'cargada_por']), 'tarjeta' => $this->tarjeta_para_responder($lead), 'duplicada' => true];
+        }
+
         $limpios  = $this->validar($datos, (array) $pipeline->lost_reasons);
         $hecha_por = $this->quien_hizo_la_llamada($actor, $datos);
 
@@ -103,11 +110,7 @@ class LeadLlamadaService
             $lead = Lead::query()->whereKey($lead->id)->lockForUpdate()->firstOrFail();
 
             if ($limpios['origen'] === LeadLlamada::ORIGEN_AUDIO_DE_JUAN) {
-                $existente = LeadLlamada::query()
-                    ->where('lead_id', (int) $lead->id)
-                    ->where('origen_clave', $limpios['origen_clave'])
-                    ->orderBy('id')
-                    ->first();
+                $existente = $this->llamada_ya_cargada($lead, $limpios);
 
                 if ($existente !== null) {
                     return ['llamada' => $existente->load(['admin', 'cargada_por']), 'tarjeta' => $this->tarjeta_para_responder($lead), 'duplicada' => true];
@@ -115,8 +118,12 @@ class LeadLlamadaService
             }
 
             $tarjeta = $this->tablero->tarjeta_abierta($lead);
+            $ganada  = null;
             if ($tarjeta === null) {
-                $tarjeta = $this->tablero->entrar_en_interesados($lead, 'llamada registrada');
+                /* Un lead que ya es cliente (tarjeta ganada) no abre otra tarjeta en «Interesados»: la llamada queda en el
+                   historial de la tarjeta ganada, que no se mueve. */
+                $ganada = $this->tarjeta_ganada($lead);
+                $tarjeta = $ganada !== null ? $ganada : $this->tablero->entrar_en_interesados($lead, 'llamada registrada');
             }
 
             $llamada = LeadLlamada::create([
@@ -137,13 +144,61 @@ class LeadLlamadaService
 
             if ($tarjeta !== null) {
                 $this->oportunidades->agregar_nota($tarjeta, $this->cuerpo_de_la_nota($llamada), 'call', null, $hecha_por);
-                $tarjeta = $this->aplicar_el_resultado($lead, $tarjeta, $limpios, $hecha_por);
+                if ($ganada === null) {
+                    $tarjeta = $this->aplicar_el_resultado($lead, $tarjeta, $limpios, $hecha_por);
+                }
             }
 
             $this->cerrar_las_tareas_del_embudo($lead, $hecha_por);
 
             return ['llamada' => $llamada->fresh(['admin', 'cargada_por']), 'tarjeta' => $this->tarjeta_para_responder($lead), 'duplicada' => false];
         });
+    }
+
+    /**
+     * La llamada de un audio de Juan que ya estaba cargada para el lead (misma `origen_clave`), o null.
+     *
+     * @param Lead                 $lead
+     * @param array<string, mixed> $datos Pedido (o datos limpios): usa `origen` y `origen_clave`.
+     *
+     * @return LeadLlamada|null
+     */
+    private function llamada_ya_cargada(Lead $lead, array $datos)
+    {
+        if ($this->texto($datos, 'origen') !== LeadLlamada::ORIGEN_AUDIO_DE_JUAN) {
+            return null;
+        }
+
+        $clave = $this->texto($datos, 'origen_clave');
+        if ($clave === null) {
+            return null;
+        }
+
+        return LeadLlamada::query()->where('lead_id', (int) $lead->id)->where('origen_clave', $clave)->orderBy('id')->first();
+    }
+
+    /**
+     * La última tarjeta del lead en el pipeline si está cerrada como GANADA («Cliente») y no tiene ninguna abierta.
+     *
+     * @param Lead $lead
+     *
+     * @return PipelineOpportunity|null
+     */
+    private function tarjeta_ganada(Lead $lead)
+    {
+        $pipeline = $this->tablero->pipeline();
+        if ($pipeline === null) {
+            return null;
+        }
+
+        $ultima = PipelineOpportunity::query()->where('pipeline_id', $pipeline->id)->where('lead_id', (int) $lead->id)->orderByDesc('id')->first();
+        if ($ultima === null || $ultima->closed_at === null) {
+            return null;
+        }
+
+        $etapa = PipelineStage::query()->find((int) $ultima->stage_id);
+
+        return $etapa !== null && $etapa->type === PipelineStage::TYPE_WON ? $ultima : null;
     }
 
     /**
@@ -574,7 +629,8 @@ class LeadLlamadaService
         }
 
         $this->cambiar_el_estado_del_lead($lead, 'implementacion_pedida');
-        LeadTareaVendedorService::crear($lead->fresh(), LeadTareaVendedorService::MOTIVO_IMPLEMENTACION_PEDIDA);
+        /* Sin aviso: la tarea nace para cerrarse en este mismo pedido y Juan no puede abrir `/tasks`. */
+        LeadTareaVendedorService::crear($lead->fresh(), LeadTareaVendedorService::MOTIVO_IMPLEMENTACION_PEDIDA, false);
     }
 
     /**
@@ -606,9 +662,15 @@ class LeadLlamadaService
      */
     private function crear_la_tarea_del_contrato(Lead $lead)
     {
+        /* Idempotente: una sola tarea abierta por lead. */
+        $abierta = AdminTask::query()->where('lead_id', (int) $lead->id)->where('created_via', 'tablero_ya_contrato')->where('is_done', false)->exists();
+        if ($abierta) {
+            return;
+        }
+
         $empresa = trim((string) $lead->company_name) !== '' ? trim((string) $lead->company_name) : trim((string) $lead->contact_name);
 
-        AdminTask::create([
+        $tarea = AdminTask::create([
             'created_by_admin_id' => 0,
             'assigned_admin_id'   => null,
             'lead_id'             => (int) $lead->id,
@@ -619,6 +681,21 @@ class LeadLlamadaService
             'sort_order'          => 0,
             'created_via'         => 'tablero_ya_contrato',
         ]);
+
+        /* Asignada a quien recibe las tareas de leads de Lucas (`for_lead_task`); sin nadie, queda para cualquiera. La tarea ya
+           está creada: un error de la asignación o del aviso no la tira. */
+        try {
+            $ids = AdminTaskAssignmentResolver::for_lead_task();
+            if (! empty($ids)) {
+                $tarea->assigned_admins()->sync($ids);
+                $tarea->assigned_admin_id = $ids[0];
+                $tarea->save();
+            }
+
+            AdminTaskNotificationService::create_for_task($tarea);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::channel('daily')->error('LeadLlamadaService: la tarea del contrato quedó creada pero la asignación o el aviso fallaron.', ['task_id' => $tarea->id, 'error' => $e->getMessage()]);
+        }
     }
 
     /**

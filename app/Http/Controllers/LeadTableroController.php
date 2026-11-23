@@ -86,7 +86,7 @@ class LeadTableroController extends Controller
         $propia->done_by_admin_id = $admin_id;
         $propia->save();
 
-        return response()->json(['model' => ['id' => (int) $propia->id, 'is_done' => true]], 200);
+        return response()->json(['model' => ['id' => (int) $propia->id, 'is_done' => true, 'done_at' => $propia->done_at ? $propia->done_at->format('Y-m-d H:i:s') : null]], 200);
     }
 
     /**
