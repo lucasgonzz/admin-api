@@ -3,6 +3,7 @@
 namespace App\Http\Middleware;
 
 use App\Services\AdminSoloLeadsPolicy;
+use App\Services\SoloLeadsRecursos;
 use Closure;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -83,6 +84,15 @@ class SoloLeadsAllowlist
             ], 403);
         }
 
+        // Rutas del tablero con recurso: el `{id}` tiene que ser del pipeline de leads (se resuelve contra la base).
+        $regla = $this->policy->regla_de_recurso($metodo, $uri);
+        if ($regla !== null && ! app(SoloLeadsRecursos::class)->cumple($regla, $parametros)) {
+            return response()->json([
+                'message' => AdminSoloLeadsPolicy::MENSAJE_DE_RESPUESTA,
+                'code'    => AdminSoloLeadsPolicy::CODIGO_DE_RESPUESTA,
+            ], 403);
+        }
+
         // Escritura acotada (estado y nota del lead): se descarta el resto del cuerpo, no se rechaza. El
         // endpoint sólo pisa las claves presentes, así que lo que no viene queda como estaba. También se
         // filtran la query y los archivos: el controlador lee de las tres fuentes.
@@ -101,7 +111,7 @@ class SoloLeadsAllowlist
             }
         }
 
-        return $this->filtrar_respuesta($next($request));
+        return $this->filtrar_respuesta($next($request), $metodo . ' ' . ltrim($uri, '/'));
     }
 
     /**
@@ -113,11 +123,12 @@ class SoloLeadsAllowlist
      * —rutas permitidas— devolvían al perfil las columnas completas de Client y Demo. No se resuelve con
      * `$hidden` en esos modelos porque cambiaría la respuesta de los admins normales y de otros consumidores.
      *
-     * @param mixed $respuesta Respuesta del controlador.
+     * @param mixed  $respuesta     Respuesta del controlador.
+     * @param string $clave_de_ruta «<MÉTODO> <uri>» de la ruta (para las claves extra del tablero).
      *
      * @return mixed La misma respuesta con el cuerpo filtrado si era JSON.
      */
-    private function filtrar_respuesta($respuesta)
+    private function filtrar_respuesta($respuesta, string $clave_de_ruta = '')
     {
         if (! $respuesta instanceof JsonResponse) {
             return $respuesta;
@@ -129,7 +140,7 @@ class SoloLeadsAllowlist
             return $respuesta;
         }
 
-        $respuesta->setData($this->policy->filtrar_salida($cuerpo));
+        $respuesta->setData($this->policy->filtrar_salida($cuerpo, $clave_de_ruta !== '' ? $clave_de_ruta : null));
 
         return $respuesta;
     }

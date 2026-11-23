@@ -61,6 +61,11 @@ class PipelineController extends Controller
 
         $query = Pipeline::query()->orderBy('sort_order')->orderBy('id');
 
+        /* Perfil «Sólo Leads» (tablero de Juan): ve únicamente el pipeline de leads. */
+        if ((bool) ($request->user()->solo_leads ?? false)) {
+            $query->where('slug', \Database\Seeders\PipelineLeadSeeder::SLUG);
+        }
+
         if (empty($datos['include_archived'])) {
             $query->whereNull('archived_at');
         }

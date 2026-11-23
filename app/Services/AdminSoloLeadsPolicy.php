@@ -83,6 +83,56 @@ class AdminSoloLeadsPolicy
     ];
 
     /**
+     * Rutas del tablero de Juan (misión embudo-juan-pipeline, E1): se suman a `RUTAS_PERMITIDAS` SIN tocarla, porque los tests
+     * de E5 que fijan esa lista (23 rutas) tienen que seguir verdes. Mismo formato: «<MÉTODO> <uri>» como `Route::uri()`.
+     * Cada entrada existe y lleva `admin.solo_leads` (lo verifica `PerfilSoloLeadsEnElTableroTest`).
+     *
+     * `GET lead-tablero/candidatos` (E1b) NO está: es del agente, Juan no la necesita y para él da 403.
+     *
+     * @var array<int, string>
+     */
+    const RUTAS_DEL_TABLERO = [
+        'GET api/admin/pipelines/meta',
+        'GET api/admin/pipelines',
+        'GET api/admin/pipelines/{id}/opportunities',
+        'GET api/admin/pipeline-opportunities/{id}',
+        'PUT api/admin/pipeline-opportunities/{id}',
+        'POST api/admin/pipeline-opportunities/{id}/move',
+        'POST api/admin/pipeline-opportunities/{id}/notes',
+        'POST api/admin/lead/{id}/llamadas',
+        'GET api/admin/lead/{id}/llamadas',
+        'GET api/admin/lead-tablero/mis-tareas',
+        'POST api/admin/lead-tablero/tareas/{id}/hecha',
+    ];
+
+    /**
+     * Rutas del tablero cuyo recurso hay que verificar contra la base: «<MÉTODO> <uri>» => regla de
+     * {@see SoloLeadsRecursos}. Sin esto el perfil abriría el tablero y las tarjetas de CUALQUIER pipeline (por ejemplo
+     * «Agentes»): la URL sola no dice a qué pipeline pertenece el `{id}`.
+     *
+     * @var array<string, string>
+     */
+    const RECURSOS_DEL_TABLERO = [
+        'GET api/admin/pipelines/{id}/opportunities'       => SoloLeadsRecursos::PIPELINE_DE_LEADS,
+        'GET api/admin/pipeline-opportunities/{id}'        => SoloLeadsRecursos::OPORTUNIDAD_DE_LEADS,
+        'PUT api/admin/pipeline-opportunities/{id}'        => SoloLeadsRecursos::OPORTUNIDAD_DE_LEADS,
+        'POST api/admin/pipeline-opportunities/{id}/move'  => SoloLeadsRecursos::OPORTUNIDAD_DE_LEADS,
+        'POST api/admin/pipeline-opportunities/{id}/notes' => SoloLeadsRecursos::OPORTUNIDAD_DE_LEADS,
+    ];
+
+    /**
+     * Claves anidadas que el perfil ve SÓLO en las respuestas de `RUTAS_DEL_TABLERO` (las rutas de Leads no cambian de
+     * filtro). `call`, la Meet con su transcripción, queda afuera a propósito.
+     *
+     * @var array<int, string>
+     */
+    const CLAVES_DEL_TABLERO = [
+        'opportunities', 'opportunity', 'activity', 'activities', 'resumen', 'por_etapa', 'motivos_perdida', 'agenda',
+        'stage', 'stages', 'subject', 'owner', 'last_activity', 'pipeline', 'pipelines', 'fields', 'lost_reasons',
+        'ultima_llamada', 'llamada', 'oportunidad', 'admin', 'cargada_por',
+    ];
+
+    /**
      * Restricciones por parámetro de ruta: "<MÉTODO> <uri>" => [nombre del parámetro => valores permitidos].
      * Una ruta con restricción sólo se permite si TODOS sus parámetros restringidos traen un valor de la lista.
      *
@@ -102,6 +152,8 @@ class AdminSoloLeadsPolicy
     const CAMPOS_EDITABLES = [
         // Cambiar el estado y la nota; nada más del lead (nombre, teléfono, empresa, etc.).
         'PUT api/admin/lead/{id}' => ['status', 'notes'],
+        // Tablero de Juan: la próxima acción de la tarjeta; el responsable no se cambia.
+        'PUT api/admin/pipeline-opportunities/{id}' => ['next_action_at', 'next_action_note'],
     ];
 
     /**
@@ -245,7 +297,7 @@ class AdminSoloLeadsPolicy
     {
         $clave = $this->clave_de_ruta($metodo, $uri);
 
-        if (! in_array($clave, self::RUTAS_PERMITIDAS, true)) {
+        if (! in_array($clave, self::RUTAS_PERMITIDAS, true) && ! in_array($clave, self::RUTAS_DEL_TABLERO, true)) {
             return false;
         }
 
@@ -259,6 +311,21 @@ class AdminSoloLeadsPolicy
         }
 
         return true;
+    }
+
+    /**
+     * La regla de recurso que hay que verificar contra la base para una ruta del tablero (null si no tiene).
+     *
+     * @param string $metodo Verbo HTTP.
+     * @param string $uri    Uri de la ruta con sus marcadores.
+     *
+     * @return string|null Una constante de {@see SoloLeadsRecursos}.
+     */
+    public function regla_de_recurso(string $metodo, string $uri)
+    {
+        $clave = $this->clave_de_ruta($metodo, $uri);
+
+        return isset(self::RECURSOS_DEL_TABLERO[$clave]) ? self::RECURSOS_DEL_TABLERO[$clave] : null;
     }
 
     /**
@@ -327,27 +394,33 @@ class AdminSoloLeadsPolicy
      * 4. Un objeto o lista bajo una clave de CLAVES_ANIDADAS_PERMITIDAS se recorre con estas mismas reglas.
      * 5. Cualquier otro objeto o lista se elimina.
      *
-     * @param mixed $valor Valor decodificado del cuerpo de la respuesta.
+     * @param mixed       $valor         Valor decodificado del cuerpo de la respuesta.
+     * @param string|null $clave_de_ruta «<MÉTODO> <uri>» de la ruta (opcional): en las del tablero se suman las claves de
+     *                                   `CLAVES_DEL_TABLERO`. Un llamador que no lo pasa filtra como antes.
      *
      * @return mixed El mismo valor sin lo que el perfil no puede ver.
      */
-    public function filtrar_salida($valor)
+    public function filtrar_salida($valor, ?string $clave_de_ruta = null)
     {
-        return $this->filtrar_nodo($valor);
+        /* Sólo las rutas del tablero suman las claves anidadas del tablero; el resto filtra como siempre. */
+        $extra = $clave_de_ruta !== null && in_array($clave_de_ruta, self::RUTAS_DEL_TABLERO, true) ? self::CLAVES_DEL_TABLERO : [];
+
+        return $this->filtrar_nodo($valor, $extra);
     }
 
     /**
      * Recorre un nodo (objeto, lista o escalar) aplicando las reglas de `filtrar_salida()`.
      *
-     * @param mixed $nodo Nodo a filtrar.
+     * @param mixed              $nodo         Nodo a filtrar.
+     * @param array<int, string> $claves_extra Claves anidadas que además se permiten (las del tablero, según la ruta).
      *
      * @return mixed
      */
-    private function filtrar_nodo($nodo)
+    private function filtrar_nodo($nodo, array $claves_extra = [])
     {
         if (is_array($nodo) && $this->es_lista($nodo)) {
-            return array_map(function ($hijo) {
-                return $this->filtrar_nodo($hijo);
+            return array_map(function ($hijo) use ($claves_extra) {
+                return $this->filtrar_nodo($hijo, $claves_extra);
             }, $nodo);
         }
 
@@ -372,8 +445,8 @@ class AdminSoloLeadsPolicy
 
             if (isset(self::CAMPOS_MINIMOS_DE_RELACIONES[$clave])) {
                 $salida[$clave] = $this->reducir_a_campos($hijo, self::CAMPOS_MINIMOS_DE_RELACIONES[$clave]);
-            } elseif (in_array($clave, self::CLAVES_ANIDADAS_PERMITIDAS, true)) {
-                $salida[$clave] = $this->filtrar_nodo($hijo);
+            } elseif (in_array($clave, self::CLAVES_ANIDADAS_PERMITIDAS, true) || in_array($clave, $claves_extra, true)) {
+                $salida[$clave] = $this->filtrar_nodo($hijo, $claves_extra);
             }
             // Cualquier otra relación u objeto anidado no listado se elimina.
         }
