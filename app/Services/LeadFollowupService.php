@@ -54,12 +54,13 @@ class LeadFollowupService
      * `process_lead()` a propósito: `process_single_lead()` (el comando de prueba local) y el botón
      * manual no son la cadencia automática.
      *
-     * @return array{processed:int,suggestions:int,paused:int,errors:int,fuera_de_franja:bool}
-     *   `fuera_de_franja` en true: la corrida no procesó nada porque era de noche.
+     * @return array{processed:int,suggestions:int,paused:int,errors:int,embudo:int,fuera_de_franja:bool}
+     *   `fuera_de_franja` en true: la corrida no procesó nada porque era de noche. `embudo` cuenta los leads que no se
+     *   tocaron porque los lleva el embudo nuevo (pasos programados, E3).
      */
     public function process_all_active_leads(): array
     {
-        $stats = ['processed' => 0, 'suggestions' => 0, 'paused' => 0, 'errors' => 0, 'fuera_de_franja' => false];
+        $stats = ['processed' => 0, 'suggestions' => 0, 'paused' => 0, 'errors' => 0, 'embudo' => 0, 'fuera_de_franja' => false];
 
         if (! FranjaHorariaDeSeguimientos::ahora_esta_dentro()) {
             $stats['fuera_de_franja'] = true;
@@ -90,6 +91,9 @@ class LeadFollowupService
                 }
                 if ($result === 'paused') {
                     $stats['paused']++;
+                }
+                if ($result === 'embudo') {
+                    $stats['embudo']++;
                 }
             } catch (\Throwable $e) {
                 $stats['errors']++;
@@ -293,7 +297,7 @@ class LeadFollowupService
      *                                                               armado). Null: se crea uno para este
      *                                                               lead (camino de process_single_lead()).
      *
-     * @return string|null suggestion|paused|null
+     * @return string|null suggestion|paused|embudo|null
      */
     protected function process_lead(Lead $lead, $rules_by_estado, ?ClientPhoneDirectory $directorio = null): ?string
     {
@@ -302,6 +306,16 @@ class LeadFollowupService
         }
         if (! $rules_by_estado->has($lead->status)) {
             return null;
+        }
+
+        /*
+         * Embudo nuevo (misión embudo-whatsapp-precios, E3): un lead que tiene pasos de seguimiento del embudo en un estado con
+         * pasos (`nuevo`, `contactado`, `link_enviado`) lo llevan ellos, no este cron: si no, recibiría dos cadencias a la vez
+         * (la de 48 h de este cron encima de la de 3 h y 22 h). Sale un resultado propio, `embudo`, para el log de la corrida.
+         * Un lead que ya salió de esos estados (demo, closer...) vuelve a ser del cron aunque conserve filas de pasos viejas.
+         */
+        if (LeadEmbudoSeguimientosService::lo_lleva_el_embudo($lead)) {
+            return 'embudo';
         }
 
         /*

@@ -490,6 +490,15 @@ class LeadScheduledMessageService
             return $this->marcar_cancelado($programado, LeadScheduledMessage::CANCELED_LEAD_CERRADO);
         }
 
+        /* Pasos de seguimiento del embudo (misión embudo-whatsapp-precios, E3): tres frenos propios, DESPUÉS de los de promovido
+           y cerrado (un lead que ya creó su prueba se cancela por `lead_promovido`, que es la causa real). */
+        if ($programado->paso_embudo !== null) {
+            $resultado_del_paso = $this->frenar_paso_del_embudo($programado, $lead);
+            if ($resultado_del_paso !== null) {
+                return $resultado_del_paso;
+            }
+        }
+
         /* Freno 4, revalidado: alguien marcó a mano que a este lead ya no le llega nada. La marca
            la puso una persona mirando la conversación y un envío automático no está en posición de
            contradecirla — igual que en `claude/*`, no hay parámetro que la saltee. */
@@ -598,9 +607,15 @@ class LeadScheduledMessageService
            al mismo lead. Con `enviando` reclamado antes del envío eso ya no puede pasar, y este
            catch cierra el caso completo dejando la fila en un estado terminal y honesto. */
         try {
+            /* Un paso del embudo no tiene autor humano: sale como mensaje AUTOMÁTICO del sistema, con un kind que E2 trata
+               como `kinds_automaticos()` (cuenta como entregado en `puntos_entregados`, pero no como respuesta a una pregunta
+               del lead). El que programa un operador sigue saliendo como `setter`. */
+            $es_paso_del_embudo = $programado->paso_embudo !== null;
+
             $mensaje = LeadMessage::create([
                 'lead_id'               => (int) $lead->id,
-                'sender'                => 'setter',
+                'sender'                => $es_paso_del_embudo ? 'sistema' : 'setter',
+                'system_message_kind'   => $es_paso_del_embudo ? LeadFlujoEntradaService::KIND_EMBUDO_PASO : null,
                 'content'               => (string) $programado->content,
                 'status'                => 'enviado',
                 'whatsapp_message_id'   => $whatsapp_message_id,
@@ -652,6 +667,53 @@ class LeadScheduledMessageService
                     . '). NO lo vuelvas a mandar: ya salió.'
             );
         }
+    }
+
+    /**
+     * Los frenos propios de un paso de seguimiento del embudo (E3), en este orden:
+     *  1. el interruptor del flujo de entrada está apagado → se cancela (`flujo_apagado`);
+     *  2. el lead ya no está en el estado para el que se programó → se cancela (`cambio_de_estado`);
+     *  3. hay una conversación a medio contestar (pregunta sin contestar, sugerencia sin enviar o generación de la IA
+     *     agendada) → se pospone 60 minutos, y si ya no entra en la ventana de 24 h o en la franja se cancela
+     *     (`conversacion_pendiente`).
+     * En los tres casos no se llama a WhatsApp.
+     *
+     * @param LeadScheduledMessage $programado Paso ya reclamado (`enviando`).
+     * @param Lead                 $lead
+     *
+     * @return string|null El estado en que quedó la fila si algún freno actuó; null si el paso puede seguir su camino.
+     */
+    private function frenar_paso_del_embudo(LeadScheduledMessage $programado, Lead $lead)
+    {
+        if (! LeadFlujoEntradaService::activo()) {
+            return $this->marcar_cancelado($programado, LeadScheduledMessage::CANCELED_FLUJO_APAGADO);
+        }
+
+        if ((string) $lead->status !== (string) $programado->estado_lead_al_programar) {
+            return $this->marcar_cancelado($programado, LeadScheduledMessage::CANCELED_CAMBIO_DE_ESTADO);
+        }
+
+        if (! LeadEmbudoSeguimientosService::hay_conversacion_pendiente($lead)) {
+            return null;
+        }
+
+        $nuevo_momento = LeadEmbudoSeguimientosService::momento_pospuesto($programado, $lead);
+        if ($nuevo_momento === null) {
+            return $this->marcar_cancelado($programado, LeadScheduledMessage::CANCELED_CONVERSACION_PENDIENTE);
+        }
+
+        /* La fila volvió a `pendiente`: la reclamó `despachar_uno()` y todavía no salió nada. La primera vez deja en
+           `error_text` la hora original (el tope de 24 h de la retención se cuenta desde ahí). */
+        $marca = LeadEmbudoSeguimientosService::marca_de_la_primera_retencion($programado);
+        if ($marca !== null) {
+            $programado->error_text = $marca;
+        }
+        $programado->scheduled_send_at   = $nuevo_momento;
+        $programado->status              = LeadScheduledMessage::STATUS_PENDIENTE;
+        $programado->dispatch_started_at = null;
+        $programado->save();
+
+        return LeadScheduledMessage::STATUS_PENDIENTE;
     }
 
     /**

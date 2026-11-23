@@ -52,6 +52,7 @@ class StatusCardsAgrupadaOtrosTest extends TestCase
         'demo_pendiente_de_terminar',
         'demo_realizada',
         'prueba_activa',
+        'prueba_vencida',
         'implementacion_pedida',
         'mail2_enviado',
         'cerrado_ganado',

@@ -8,6 +8,7 @@ use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Models\MessageVariant;
 use App\Services\LeadBroadcastService;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -445,6 +446,17 @@ class LeadWhatsappOnboardingService
                 LeadFlujoEntradaService::texto_del_punto($punto),
                 (string) LeadFlujoEntradaService::kind_del_punto($punto)
             );
+        }
+
+        /* E3 (misión embudo-whatsapp-precios): lo que salió arma los seguimientos del embudo.
+           - `llegada_2` salió con el lead todavía en `nuevo`: se programan `nuevo_3h` y `nuevo_22h`, anclados en este momento.
+           - El link de la prueba salió por este camino literal (el lead de la web que contestó sin preguntar): como a cualquier
+             otro envío del link, el lead pasa a `link_enviado` (DECISIONES-E3, P1), que programa los pasos del link. */
+        if (in_array('prueba_y_rubro', $debidos, true) && (string) $lead->status === 'nuevo') {
+            LeadEmbudoSeguimientosService::programar_para_estado($lead, Carbon::now(), false);
+        }
+        if (in_array('link_prueba', $debidos, true)) {
+            LeadFlujoEntradaService::marcar_link_enviado($lead, LeadFlujoEntradaService::texto_del_punto('link_prueba'));
         }
     }
 

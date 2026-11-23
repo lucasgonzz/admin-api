@@ -2227,6 +2227,12 @@ class WhatsappWebhookController extends Controller
             $this->marcar_contactado_si_respondio_a_la_presentacion($lead, $onboarding_service);
         }
 
+        // 2b-bis) Seguimientos del embudo (misión embudo-whatsapp-precios, E3): cada inbound de un lead que ya tiene pasos y está
+        //     en `contactado` o `link_enviado` vuelve a anclarlos en este mensaje; y si el lead acaba de pasar de `nuevo` a
+        //     `contactado`, se cancelan los pasos de `nuevo` y se programan los de `contactado`. Va ANTES de decidir el camino del
+        //     paso 2 (literal o IA) porque el cambio de estado ya ocurrió y no depende de ese camino.
+        \App\Services\LeadEmbudoSeguimientosService::al_llegar_un_mensaje($lead);
+
         // Detectar confirmaciones de la demo (ingreso / fin) ANTES de pedir sugerencia IA.
         // Si se detecta una confirmación de fin, la IA no debe generar sugerencias sobre ese mensaje.
         $this->handle_demo_confirmation_if_needed($lead, (string) $content);
