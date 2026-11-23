@@ -457,6 +457,9 @@ Route::middleware('claude.task.key')
            de la etapa, con reserva vigente (misión hitos-de-implementacion-por-soporte, 26/10/2026). */
         Route::post('support-codex/tickets/{id}/implementation-note', 'Api\ClaudeSupportCodexController@implementation_note')
             ->whereNumber('id');
+        /* El dueño de una prueba sin implementación la pide por Soporte (misión embudo-juan-pipeline, E2). */
+        Route::post('support-codex/tickets/{id}/implementacion-pedida', 'Api\ClaudeImplementacionPedidaController@pedida_json')
+            ->whereNumber('id');
         /* Seguimiento proactivo de las implementaciones (misión cruzada seguimiento-de-implementaciones, 11/11/2026):
            el monitor pide los vencidos, reserva uno con su contexto, guarda los hitos de uso que midió y manda (o
            pospone) el mensaje que redactó Martín. Desde un ticket normal, Martín pausa o reanuda el seguimiento del
@@ -1209,6 +1212,10 @@ Route::prefix('admin')->group(function () {
            `prueba-NN` del VPS con sus acciones (dormir, despertar, borrar con respaldo, reintentar, mantener). */
         Route::get('client/{clientId}/prueba', [\App\Http\Controllers\PruebaInstanciaController::class, 'prueba_del_cliente_json']);
         Route::put('client/{clientId}/prueba', [\App\Http\Controllers\PruebaInstanciaController::class, 'cambiar_dias_del_cliente_json']);
+        /* Implementación contratada y pausa de la prueba (misión embudo-juan-pipeline, E2). */
+        Route::put('client/{id}/implementacion-contratada', [\App\Http\Controllers\ClientImplementacionContratadaController::class, 'fijar_json'])->whereNumber('id');
+        Route::post('client/{id}/implementacion/articulos-importados', [\App\Http\Controllers\ClientImplementacionContratadaController::class, 'articulos_importados_json'])->whereNumber('id');
+        Route::post('client/{id}/prueba/reanudar', [\App\Http\Controllers\ClientImplementacionContratadaController::class, 'reanudar_json'])->whereNumber('id');
         Route::get('lead/{leadId}/prueba', [\App\Http\Controllers\PruebaInstanciaController::class, 'prueba_del_lead_json']);
         Route::put('lead/{leadId}/prueba', [\App\Http\Controllers\PruebaInstanciaController::class, 'cambiar_dias_del_lead_json']);
         Route::get('prueba/instancias', [\App\Http\Controllers\PruebaInstanciaController::class, 'index_json']);

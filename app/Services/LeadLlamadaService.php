@@ -103,6 +103,16 @@ class LeadLlamadaService
         }
 
         $limpios  = $this->validar($datos, (array) $pipeline->lost_reasons);
+
+        /* E2: «pagó la mitad» de un lead que ya tiene prueba (cliente) pide los paquetes implementados; sin cliente (todavía no
+           creó la prueba) los paquetes son opcionales. Se valida ANTES de guardar nada. */
+        $paquetes = [];
+        $cliente  = $lead->promoted_client_id !== null ? \App\Models\Client::query()->find((int) $lead->promoted_client_id) : null;
+        if ($limpios['resultado'] === LeadLlamada::RESULTADO_PAGO_LA_MITAD && $cliente !== null) {
+            $paquetes = app(ImplementacionContratadaService::class)->validar('mitad', isset($datos['paquetes']) && is_array($datos['paquetes']) ? $datos['paquetes'] : []);
+        }
+        $limpios['cliente']  = $cliente;
+        $limpios['paquetes'] = $paquetes;
         $hecha_por = $this->quien_hizo_la_llamada($actor, $datos);
 
         return DB::transaction(function () use ($lead, $actor, $limpios, $hecha_por) {
@@ -538,6 +548,14 @@ class LeadLlamadaService
             case LeadLlamada::RESULTADO_PAGO_LA_MITAD:
                 $tarjeta = $this->colocar($tarjeta, TableroDeJuanService::ETAPA_EN_IMPLEMENTACION, null, null, [], $hecha_por);
                 $this->cambiar_el_estado_del_lead($lead, 'en_implementacion');
+
+                /* E2: con prueba, el mismo servicio de la ficha (pausa, implementación, tarea del cobro); sin prueba, una tarea
+                   para dar de alta e implementar. */
+                if ($datos['cliente'] !== null) {
+                    app(ImplementacionContratadaService::class)->fijar($datos['cliente'], 'mitad', $datos['paquetes'], \App\Models\Admin::query()->find($hecha_por));
+                } else {
+                    app(ImplementacionContratadaService::class)->crear_la_tarea_de_alta_sin_prueba($lead);
+                }
 
                 return $tarjeta;
 

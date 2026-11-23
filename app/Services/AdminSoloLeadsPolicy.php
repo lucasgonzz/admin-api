@@ -443,6 +443,13 @@ class AdminSoloLeadsPolicy
                 continue;
             }
 
+            /* Los errores de validación son sólo textos por campo (`errors.<campo>: [mensajes]`): el perfil los ve completos, porque sin
+               ellos «Registrar llamada» no puede decirle a Juan qué le falta. */
+            if ($clave === 'errors') {
+                $salida[$clave] = $hijo;
+                continue;
+            }
+
             if (isset(self::CAMPOS_MINIMOS_DE_RELACIONES[$clave])) {
                 $salida[$clave] = $this->reducir_a_campos($hijo, self::CAMPOS_MINIMOS_DE_RELACIONES[$clave]);
             } elseif (in_array($clave, self::CLAVES_ANIDADAS_PERMITIDAS, true) || in_array($clave, $claves_extra, true)) {

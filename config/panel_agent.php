@@ -129,6 +129,8 @@ return [
             'client_apis'          => 'credenciales',
             'active_client_api_id' => 'credenciales',
         ],
+        // «Pagó la mitad» (el campo `paquetes` sólo viaja con ese resultado): pausa la prueba y avisa al ERP; no sale de un audio sin una mirada humana.
+        'POST lead/{id}/llamadas' => ['paquetes' => 'plata'],
     ],
 
     /* Por qué frena cada categoría (aparece en el preview y en el catálogo). */
