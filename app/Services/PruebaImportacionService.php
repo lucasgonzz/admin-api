@@ -182,7 +182,7 @@ class PruebaImportacionService
         /* E2: con la implementación contratada (`mitad` o `completa`) los ARTÍCULOS los importa Lucas, no el sistema: no se manda
            nada a la instancia, queda una tarea para él (una sola por cliente y archivo). Clientes y proveedores siguen su camino. */
         $gestion = app(ImplementacionContratadaService::class);
-        if ($modelo === 'article' && $gestion->articulos_los_importa_lucas($client)) {
+        if ($modelo === 'article' && $alcance === null && $gestion->articulos_los_importa_lucas($client)) {
             if (isset($input['attachment_id'])) {
                 $origen_del_archivo = '#' . (int) $input['attachment_id'] . ' ' . $archivo['filename'];
             } elseif (isset($input['pdf_attachment_id'])) {

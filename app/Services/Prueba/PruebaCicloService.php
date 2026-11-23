@@ -225,6 +225,11 @@ class PruebaCicloService
         $inicio   = $client->created_at instanceof Carbon ? $client->created_at->copy() : Carbon::now();
         $vence_at = $inicio->addDays($dias);
 
+        /* E2: cambiar los días de una prueba pausada por la implementación es fijarle un vencimiento real: se limpia la marca de pausa. */
+        if ($client->prueba_pausada_at !== null && $client->prueba_reanudada_at === null) {
+            $client->prueba_pausada_at = null;
+        }
+
         return $this->fijar_vencimiento($client, $vence_at, $dias);
     }
 

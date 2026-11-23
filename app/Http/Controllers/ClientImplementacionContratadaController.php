@@ -40,7 +40,7 @@ class ClientImplementacionContratadaController extends Controller
 
         $client = $servicio->fijar($client, (string) $request->input('estado', ''), $paquetes, $request->user());
 
-        return response()->json(['model' => $this->como_json($client, $servicio)], 200);
+        return response()->json(['model' => $this->como_json($client), 'c3' => $servicio->ultimo_c3()], 200);
     }
 
     /**
@@ -56,7 +56,7 @@ class ClientImplementacionContratadaController extends Controller
     {
         $client = Client::query()->findOrFail((int) $id);
 
-        return response()->json(['model' => $this->como_json($servicio->articulos_importados_ok($client, $request->user()), $servicio)], 200);
+        return response()->json(['model' => $this->como_json($servicio->articulos_importados_ok($client, $request->user()))], 200);
     }
 
     /**
@@ -73,27 +73,35 @@ class ClientImplementacionContratadaController extends Controller
     {
         $client = Client::query()->findOrFail((int) $id);
 
-        return response()->json(['model' => $this->como_json($servicio->reanudar_prueba($client), $servicio)], 200);
+        return response()->json(['model' => $this->como_json($servicio->reanudar_prueba($client)), 'c3' => $servicio->ultimo_c3()], 200);
     }
 
     /**
-     * El cliente con los campos de la implementación contratada (y nada de sus claves).
+     * El cliente con las columnas de la implementación contratada y de la pausa, con sus nombres reales (y el `estado` del cliente sin
+     * pisar), más lo que se sabe del aviso al ERP.
      *
-     * @param Client                          $client
-     * @param ImplementacionContratadaService $servicio
+     * @param Client $client
      *
      * @return array<string, mixed>
      */
-    private function como_json(Client $client, ImplementacionContratadaService $servicio): array
+    private function como_json(Client $client): array
     {
-        return array_merge(
-            [
-                'id'            => (int) $client->id,
-                'estado'        => (string) $client->estado,
-                'trial_days'    => $client->trial_days === null ? null : (int) $client->trial_days,
-                'trial_ends_at' => $client->trial_ends_at === null ? null : \Carbon\Carbon::parse($client->trial_ends_at)->toIso8601String(),
-            ],
-            (array) $servicio->bloque_para_soporte($client)
-        );
+        $fecha = function ($valor) {
+            return $valor === null ? null : \Carbon\Carbon::parse($valor)->toIso8601String();
+        };
+
+        return [
+            'id'                                    => (int) $client->id,
+            'estado'                                => (string) $client->estado,
+            'trial_days'                            => $client->trial_days === null ? null : (int) $client->trial_days,
+            'trial_ends_at'                         => $fecha($client->trial_ends_at),
+            'implementacion_contratada'             => (string) $client->implementacion_contratada,
+            'implementacion_paquetes'               => array_values((array) $client->implementacion_paquetes),
+            'implementacion_mitad_pagada_at'        => $fecha($client->implementacion_mitad_pagada_at),
+            'implementacion_articulos_recibidos_at' => $fecha($client->implementacion_articulos_recibidos_at),
+            'implementacion_articulos_ok_at'        => $fecha($client->implementacion_articulos_ok_at),
+            'prueba_pausada_at'                     => $fecha($client->prueba_pausada_at),
+            'prueba_reanudada_at'                   => $fecha($client->prueba_reanudada_at),
+        ];
     }
 }

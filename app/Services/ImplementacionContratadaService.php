@@ -53,6 +53,9 @@ class ImplementacionContratadaService
     /** @var PruebaCicloService */
     private $ciclo;
 
+    /** @var array<string, mixed>|null El resultado de C3 (aviso al ERP) de la última pausa o reanudación de esta instancia. */
+    private $ultimo_c3 = null;
+
     /**
      * @param TableroDeJuanService $tablero El tablero de Juan (tarjeta y lead).
      * @param PruebaCicloService   $ciclo   El ciclo de la prueba (vencimiento y C3).
@@ -80,7 +83,8 @@ class ImplementacionContratadaService
     }
 
     /**
-     * ¿Los artículos los importa Lucas (no el sistema)? `mitad` o `completa`.
+     * ¿Los artículos de la implementación los importa Lucas (no el sistema)? `mitad` o `completa`, y sólo hasta que se marca «Artículos
+     * importados OK»: después Soporte importa como a cualquier cliente con importación incluida.
      *
      * @param Client|null $client
      *
@@ -88,7 +92,9 @@ class ImplementacionContratadaService
      */
     public function articulos_los_importa_lucas($client): bool
     {
-        return $client !== null && in_array((string) $client->implementacion_contratada, ['mitad', 'completa'], true);
+        return $client !== null
+            && in_array((string) $client->implementacion_contratada, ['mitad', 'completa'], true)
+            && $client->implementacion_articulos_ok_at === null;
     }
 
     /**
@@ -156,22 +162,34 @@ class ImplementacionContratadaService
         $estrena  = $paga && in_array($anterior, ['no', 'incluida'], true);
 
         $client->implementacion_contratada = $estado;
+        $this->ultimo_c3 = null;
         $client->implementacion_paquetes   = $paquetes === [] ? null : $paquetes;
         if ($estrena && $client->implementacion_mitad_pagada_at === null) {
             $client->implementacion_mitad_pagada_at = AppTime::now();
         }
         $client->save();
 
+        /* Volver a `no` o `incluida` con la prueba pausada la reanuda: no puede quedar pausada sin implementación. */
+        if (! $paga && $this->esta_pausada($client)) {
+            return $this->reanudar_prueba($client);
+        }
+
         if (! $estrena) {
             return $client->fresh();
         }
 
-        if (in_array((string) $client->estado, PruebaCicloService::ESTADOS_EN_PRUEBA, true) && ! $this->esta_pausada($client)) {
+        /* Sólo un cliente EN PRUEBA se pausa y mueve su lead y su tarjeta: un cliente activo (que compra la implementación) deja el
+           dato, la implementación y las tareas, y nada más. */
+        $en_prueba = in_array((string) $client->estado, PruebaCicloService::ESTADOS_EN_PRUEBA, true);
+
+        if ($en_prueba && ! $this->esta_pausada($client)) {
             $this->pausar_prueba($client);
         }
 
         $this->iniciar_la_implementacion($client);
-        $this->mover_el_lead_a_implementacion($client);
+        if ($en_prueba) {
+            $this->mover_el_lead_a_implementacion($client);
+        }
         $this->crear_la_tarea_del_cobro($client, $paquetes, $autor);
 
         return $client->fresh();
@@ -190,7 +208,51 @@ class ImplementacionContratadaService
         $client->prueba_reanudada_at = null;
         $client->save();
 
-        $this->ciclo->fijar_vencimiento($client, AppTime::now()->addDays(self::HORIZONTE_DE_PAUSA_DIAS));
+        $this->avisar_si_fallo_c3(
+            $client,
+            $this->ciclo->fijar_vencimiento($client, AppTime::now()->addDays(self::HORIZONTE_DE_PAUSA_DIAS)),
+            'pausó'
+        );
+    }
+
+    /**
+     * El resultado de C3 (el aviso de vencimiento al sistema del cliente) de la última pausa o reanudación hecha con este servicio,
+     * para que la respuesta de la ficha lo informe.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function ultimo_c3()
+    {
+        return $this->ultimo_c3;
+    }
+
+    /**
+     * Guarda el resultado de C3 y, si NO salió bien, deja una tarea para Lucas: el sistema del cliente conserva su vencimiento
+     * anterior y, si no se corrige, vence en plena implementación (o sigue pausado de más).
+     *
+     * @param Client               $client
+     * @param array<string, mixed> $c3     Lo que devolvió `PruebaCicloService::fijar_vencimiento()`.
+     * @param string               $accion `pausó` o `reanudó`.
+     *
+     * @return void
+     */
+    private function avisar_si_fallo_c3(Client $client, array $c3, string $accion)
+    {
+        $this->ultimo_c3 = $c3;
+
+        if (isset($c3['estado']) && $c3['estado'] === 'ok') {
+            return;
+        }
+
+        $nombre = $this->nombre_del_cliente($client);
+        $this->crear_tarea(
+            'impl_c3',
+            'Avisarle al sistema de ' . $nombre . ' el nuevo vencimiento de la prueba (falló el aviso)',
+            'Se ' . $accion . ' la prueba de ' . $nombre . ' pero el aviso al sistema del cliente no salió bien (' . (isset($c3['estado']) ? $c3['estado'] : 'sin estado')
+                . (isset($c3['mensaje']) && $c3['mensaje'] !== '' ? ': ' . $c3['mensaje'] : '') . '). Reintentalo cambiando los días desde la ficha del cliente '
+                . 'o corrigiendo el vencimiento en su sistema.' . "\n" . '[cliente:' . (int) $client->id . ']',
+            null
+        );
     }
 
     /**
@@ -212,7 +274,11 @@ class ImplementacionContratadaService
 
         $desde = $desde !== null ? $desde->copy() : AppTime::now();
 
-        $this->ciclo->fijar_vencimiento($client, $desde->copy()->addDays(self::DIAS_DESDE_LA_ENTREGA), self::DIAS_DESDE_LA_ENTREGA);
+        $this->avisar_si_fallo_c3(
+            $client,
+            $this->ciclo->fijar_vencimiento($client, $desde->copy()->addDays(self::DIAS_DESDE_LA_ENTREGA), self::DIAS_DESDE_LA_ENTREGA),
+            'reanudó'
+        );
 
         $client->prueba_reanudada_at = AppTime::now();
         $client->save();
@@ -255,6 +321,32 @@ class ImplementacionContratadaService
             'Dar de alta e implementar a ' . $empresa . ' (pagó la mitad, sin prueba)',
             'Juan registró que ' . $empresa . ' pagó la mitad de la implementación, pero todavía no creó su prueba. Verificá el cobro, '
                 . 'dalo de alta e implementalo; el dato de la implementación se carga en la ficha del cliente cuando exista.',
+            (int) $lead->id
+        );
+    }
+
+    /**
+     * La tarea para Lucas cuando Juan registra «pagó la mitad» sobre un lead que ya es cliente (su tarjeta está ganada): el tablero
+     * no se mueve, así que la implementación se carga a mano desde la ficha del cliente. Una sola abierta por lead.
+     *
+     * @param Lead $lead
+     *
+     * @return AdminTask
+     */
+    public function crear_la_tarea_desde_la_ficha(Lead $lead): AdminTask
+    {
+        $existente = AdminTask::query()->where('created_via', 'impl_ficha')->where('lead_id', (int) $lead->id)->where('is_done', false)->first();
+        if ($existente !== null) {
+            return $existente;
+        }
+
+        $empresa = trim((string) $lead->company_name) !== '' ? trim((string) $lead->company_name) : trim((string) $lead->contact_name);
+
+        return $this->crear_tarea(
+            'impl_ficha',
+            'Cargar la implementación de ' . $empresa . ' desde la ficha del cliente (Juan registró que pagó la mitad)',
+            'Juan registró que ' . $empresa . ', que ya es cliente, pagó la mitad de una implementación. Verificá el cobro y cargala desde la ficha del cliente '
+                . '(Implementación contratada): eso pausa lo que haga falta, inicia la implementación y deja la tarea de la venta.',
             (int) $lead->id
         );
     }

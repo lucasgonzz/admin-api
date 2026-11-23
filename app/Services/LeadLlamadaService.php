@@ -156,6 +156,9 @@ class LeadLlamadaService
                 $this->oportunidades->agregar_nota($tarjeta, $this->cuerpo_de_la_nota($llamada), 'call', null, $hecha_por);
                 if ($ganada === null) {
                     $tarjeta = $this->aplicar_el_resultado($lead, $tarjeta, $limpios, $hecha_por);
+                } elseif ($limpios['resultado'] === LeadLlamada::RESULTADO_PAGO_LA_MITAD) {
+                    /* Un lead que ya es cliente: el tablero no se mueve, pero Lucas tiene que cargar la implementación desde la ficha. */
+                    app(ImplementacionContratadaService::class)->crear_la_tarea_desde_la_ficha($lead);
                 }
             }
 
