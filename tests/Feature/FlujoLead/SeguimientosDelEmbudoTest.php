@@ -5,6 +5,7 @@ namespace Tests\Feature\FlujoLead;
 use App\Jobs\SendLeadDosFormasJob;
 use App\Jobs\SendLeadPresentationMessageJob;
 use App\Models\AdminSetting;
+use App\Models\Client;
 use App\Models\FollowupRule;
 use App\Models\FollowupTemplate;
 use App\Models\Lead;
@@ -404,7 +405,11 @@ class SeguimientosDelEmbudoTest extends TestCase
         $espia = $this->espiar_whatsapp();
 
         /* Como lo deja el alta de la prueba (por query builder): `prueba_activa` y el cliente promovido. */
-        Lead::query()->whereKey($lead->id)->update(['status' => 'prueba_activa', 'promoted_client_id' => 987654]);
+        $cliente = Client::query()->create([
+            'name' => 'Negocio que creó su prueba', 'is_active' => true, 'estado' => 'prueba', 'api_url' => '', 'api_key' => 'x',
+            'inbound_api_key' => 'y', 'slug' => 'prueba-e3-' . uniqid(),
+        ]);
+        Lead::query()->whereKey($lead->id)->update(['status' => 'prueba_activa', 'promoted_client_id' => $cliente->id]);
 
         $this->ir_a('2026-11-24 10:05:00'); // vencen los dos
         $this->assertSame(0, Artisan::call('leads:send-scheduled-messages'));
@@ -577,11 +582,12 @@ class SeguimientosDelEmbudoTest extends TestCase
         $this->mensaje_de_sistema($lead, 'Sugerencia de Martín pendiente de aprobación.', null, 'sugerido');
         $antes = count($espia->textos);
 
-        $this->ir_a('2026-11-24 09:05:00');
+        /* El último inbound fue a las 10:05 del 23/11 (la ventana cierra a las 10:05 del 24): 09:02 + 60 minutos entra. */
+        $this->ir_a('2026-11-24 09:02:00');
         $this->assertSame(0, Artisan::call('leads:send-scheduled-messages'));
 
         $this->assertCount($antes, $espia->textos, 'No sale mientras haya una sugerencia sin enviar.');
-        $this->assertSame('2026-11-24 10:05:00', $this->hora_ar($this->unico_pendiente($lead, 'conversando_22h')->scheduled_send_at));
+        $this->assertSame('2026-11-24 10:02:00', $this->hora_ar($this->unico_pendiente($lead, 'conversando_22h')->scheduled_send_at));
     }
 
     /**
