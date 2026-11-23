@@ -49,6 +49,12 @@ class ContractPreciosService
     /** El descuento de bienvenida: 50 % del abono durante los primeros 3 meses (Lucas, 3/11/2026). */
     const DESCUENTO_INICIAL = ['porcentaje' => 50, 'meses' => 3];
 
+    /** Atributo del request donde `preparar_request` deja la foto armada por el servidor. */
+    const FOTO_ATRIBUTO = 'contract_plan_gestion_foto_del_servidor';
+
+    /** Política de precios con la que se toman las fotos de plan (oferta del 21/11/2026, etapa E4). */
+    const POLITICA_DE_LA_FOTO = '2026-11-21';
+
     /**
      * Texto del plan para el PDF, o null si la clave no es un plan conocido (vigente ni histórico).
      *
@@ -56,15 +62,23 @@ class ContractPreciosService
      * `inicial` de $34.200 se lee como el histórico de 300 ventas y no como el vigente de 100
      * operaciones: el PDF de un contrato firmado antes del 3/11/2026 no cambia.
      *
+     * Con `$foto` (el plan tal como estaba al elegirlo, ver `foto_del_plan()`), la foto manda: el rango sale
+     * de ella y no de las constantes ni de la fuente actual, así que el PDF de un contrato firmado no cambia
+     * si después se edita la fuente de precios (etapa E4). Sin foto, la lógica de hoy (política 3/11/2026).
+     *
      * @param mixed      $clave
      * @param mixed|null $abono_pactado
+     * @param mixed|null $foto Foto del plan del contrato (array) o null si el contrato no tiene.
      *
      * @return array|null
      */
-    public static function plan_gestion($clave, $abono_pactado = null): ?array
+    public static function plan_gestion($clave, $abono_pactado = null, $foto = null): ?array
     {
         if (!is_string($clave)) {
             return null;
+        }
+        if (self::foto_es_valida($foto, $clave)) {
+            return ['clave' => $clave, 'nombre' => $foto['nombre'], 'limite' => self::describir_rango_de_la_foto($foto)];
         }
         $historico = isset(self::PLANES_HISTORICOS[$clave]) ? self::PLANES_HISTORICOS[$clave] : null;
         $vigente = isset(self::PLANES_GESTION[$clave]) ? self::PLANES_GESTION[$clave] : null;
@@ -156,13 +170,21 @@ class ContractPreciosService
      * @param int        $operaciones    Ventas + compras + gastos del mes.
      * @param int        $usuarios_extra Usuarios por encima de los incluidos en el plan.
      * @param float|null $abono_pactado  El abono del contrato si difiere del de lista (editable).
+     * @param mixed|null $foto           Foto del plan del contrato: con foto, el rango, el excedente y el abono de
+     *                                   lista salen de la foto (`hasta` null = sin tope ni excedente).
      *
      * @return array{plan: string, nombre: string, abono: float, operaciones: int, limite: int|null, excedentes: int, precio_excedente: float, importe_excedentes: float, usuarios_extra: int, precio_usuario_extra: float, importe_usuarios: float, total: float}
      */
-    public static function cuota_mensual(string $plan, int $operaciones, int $usuarios_extra = 0, ?float $abono_pactado = null): array
+    public static function cuota_mensual(string $plan, int $operaciones, int $usuarios_extra = 0, ?float $abono_pactado = null, $foto = null): array
     {
-        $datos = isset(self::PLANES_GESTION[$plan]) ? self::PLANES_GESTION[$plan] : self::PLANES_GESTION['a_medida'];
-        $clave = isset(self::PLANES_GESTION[$plan]) ? $plan : 'a_medida';
+        if (self::foto_es_valida($foto, $plan)) {
+            /* Con foto, manda la foto (se arma con la misma forma que una fila de PLANES_GESTION). */
+            $datos = ['nombre' => $foto['nombre'], 'limite' => $foto['hasta'], 'abono' => $foto['abono_lista'], 'excedente' => $foto['excedente']];
+            $clave = $plan;
+        } else {
+            $datos = isset(self::PLANES_GESTION[$plan]) ? self::PLANES_GESTION[$plan] : self::PLANES_GESTION['a_medida'];
+            $clave = isset(self::PLANES_GESTION[$plan]) ? $plan : 'a_medida';
+        }
         $abono = $abono_pactado !== null ? (float) $abono_pactado : (float) ($datos['abono'] ?? 0);
         $operaciones = max(0, $operaciones);
         $usuarios_extra = max(0, $usuarios_extra);
@@ -204,6 +226,98 @@ class ContractPreciosService
         return round($abono * (100 - self::DESCUENTO_INICIAL['porcentaje']) / 100, 2);
     }
 
+    /**
+     * ¿Es una foto de plan usable para esta clave? Un array con la clave y los campos que usan el PDF y la cuota.
+     *
+     * @param mixed       $foto
+     * @param string|null $clave Si viene, la foto tiene que ser de ese plan.
+     *
+     * @return bool
+     */
+    public static function foto_es_valida($foto, ?string $clave = null): bool
+    {
+        if (!is_array($foto) || !isset($foto['clave'], $foto['nombre'], $foto['desde'], $foto['abono_lista']) || !array_key_exists('hasta', $foto) || !array_key_exists('excedente', $foto)) {
+            return false;
+        }
+        return $clave === null || $foto['clave'] === $clave;
+    }
+
+    /**
+     * El texto del rango de una foto: «hasta N operaciones por mes», «de D a H operaciones por mes» o, sin
+     * tope, «operaciones ilimitadas».
+     *
+     * @param array $foto
+     *
+     * @return string
+     */
+    private static function describir_rango_de_la_foto(array $foto): string
+    {
+        if ($foto['hasta'] === null) {
+            return 'operaciones ilimitadas';
+        }
+        if ((int) $foto['desde'] === 0) {
+            return 'hasta '.number_format((int) $foto['hasta'], 0, ',', '.').' operaciones por mes';
+        }
+        return 'de '.number_format((int) $foto['desde'], 0, ',', '.').' a '.number_format((int) $foto['hasta'], 0, ',', '.').' operaciones por mes';
+    }
+
+    /**
+     * La foto de un plan vigente de la fuente única de precios, tal como está HOY, o null si la clave no es un
+     * plan vigente (`plus`, `a_medida`, los históricos). La política es la fecha de la oferta con la que se saca.
+     *
+     * @param mixed $clave
+     *
+     * @return array|null
+     */
+    public static function foto_del_plan($clave): ?array
+    {
+        $plan = is_string($clave) ? PreciosVigentesSettings::plan($clave) : null;
+        if ($plan === null) {
+            return null;
+        }
+        return [
+            'clave'       => $plan['clave'],
+            'nombre'      => $plan['nombre'],
+            'desde'       => $plan['desde'],
+            'hasta'       => $plan['hasta'],
+            'usuarios'    => $plan['usuarios'],
+            'excedente'   => $plan['excedente'],
+            'abono_lista' => $plan['abono'],
+            'politica'    => self::POLITICA_DE_LA_FOTO,
+        ];
+    }
+
+    /**
+     * Decide qué pasa con la foto cuando un guardado trae `contract_plan_gestion`.
+     *
+     *  - Plan vacío, que no es vigente (`plus`, `a_medida`, históricos) o es el histórico por ventas
+     *    (`inicial` con el abono de $34.200): sin foto (null), para que el PDF use la política del 3/11.
+     *  - El mismo plan que ya tenía el contrato: no se toca, tenga foto o no. Un contrato firmado sin foto que
+     *    se vuelve a guardar no puede cambiar de rango en silencio, y uno con foto no la pisa aunque la
+     *    fuente haya cambiado.
+     *  - Un plan vigente distinto del anterior (o el primero que se elige): foto nueva desde la fuente.
+     *
+     * @param mixed $nuevo     Clave que llega en el guardado.
+     * @param mixed $anterior  Clave que tenía el contrato.
+     * @param mixed $abono     Abono de Gestión pactado en el guardado.
+     *
+     * @return array|null|false array = foto nueva, null = quitar la foto, false = no tocar.
+     */
+    private static function foto_para_guardar($nuevo, $anterior, $abono)
+    {
+        if (!is_string($nuevo) || $nuevo === '' || self::es_plan_historico($nuevo, $abono)) {
+            return null;
+        }
+        $foto = self::foto_del_plan($nuevo);
+        if ($foto === null) {
+            return null;
+        }
+        if ($nuevo === $anterior) {
+            return false;
+        }
+        return $foto;
+    }
+
     public static function reglas(): array
     {
         $centavos = function ($atributo, $valor, $fallar) {
@@ -212,7 +326,12 @@ class ContractPreciosService
             }
         };
         /* Vigentes e históricos: guardar un contrato viejo sin tocarle el plan no puede dar 422. */
-        $planes = array_unique(array_merge(array_keys(self::PLANES_GESTION), array_keys(self::PLANES_HISTORICOS)));
+        $vigentes = [];
+        foreach (PreciosVigentesSettings::to_array()['gestion']['planes'] as $plan_vigente) {
+            $vigentes[] = $plan_vigente['clave'];
+        }
+        /* Unión: planes vigentes de la fuente, política 3/11 (con `plus` y `a_medida`) e históricos. */
+        $planes = array_unique(array_merge($vigentes, array_keys(self::PLANES_GESTION), array_keys(self::PLANES_HISTORICOS)));
         $reglas = [
             'contract_precios_sistemas' => ['nullable', 'array:gestion,ecommerce,agentes', 'size:3'],
             'contract_descuento_conjunto' => ['nullable', 'numeric', 'min:0', 'max:999999999', $centavos],
@@ -236,7 +355,17 @@ class ContractPreciosService
     /** Valida antes de escribir y deriva los totales históricos para cobranzas. */
     public static function preparar_request(Request $request, $contrato): void
     {
+        /* 🔴 La foto del plan NUNCA viene del cliente HTTP: se descarta lo que llegue en el cuerpo (form o JSON) y
+           en la query string ANTES de cualquier has/input/validate, y no hay regla de validación que la acepte. La
+           arma el servidor en `preparar_foto_del_plan` y la deja en un atributo del request (ver `FOTO_ATRIBUTO`)
+           para que el controlador la escriba él mismo. Ver ContratoFotoDelPlanNoSeFalsificaTest. */
+        $request->request->remove('contract_plan_gestion_foto');
+        $request->query->remove('contract_plan_gestion_foto');
+        if ($request->isJson()) {
+            $request->json()->remove('contract_plan_gestion_foto');
+        }
         $request->validate(self::reglas());
+        self::preparar_foto_del_plan($request, $contrato);
         $precios = $request->input('contract_precios_sistemas', $contrato->contract_precios_sistemas);
         self::preparar_precio_extra($request, $contrato, $precios);
         self::preparar_anual($request, $contrato, $precios);
@@ -262,6 +391,45 @@ class ContractPreciosService
             'contract_precio_licencia' => (string) $resumen['total'],
             'contract_mensualidad_base' => (string) $resumen['mensualidad'],
         ]);
+    }
+
+    /**
+     * Arma la foto del plan de gestión cuando el guardado trae `contract_plan_gestion` (ver `foto_para_guardar`).
+     * Sin esa clave en el guardado no se toca nada.
+     *
+     * @param Request $request
+     * @param mixed   $contrato Lead o Client.
+     *
+     * @return void
+     */
+    private static function preparar_foto_del_plan(Request $request, $contrato): void
+    {
+        if (!$request->has('contract_plan_gestion')) {
+            return;
+        }
+        $precios = $request->input('contract_precios_sistemas', $contrato->contract_precios_sistemas);
+        $abono = is_array($precios) ? ($precios['gestion']['mensualidad'] ?? null) : null;
+        $foto = self::foto_para_guardar($request->input('contract_plan_gestion'), $contrato->contract_plan_gestion, $abono);
+        if ($foto === false) {
+            return;
+        }
+        if ($foto === null && $contrato->contract_plan_gestion_foto === null) {
+            return;
+        }
+        $request->attributes->set(self::FOTO_ATRIBUTO, $foto);
+    }
+
+    /**
+     * La foto que armó `preparar_request` para este guardado: un array (foto nueva), null (quitarla) o false si
+     * el guardado no tiene que tocarla. Es lo único que el controlador escribe en `contract_plan_gestion_foto`.
+     *
+     * @param Request $request
+     *
+     * @return array|null|false
+     */
+    public static function foto_para_escribir(Request $request)
+    {
+        return $request->attributes->get(self::FOTO_ATRIBUTO, false);
     }
 
     private static function preparar_anual(Request $request, $contrato, $precios): void

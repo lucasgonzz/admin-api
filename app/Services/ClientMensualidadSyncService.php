@@ -290,10 +290,15 @@ class ClientMensualidadSyncService
         /* Un plan de la política anterior (por ventas: `estandar`, `pro`, o el `inicial` de $34.200)
          * no es un plan por operaciones: no se le aplican excedentes sobre 100 operaciones. Mismo
          * criterio que `plan_gestion()` para el PDF (hallazgo del chequeo independiente, 3/11/2026). */
-        $plan_del_contrato = is_string($client->contract_plan_gestion)
+        /* Con foto del plan (E4) manda la foto: el plan es del contrato aunque la fuente de precios haya cambiado. */
+        $foto = $client->contract_plan_gestion_foto;
+        $con_foto = is_string($client->contract_plan_gestion)
+            && ContractPreciosService::foto_es_valida($foto, $client->contract_plan_gestion);
+
+        $plan_del_contrato = $con_foto || (is_string($client->contract_plan_gestion)
             && isset(ContractPreciosService::PLANES_GESTION[$client->contract_plan_gestion])
             && $client->contract_plan_gestion !== 'a_medida'
-            && ! ContractPreciosService::es_plan_historico($client->contract_plan_gestion, $pactado);
+            && ! ContractPreciosService::es_plan_historico($client->contract_plan_gestion, $pactado));
 
         $plan = $plan_del_contrato
             ? $client->contract_plan_gestion
@@ -308,7 +313,8 @@ class ClientMensualidadSyncService
             $plan,
             (int) $operaciones_mes['total'],
             (int) ($client->contract_usuarios_extra ?? 0),
-            $abono_pactado
+            $abono_pactado,
+            $con_foto ? $foto : null
         );
         $cuota['plan_del_contrato'] = $plan_del_contrato;
         $cuota['mes'] = $operaciones_mes['mes'];

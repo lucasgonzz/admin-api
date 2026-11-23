@@ -465,6 +465,8 @@ class Lead extends Model
         // un JSON de keys de CotizadorSettings::SISTEMAS, y el plazo mínimo de la Suscripción va a
         // int porque el PDF lo escribe en letras con LeadContractPdfService::meses_en_letras().
         'contract_precios_sistemas'          => 'array',
+        // Foto del plan de gestión al elegirlo (E4): {clave, nombre, desde, hasta, usuarios, excedente, abono_lista, politica}
+        'contract_plan_gestion_foto'        => 'array',
         'contract_descuento_conjunto'        => 'float',
         'contract_pago_anual'                => 'boolean',
         'contract_descuento_anual'            => 'float',
