@@ -876,6 +876,15 @@ class LeadProperties
                 'value' => null,
                 'show' => false,
             ],
+            /* Foto del plan de gestión (E4): la arma el servidor en `ContractPreciosService::preparar_request`,
+               nunca viene de la SPA. */
+            [
+                'key' => 'contract_plan_gestion_foto',
+                'text' => 'Contrato — contract_plan_gestion_foto',
+                'type' => 'text',
+                'value' => null,
+                'show' => false,
+            ],
             [
                 'key' => 'contract_descuento_conjunto',
                 'text' => 'Contrato — contract_descuento_conjunto',

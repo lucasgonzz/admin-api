@@ -110,6 +110,8 @@ class Client extends Model
          * que en `Lead`, por el mismo motivo que el resto del bloque. `contract_modalidad` es texto
          * y no lleva cast. */
         'contract_precios_sistemas'          => 'array',
+        // Foto del plan de gestión al elegirlo (E4): {clave, nombre, desde, hasta, usuarios, excedente, abono_lista, politica}
+        'contract_plan_gestion_foto'        => 'array',
         'contract_descuento_conjunto'        => 'float',
         'contract_pago_anual'                => 'boolean',
         'contract_descuento_anual'            => 'float',

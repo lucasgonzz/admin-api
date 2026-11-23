@@ -166,7 +166,9 @@ class LeadContractPdfService
             ? ContractPreciosService::plan_gestion(
                 $lead->contract_plan_gestion,
                 /* El abono pactado distingue el `inicial` histórico (300 ventas) del vigente (100 operaciones). */
-                is_array($lead->contract_precios_sistemas) ? ($lead->contract_precios_sistemas['gestion']['mensualidad'] ?? null) : null
+                is_array($lead->contract_precios_sistemas) ? ($lead->contract_precios_sistemas['gestion']['mensualidad'] ?? null) : null,
+                /* La foto del plan (E4): con foto, el rango del PDF es el que se firmó aunque la fuente cambie. */
+                $lead->contract_plan_gestion_foto
             )
             : null;
 
