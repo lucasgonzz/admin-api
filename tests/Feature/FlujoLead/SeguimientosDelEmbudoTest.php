@@ -414,7 +414,7 @@ class SeguimientosDelEmbudoTest extends TestCase
             $this->assertSame(LeadScheduledMessage::STATUS_CANCELADO, (string) $paso->status, "{$paso->paso_embudo} tiene que quedar cancelado.");
             $this->assertSame(LeadScheduledMessage::CANCELED_LEAD_PROMOVIDO, (string) $paso->canceled_reason, "{$paso->paso_embudo}: el lead ya es de un cliente en prueba.");
         }
-        $this->assertSame(0, LeadMessage::query()->where('lead_id', $lead->id)->where('sender', 'setter')->count(), 'Ni se escribe nada en el hilo.');
+        $this->assertSame(0, LeadMessage::query()->where('lead_id', $lead->id)->where('sender', '!=', 'lead')->where('is_status_event', false)->where('system_message_kind', 'whatsapp_embudo_paso')->count(), 'Ni se escribe nada en el hilo.');
     }
 
     // ------------------------------------------------------------------------------------------
@@ -493,14 +493,141 @@ class SeguimientosDelEmbudoTest extends TestCase
 
         $this->assertSame(LeadScheduledMessage::STATUS_ENVIADO, (string) $paso_igual->fresh()->status, 'Control: el del lead que sigue en nuevo sale.');
         $this->assertSame([['to' => $igual->phone, 'body' => 'Seguimiento que sí sale.']], $espia->textos, 'Sólo se llamó a WhatsApp por el lead que no cambió.');
-        $enviado = LeadMessage::query()->where('lead_id', $igual->id)->where('sender', 'setter')->first();
+        $enviado = LeadMessage::query()->where('lead_id', $igual->id)->where('sender', '!=', 'lead')->where('is_status_event', false)->first();
         $this->assertNotNull($enviado, 'Queda la burbuja en el hilo.');
         $this->assertSame('Seguimiento que sí sale.', (string) $enviado->content);
         $this->assertNull($enviado->sent_by_admin_id, 'Un paso del embudo no se hace pasar por un operador.');
+        /* Decisión P3: sale como automático del sistema, con un kind que E2 trata como `kinds_automaticos()`. */
+        $this->assertSame('sistema', (string) $enviado->sender, 'El paso sale como mensaje del sistema (E2 cuenta lo entregado por ahí).');
+        $this->assertSame('whatsapp_embudo_paso', (string) $enviado->system_message_kind);
+        $this->assertContains((string) $enviado->system_message_kind, LeadFlujoEntradaService::kinds_automaticos());
 
         $this->assertSame(LeadScheduledMessage::STATUS_CANCELADO, (string) $paso_cambio->fresh()->status, 'El lead pasó de nuevo a calificado: el paso no sale.');
         $this->assertSame($this->motivo_cambio_de_estado(), (string) $paso_cambio->fresh()->canceled_reason);
-        $this->assertSame(0, LeadMessage::query()->where('lead_id', $cambio->id)->where('sender', 'setter')->count());
+        $this->assertSame(0, LeadMessage::query()->where('lead_id', $cambio->id)->where('sender', '!=', 'lead')->where('is_status_event', false)->count());
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Decisiones del Coordinador P2 y P3 (23/11/2026)
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * DECISIONES-E3 P2. Si al despachar el lead tiene una pregunta sin contestar, el paso NO sale: se pospone 60 minutos
+     * (respetando franja y ventana) y no se llama a WhatsApp. Cuando la pregunta se contesta, el paso pospuesto sale.
+     *
+     * @return void
+     */
+    public function test_el_paso_con_una_pregunta_sin_contestar_se_pospone_60_minutos(): void
+    {
+        [$lead, $telefono, $espia] = $this->lead_contactado_con_su_paso();
+        $this->ir_a('2026-11-23 10:30:00');
+        $this->postear_kapso($telefono, '¿Cuánto sale?')->assertStatus(200);
+        $this->assertSame(['conversando_22h'], $this->claves_pendientes($lead), 'Precondición: el paso sigue programado.');
+        $antes = count($espia->textos);
+
+        $this->ir_a('2026-11-24 09:05:00'); // el paso venció a las 09:01 y la pregunta sigue sin contestar
+        $this->assertSame(0, Artisan::call('leads:send-scheduled-messages'));
+
+        $this->assertCount($antes, $espia->textos, 'No se le manda nada: Martín todavía tiene que contestarle.');
+        $this->assertSame(['conversando_22h'], $this->claves_pendientes($lead), 'El paso queda pendiente, pospuesto.');
+        $this->assertSame('2026-11-24 10:05:00', $this->hora_ar($this->unico_pendiente($lead, 'conversando_22h')->scheduled_send_at), '09:05 + 60 minutos.');
+
+        /* Se contesta la pregunta: a la hora pospuesta el paso sale. */
+        $this->mensaje_de_sistema($lead, 'Cuesta lo que te conté arriba, ¿lo vemos?');
+        $this->ir_a('2026-11-24 10:06:00');
+        $this->assertSame(0, Artisan::call('leads:send-scheduled-messages'));
+        $this->assertCount($antes + 1, $espia->textos, 'Contestada la pregunta, el paso pospuesto sale.');
+        $this->assertSame([], $this->claves_pendientes($lead));
+    }
+
+    /**
+     * DECISIONES-E3 P2. Si el paso pospuesto ya no entra en la ventana de 24 h (el último inbound fue a las 10:30 del
+     * 23/11: cierra a las 10:30 del 24/11), se cancela con `CANCELED_CONVERSACION_PENDIENTE` y no se llama a WhatsApp.
+     *
+     * @return void
+     */
+    public function test_si_el_paso_pospuesto_no_entra_en_la_ventana_se_cancela(): void
+    {
+        [$lead, $telefono, $espia] = $this->lead_contactado_con_su_paso();
+        $this->ir_a('2026-11-23 10:30:00');
+        $this->postear_kapso($telefono, '¿Cuánto sale?')->assertStatus(200);
+        $antes = count($espia->textos);
+
+        $this->ir_a('2026-11-24 09:45:00'); // 09:45 + 60 minutos = 10:45, con la ventana ya cerrada
+        $this->assertSame(0, Artisan::call('leads:send-scheduled-messages'));
+
+        $motivo = $this->motivo_de_cancelacion('CANCELED_CONVERSACION_PENDIENTE');
+        $this->assertCount($antes, $espia->textos, 'No se llama a WhatsApp.');
+        $paso = $this->pasos_de($lead)->where('paso_embudo', 'conversando_22h')->where('status', LeadScheduledMessage::STATUS_CANCELADO)->first();
+        $this->assertNotNull($paso, 'El paso queda cancelado.');
+        $this->assertSame($motivo, (string) $paso->canceled_reason);
+        $this->assertSame([], $this->claves_pendientes($lead));
+    }
+
+    /**
+     * DECISIONES-E3 P2. Una sugerencia de Martín sin enviar (pendiente de aprobación, retenida) también retiene el paso: se
+     * pospone 60 minutos y no sale nada.
+     *
+     * @return void
+     */
+    public function test_el_paso_con_una_sugerencia_sin_enviar_se_pospone(): void
+    {
+        [$lead, , $espia] = $this->lead_contactado_con_su_paso();
+        $this->ir_a('2026-11-23 10:20:00');
+        $this->mensaje_de_sistema($lead, 'Sugerencia de Martín pendiente de aprobación.', null, 'sugerido');
+        $antes = count($espia->textos);
+
+        $this->ir_a('2026-11-24 09:05:00');
+        $this->assertSame(0, Artisan::call('leads:send-scheduled-messages'));
+
+        $this->assertCount($antes, $espia->textos, 'No sale mientras haya una sugerencia sin enviar.');
+        $this->assertSame('2026-11-24 10:05:00', $this->hora_ar($this->unico_pendiente($lead, 'conversando_22h')->scheduled_send_at));
+    }
+
+    /**
+     * DECISIONES-E3 P3. El mensaje de un paso del embudo queda marcado para que E2 lo trate como automático del sistema:
+     * su kind está en `kinds_automaticos()`, así que NO cuenta como respuesta a una pregunta del lead
+     * (`hay_pregunta_sin_contestar` sigue en true) aunque salga después de la pregunta.
+     *
+     * @return void
+     */
+    public function test_el_mensaje_de_un_paso_es_automatico_y_no_contesta_una_pregunta(): void
+    {
+        $this->assertTrue(defined(LeadFlujoEntradaService::class . '::KIND_EMBUDO_PASO'), 'Falta LeadFlujoEntradaService::KIND_EMBUDO_PASO.');
+        $kind = (string) constant(LeadFlujoEntradaService::class . '::KIND_EMBUDO_PASO');
+        $this->assertSame('whatsapp_embudo_paso', $kind);
+        $this->assertContains($kind, LeadFlujoEntradaService::kinds_automaticos());
+
+        $lead = $this->crear_lead_de_flujo('contactado');
+        $this->dejar_entregado_el_paso_1($lead);
+        $this->mensaje_del_lead($lead, '¿Cuánto sale?');
+        $this->mensaje_de_sistema($lead, '¿Pudiste pensarlo?', $kind);
+
+        $this->assertTrue(LeadFlujoEntradaService::hay_pregunta_sin_contestar($lead->fresh()), 'El paso no contesta la pregunta.');
+    }
+
+    /**
+     * DECISIONES-E3 (menores). Con el interruptor del flujo apagado, los pasos pendientes que vencen se cancelan con
+     * `CANCELED_FLUJO_APAGADO` y no se llama a WhatsApp; los que todavía no vencieron siguen pendientes.
+     *
+     * @return void
+     */
+    public function test_con_el_interruptor_apagado_el_despacho_cancela_los_pasos(): void
+    {
+        [$lead, , $espia] = $this->llegar_y_recibir_el_paso_1();
+        $this->assertSame(['nuevo_22h', 'nuevo_3h'], $this->claves_pendientes($lead), 'Precondición: hay pasos programados.');
+        AdminSetting::set(LeadFlujoEntradaService::KEY_ACTIVO, '0');
+        $antes = count($espia->textos);
+
+        $this->ir_a('2026-11-23 13:05:00'); // venció nuevo_3h
+        $this->assertSame(0, Artisan::call('leads:send-scheduled-messages'));
+
+        $motivo = $this->motivo_de_cancelacion('CANCELED_FLUJO_APAGADO');
+        $this->assertCount($antes, $espia->textos, 'Apagado el flujo no sale ningún seguimiento.');
+        $tres_horas = $this->pasos_de($lead)->where('paso_embudo', 'nuevo_3h')->first();
+        $this->assertSame(LeadScheduledMessage::STATUS_CANCELADO, (string) $tres_horas->status);
+        $this->assertSame($motivo, (string) $tres_horas->canceled_reason);
+        $this->assertSame(['nuevo_22h'], $this->claves_pendientes($lead), 'El que todavía no venció sigue pendiente (lo cancelará su despacho).');
     }
 
     // ------------------------------------------------------------------------------------------
@@ -756,12 +883,41 @@ class SeguimientosDelEmbudoTest extends TestCase
      */
     private function motivo_cambio_de_estado(): string
     {
+        return $this->motivo_de_cancelacion('CANCELED_CAMBIO_DE_ESTADO');
+    }
+
+    /**
+     * El valor de una constante `CANCELED_*` nueva del modelo. Si no existe, el test falla con un mensaje claro.
+     *
+     * @param string $nombre Nombre de la constante.
+     *
+     * @return string
+     */
+    private function motivo_de_cancelacion(string $nombre): string
+    {
         $this->assertTrue(
-            defined(LeadScheduledMessage::class . '::CANCELED_CAMBIO_DE_ESTADO'),
-            'Falta la constante LeadScheduledMessage::CANCELED_CAMBIO_DE_ESTADO (PLAN §2.3).'
+            defined(LeadScheduledMessage::class . '::' . $nombre),
+            "Falta la constante LeadScheduledMessage::{$nombre} (PLAN §2.3 / DECISIONES-E3)."
         );
 
-        return (string) constant(LeadScheduledMessage::class . '::CANCELED_CAMBIO_DE_ESTADO');
+        return (string) constant(LeadScheduledMessage::class . '::' . $nombre);
+    }
+
+    /**
+     * Deja a un lead en `contactado` con su `conversando_22h` programado (a las 09:00-09:01 del 24/11), por el recorrido real:
+     * llegada a las 10:00 y respuesta SIN pregunta a las 10:05.
+     *
+     * @return array{0: Lead, 1: string, 2: WhatsappSendService}
+     */
+    private function lead_contactado_con_su_paso(): array
+    {
+        [$lead, $telefono, $espia] = $this->llegar_y_recibir_el_paso_1();
+        $this->avanzar(300); // 10:05
+        $this->postear_kapso($telefono, self::RESPUESTA_SIN_PREGUNTA)->assertStatus(200);
+        $this->avanzar(3);
+        $this->correr_job($this->jobs_encolados(SendLeadDosFormasJob::class)->first());
+
+        return [$lead, $telefono, $espia];
     }
 
     /**
