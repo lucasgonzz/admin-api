@@ -306,7 +306,7 @@ class PruebaPlantillasService
      */
     const PLANTILLAS_NUEVAS = [
         self::BIENVENIDA_V4 => [
-            'body' => 'Hola {{1}}, soy Martín, del equipo de ComercioCity. Ya tenés tu sistema armado con datos de ejemplo para que lo pruebes tranquilo. Si querés probarlo con tus productos, mandame por acá tu Excel de artículos y te paso un video corto para subirlo vos mismo. Cualquier duda, escribime por acá.',
+            'body' => 'Hola {{1}}, soy Martín, del equipo de ComercioCity. Ya tenés tu sistema armado con datos de ejemplo para que lo pruebes tranquilo. Si querés probarlo con tus productos, decime y te paso un video corto para que subas tu Excel de artículos vos mismo. Y si preferís que lo haga el equipo, existe el servicio de implementación: decime y te llama Juan.',
             'uso'  => 'Prueba gratuita: bienvenida de Martín sin la oferta de cargar gratis. Reemplaza a cc_prueba_bienvenida cuando Meta la aprueba.',
         ],
         self::BIENVENIDA_CON_ASISTENTE_V4 => [
@@ -336,7 +336,7 @@ class PruebaPlantillasService
      */
     const PLANTILLAS_EMBUDO = [
         'cc_embudo_conversando_dia_3' => [
-            'body' => 'Hola {{1}}, soy Martín, de ComercioCity. Te escribo por si te quedó pendiente lo que hablamos: podés probar el sistema gratis 7 días con tu negocio, por tu cuenta, o que te lo dejemos armado con tus productos. ¿Querés que te pase el link para crear tu prueba?',
+            'body' => 'Hola {{1}}, soy Martín, de ComercioCity. Te escribo por si te quedó pendiente lo que hablamos: podés probar el sistema gratis 7 días, por tu cuenta. Si preferís que te lo dejemos armado con tus productos, tenemos el servicio de implementación: decime y te llama Juan. ¿Querés que te pase el link para crear tu prueba?',
             'uso'  => 'Embudo de leads: seguimiento del día 3 para quien venía conversando.', 'categoria' => 'MARKETING', 'estado' => 'manual_embudo',
         ],
         'cc_embudo_link_dia_3' => [

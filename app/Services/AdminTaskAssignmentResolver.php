@@ -84,4 +84,40 @@ class AdminTaskAssignmentResolver
 
         return self::for_lead_task();
     }
+
+    /**
+     * El admin que hace de «Juan» (el vendedor): primero los del perfil «Sólo Leads»; si no hay, un vendedor que NO sea closer; si no hay,
+     * el closer. Es el orden que evita que el closer, marcado también como vendedor por `ventas:migrar-licencias` y más viejo que Juan,
+     * le gane (misión embudo-juan-pipeline, E3 ronda 2).
+     *
+     * @param bool $para_el_aviso true = el aviso del día 5: exige teléfono y el último recurso es cualquier `is_closer` con teléfono;
+     *                            false = quien hizo una llamada: sin teléfono, y el último recurso es un closer que además sea vendedor.
+     *
+     * @return Admin|null
+     */
+    public static function vendedor_de_juan(bool $para_el_aviso): ?Admin
+    {
+        $con_telefono = function ($consulta) use ($para_el_aviso) {
+            if ($para_el_aviso) {
+                $consulta->whereNotNull('phone_number')->where('phone_number', '!=', '');
+            }
+        };
+
+        $juan = Admin::query()->where('solo_leads', true)->where($con_telefono)->orderBy('id')->first();
+        if ($juan !== null) {
+            return $juan;
+        }
+
+        $vendedor = Admin::query()->where('es_vendedor', true)->where('is_closer', false)->where($con_telefono)->orderBy('id')->first();
+        if ($vendedor !== null) {
+            return $vendedor;
+        }
+
+        $closer = Admin::query()->where('is_closer', true)->where($con_telefono);
+        if (! $para_el_aviso) {
+            $closer->where('es_vendedor', true);
+        }
+
+        return $closer->orderBy('id')->first();
+    }
 }

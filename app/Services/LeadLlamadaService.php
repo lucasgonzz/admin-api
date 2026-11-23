@@ -470,11 +470,11 @@ class LeadLlamadaService
             return (int) $elegido->id;
         }
 
-        foreach (AdminTaskAssignmentResolver::for_embudo_task() as $id) {
-            $candidato = Admin::query()->whereKey((int) $id)->first();
-            if ($candidato !== null && ((bool) $candidato->solo_leads || (bool) $candidato->es_vendedor)) {
-                return (int) $candidato->id;
-            }
+        /* Primero «Sólo Leads», después un vendedor que no sea closer y, por último, el closer (que `ventas:migrar-licencias` también marca
+           como vendedor y suele ser más viejo que Juan). */
+        $juan = AdminTaskAssignmentResolver::vendedor_de_juan(false);
+        if ($juan !== null) {
+            return (int) $juan->id;
         }
 
         throw PipelineRuleException::validacion(['hecha_por_admin_id' => ['No hay un vendedor para asignarle la llamada.']]);

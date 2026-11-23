@@ -1469,17 +1469,9 @@ class PruebaWhatsappService
             }
         }
 
-        /* P4 (E3): el aviso va primero a Juan (los admins de ventas con teléfono: perfil «Sólo Leads» o vendedor) y, si no hay ninguno con
-           teléfono, al closer como hasta ahora. Los identificadores (`aviso_tomas`, `TOMAS_*`) no cambian: son contrato con el SPA. */
-        $closer = Admin::query()
-            ->where(function ($consulta) {
-                $consulta->where('solo_leads', true)->orWhere('es_vendedor', true);
-            })
-            ->whereNotNull('phone_number')->where('phone_number', '!=', '')
-            ->orderBy('id')->first();
-        if ($closer === null) {
-            $closer = Admin::query()->where('is_closer', true)->whereNotNull('phone_number')->first();
-        }
+        /* P4 (E3): el aviso va primero a Juan (perfil «Sólo Leads» con teléfono), después a un vendedor que no sea closer y, si no hay, al
+           closer como hasta ahora. Los identificadores (`aviso_tomas`, `TOMAS_*`) no cambian: son contrato con el SPA. */
+        $closer = AdminTaskAssignmentResolver::vendedor_de_juan(true);
         if ($closer === null) {
             /* Un solo `fallido` por motivo: el job diario pasa por acá cada mañana y no tiene que dejar una fila por día. */
             $ya_fallido = PruebaWhatsappEnvio::query()
