@@ -127,6 +127,11 @@ class PruebaPlantillasService
             'body' => 'Hola {{1}}, para que la prueba sea con lo tuyo te cargamos tus artículos sin costo. Mandame por acá el Excel de tu lista o el catálogo de tu proveedor en PDF y lo dejamos listo en tu sistema.',
             'uso'  => 'Prueba gratuita: el negocio no importó su información.',
         ],
+        /* E3: «importó su información» sin carga gratis. Va con las v2 de los pasos porque, igual que ellas, reemplaza a la vieja. */
+        self::PASO_IMPORTO_V2 => [
+            'body' => 'Hola {{1}}, para que la prueba sea con lo tuyo podés subir tu Excel de artículos vos mismo: respondeme por acá y te paso un video corto de cómo se hace.',
+            'uso'  => 'Prueba gratuita: el negocio no importó su información (sin carga gratis). Reemplaza a cc_prueba_paso_importo, que se retira.',
+        ],
         'cc_prueba_paso_articulo_creado' => [
             'body' => 'Hola {{1}}, un paso corto para probar el sistema: cargá un artículo tuyo desde Artículos con el botón Nuevo. Lleva un minuto y después lo vendés desde Vender. Si querés te paso un video de cómo se hace.',
             'uso'  => 'Prueba gratuita: el negocio no creó ningún artículo.',
@@ -233,6 +238,7 @@ class PruebaPlantillasService
     const PROMESAS_DE_VIDEO = [
         'Si querés te paso un video de cómo se hace.',
         'Te paso un video si lo necesitás.',
+        'respondeme por acá y te paso un video corto de cómo se hace.',
     ];
 
     /**
@@ -245,6 +251,8 @@ class PruebaPlantillasService
     public static function sin_promesa_de_video(string $texto): string
     {
         $limpio = str_replace(self::PROMESAS_DE_VIDEO, '', $texto);
+        /* Si la promesa era la cola de una oración que abría con «:», la oración cierra con un punto. */
+        $limpio = (string) preg_replace('/:\s*$/u', '.', rtrim($limpio));
 
         return trim((string) preg_replace('/ {2,}/', ' ', $limpio));
     }
@@ -290,8 +298,8 @@ class PruebaPlantillasService
     }
 
     /**
-     * Las plantillas nuevas de la prueba (misión embudo-juan-pipeline, E3): bienvenidas v4 y v5 y el paso de importar, sin carga
-     * gratis. Van aparte de {@see self::todas()} porque no reemplazan a nadie hasta que Meta las aprueba; las crea
+     * Las plantillas nuevas de la prueba (misión embudo-juan-pipeline, E3): bienvenidas v4 y v5 sin carga gratis (el paso de importar v2
+     * va con las v2 de los pasos). Van aparte de {@see self::todas()} porque no reemplazan a nadie hasta que Meta las aprueba; las crea
      * `prueba:crear-plantillas` ({@see self::todas_para_crear()}).
      *
      * @var array<string, array<string, string>>
@@ -315,10 +323,6 @@ class PruebaPlantillasService
             'uso'  => 'Prueba gratuita: la bienvenida v2 con asistente sin la oferta de cargar gratis. Reemplaza a cc_prueba_bienvenida_asistente_v2 cuando Meta la aprueba. {{2}} es la dirección del sistema y {{3}} el número del asistente.',
             'ejemplo_2' => 'https://ferreteria-lopez.comerciocity.com',
             'ejemplo_3' => '+54 9 11 1234-5678',
-        ],
-        self::PASO_IMPORTO_V2 => [
-            'body' => 'Hola {{1}}, para que la prueba sea con lo tuyo podés subir tu Excel de artículos vos mismo: respondeme por acá y te paso un video corto de cómo se hace.',
-            'uso'  => 'Prueba gratuita: el negocio no importó su información (sin carga gratis). Reemplaza a cc_prueba_paso_importo, que se retira.',
         ],
     ];
 
