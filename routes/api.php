@@ -49,6 +49,8 @@ use App\Http\Controllers\LeadChatsController;
 use App\Http\Controllers\LeadController;
 use App\Http\Controllers\MetaRawWebhookController;
 use App\Http\Controllers\PipelineActivityController;
+use App\Http\Controllers\LeadLlamadaController;
+use App\Http\Controllers\LeadTableroController;
 use App\Http\Controllers\PipelineController;
 use App\Http\Controllers\PipelineOpportunityController;
 use App\Http\Controllers\PipelineStageController;
@@ -1977,6 +1979,13 @@ Route::prefix('admin')->group(function () {
         Route::post('pipeline-opportunities/{id}/move', [PipelineOpportunityController::class, 'move_json'])->whereNumber('id');
         Route::post('pipeline-opportunities/{id}/notes', [PipelineOpportunityController::class, 'store_note_json'])->whereNumber('id');
         Route::delete('pipeline-opportunities/{id}', [PipelineOpportunityController::class, 'destroy_json'])->whereNumber('id');
+
+        /* Tablero de Juan (misión embudo-juan-pipeline): «Registrar llamada», «Mis tareas» y la búsqueda de candidatos. */
+        Route::post('lead/{id}/llamadas', [LeadLlamadaController::class, 'store_json'])->whereNumber('id');
+        Route::get('lead/{id}/llamadas', [LeadLlamadaController::class, 'index_json'])->whereNumber('id');
+        Route::get('lead-tablero/mis-tareas', [LeadTableroController::class, 'mis_tareas_json']);
+        Route::get('lead-tablero/candidatos', [LeadTableroController::class, 'candidatos_json']);
+        Route::post('lead-tablero/tareas/{id}/hecha', [LeadTableroController::class, 'tarea_hecha_json'])->whereNumber('id');
 
         Route::delete('pipeline-activities/{id}', [PipelineActivityController::class, 'destroy_json'])->whereNumber('id');
 
