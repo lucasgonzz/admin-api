@@ -64,4 +64,24 @@ class AdminTaskAssignmentResolver
 
         return self::for_lead_task();
     }
+
+    /**
+     * Ids de los admins que reciben las tareas de la implementación contratada (misión embudo-juan-pipeline, E2): verificar el
+     * cobro de la mitad, importar los artículos y seguir la implementación.
+     *
+     * Es el admin del setting `implementation_assigned_admin_id` si es mayor que 0 (el mismo que recibe las implementaciones); si
+     * no, los setters, igual que {@see for_lead_task()} (Lucas es setter).
+     *
+     * @return array<int> Ids de admins; vacío si no hay ninguno (la tarea queda sin asignar: la puede tomar cualquiera).
+     */
+    public static function for_implementacion_task(): array
+    {
+        $admin_id = (int) \App\Models\AdminSetting::get('implementation_assigned_admin_id', 0);
+
+        if ($admin_id > 0 && Admin::query()->whereKey($admin_id)->exists()) {
+            return [$admin_id];
+        }
+
+        return self::for_lead_task();
+    }
 }

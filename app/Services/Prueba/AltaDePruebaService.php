@@ -328,6 +328,8 @@ class AltaDePruebaService
             'email'              => $email !== '' ? $email : null,
             'tiene_ecommerce'    => true,
             'current_version_id' => $latest_version ? $latest_version->id : null,
+            /* E2: la prueba nueva nace sin implementación (los clientes que ya existían quedan `incluida`, el default de la columna). */
+            'implementacion_contratada' => 'no',
         ]);
 
         /* Un alta con un correo de la lista `prueba_ensayo_correos` nace marcada como ensayo, ANTES de que se arme la
