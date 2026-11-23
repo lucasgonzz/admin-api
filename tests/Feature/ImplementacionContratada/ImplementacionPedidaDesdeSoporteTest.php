@@ -76,6 +76,8 @@ class ImplementacionPedidaDesdeSoporteTest extends BaseDeLaImplementacion
     public function test_un_cliente_sin_lead_da_422(): void
     {
         $client = Client::query()->findOrFail($this->cliente_en_prueba(4, 7, '+5493417771111')->id);
+        Client::query()->whereKey($client->id)->update(['implementacion_contratada' => 'no']);
+        $client = $client->fresh();
 
         $respuesta = $this->pedir($this->ticket_del_cliente($client));
 

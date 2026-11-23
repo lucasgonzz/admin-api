@@ -66,6 +66,18 @@ abstract class BaseDeLaImplementacion extends BaseDeLaPrueba
     }
 
     /**
+     * Una fecha de la base como `Y-m-d H:i:s` en hora de Argentina (`trial_ends_at` no tiene cast: es un string).
+     *
+     * @param mixed $valor
+     *
+     * @return string|null
+     */
+    protected function fecha($valor)
+    {
+        return $valor === null ? null : Carbon::parse($valor)->setTimezone(self::$ZONA_DEL_TABLERO)->format('Y-m-d H:i:s');
+    }
+
+    /**
      * Una prueba en curso, con su lead (`prueba_activa`) y su tarjeta en «En prueba por su cuenta». Nace como nacen las pruebas
      * nuevas: sin implementación contratada (`no`). Vence el 27/11/2026 a las 12:00.
      *

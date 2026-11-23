@@ -89,7 +89,7 @@ class PausaDeLaPruebaTest extends BaseDeLaImplementacion
     private function afirmar_reanudada(Client $client, $lead): void
     {
         $client = $client->fresh();
-        $this->assertSame('2026-12-17 09:00:00', $client->trial_ends_at->format('Y-m-d H:i:s'), 'Siete días desde la entrega.');
+        $this->assertSame('2026-12-17 09:00:00', $this->fecha($client->trial_ends_at), 'Siete días desde la entrega.');
         $this->assertSame(7, (int) $client->trial_days);
         $this->assertSame('2026-12-10 09:00:00', $client->prueba_reanudada_at->format('Y-m-d H:i:s'));
 
@@ -218,11 +218,11 @@ class PausaDeLaPruebaTest extends BaseDeLaImplementacion
         $implementacion->current_stage = 5;
         $implementacion->save();
         ImplementationStage::query()->where('implementation_id', $implementacion->id)->where('stage_number', 5)->update(['status' => 'in_progress']);
-        $antes = $client->fresh()->trial_ends_at->format('Y-m-d H:i:s');
+        $antes = $this->fecha($client->fresh()->trial_ends_at);
 
         $this->postJson('/api/admin/implementation/' . $implementacion->id . '/advance-stage')->assertStatus(200);
 
-        $this->assertSame($antes, $client->fresh()->trial_ends_at->format('Y-m-d H:i:s'), 'La etapa 5 de un cliente sin pausa no toca el vencimiento.');
+        $this->assertSame($antes, $this->fecha($client->fresh()->trial_ends_at), 'La etapa 5 de un cliente sin pausa no toca el vencimiento.');
         $this->assertNull($client->fresh()->prueba_reanudada_at);
         $this->assertSame([], $this->pedidos_c3(), 'Y no avisa al ERP.');
     }

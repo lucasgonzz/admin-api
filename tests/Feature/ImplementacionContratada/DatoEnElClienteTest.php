@@ -55,7 +55,7 @@ class DatoEnElClienteTest extends BaseDeLaImplementacion
         $this->assertSame('2026-11-23 12:00:00', $client->implementacion_mitad_pagada_at->format('Y-m-d H:i:s'));
         $this->assertSame('2026-11-23 12:00:00', $client->prueba_pausada_at->format('Y-m-d H:i:s'));
         $this->assertNull($client->prueba_reanudada_at);
-        $this->assertSame('2027-11-23 12:00:00', $client->trial_ends_at->format('Y-m-d H:i:s'), 'La pausa lleva el vencimiento al horizonte (un año).');
+        $this->assertSame('2027-11-23 12:00:00', $this->fecha($client->trial_ends_at), 'La pausa lleva el vencimiento al horizonte (un año).');
 
         $c3 = $this->pedidos_c3();
         $this->assertNotEmpty($c3, 'Se le avisa al ERP.');
@@ -99,7 +99,7 @@ class DatoEnElClienteTest extends BaseDeLaImplementacion
         $client = $client->fresh();
         $this->assertSame('no', (string) $client->implementacion_contratada);
         $this->assertNull($client->prueba_pausada_at);
-        $this->assertSame('2026-11-27 12:00:00', $client->trial_ends_at->format('Y-m-d H:i:s'));
+        $this->assertSame('2026-11-27 12:00:00', $this->fecha($client->trial_ends_at));
         $this->assertSame(0, Implementation::query()->where('client_id', $client->id)->count());
     }
 
@@ -137,7 +137,7 @@ class DatoEnElClienteTest extends BaseDeLaImplementacion
         $client = $client->fresh();
         $this->assertSame('mitad', (string) $client->implementacion_contratada);
         $this->assertNotNull($client->prueba_pausada_at);
-        $this->assertSame('2027-11-23 12:00:00', $client->trial_ends_at->format('Y-m-d H:i:s'));
+        $this->assertSame('2027-11-23 12:00:00', $this->fecha($client->trial_ends_at));
         $this->assertSame('en_implementacion', (string) $lead->fresh()->status);
         $this->assertSame('en_implementacion', $this->clave_de_la_columna($this->tarjeta_del_lead($lead)));
         $this->assertSame(1, Implementation::query()->where('client_id', $client->id)->count());
@@ -157,7 +157,7 @@ class DatoEnElClienteTest extends BaseDeLaImplementacion
         $respuesta = $this->postJson('/api/admin/lead/' . $lead->id . '/llamadas', ['atendio' => true, 'resultado' => 'pago_la_mitad']);
 
         $respuesta->assertStatus(422);
-        $this->assertArrayHasKey('paquetes', (array) $respuesta->json('errors'));
+        $this->assertArrayHasKey('paquetes', (array) $respuesta->json('errors'), substr((string) $respuesta->getContent(), 0, 300));
         $this->assertSame(0, (int) DB::table('lead_llamadas')->where('lead_id', (int) $lead->id)->count());
         $this->assertNull($client->fresh()->prueba_pausada_at);
         $this->assertSame('no', (string) $client->fresh()->implementacion_contratada);
