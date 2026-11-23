@@ -702,7 +702,12 @@ class LeadScheduledMessageService
             return $this->marcar_cancelado($programado, LeadScheduledMessage::CANCELED_CONVERSACION_PENDIENTE);
         }
 
-        /* La fila volvió a `pendiente`: la reclamó `despachar_uno()` y todavía no salió nada. */
+        /* La fila volvió a `pendiente`: la reclamó `despachar_uno()` y todavía no salió nada. La primera vez deja en
+           `error_text` la hora original (el tope de 24 h de la retención se cuenta desde ahí). */
+        $marca = LeadEmbudoSeguimientosService::marca_de_la_primera_retencion($programado);
+        if ($marca !== null) {
+            $programado->error_text = $marca;
+        }
         $programado->scheduled_send_at   = $nuevo_momento;
         $programado->status              = LeadScheduledMessage::STATUS_PENDIENTE;
         $programado->dispatch_started_at = null;

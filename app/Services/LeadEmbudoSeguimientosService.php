@@ -9,6 +9,9 @@ use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Models\LeadScheduledMessage;
 use Carbon\Carbon;
+use Illuminate\Contracts\Cache\LockTimeoutException;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Seguimientos automáticos del embudo de WhatsApp (misión embudo-whatsapp-precios, etapa E3, PLAN §2.3).
@@ -118,6 +121,40 @@ class LeadEmbudoSeguimientosService
             return;
         }
 
+        /* 🔴 Un candado por lead (ronda 1 de revisión): dos mensajes del lead casi a la vez corren este método en paralelo, los
+           dos ven «no hay pendiente» y crean cada uno su fila, y el lead recibe el seguimiento dos veces. Es un `Cache::lock` y
+           no una transacción con `lockForUpdate` sobre la fila del lead: el webhook ya guarda y emite eventos dentro de su
+           propia transacción y un segundo bloqueo de la misma fila lo podría trabar. Si el candado no se consigue en 5 s se
+           sigue sin él (perder el seguimiento es peor que un duplicado, y la autocuración de abajo repara el duplicado). */
+        $candado   = Cache::lock('lead-embudo-programar-' . (int) $lead->id, 15);
+        $con_candado = false;
+        try {
+            $candado->block(5);
+            $con_candado = true;
+        } catch (LockTimeoutException $e) {
+            Log::channel('daily')->warning('LeadEmbudoSeguimientosService: no se consiguió el candado del lead; se programa sin él.', ['lead_id' => $lead->id]);
+        }
+
+        try {
+            self::programar_con_el_candado_tomado($lead, $ancla, $reiniciar);
+        } finally {
+            if ($con_candado) {
+                $candado->release();
+            }
+        }
+    }
+
+    /**
+     * El cuerpo de {@see programar_para_estado()}, ya con el candado del lead tomado.
+     *
+     * @param Lead        $lead
+     * @param Carbon|null $ancla
+     * @param bool        $reiniciar
+     *
+     * @return void
+     */
+    private static function programar_con_el_candado_tomado(Lead $lead, ?Carbon $ancla, bool $reiniciar): void
+    {
         $estado = (string) $lead->status;
 
         /* Lo programado para otro estado ya no corresponde: el lead cambió de estado. */
@@ -141,11 +178,18 @@ class LeadEmbudoSeguimientosService
                 continue;
             }
 
-            $existente = LeadScheduledMessage::query()
+            /* Autocuración: si por una carrera quedaron dos o más pendientes del mismo paso, se queda la más vieja y las demás
+               se cancelan. */
+            $pendientes = LeadScheduledMessage::query()
                 ->where('lead_id', (int) $lead->id)
                 ->where('paso_embudo', $paso)
                 ->where('status', LeadScheduledMessage::STATUS_PENDIENTE)
-                ->first();
+                ->orderBy('id')
+                ->get();
+            $existente = $pendientes->first();
+            foreach ($pendientes->slice(1) as $repetida) {
+                self::cancelar($repetida, LeadScheduledMessage::CANCELED_REANCLADO);
+            }
 
             if ($existente === null && ! $reiniciar
                 && LeadScheduledMessage::query()->where('lead_id', (int) $lead->id)->where('paso_embudo', $paso)->exists()) {
@@ -167,6 +211,7 @@ class LeadEmbudoSeguimientosService
             if ($existente !== null) {
                 $existente->scheduled_send_at = $cuando;
                 $existente->content           = $contenido;
+                $existente->error_text        = null; // al volver a anclarlo se borra la marca de retención
                 $existente->save();
                 continue;
             }
@@ -238,7 +283,7 @@ class LeadEmbudoSeguimientosService
     }
 
     /**
-     * ¿El lead está en un estado con pasos y tiene alguna fila de paso? Es lo que el cron viejo de seguimientos mira para no
+     * ¿El flujo está prendido, el lead está en un estado con pasos y tiene alguna fila de paso? Es lo que el cron viejo de seguimientos mira para no
      * mandar una segunda cadencia encima de la nueva.
      *
      * @param Lead $lead
@@ -247,7 +292,9 @@ class LeadEmbudoSeguimientosService
      */
     public static function lo_lleva_el_embudo(Lead $lead): bool
     {
-        return isset(self::PASOS[(string) $lead->status]) && self::tiene_pasos($lead);
+        /* Con el interruptor apagado el embudo no hace nada (el despacho cancela lo que quedó): el cron viejo lleva al lead
+           como antes de E3. */
+        return LeadFlujoEntradaService::activo() && isset(self::PASOS[(string) $lead->status]) && self::tiene_pasos($lead);
     }
 
     // ------------------------------------------------------------------------------------------
@@ -270,6 +317,12 @@ class LeadEmbudoSeguimientosService
         $cuando   = $ahora->copy()->addMinutes(self::MINUTOS_DE_ESPERA);
         $expira   = $es_texto ? self::cuando_cierra_la_ventana($lead) : null;
 
+        /* Tope: la retención termina. Un paso no se pospone más allá de 24 h desde la hora en que le tocaba originalmente
+           (vale también para plantillas, que no tienen ventana que las corte). */
+        if ($cuando->gt(self::origen_de_la_retencion($paso)->copy()->addHours(self::HORAS_MAXIMAS_DE_RETENCION))) {
+            return null;
+        }
+
         if ($es_texto && ($expira === null || $cuando->gte($expira))) {
             return null;
         }
@@ -284,6 +337,52 @@ class LeadEmbudoSeguimientosService
         return $cuando;
     }
 
+    /** Horas máximas que un paso puede estar retenido por una conversación pendiente, contadas desde su hora original. */
+    public const HORAS_MAXIMAS_DE_RETENCION = 24;
+
+    /** Formato de la marca que deja la primera retención en `error_text` del paso: `[<fecha ISO 8601 original>]`. */
+    private const MARCA_DE_RETENCION = 'Retenido por una conversación pendiente; le tocaba [%s].';
+
+    /**
+     * La hora ORIGINAL en que le tocaba salir a un paso retenido: la que dejó la primera retención en su marca; si no tiene
+     * marca (todavía no se retuvo), la hora que tiene ahora.
+     *
+     * 🔴 Se guarda en `error_text` (sin columna nueva, decisión de la ronda 1): es un campo de texto que un paso pendiente no
+     * usa, el envío exitoso lo deja en null y volver a anclar el paso también.
+     *
+     * @param LeadScheduledMessage $paso
+     *
+     * @return Carbon
+     */
+    public static function origen_de_la_retencion(LeadScheduledMessage $paso): Carbon
+    {
+        if (preg_match('/le tocaba \[(.+?)\]\./', (string) $paso->error_text, $coincidencia) === 1) {
+            try {
+                return Carbon::parse($coincidencia[1])->setTimezone(config('app.timezone'));
+            } catch (\Exception $e) {
+                // marca ilegible: se cae a la hora actual del paso
+            }
+        }
+
+        return Carbon::instance($paso->scheduled_send_at)->setTimezone(config('app.timezone'));
+    }
+
+    /**
+     * La marca que se guarda en el paso la PRIMERA vez que se lo retiene (con su hora original).
+     *
+     * @param LeadScheduledMessage $paso Paso todavía con su hora original.
+     *
+     * @return string|null Null si ya tiene la marca.
+     */
+    public static function marca_de_la_primera_retencion(LeadScheduledMessage $paso): ?string
+    {
+        if (strpos((string) $paso->error_text, 'le tocaba [') !== false) {
+            return null;
+        }
+
+        return sprintf(self::MARCA_DE_RETENCION, Carbon::instance($paso->scheduled_send_at)->setTimezone(config('app.timezone'))->toIso8601String());
+    }
+
     /**
      * ¿Hay una conversación a medio contestar? Una pregunta del lead sin respuesta, una sugerencia de Martín sin enviar o una
      * generación de la IA agendada o en curso. En ese caso el paso espera: lo que Martín está por decir va primero.
@@ -294,9 +393,50 @@ class LeadEmbudoSeguimientosService
      */
     public static function hay_conversacion_pendiente(Lead $lead): bool
     {
-        return LeadFlujoEntradaService::hay_pregunta_sin_contestar($lead)
+        return self::hay_pregunta_sin_respuesta_para_el_paso($lead)
             || LeadFlujoEntradaService::hay_sugerencia_sin_enviar($lead)
             || (new LeadAiSuggestionScheduler())->hay_generacion_agendada((int) $lead->id);
+    }
+
+    /**
+     * ¿La última pregunta del lead sigue sin respuesta, para decidir si un paso espera? Propia del embudo y a propósito
+     * DISTINTA de `LeadFlujoEntradaService::hay_pregunta_sin_contestar` (que usa E2 para el literal y no cambia): acá cuenta
+     * como respuesta CUALQUIER mensaje saliente enviado después de la pregunta que no sea del lead (sistema, setter, closer,
+     * admin), salvo el de otro paso del embudo. Así una respuesta que dio un humano a mano no retiene el paso para siempre.
+     *
+     * @param Lead $lead
+     *
+     * @return bool
+     */
+    public static function hay_pregunta_sin_respuesta_para_el_paso(Lead $lead): bool
+    {
+        $ultima_pregunta = 0;
+        $mensajes = LeadMessage::query()
+            ->where('lead_id', (int) $lead->id)
+            ->where('sender', 'lead')
+            ->where('is_status_event', false)
+            ->get();
+
+        foreach ($mensajes as $mensaje) {
+            if (LeadFlujoEntradaService::tiene_pregunta((string) $mensaje->content)) {
+                $ultima_pregunta = max($ultima_pregunta, (int) $mensaje->id);
+            }
+        }
+
+        if ($ultima_pregunta === 0) {
+            return false;
+        }
+
+        return ! LeadMessage::query()
+            ->where('lead_id', (int) $lead->id)
+            ->where('sender', '!=', 'lead')
+            ->where('is_status_event', false)
+            ->where('status', 'enviado')
+            ->where(function ($query) {
+                $query->whereNull('system_message_kind')->orWhere('system_message_kind', '!=', LeadFlujoEntradaService::KIND_EMBUDO_PASO);
+            })
+            ->where('id', '>', $ultima_pregunta)
+            ->exists();
     }
 
     // ------------------------------------------------------------------------------------------
