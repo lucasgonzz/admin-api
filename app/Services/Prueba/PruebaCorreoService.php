@@ -35,9 +35,9 @@ class PruebaCorreoService
             'texto'  => 'Tu sistema ya está armado con datos de ejemplo y todavía no entraste. Entrá cuando puedas: en unos minutos ves cómo trabaja.',
         ],
         'importo' => [
-            'asunto' => 'Te cargamos tu catálogo sin costo',
+            'asunto' => 'Subí tus artículos a tu prueba',
             'titulo' => 'Probá el sistema con tus artículos',
-            'texto'  => 'Para que la prueba sea con lo tuyo, te cargamos tus artículos sin costo. Mandame el Excel de tu lista o el catálogo de tu proveedor en PDF, por WhatsApp o desde Soporte, en tu sistema, y lo dejamos listo.',
+            'texto'  => 'Para que la prueba sea con lo tuyo, podés subir tu Excel de artículos vos mismo: en Agentes, Soporte, te paso un video corto de cómo se hace.',
         ],
         'articulo_creado' => [
             'asunto' => 'Un paso corto: cargá un artículo',

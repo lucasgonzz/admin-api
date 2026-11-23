@@ -286,10 +286,10 @@ class PruebaWhatsappService
     {
         $url = (string) Prueba\PruebaCorreoService::url_del_sistema($client);
 
-        if ($plantilla === PruebaPlantillasService::BIENVENIDA_V2) {
+        if (in_array($plantilla, [PruebaPlantillasService::BIENVENIDA_V2, PruebaPlantillasService::BIENVENIDA_V5], true)) {
             return $url;
         }
-        if (in_array($plantilla, [PruebaPlantillasService::BIENVENIDA_CON_ASISTENTE_V2, PruebaPlantillasService::BIENVENIDA_CON_ASISTENTE_V3], true)) {
+        if (in_array($plantilla, [PruebaPlantillasService::BIENVENIDA_CON_ASISTENTE_V2, PruebaPlantillasService::BIENVENIDA_CON_ASISTENTE_V3, PruebaPlantillasService::BIENVENIDA_CON_ASISTENTE_V5], true)) {
             return [$url, (string) $numero_asistente];
         }
 
@@ -365,7 +365,8 @@ class PruebaWhatsappService
             }
 
             $url   = Prueba\PruebaCorreoService::url_del_sistema($client);
-            $texto = PruebaPlantillasService::cuerpo_de(PruebaPlantillasService::BIENVENIDA_V2);
+            /* E3: la copia para el sistema usa el texto sin carga gratis (v5), con la dirección del sistema. */
+            $texto = PruebaPlantillasService::cuerpo_de(PruebaPlantillasService::BIENVENIDA_V5);
             if ($url === null) {
                 $texto = str_replace(PruebaPlantillasService::COMO_ENTRAR . ' ', '', $texto);
             }
@@ -743,7 +744,8 @@ class PruebaWhatsappService
                 return ['paso' => null, 'plantilla' => null, 'estado' => 'sin_hito_faltante', 'detalle' => 'Pasó por todos los hitos.', 'sin_plantilla' => null];
             }
 
-            $plantilla = PruebaPlantillasService::plantilla_del_paso($proximo);
+            /* E3: «importó» va siempre con la v2 (la vieja prometía cargar sin costo y está retirada). */
+            $plantilla = $proximo === 'importo' ? PruebaPlantillasService::PASO_IMPORTO_V2 : PruebaPlantillasService::plantilla_del_paso($proximo);
             $estado    = $this->plantillas->estado_para_enviar($plantilla);
             if ($estado['motivo'] !== null) {
                 return ['paso' => null, 'plantilla' => $plantilla, 'estado' => 'plantilla_no_disponible', 'detalle' => $plantilla . ': ' . $estado['motivo'], 'sin_plantilla' => $proximo];
@@ -1467,7 +1469,17 @@ class PruebaWhatsappService
             }
         }
 
-        $closer = Admin::query()->where('is_closer', true)->whereNotNull('phone_number')->first();
+        /* P4 (E3): el aviso va primero a Juan (los admins de ventas con teléfono: perfil «Sólo Leads» o vendedor) y, si no hay ninguno con
+           teléfono, al closer como hasta ahora. Los identificadores (`aviso_tomas`, `TOMAS_*`) no cambian: son contrato con el SPA. */
+        $closer = Admin::query()
+            ->where(function ($consulta) {
+                $consulta->where('solo_leads', true)->orWhere('es_vendedor', true);
+            })
+            ->whereNotNull('phone_number')->where('phone_number', '!=', '')
+            ->orderBy('id')->first();
+        if ($closer === null) {
+            $closer = Admin::query()->where('is_closer', true)->whereNotNull('phone_number')->first();
+        }
         if ($closer === null) {
             /* Un solo `fallido` por motivo: el job diario pasa por acá cada mañana y no tiene que dejar una fila por día. */
             $ya_fallido = PruebaWhatsappEnvio::query()
@@ -1493,12 +1505,12 @@ class PruebaWhatsappService
         $texto  = $this->texto_para_tomas($client, $lead, $motivo, $datos);
         $titulo = 'Prueba gratuita: ' . $client->resolve_display_name();
 
-        $wamid = $this->sender->send_text(trim((string) $closer->phone_number), $texto, 'Aviso a Tomás - prueba gratuita - cliente #' . $client->id, true);
+        $wamid = $this->sender->send_text(trim((string) $closer->phone_number), $texto, 'Aviso a Juan - prueba gratuita - cliente #' . $client->id, true);
 
         try {
             AdminPushNotificationService::send_to_admin((int) $closer->id, $titulo, $texto, ['url' => $this->link_al_lead($lead)]);
         } catch (\Throwable $e) {
-            Log::channel('daily')->warning('PruebaWhatsapp: falló el push a Tomás.', ['client_id' => $client->id, 'error' => $e->getMessage()]);
+            Log::channel('daily')->warning('PruebaWhatsapp: falló el push a Juan.', ['client_id' => $client->id, 'error' => $e->getMessage()]);
         }
 
         $estado = $wamid !== null ? PruebaWhatsappEnvio::ESTADO_ENVIADO : PruebaWhatsappEnvio::ESTADO_FALLIDO;

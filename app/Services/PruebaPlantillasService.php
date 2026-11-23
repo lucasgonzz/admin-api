@@ -47,10 +47,32 @@ class PruebaPlantillasService
      */
     const BIENVENIDA_CON_ASISTENTE_V3 = 'cc_prueba_bienvenida_asistente_v3';
 
-    const BIENVENIDAS = [self::BIENVENIDA, self::BIENVENIDA_CON_ASISTENTE, self::BIENVENIDA_V2, self::BIENVENIDA_CON_ASISTENTE_V2, self::BIENVENIDA_CON_ASISTENTE_V3];
+    /**
+     * Bienvenidas SIN la oferta de cargar «sin costo» (misión embudo-juan-pipeline, E3). Meta no deja editar una plantilla aprobada, así
+     * que van con nombre nuevo y reemplazan a las viejas recién cuando Meta las aprueba ({@see self::bienvenida_vigente()}).
+     * v4 no lleva la dirección del sistema; v5 es la v2 corregida.
+     */
+    const BIENVENIDA_V4 = 'cc_prueba_bienvenida_v4';
+    const BIENVENIDA_CON_ASISTENTE_V4 = 'cc_prueba_bienvenida_asistente_v4';
+    const BIENVENIDA_V5 = 'cc_prueba_bienvenida_v5';
+    const BIENVENIDA_CON_ASISTENTE_V5 = 'cc_prueba_bienvenida_asistente_v5';
+
+    /** El empujón de «importó su información» sin carga gratis. Reemplaza a `cc_prueba_paso_importo`, que queda retirada. */
+    const PASO_IMPORTO_V2 = 'cc_prueba_paso_importo_v2';
+
+    /** Plantillas que NUNCA se vuelven a mandar (prometían cargar sin costo). */
+    const PLANTILLAS_RETIRADAS = ['cc_prueba_paso_importo'];
+
+    const BIENVENIDAS = [
+        self::BIENVENIDA, self::BIENVENIDA_CON_ASISTENTE, self::BIENVENIDA_V2, self::BIENVENIDA_CON_ASISTENTE_V2, self::BIENVENIDA_CON_ASISTENTE_V3,
+        self::BIENVENIDA_V4, self::BIENVENIDA_CON_ASISTENTE_V4, self::BIENVENIDA_V5, self::BIENVENIDA_CON_ASISTENTE_V5,
+    ];
 
     /** Las bienvenidas que presentan el número del asistente personal. */
-    const BIENVENIDAS_CON_ASISTENTE = [self::BIENVENIDA_CON_ASISTENTE, self::BIENVENIDA_CON_ASISTENTE_V2, self::BIENVENIDA_CON_ASISTENTE_V3];
+    const BIENVENIDAS_CON_ASISTENTE = [
+        self::BIENVENIDA_CON_ASISTENTE, self::BIENVENIDA_CON_ASISTENTE_V2, self::BIENVENIDA_CON_ASISTENTE_V3, self::BIENVENIDA_CON_ASISTENTE_V4,
+        self::BIENVENIDA_CON_ASISTENTE_V5,
+    ];
 
     /** El pedido de la encuesta al que NO contrató, cuando la prueba terminó. `{{2}}` = el enlace. */
     const FIN_ENCUESTA = 'cc_prueba_fin_encuesta';
@@ -251,6 +273,12 @@ class PruebaPlantillasService
      */
     public function plantilla_del_paso_vigente(string $hito, ?\App\Models\Client $client = null): string
     {
+        /* E3: «importó su información» NUNCA vuelve a la plantilla vieja (prometía cargar sin costo): siempre la v2, para todos. Si Meta
+           todavía no la aprobó, el paso no sale ese día. */
+        if ($hito === 'importo') {
+            return self::PASO_IMPORTO_V2;
+        }
+
         $v1 = self::plantilla_del_paso($hito);
         $v2 = $v1 . self::SUFIJO_V2;
 
@@ -260,6 +288,70 @@ class PruebaPlantillasService
 
         return $this->estado_para_enviar($v2)['motivo'] === null ? $v2 : $v1;
     }
+
+    /**
+     * Las plantillas nuevas de la prueba (misión embudo-juan-pipeline, E3): bienvenidas v4 y v5 y el paso de importar, sin carga
+     * gratis. Van aparte de {@see self::todas()} porque no reemplazan a nadie hasta que Meta las aprueba; las crea
+     * `prueba:crear-plantillas` ({@see self::todas_para_crear()}).
+     *
+     * @var array<string, array<string, string>>
+     */
+    const PLANTILLAS_NUEVAS = [
+        self::BIENVENIDA_V4 => [
+            'body' => 'Hola {{1}}, soy Martín, del equipo de ComercioCity. Ya tenés tu sistema armado con datos de ejemplo para que lo pruebes tranquilo. Si querés probarlo con tus productos, mandame por acá tu Excel de artículos y te paso un video corto para subirlo vos mismo. Cualquier duda, escribime por acá.',
+            'uso'  => 'Prueba gratuita: bienvenida de Martín sin la oferta de cargar gratis. Reemplaza a cc_prueba_bienvenida cuando Meta la aprueba.',
+        ],
+        self::BIENVENIDA_CON_ASISTENTE_V4 => [
+            'body' => 'Hola {{1}}, soy Martín, del equipo de ComercioCity. Tu prueba de siete días ya está lista con datos de ejemplo. Si querés probarla con tus productos, te paso un video corto para subir tu Excel vos mismo. Tu asistente personal te atiende por WhatsApp en el {{2}}. ' . \App\Services\Prueba\PruebaAsistenteService::USO,
+            'uso'  => 'Prueba gratuita: bienvenida de Martín con el WhatsApp del asistente personal, sin la oferta de cargar gratis. Reemplaza a cc_prueba_bienvenida_asistente cuando Meta la aprueba.',
+        ],
+        self::BIENVENIDA_V5 => [
+            'body' => 'Hola {{1}}, soy Martín, del equipo de ComercioCity. Ya tenés tu sistema armado con datos de ejemplo para que lo pruebes tranquilo. ' . self::COMO_ENTRAR . ' Adentro, en Agentes, tenés dos ayudas: Soporte, que soy yo (te contesto y te paso los videos; pedime un recorrido guiado y te lo muestro en tu pantalla), y tu Asistente personal, al que le preguntás por tu negocio, por ejemplo cuánto vendiste hoy. Si querés probarlo con tus productos, en Soporte te paso un video corto para subir tu Excel vos mismo.',
+            'uso'  => 'Prueba gratuita: la bienvenida v2 sin la oferta de cargar gratis. Reemplaza a cc_prueba_bienvenida_v2 cuando Meta la aprueba. {{2}} es la dirección del sistema.',
+            'ejemplo_2' => 'https://ferreteria-lopez.comerciocity.com',
+        ],
+        self::BIENVENIDA_CON_ASISTENTE_V5 => [
+            'body' => 'Hola {{1}}, soy Martín, del equipo de ComercioCity. Tu prueba de siete días ya está lista con datos de ejemplo. ' . self::COMO_ENTRAR . ' Adentro, en Agentes, tenés dos ayudas: Soporte, que soy yo (te contesto y te paso los videos; pedime un recorrido guiado y te lo muestro en tu pantalla), y tu Asistente personal, al que le preguntás por tu negocio, por ejemplo cuánto vendiste hoy. Si querés probarlo con tus productos, en Soporte te paso un video corto para subir tu Excel vos mismo. Tu Asistente personal también te atiende por WhatsApp en el {{3}}. ' . \App\Services\Prueba\PruebaAsistenteService::USO,
+            'uso'  => 'Prueba gratuita: la bienvenida v2 con asistente sin la oferta de cargar gratis. Reemplaza a cc_prueba_bienvenida_asistente_v2 cuando Meta la aprueba. {{2}} es la dirección del sistema y {{3}} el número del asistente.',
+            'ejemplo_2' => 'https://ferreteria-lopez.comerciocity.com',
+            'ejemplo_3' => '+54 9 11 1234-5678',
+        ],
+        self::PASO_IMPORTO_V2 => [
+            'body' => 'Hola {{1}}, para que la prueba sea con lo tuyo podés subir tu Excel de artículos vos mismo: respondeme por acá y te paso un video corto de cómo se hace.',
+            'uso'  => 'Prueba gratuita: el negocio no importó su información (sin carga gratis). Reemplaza a cc_prueba_paso_importo, que se retira.',
+        ],
+    ];
+
+    /**
+     * Las plantillas que faltaban (misión embudo-juan-pipeline, E3): el seguimiento del embudo del día 3 y los recordatorios de la prueba
+     * vencida de los días 8, 14 y 30. Categoría MARKETING y estado `manual_embudo` (el prefijo `manual_` las aleja del cron viejo).
+     * Quedan escritas y registradas por `prueba:crear-plantillas`; las claves `lead_embudo_plantilla_*` y `prueba_vencida_plantilla_dia_*`
+     * NO se escriben solas: se cargan cuando Meta las aprueba.
+     *
+     * @var array<string, array<string, string>>
+     */
+    const PLANTILLAS_EMBUDO = [
+        'cc_embudo_conversando_dia_3' => [
+            'body' => 'Hola {{1}}, soy Martín, de ComercioCity. Te escribo por si te quedó pendiente lo que hablamos: podés probar el sistema gratis 7 días con tu negocio, por tu cuenta, o que te lo dejemos armado con tus productos. ¿Querés que te pase el link para crear tu prueba?',
+            'uso'  => 'Embudo de leads: seguimiento del día 3 para quien venía conversando.', 'categoria' => 'MARKETING', 'estado' => 'manual_embudo',
+        ],
+        'cc_embudo_link_dia_3' => [
+            'body' => 'Hola {{1}}, soy Martín, de ComercioCity. ¿Pudiste crear tu prueba? Si algo no te funcionó o preferís que lo veamos juntos, respondeme por acá y te ayudo.',
+            'uso'  => 'Embudo de leads: seguimiento del día 3 para quien recibió el link de la prueba.', 'categoria' => 'MARKETING', 'estado' => 'manual_embudo',
+        ],
+        'cc_prueba_vencida_dia_8' => [
+            'body' => 'Hola {{1}}, soy Martín, de ComercioCity. Tu prueba terminó, pero todo lo que cargaste sigue guardado. Si querés seguir usando el sistema, respondeme por acá y te cuento cómo.',
+            'uso'  => 'Prueba vencida: recordatorio del día 8.', 'categoria' => 'MARKETING', 'estado' => 'manual_embudo',
+        ],
+        'cc_prueba_vencida_dia_14' => [
+            'body' => 'Hola {{1}}, ¿cómo va todo? Tu sistema de prueba sigue guardado unos días más. Si querés retomarlo con tu información ya cargada, escribime por acá y lo vemos.',
+            'uso'  => 'Prueba vencida: recordatorio del día 14.', 'categoria' => 'MARKETING', 'estado' => 'manual_embudo',
+        ],
+        'cc_prueba_vencida_dia_30' => [
+            'body' => 'Hola {{1}}, soy Martín, de ComercioCity. En estos días se borra la información de tu prueba. Si querés conservarla y seguir con el sistema, respondeme por acá antes de que se borre.',
+            'uso'  => 'Prueba vencida: recordatorio del día 30, antes del borrado.', 'categoria' => 'MARKETING', 'estado' => 'manual_embudo',
+        ],
+    ];
 
     /** Recordatorio de archivos para quien pagó la implementación y todavía no mandó el Excel de artículos (E2). */
     const ARCHIVOS_RECORDATORIO = 'cc_impl_archivos_recordatorio';
@@ -278,7 +370,17 @@ class PruebaPlantillasService
     ];
 
     /**
-     * Todas las plantillas de la prueba que se crean en Meta.
+     * Todo lo que crea `prueba:crear-plantillas`: {@see self::todas()} más las nuevas y las del embudo (E3).
+     *
+     * @return array<string, array<string, string>>
+     */
+    public static function todas_para_crear(): array
+    {
+        return self::todas() + self::PLANTILLAS_NUEVAS + self::PLANTILLAS_EMBUDO;
+    }
+
+    /**
+     * Las plantillas de la prueba que ya existían (las que registran los tests de la prueba como aprobadas).
      *
      * @return array<string, array<string, string>>
      */
@@ -303,6 +405,19 @@ class PruebaPlantillasService
     {
         $v1 = $con_asistente ? self::BIENVENIDA_CON_ASISTENTE : self::BIENVENIDA;
         $v2 = $con_asistente ? self::BIENVENIDA_CON_ASISTENTE_V2 : self::BIENVENIDA_V2;
+        $v4 = $con_asistente ? self::BIENVENIDA_CON_ASISTENTE_V4 : self::BIENVENIDA_V4;
+        $v5 = $con_asistente ? self::BIENVENIDA_CON_ASISTENTE_V5 : self::BIENVENIDA_V5;
+
+        /* E3: las versiones sin carga gratis van primero, apenas Meta las aprueba. La v5 es la v2 corregida (sólo si hoy corresponde la
+           v2); la v4 es la v1 corregida. Si ninguna está aprobada, sigue el orden de siempre. */
+        $corresponde_la_v2 = \App\Services\Prueba\PruebaSettings::bienvenida_version() === 'v2'
+            && ($client === null || (\App\Services\Prueba\PruebaSettings::novedades_para($client) && \App\Services\Prueba\PruebaCorreoService::url_del_sistema($client) !== null));
+        if ($corresponde_la_v2 && $this->estado_para_enviar($v5)['motivo'] === null) {
+            return $v5;
+        }
+        if ($this->estado_para_enviar($v4)['motivo'] === null) {
+            return $v4;
+        }
 
         if (\App\Services\Prueba\PruebaSettings::bienvenida_version() !== 'v2'
             || ($client !== null && ! \App\Services\Prueba\PruebaSettings::novedades_para($client))
@@ -339,7 +454,7 @@ class PruebaPlantillasService
      */
     public static function cuerpo_de(string $nombre): string
     {
-        $todas = self::todas();
+        $todas = self::todas_para_crear();
 
         return isset($todas[$nombre]) ? (string) $todas[$nombre]['body'] : '';
     }
@@ -397,7 +512,7 @@ class PruebaPlantillasService
     {
         $resultados = [];
 
-        foreach (self::todas() as $nombre => $definicion) {
+        foreach (self::todas_para_crear() as $nombre => $definicion) {
             $existente = FollowupTemplate::query()->where('template_name', $nombre)->first();
 
             if ($existente !== null) {
@@ -424,7 +539,7 @@ class PruebaPlantillasService
             $respuesta = $meta->crear([
                 'name'       => $nombre,
                 'language'   => self::IDIOMA,
-                'category'   => self::CATEGORIA,
+                'category'   => isset($definicion['categoria']) ? $definicion['categoria'] : self::CATEGORIA,
                 'components' => $componentes,
             ]);
 
@@ -450,14 +565,14 @@ class PruebaPlantillasService
 
             $fila = FollowupTemplate::create([
                 'template_name'              => $nombre,
-                'estado'                     => self::ESTADO,
+                'estado'                     => isset($definicion['estado']) ? $definicion['estado'] : self::ESTADO,
                 'dia_numero'                 => 1,
                 'body_template'              => $definicion['body'],
                 'language_code'              => self::IDIOMA,
                 /* `activa = false` SIEMPRE: la enciende el sync al confirmar APPROVED contra Meta. */
                 'activa'                     => false,
                 'meta_status'                => $estado_de_meta,
-                'meta_category'              => self::CATEGORIA,
+                'meta_category'              => isset($definicion['categoria']) ? $definicion['categoria'] : self::CATEGORIA,
                 'meta_template_id'           => isset($respuesta['datos']['id']) ? (string) $respuesta['datos']['id'] : null,
                 'meta_rechazo'               => null,
                 'meta_synced_at'             => now(),
