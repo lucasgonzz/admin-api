@@ -198,7 +198,7 @@ class ImplementacionContratadaService
      * llamada de cierre a los 5 días.
      *
      * @param Client      $client
-     * @param Carbon|null $desde   Desde cuándo corren los días (default: ahora).
+     * @param Carbon|null $desde   Desde cuándo corren los días (por defecto, ahora).
      *
      * @return Client
      *
