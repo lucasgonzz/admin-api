@@ -133,6 +133,21 @@ return [
         'POST lead/{id}/llamadas' => ['paquetes' => 'plata'],
     ],
 
+    /*
+    | Freno por VALOR de un campo: como `field_brakes`, pero sólo sube la categoría si el campo trae uno de los valores listados.
+    | Clave «MÉTODO ruta» => [campo => [valor => categoría]]. Cubre todo camino que pause una prueba o abra una implementación
+    | (misión embudo-juan-pipeline, E2): «pagó la mitad» con o sin paquetes, y fijar mitad o completa desde la ficha del cliente.
+    | Juan y Lucas desde la SPA (humanos) no pasan por el guard del agente, así que no se frenan.
+    */
+    'field_value_brakes' => [
+        'POST lead/{id}/llamadas' => [
+            'resultado' => ['pago_la_mitad' => 'plata'],
+        ],
+        'PUT client/{id}/implementacion-contratada' => [
+            'estado' => ['mitad' => 'plata', 'completa' => 'plata'],
+        ],
+    ],
+
     /* Por qué frena cada categoría (aparece en el preview y en el catálogo). */
     'reasons' => [
         'credenciales' => 'Toca o devuelve claves, accesos, usuarios o certificados: se confirma el pedido exacto antes de ejecutarlo.',
