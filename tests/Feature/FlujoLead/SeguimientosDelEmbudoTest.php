@@ -637,6 +637,174 @@ class SeguimientosDelEmbudoTest extends TestCase
     }
 
     // ------------------------------------------------------------------------------------------
+    // Ronda 1 de revisión (23/11/2026): duplicados, interruptor apagado y retención que termina
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * Ronda 1, punto 1 (autocuración). Dos mensajes simultáneos del mismo lead pueden haber dejado dos filas pendientes del
+     * mismo paso. Con dos filas pendientes de `conversando_22h` precargadas, el siguiente inbound deja UNA (la más vieja) y
+     * cancela la otra con `CANCELED_REANCLADO`; y el despacho manda un solo WhatsApp.
+     *
+     * @return void
+     */
+    public function test_dos_filas_pendientes_del_mismo_paso_se_curan_y_sale_un_solo_mensaje(): void
+    {
+        [$lead, $telefono, $espia] = $this->lead_contactado_con_su_paso();
+        $original  = $this->unico_pendiente($lead, 'conversando_22h');
+        $duplicada = $this->insertar_paso($lead, 'conversando_22h', 'contactado', '2026-11-24 09:01:00', 'Duplicado de una carrera.');
+        $this->assertCount(2, $this->pasos_de($lead)->where('status', LeadScheduledMessage::STATUS_PENDIENTE)->where('paso_embudo', 'conversando_22h'), 'Precondición: hay dos pendientes del mismo paso.');
+
+        $this->ir_a('2026-11-23 10:30:00');
+        $this->postear_kapso($telefono, 'Gracias, lo reviso')->assertStatus(200);
+
+        $this->assertSame(['conversando_22h'], $this->claves_pendientes($lead), 'Queda una sola pendiente.');
+        $this->assertSame((int) $original->id, (int) $this->unico_pendiente($lead, 'conversando_22h')->id, 'Se queda la más vieja.');
+        $this->assertSame(LeadScheduledMessage::STATUS_CANCELADO, (string) $duplicada->fresh()->status);
+        $this->assertSame($this->motivo_de_cancelacion('CANCELED_REANCLADO'), (string) $duplicada->fresh()->canceled_reason);
+
+        $antes = count($espia->textos);
+        $this->ir_a('2026-11-24 09:30:00');
+        $this->assertSame(0, Artisan::call('leads:send-scheduled-messages'));
+        $this->assertCount($antes + 1, $espia->textos, 'Un solo seguimiento sale, no dos.');
+    }
+
+    /**
+     * Ronda 1, punto 2. Con el interruptor del flujo APAGADO el cron viejo vuelve a llevar al lead, como antes de E3, aunque
+     * tenga filas de paso (pendientes o canceladas): no devuelve `embudo` y le sale su plantilla de siempre. (Con el
+     * interruptor prendido se mantiene el diseño: lo lleva el embudo; lo cubre `test_el_cron_viejo_no_toca_leads_con_pasos`.)
+     *
+     * @return void
+     */
+    public function test_con_el_interruptor_apagado_el_cron_viejo_vuelve_a_llevar_al_lead_con_pasos(): void
+    {
+        $espia = $this->espiar_plantillas();
+        $this->crear_regla_de_seguimiento('nuevo', 48, 3);
+        $this->crear_plantilla_de_seguimiento('nuevo');
+
+        $pendiente = $this->lead_de_anuncio_que_nunca_contesto();
+        $cancelado = $this->lead_de_anuncio_que_nunca_contesto();
+        $this->insertar_paso($pendiente, 'nuevo_3h', 'nuevo', '2026-11-23 13:00:00', 'Paso pendiente.');
+        $paso = $this->insertar_paso($cancelado, 'nuevo_3h', 'nuevo', '2026-11-23 13:00:00', 'Paso cancelado.');
+        $paso->status = LeadScheduledMessage::STATUS_CANCELADO;
+        $paso->save();
+
+        AdminSetting::set(LeadFlujoEntradaService::KEY_ACTIVO, '0');
+        $servicio = app(LeadFollowupService::class);
+
+        $this->assertSame('suggestion', $servicio->process_single_lead($pendiente), 'Apagado el flujo, el lead con un paso pendiente es del cron de siempre.');
+        $this->assertSame('suggestion', $servicio->process_single_lead($cancelado), 'Y el que sólo tiene pasos cancelados también.');
+        $this->assertCount(2, $espia->plantillas, 'A los dos les sale su plantilla.');
+
+        /* Control: prendido, el que tiene un paso pendiente lo lleva el embudo. */
+        AdminSetting::set(LeadFlujoEntradaService::KEY_ACTIVO, '1');
+        $tercero = $this->lead_de_anuncio_que_nunca_contesto();
+        $this->insertar_paso($tercero, 'nuevo_3h', 'nuevo', '2026-11-23 13:00:00', 'Paso pendiente.');
+        $this->assertSame('embudo', $servicio->process_single_lead($tercero), 'Control: con el flujo prendido lo lleva el embudo.');
+    }
+
+    /**
+     * Ronda 1, punto 3a. Si un setter contestó a mano la pregunta del lead, la pregunta está contestada para el freno del
+     * embudo (cuenta cualquier saliente que no sea del lead ni de un paso del embudo), aunque la IA esté apagada: el paso sale
+     * a su hora. El comportamiento de `hay_pregunta_sin_contestar` de E2 no cambia.
+     *
+     * @return void
+     */
+    public function test_si_un_setter_contesto_a_mano_el_paso_sale_a_su_hora(): void
+    {
+        [$lead, $telefono, $espia] = $this->lead_contactado_con_su_paso();
+        $this->ir_a('2026-11-23 10:30:00');
+        $this->postear_kapso($telefono, '¿Cuánto sale?')->assertStatus(200);
+        $this->ir_a('2026-11-23 10:40:00');
+        LeadMessage::create([
+            'lead_id' => $lead->id, 'sender' => 'setter', 'kind' => 'text', 'content' => 'Te paso los precios por acá.',
+            'status' => 'enviado', 'is_status_event' => false, 'is_followup' => false, 'requiere_verificacion' => false,
+            'sent_at' => now(), 'whatsapp_message_id' => 'wamid.setter.manual',
+        ]);
+        $this->assertSame(['conversando_22h'], $this->claves_pendientes($lead), 'Precondición: el paso sigue programado.');
+        $antes = count($espia->textos);
+
+        $this->ir_a('2026-11-24 09:05:00'); // el paso venció a las 09:01; la ventana cierra a las 10:30
+        $this->assertSame(0, Artisan::call('leads:send-scheduled-messages'));
+
+        $this->assertCount($antes + 1, $espia->textos, 'La pregunta ya tiene su respuesta humana: el paso sale a su hora.');
+        $this->assertSame([], $this->claves_pendientes($lead));
+    }
+
+    /**
+     * Ronda 1, punto 3b. La retención TERMINA: un paso de plantilla (no tiene ventana que lo corte) con una pregunta sin
+     * contestar para siempre se pospone de a 60 minutos como mucho hasta 24 h después de su hora original; pasado el tope se
+     * cancela con `CANCELED_CONVERSACION_PENDIENTE` y no sale ninguna plantilla.
+     *
+     * @return void
+     */
+    public function test_la_retencion_de_una_plantilla_termina_al_pasar_las_24_horas(): void
+    {
+        $espia = $this->espiar_whatsapp();
+        $lead = $this->crear_lead_de_flujo('contactado');
+        $this->dejar_entregado_el_paso_1($lead);
+        $this->mensaje_del_lead($lead, '¿Cuánto sale?'); // nadie la contesta nunca
+        $paso = $this->insertar_paso($lead, 'conversando_dia_3', 'contactado', '2026-11-26 12:00:00', 'Hola Marina, ¿seguimos?', 'cc_embudo_conversando_dia_3');
+
+        $this->ir_a('2026-11-26 12:05:00');
+        $this->assertSame(0, Artisan::call('leads:send-scheduled-messages'));
+        $this->assertSame(LeadScheduledMessage::STATUS_PENDIENTE, (string) $paso->fresh()->status, 'Primero se pospone.');
+        $this->assertSame('2026-11-26 13:05:00', $this->hora_ar($paso->fresh()->scheduled_send_at));
+
+        /* Sigue sin contestarse: se vuelve a posponer mientras no pase el tope de 24 h desde las 12:00 originales. */
+        $this->ir_a('2026-11-27 10:30:00');
+        $this->assertSame(0, Artisan::call('leads:send-scheduled-messages'));
+        $this->assertSame(LeadScheduledMessage::STATUS_PENDIENTE, (string) $paso->fresh()->status, 'Dentro de las 24 h sigue retenido.');
+        $this->assertSame('2026-11-27 11:30:00', $this->hora_ar($paso->fresh()->scheduled_send_at));
+
+        /* 11:30 del 27 + 60 minutos ya pasa las 12:00 del 27 (24 h después de la hora original): se cancela. */
+        $this->ir_a('2026-11-27 11:30:00');
+        $this->assertSame(0, Artisan::call('leads:send-scheduled-messages'));
+        $this->assertSame(LeadScheduledMessage::STATUS_CANCELADO, (string) $paso->fresh()->status, 'Pasado el tope, la retención termina.');
+        $this->assertSame($this->motivo_de_cancelacion('CANCELED_CONVERSACION_PENDIENTE'), (string) $paso->fresh()->canceled_reason);
+        $this->assertSame([], $espia->textos, 'Nunca se llamó a WhatsApp con un texto.');
+    }
+
+    /**
+     * Ronda 1, nota de A. Un lead ANTERIOR al encendido del flujo (su `created_at` es anterior al sello) o con `demo_id` no
+     * está «en el flujo» (E2, puntos 10 y 10-bis): con el interruptor prendido no se le programa ningún paso, salga lo que
+     * salga. Control en el mismo test: un lead posterior al encendido y sin demo sí los recibe.
+     *
+     * @return void
+     */
+    public function test_un_lead_viejo_o_con_demo_no_recibe_pasos_con_el_interruptor_prendido(): void
+    {
+        $espia = $this->espiar_whatsapp();
+        $texto = '¡Hola! Soy Martín, de ComercioCity. Lo podés probar gratis 7 días con tu propio negocio. ¿Qué rubro trabajás?';
+        $enviar = function (Lead $lead) use ($espia, $texto) {
+            $sugerencia = LeadMessage::create([
+                'lead_id' => $lead->id, 'sender' => 'sistema', 'kind' => 'text', 'status' => 'sugerido', 'content' => $texto,
+                'is_followup' => false, 'is_status_event' => false, 'requiere_verificacion' => false, 'suggested_lead_status' => null,
+            ]);
+            (new LeadSuggestionSendService($espia))->send_suggestion($sugerencia);
+        };
+
+        /* El flujo se prendió a las 10:00 (setUp): un lead de las 09:00 es anterior. */
+        $this->ir_a('2026-11-23 09:00:00');
+        $viejo = $this->crear_lead_de_flujo('nuevo');
+        $this->mensaje_del_lead($viejo, '¿Cuánto cuesta?');
+
+        $this->ir_a('2026-11-23 10:05:00');
+        $con_demo = $this->crear_lead_de_flujo('nuevo');
+        Lead::query()->whereKey($con_demo->id)->update(['demo_id' => 1]);
+        $this->mensaje_del_lead($con_demo->fresh(), '¿Cuánto cuesta?');
+        $nuevo = $this->crear_lead_de_flujo('nuevo');
+        $this->mensaje_del_lead($nuevo, '¿Cuánto cuesta?');
+
+        foreach ([$viejo, $con_demo, $nuevo] as $lead) {
+            $enviar($lead->fresh());
+        }
+
+        $this->assertSame(['nuevo_22h', 'nuevo_3h'], $this->claves_pendientes($nuevo), 'Control: el lead posterior al encendido y sin demo sí recibe sus pasos.');
+        $this->assertSame([], $this->claves_pendientes($viejo), 'El lead anterior al encendido no recibe pasos.');
+        $this->assertSame([], $this->claves_pendientes($con_demo), 'El lead con demo no recibe pasos.');
+    }
+
+    // ------------------------------------------------------------------------------------------
     // CA20 — el cron viejo no toca al lead con pasos
     // ------------------------------------------------------------------------------------------
 
@@ -822,13 +990,16 @@ class SeguimientosDelEmbudoTest extends TestCase
      *
      * @return LeadScheduledMessage
      */
-    private function insertar_paso(Lead $lead, string $clave, string $estado_al_programar, string $cuando, string $texto): LeadScheduledMessage
+    private function insertar_paso(Lead $lead, string $clave, string $estado_al_programar, string $cuando, string $texto, ?string $plantilla = null): LeadScheduledMessage
     {
         return LeadScheduledMessage::create([
             'lead_id'                  => $lead->id,
             'scheduled_send_at'        => $this->ar($cuando),
-            'mode'                     => LeadScheduledMessage::MODE_TEXTO_LIBRE,
+            'mode'                     => $plantilla === null ? LeadScheduledMessage::MODE_TEXTO_LIBRE : LeadScheduledMessage::MODE_PLANTILLA,
             'content'                  => $texto,
+            'template_name'            => $plantilla,
+            'template_language'        => $plantilla === null ? null : 'es_AR',
+            'template_variables'       => $plantilla === null ? null : ['Marina'],
             'cancel_if_lead_replies'   => false,
             'baseline_lead_message_id' => null,
             'status'                   => LeadScheduledMessage::STATUS_PENDIENTE,
