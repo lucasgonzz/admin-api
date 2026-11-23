@@ -215,6 +215,67 @@ class EmpujonesDespuesDeVencerTest extends BaseDeLaPrueba
         );
     }
 
+    /**
+     * DECISIONES-E3 (menores). `prueba_vencida` va en el catálogo inmediatamente después de `prueba_activa` (grupo «Prueba»),
+     * también cuando lo da de alta el seeder standalone en una base que ya tiene el catálogo.
+     *
+     * @return void
+     */
+    public function test_prueba_vencida_va_justo_despues_de_prueba_activa(): void
+    {
+        LeadPipelineStatus::seed_defaults_if_empty();
+        LeadPipelineStatus::query()->where('slug', 'prueba_vencida')->delete();
+
+        (new LeadPipelineStatusEmbudoSeeder())->run();
+
+        $activa  = LeadPipelineStatus::query()->where('slug', 'prueba_activa')->value('sort_order');
+        $vencida = LeadPipelineStatus::query()->where('slug', 'prueba_vencida')->value('sort_order');
+        $this->assertNotNull($vencida, 'El seeder da de alta prueba_vencida.');
+        $this->assertSame((int) $activa + 1, (int) $vencida, 'Va inmediatamente después de prueba_activa.');
+    }
+
+    /**
+     * DECISIONES-E3 (menores). Extender una prueba vencida que vuelve a quedar activa devuelve al lead de `prueba_vencida` a
+     * `prueba_activa`, con evento de estado. Si extender no la reactiva (la fecha nueva sigue en el pasado) el lead no se
+     * toca; y un lead que no estaba en `prueba_vencida` tampoco.
+     *
+     * @return void
+     */
+    public function test_extender_una_vencida_que_se_reactiva_vuelve_el_lead_a_prueba_activa(): void
+    {
+        [$client, $lead] = $this->negocio_vencido(8);
+        $ciclo = app(PruebaCicloService::class);
+
+        /* Siete días desde el alta siguen en el pasado: no se reactiva. */
+        $ciclo->cambiar_dias($client->fresh(), 7);
+        $this->assertSame(PruebaCicloService::CLIENTE_PRUEBA_VENCIDA, (string) $client->fresh()->estado, 'Precondición: sigue vencida.');
+        $this->assertSame('prueba_vencida', (string) $lead->fresh()->status, 'Si no se reactiva, el lead no se toca.');
+        $this->assertSame(0, LeadMessage::query()->where('lead_id', $lead->id)->where('is_status_event', true)->count());
+
+        /* Treinta días desde el alta: vuelve a estar en curso. */
+        $ciclo->cambiar_dias($client->fresh(), 30);
+        $this->assertSame(PruebaCicloService::CLIENTE_PRUEBA, (string) $client->fresh()->estado, 'Precondición: la prueba se reactivó.');
+        $this->assertSame('prueba_activa', (string) $lead->fresh()->status, 'El lead vuelve a prueba_activa.');
+        $this->assertSame(1, LeadMessage::query()->where('lead_id', $lead->id)->where('is_status_event', true)->count(), 'Con su evento de estado.');
+    }
+
+    /**
+     * DECISIONES-E3 (menores). Extender no mueve a un lead que no está en `prueba_vencida` (por ejemplo, uno que ya pidió la
+     * implementación), aunque la prueba se reactive.
+     *
+     * @return void
+     */
+    public function test_extender_no_mueve_a_un_lead_que_no_estaba_en_prueba_vencida(): void
+    {
+        [$client, $lead] = $this->negocio_vencido(8);
+        Lead::query()->whereKey($lead->id)->update(['status' => 'implementacion_pedida']);
+
+        app(PruebaCicloService::class)->cambiar_dias($client->fresh(), 30);
+
+        $this->assertSame(PruebaCicloService::CLIENTE_PRUEBA, (string) $client->fresh()->estado, 'Precondición: se reactivó.');
+        $this->assertSame('implementacion_pedida', (string) $lead->fresh()->status);
+    }
+
     // ------------------------------------------------------------------------------------------
     // CA22 — empujones después de vencer
     // ------------------------------------------------------------------------------------------
@@ -284,6 +345,63 @@ class EmpujonesDespuesDeVencerTest extends BaseDeLaPrueba
             'Cada plantilla sale una vez, en su día, y nada más.'
         );
         $this->assertSame(3, PruebaWhatsappEnvio::query()->where('client_id', $client->id)->where('plantilla', 'like', 'cc_prueba_vencida_dia_%')->count());
+    }
+
+    /**
+     * DECISIONES-E3 (menores). Los hitos son por UMBRAL, no por igualdad: se manda el hito más alto alcanzado (8, 14 o 30) que
+     * todavía no se mandó. Si la corrida del día 8 se perdió, la del día 10 manda la del 8; el día 11 no repite; el 20 manda la
+     * del 14 y el 33 la del 30. Cada una una sola vez (deduplicadas por `prueba_whatsapp_envios.plantilla`).
+     *
+     * @return void
+     */
+    public function test_los_hitos_son_por_umbral(): void
+    {
+        $espia = $this->espiar_sender();
+        foreach ([8, 14, 30] as $dia) {
+            AdminSetting::set('prueba_vencida_plantilla_dia_' . $dia, 'cc_prueba_vencida_dia_' . $dia);
+            $this->plantilla_aprobada('cc_prueba_vencida_dia_' . $dia);
+        }
+        [$client] = $this->negocio_vencido(10);
+
+        $corrida = function (int $dia) use ($client) {
+            $this->ir_al_dia($dia, 13);
+            $this->assertSame(0, Artisan::call('prueba:empujar', ['--cliente' => $client->id]));
+        };
+
+        $corrida(10);
+        $this->assertSame(['cc_prueba_vencida_dia_8'], array_column($espia->plantillas, 'template_name'), 'La corrida perdida del día 8 se recupera el día 10.');
+        $corrida(11);
+        $this->assertCount(1, $espia->plantillas, 'El día 11 no repite.');
+        $corrida(20);
+        $this->assertSame(['cc_prueba_vencida_dia_8', 'cc_prueba_vencida_dia_14'], array_column($espia->plantillas, 'template_name'));
+        $corrida(33);
+        $this->assertSame(['cc_prueba_vencida_dia_8', 'cc_prueba_vencida_dia_14', 'cc_prueba_vencida_dia_30'], array_column($espia->plantillas, 'template_name'));
+        $corrida(40);
+        $this->assertCount(3, $espia->plantillas, 'Pasados los tres hitos no se manda más.');
+        $this->assertSame(3, PruebaWhatsappEnvio::query()->where('client_id', $client->id)->where('plantilla', 'like', 'cc_prueba_vencida_dia_%')->count());
+    }
+
+    /**
+     * DECISIONES-E3 (menores). Los hitos anteriores salteados NO se mandan: un negocio que se mira por primera vez el día 20
+     * recibe la del 14 (el más alto alcanzado) y nunca la del 8; el día 31 recibe la del 30 y tampoco la del 8.
+     *
+     * @return void
+     */
+    public function test_los_hitos_anteriores_salteados_no_se_mandan(): void
+    {
+        $espia = $this->espiar_sender();
+        foreach ([8, 14, 30] as $dia) {
+            AdminSetting::set('prueba_vencida_plantilla_dia_' . $dia, 'cc_prueba_vencida_dia_' . $dia);
+            $this->plantilla_aprobada('cc_prueba_vencida_dia_' . $dia);
+        }
+        [$client] = $this->negocio_vencido(20);
+
+        $this->assertSame(0, Artisan::call('prueba:empujar', ['--cliente' => $client->id]));
+        $this->assertSame(['cc_prueba_vencida_dia_14'], array_column($espia->plantillas, 'template_name'), 'El día 20 sale la del 14, no la del 8.');
+
+        $this->ir_al_dia(31, 13);
+        $this->assertSame(0, Artisan::call('prueba:empujar', ['--cliente' => $client->id]));
+        $this->assertSame(['cc_prueba_vencida_dia_14', 'cc_prueba_vencida_dia_30'], array_column($espia->plantillas, 'template_name'), 'Y nunca la del 8.');
     }
 
     /**
