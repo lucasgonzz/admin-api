@@ -446,7 +446,7 @@ class AdminSoloLeadsPolicy
             /* Los errores de validación son sólo textos por campo (`errors.<campo>: [mensajes]`): el perfil los ve completos, porque sin
                ellos «Registrar llamada» no puede decirle a Juan qué le falta. */
             if ($clave === 'errors') {
-                $salida[$clave] = $hijo;
+                $salida[$clave] = $this->filtrar_errores($hijo);
                 continue;
             }
 
@@ -456,6 +456,49 @@ class AdminSoloLeadsPolicy
                 $salida[$clave] = $this->filtrar_nodo($hijo, $claves_extra);
             }
             // Cualquier otra relación u objeto anidado no listado se elimina.
+        }
+
+        return $es_objeto ? (object) $salida : $salida;
+    }
+
+    /**
+     * Deja pasar los errores de validación (`errors`) SÓLO como textos por campo: cada campo es una lista de textos (o un texto). Se
+     * descarta todo lo demás (objetos, listas de objetos, anidados) y toda clave que parezca secreta.
+     *
+     * @param mixed $errores Objeto o arreglo `campo => [mensajes]`.
+     *
+     * @return mixed Del mismo tipo que recibió.
+     */
+    private function filtrar_errores($errores)
+    {
+        if (! is_object($errores) && ! is_array($errores)) {
+            return $errores;
+        }
+
+        $es_objeto = is_object($errores);
+        $salida    = [];
+        foreach (($es_objeto ? get_object_vars($errores) : $errores) as $campo => $mensajes) {
+            if ($this->es_clave_sensible((string) $campo)) {
+                continue;
+            }
+
+            if (is_string($mensajes)) {
+                $salida[$campo] = $mensajes;
+                continue;
+            }
+
+            if (is_array($mensajes) && $this->es_lista($mensajes)) {
+                $solo_textos = true;
+                foreach ($mensajes as $mensaje) {
+                    if (! is_string($mensaje)) {
+                        $solo_textos = false;
+                        break;
+                    }
+                }
+                if ($solo_textos) {
+                    $salida[$campo] = $mensajes;
+                }
+            }
         }
 
         return $es_objeto ? (object) $salida : $salida;
