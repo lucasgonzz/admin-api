@@ -13,6 +13,7 @@ use App\Models\LeadScheduledMessage;
 use App\Services\LeadFlujoEntradaService;
 use App\Services\LeadFollowupService;
 use App\Services\LeadOfertaDePruebaService;
+use App\Services\LeadOrigenService;
 use App\Services\LeadSuggestionSendService;
 use App\Services\PruebaPlantillasService;
 use App\Services\WhatsappSendService;
@@ -414,6 +415,49 @@ class SeguimientosDelEmbudoTest extends TestCase
             $this->assertSame(LeadScheduledMessage::CANCELED_LEAD_PROMOVIDO, (string) $paso->canceled_reason, "{$paso->paso_embudo}: el lead ya es de un cliente en prueba.");
         }
         $this->assertSame(0, LeadMessage::query()->where('lead_id', $lead->id)->where('sender', 'setter')->count(), 'Ni se escribe nada en el hilo.');
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Decisión del Coordinador P1 (23/11/2026): el link por el camino literal también pasa a link_enviado
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * DECISIONES-E3 P1. El lead de la web (frase de la landing) que contesta SIN preguntar recibe, por el camino literal
+     * (`SendLeadDosFormasJob`), las dos formas, la página y el link de la prueba. Como a cualquier otro envío del link
+     * (`LeadSuggestionSendService`), eso lo pasa a `link_enviado` con su evento de estado, cancela los pasos de los estados
+     * anteriores y programa los del link: `link_2h` y `link_22h`. No le quedan pasos de `contactado`.
+     *
+     * @return void
+     */
+    public function test_el_link_por_el_camino_literal_pasa_al_lead_de_la_web_a_link_enviado(): void
+    {
+        $telefono = $this->telefono_al_azar();
+        $this->postear_kapso($telefono, LeadOrigenService::FRASE_LANDING_PRUEBA)->assertStatus(200);
+        $lead = Lead::query()->where('phone', $telefono)->firstOrFail();
+
+        $espia = $this->espiar_whatsapp();
+        $this->correr_job($this->jobs_encolados(SendLeadPresentationMessageJob::class)->last());
+        $this->avanzar(300); // 10:05
+        $this->postear_kapso($telefono, self::RESPUESTA_SIN_PREGUNTA)->assertStatus(200);
+        $jobs = $this->jobs_encolados(SendLeadDosFormasJob::class);
+        $this->assertCount(1, $jobs, 'Precondición (E2): sin pregunta sale el literal del paso 2.');
+        $this->avanzar(3);
+        $this->correr_job($jobs->first());
+
+        $this->assertTrue(
+            count(array_filter($this->cuerpos_enviados($espia), function ($texto) {
+                return strpos($texto, LeadOfertaDePruebaService::link()) !== false;
+            })) === 1,
+            'Precondición (E2): el literal del lead de la web lleva el link de la prueba.'
+        );
+        $this->assertSame('link_enviado', (string) $lead->fresh()->status, 'Haberle mandado el link lo pasa a link_enviado, salga por donde salga.');
+        $this->assertSame(
+            1,
+            LeadMessage::query()->where('lead_id', $lead->id)->where('is_status_event', true)->where('content', 'like', '%' . \App\Models\LeadPipelineStatus::label_for('link_enviado') . '%')->count(),
+            'Y queda el evento de estado en el hilo.'
+        );
+        $this->assertSame(['link_22h', 'link_2h'], $this->claves_pendientes($lead), 'Quedan los pasos del link y ninguno de nuevo ni de contactado.');
+        $this->assertSame('2026-11-23 12:05:03', $this->hora_ar($this->unico_pendiente($lead, 'link_2h')->scheduled_send_at), 'link_2h: 2 h después de que sale el link.');
     }
 
     // ------------------------------------------------------------------------------------------
