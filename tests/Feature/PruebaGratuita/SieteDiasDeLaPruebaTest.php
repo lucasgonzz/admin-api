@@ -150,7 +150,7 @@ class SieteDiasDeLaPruebaTest extends BaseDeLaPrueba
 
         $this->assertSame([
             'cc_prueba_bienvenida',
-            'cc_prueba_paso_importo',
+            'cc_prueba_paso_importo_v2',
             'cc_prueba_paso_articulo_creado_v2',
             'cc_prueba_paso_articulo_actualizado',
             'cc_prueba_paso_venta',
@@ -209,7 +209,7 @@ class SieteDiasDeLaPruebaTest extends BaseDeLaPrueba
 
         $this->assertSame([
             'cc_prueba_bienvenida',
-            'cc_prueba_paso_importo',
+            'cc_prueba_paso_importo_v2',
             'cc_prueba_paso_articulo_creado_v2',
             'cc_prueba_paso_articulo_actualizado',
             'cc_prueba_paso_venta',
@@ -278,10 +278,10 @@ class SieteDiasDeLaPruebaTest extends BaseDeLaPrueba
         $this->assertTrue($hoy['encuesta_pendiente']);
         $this->assertSame('importo', $hoy['paso']);
         $this->assertSame('enviado', app(PruebaWhatsappService::class)->empujar($client->fresh(), $lead)['estado']);
-        $this->assertSame('cc_prueba_paso_importo', $this->secuencia($espia)[1]);
+        $this->assertSame('cc_prueba_paso_importo_v2', $this->secuencia($espia)[1]);
 
         /* Si a esa hora faltaran menos de tres horas, no. */
-        PruebaWhatsappEnvio::where('client_id', $client->id)->where('plantilla', 'cc_prueba_paso_importo')->delete();
+        PruebaWhatsappEnvio::where('client_id', $client->id)->where('plantilla', 'cc_prueba_paso_importo_v2')->delete();
         Carbon::setTestNow($this->alta->copy()->addDays(7)->subHours(2));
         $hoy = $this->getJson('/api/claude/prueba/resumen?consultar_instancia=1&client_id=' . $client->id, $this->headers_de_claude())->assertOk()->json('pruebas.0.hoy');
         $this->assertNull($hoy['paso']);

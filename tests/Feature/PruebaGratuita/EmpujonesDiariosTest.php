@@ -128,14 +128,14 @@ class EmpujonesDiariosTest extends BaseDeLaPrueba
         $espia = $this->espiar_sender();
         [$client, $lead] = $this->negocio_con_bienvenida();
 
-        \App\Models\FollowupTemplate::where('template_name', 'cc_prueba_paso_importo')->update(['activa' => false, 'meta_status' => 'PENDING']);
+        \App\Models\FollowupTemplate::where('template_name', 'cc_prueba_paso_importo_v2')->update(['activa' => false, 'meta_status' => 'PENDING']);
 
         $this->fakear_http(['*/admin-sync/prueba/estado' => Http::response($this->estado_de_la_instancia(['ingreso']), 200)]);
 
         $resultado = app(PruebaWhatsappService::class)->empujar($client, $lead);
 
         $this->assertSame('plantilla_no_disponible', $resultado['estado']);
-        $this->assertStringContainsString('cc_prueba_paso_importo', (string) $resultado['detalle']);
+        $this->assertStringContainsString('cc_prueba_paso_importo_v2', (string) $resultado['detalle']);
         $this->assertCount(0, $espia->plantillas);
         $this->assertSame(0, PruebaWhatsappEnvio::where('client_id', $client->id)->where('estado', PruebaWhatsappEnvio::ESTADO_EN_COLA)->count(), 'Un empujón no se encola: mañana se vuelve a mirar.');
     }

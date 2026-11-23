@@ -75,7 +75,7 @@ class ResumenDeAccionesNuevasDelAgenteTest extends TestCase
     public function test_confirmar_interes_closer(): void
     {
         $this->assertSame(
-            ['Confirmar interés en la llamada con Thomás'],
+            ['Confirmar interés en la llamada con Juan'],
             LeadMessage::build_actions_summary(['confirmar_interes_closer' => true], 'demo_realizada')
         );
 
