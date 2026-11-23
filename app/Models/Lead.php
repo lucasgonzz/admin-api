@@ -11,6 +11,7 @@ use App\Helpers\WhatsappNormalizer;
 use App\Services\DemoUrlNormalizer;
 use App\Services\LeadDemoFormMapper;
 use App\Services\Pipelines\PipelineLeadFunnelService;
+use App\Services\Pipelines\TableroDeJuanService;
 use App\Services\LeadDemoSettings;
 use App\Services\LeadWhatsappOnboardingSettings;
 use Illuminate\Database\Eloquent\Model;
@@ -242,11 +243,18 @@ class Lead extends Model
            excepción del CRM acá empezaría a tirar 500 en lugares que no tienen nada que ver con el
            CRM. */
         static::saved(function (Lead $lead) {
+            /* Tablero de Juan (E1): un negocio grande entra solo a «Interesados». */
+            if ($lead->wasChanged('cantidad_empleados')) {
+                app(TableroDeJuanService::class)->al_cambiar_empleados($lead);
+            }
+
             if (! $lead->wasChanged('status')) {
                 return;
             }
 
             app(PipelineLeadFunnelService::class)->al_cambiar_estado_del_lead($lead);
+            /* Tablero de Juan (E1): el estado nuevo mueve o da de alta la tarjeta. */
+            app(TableroDeJuanService::class)->al_cambiar_estado($lead);
         });
 
         static::deleting(function (Lead $lead) {
