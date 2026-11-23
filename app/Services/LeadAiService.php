@@ -11461,6 +11461,12 @@ Demo fecha: {$demo}
 {$extra}
 TXT;
 
+        /* Tablero de Juan (E1): lo que Juan habló por teléfono con el lead (las últimas 5 llamadas), para no repreguntarlo. */
+        $bloque_de_llamadas = app(LeadLlamadaService::class)->bloque_para_agente($lead);
+        if ($bloque_de_llamadas !== '') {
+            $txt .= "\n\n" . $bloque_de_llamadas;
+        }
+
         /* Inyectar disponibilidad de demos si se provee (segunda llamada con slots). */
         if ($availability_context !== '') {
             $txt .= "\n\nDISPONIBILIDAD DE DEMOS:\n{$availability_context}";
