@@ -15,6 +15,8 @@ use Illuminate\Database\Seeder;
  * Qué hace, y nada más:
  *  - da de alta `link_enviado` (grupo «Prueba», `#0dcaf0`) e `implementacion_pedida` (grupo «Cierre», `#fd7e14`) si no
  *    existen;
+ *  - (E3) da de alta `prueba_vencida` (grupo «Prueba», `#adb5bd`) justo detrás de `prueba_activa`; el seeder ya corrió en
+ *    producción para los otros dos, así que la entrada nueva se da de alta sola al volver a correrlo;
  *  - cambia la etiqueta de `contactado` a «Conversando» y la de `prueba_activa` a «En prueba» SÓLO si todavía tienen
  *    la etiqueta vieja por defecto, para no pisar una edición a mano;
  *  - es idempotente: corrido dos veces, el resultado es el mismo.
@@ -37,6 +39,9 @@ class LeadPipelineStatusEmbudoSeeder extends Seeder
     private const NUEVOS = [
         'link_enviado'          => 'calificado',
         'implementacion_pedida' => 'prueba_activa',
+        /* E3: la prueba venció sin contratar. Va inmediatamente después de `prueba_activa` (dentro del grupo «Prueba»);
+           como se da de alta DESPUÉS de `implementacion_pedida`, queda entre las dos. */
+        'prueba_vencida'        => 'prueba_activa',
     ];
 
     /**

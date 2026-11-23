@@ -4,6 +4,9 @@ namespace App\Services\Prueba;
 
 use App\Models\Client;
 use App\Models\Lead;
+use App\Models\LeadMessage;
+use App\Models\LeadPipelineStatus;
+use App\Services\LeadBroadcastService;
 use App\Models\TrialInstance;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -75,12 +78,54 @@ class PruebaCicloService
             $client->save();
         }
 
+        /* E3 (misión embudo-whatsapp-precios): el lead de la prueba vence con ella. */
+        $this->mover_el_lead_de($client, LeadPipelineStatus::PRUEBA_ACTIVA, LeadPipelineStatus::PRUEBA_VENCIDA, 'venció la prueba gratuita');
+
         $instancia = self::instancia_de($client);
         if ($instancia !== null) {
             $this->dormir($instancia);
         }
 
         Log::info('PruebaCicloService: prueba vencida.', ['client_id' => $client->id]);
+    }
+
+    /**
+     * Mueve al lead promovido de un cliente de un estado a otro SÓLO si está en el primero, por query builder (sin observers:
+     * el alta de la prueba lo hace igual) y con un evento de estado en el hilo (no cuenta como mensaje ni como sin leer).
+     * Si el lead está en cualquier otro estado, no lo toca.
+     *
+     * @param Client $client
+     * @param string $desde  Slug en el que tiene que estar el lead.
+     * @param string $hasta  Slug al que pasa.
+     * @param string $motivo Texto corto del evento («venció la prueba gratuita»).
+     *
+     * @return bool true si el lead cambió de estado.
+     */
+    private function mover_el_lead_de(Client $client, string $desde, string $hasta, string $motivo): bool
+    {
+        $lead = Lead::query()->where('promoted_client_id', (int) $client->id)->orderByDesc('id')->first();
+        if ($lead === null || (string) $lead->status !== $desde) {
+            return false;
+        }
+
+        $nuevo = LeadPipelineStatus::ensure_exists($hasta);
+
+        Lead::query()->whereKey($lead->id)->where('status', $desde)->update(['status' => $nuevo->slug, 'updated_at' => Carbon::now()]);
+
+        LeadMessage::create([
+            'lead_id'               => $lead->id,
+            'sender'                => 'sistema',
+            'content'               => 'Estado cambiado de "' . LeadPipelineStatus::label_for($desde)
+                . '" a "' . LeadPipelineStatus::label_for($nuevo->slug) . '": ' . $motivo . '.',
+            'status'                => 'enviado',
+            'is_followup'           => false,
+            'is_status_event'       => true,
+            'requiere_verificacion' => false,
+        ]);
+
+        LeadBroadcastService::emit_conversation_updated((int) $lead->id);
+
+        return true;
     }
 
     /** `prueba.vencida` del canal de hitos: vence al cliente del lead. */
@@ -187,7 +232,13 @@ class PruebaCicloService
         if ($vence_at->isFuture() && (string) $client->estado === self::CLIENTE_PRUEBA_VENCIDA) {
             $client->estado = self::CLIENTE_PRUEBA;
         }
+        $se_reactivo = $vence_at->isFuture() && (string) $client->getOriginal('estado') === self::CLIENTE_PRUEBA_VENCIDA;
         $client->save();
+
+        /* E3: si la extensión la reactivó, el lead vuelve de `prueba_vencida` a `prueba_activa` (sólo si estaba ahí). */
+        if ($se_reactivo) {
+            $this->mover_el_lead_de($client, LeadPipelineStatus::PRUEBA_VENCIDA, LeadPipelineStatus::PRUEBA_ACTIVA, 'se extendió la prueba gratuita');
+        }
 
         $instancia = self::instancia_de($client);
         if ($instancia !== null && $vence_at->isFuture() && $instancia->esta_dormida()) {

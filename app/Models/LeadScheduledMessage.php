@@ -92,6 +92,24 @@ class LeadScheduledMessage extends Model
     public const CANCELED_LEAD_CERRADO = 'lead_cerrado';
 
     /**
+     * El lead cambió de estado entre programar y enviar un paso del embudo (E3, misión embudo-whatsapp-precios): el paso
+     * era de otro estado y ya no corresponde.
+     */
+    public const CANCELED_CAMBIO_DE_ESTADO = 'cambio_de_estado';
+
+    /**
+     * Un paso del embudo venció con una conversación pendiente (una pregunta sin contestar o una sugerencia de Martín sin
+     * enviar), se lo pospuso y ya no entra en la ventana de 24 h o en la franja.
+     */
+    public const CANCELED_CONVERSACION_PENDIENTE = 'conversacion_pendiente';
+
+    /** Un paso del embudo venció con el interruptor del flujo de entrada apagado. */
+    public const CANCELED_FLUJO_APAGADO = 'flujo_apagado';
+
+    /** Un paso del embudo ya no se pudo reprogramar al volver a anclarlo (quedó fuera de la ventana de 24 h). */
+    public const CANCELED_REANCLADO = 'reanclado';
+
+    /**
      * Estados de un lead a los que NO se les programa ni se les manda un mensaje comercial.
      *
      * 🔴 Es la MISMA lista para las dos puertas —programar y despachar— a propósito. Hasta el

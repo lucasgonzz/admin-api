@@ -45,6 +45,9 @@ class LeadPipelineStatus extends Model
         // cuando se borra la instancia sin contratar (cerrado_perdido).
         // Sólo su etiqueta cambió a «En prueba» (E2): lo leen cinco servicios por el slug.
         'prueba_activa'                => 'En prueba',
+        // Embudo nuevo (E3): la prueba gratuita venció y el negocio no contrató. Lo pone `PruebaCicloService::vencer()` y lo
+        // saca contratar (cerrado_ganado), borrar (cerrado_perdido) o extender la prueba (vuelve a prueba_activa).
+        'prueba_vencida'               => 'Prueba vencida',
         // Embudo nuevo (E2): el lead pidió que se lo carguemos nosotros; lo llama el vendedor.
         'implementacion_pedida'        => 'Implementación pedida',
         'closer_activo'                => 'Closer activo',
@@ -56,6 +59,9 @@ class LeadPipelineStatus extends Model
 
     /** Slug del estado de la prueba gratuita en curso. */
     public const PRUEBA_ACTIVA = 'prueba_activa';
+
+    /** Slug del estado de la prueba gratuita vencida sin contratar (E3). */
+    public const PRUEBA_VENCIDA = 'prueba_vencida';
 
     /**
      * Color de fondo del badge por slug (hex) para admin-spa.
@@ -77,6 +83,7 @@ class LeadPipelineStatus extends Model
         'demo_pendiente_de_terminar'   => '#dc3545',
         'demo_realizada'               => '#0d6efd',
         'prueba_activa'                => '#20c997',
+        'prueba_vencida'               => '#adb5bd',
         'implementacion_pedida'        => '#fd7e14',
         'closer_activo'                => '#6f42c1',
         'mail2_enviado'                => '#adb5bd',
@@ -99,6 +106,7 @@ class LeadPipelineStatus extends Model
         'demo_pendiente_de_terminar' => 'Demo',
         'demo_realizada'             => 'Demo',
         'prueba_activa'              => 'Prueba',
+        'prueba_vencida'             => 'Prueba',
         'link_enviado'               => 'Prueba',
         'implementacion_pedida'      => 'Cierre',
         'closer_activo'              => 'Cierre',
