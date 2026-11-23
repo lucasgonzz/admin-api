@@ -63,7 +63,9 @@ class LeadCandidatosParaLlamadaService
     {
         $texto_normalizado = $this->normalizar($texto);
         $palabras          = $texto_normalizado === '' ? [] : explode(' ', $texto_normalizado);
-        $final_del_telefono = $telefono === '' ? '' : substr($telefono, -self::DIGITOS_DEL_TELEFONO);
+        /* Con menos de 8 dígitos no se puede identificar a nadie: una coincidencia de sufijo corto (ej. «8197») no puntúa. */
+        $final_del_telefono = strlen($telefono) < self::DIGITOS_DEL_TELEFONO ? '' : substr($telefono, -self::DIGITOS_DEL_TELEFONO);
+        $contienen_todo     = 0;
 
         $tarjetas = $this->tarjetas_abiertas();
         $leads    = $this->universo(array_keys($tarjetas));
@@ -81,6 +83,10 @@ class LeadCandidatosParaLlamadaService
             if ($con_tarjeta) {
                 $puntaje   = min(100, $puntaje + 5);
                 $motivos[] = 'Tiene una tarjeta abierta en el tablero';
+            }
+
+            if ($this->contiene_todo_el_texto($lead, $texto_normalizado)) {
+                $contienen_todo++;
             }
 
             $candidatos[] = [
@@ -107,18 +113,22 @@ class LeadCandidatosParaLlamadaService
 
         $candidatos = array_slice($candidatos, 0, self::MAXIMO_DE_CANDIDATOS);
 
-        return ['decision' => $this->decidir($candidatos), 'models' => $candidatos];
+        return ['decision' => $this->decidir($candidatos, $contienen_todo), 'models' => $candidatos];
     }
 
     /**
      * La decisión: `unico` si el primero tiene 80 o más y le saca 20 o más al segundo; `ambiguo` si hay candidatos pero no
      * se cumple; `sin_candidatos` si la lista está vacía.
      *
-     * @param array<int, array<string, mixed>> $candidatos Ordenados de mayor a menor puntaje.
+     * Aunque el primero le saque 20 puntos al segundo, si DOS o más candidatos contienen todo el texto buscado (ej. «Ferretería
+     * López» y «Ferretería López Hnos» con `q=Ferretería López`) no hay unicidad: es `ambiguo`.
+     *
+     * @param array<int, array<string, mixed>> $candidatos    Ordenados de mayor a menor puntaje.
+     * @param int                              $contienen_todo Cuántos candidatos contienen todo el texto buscado.
      *
      * @return string
      */
-    private function decidir(array $candidatos): string
+    private function decidir(array $candidatos, int $contienen_todo = 0): string
     {
         if ($candidatos === []) {
             return 'sin_candidatos';
@@ -126,11 +136,38 @@ class LeadCandidatosParaLlamadaService
 
         $segundo = isset($candidatos[1]) ? $candidatos[1]['puntaje'] : 0;
 
+        if ($contienen_todo >= 2) {
+            return 'ambiguo';
+        }
+
         if ($candidatos[0]['puntaje'] >= self::PUNTAJE_PARA_SER_UNICO && $candidatos[0]['puntaje'] - $segundo >= self::VENTAJA_PARA_SER_UNICO) {
             return 'unico';
         }
 
         return 'ambiguo';
+    }
+
+    /**
+     * ¿La empresa o el nombre del contacto del lead contienen TODO el texto buscado (como palabras completas)?
+     *
+     * @param Lead   $lead
+     * @param string $texto Búsqueda normalizada ('' = no aplica).
+     *
+     * @return bool
+     */
+    private function contiene_todo_el_texto(Lead $lead, string $texto): bool
+    {
+        if ($texto === '') {
+            return false;
+        }
+
+        foreach ([(string) $lead->company_name, (string) $lead->contact_name] as $campo) {
+            if (strpos(' ' . $this->normalizar($campo) . ' ', ' ' . $texto . ' ') !== false) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
