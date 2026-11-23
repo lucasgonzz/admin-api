@@ -179,6 +179,30 @@ class PruebaImportacionService
             $clave = hash('sha256', 'catalogo_whatsapp:' . $ticket->id . ':' . $mensaje->id . ':' . $url);
         }
 
+        /* E2: con la implementación contratada (`mitad` o `completa`) los ARTÍCULOS los importa Lucas, no el sistema: no se manda
+           nada a la instancia, queda una tarea para él (una sola por cliente y archivo). Clientes y proveedores siguen su camino. */
+        $gestion = app(ImplementacionContratadaService::class);
+        if ($modelo === 'article' && $gestion->articulos_los_importa_lucas($client)) {
+            if (isset($input['attachment_id'])) {
+                $origen_del_archivo = '#' . (int) $input['attachment_id'] . ' ' . $archivo['filename'];
+            } elseif (isset($input['pdf_attachment_id'])) {
+                $origen_del_archivo = 'PDF #' . (int) $input['pdf_attachment_id'];
+            } elseif (isset($input['whatsapp_catalog_url'])) {
+                $origen_del_archivo = 'catálogo de WhatsApp ' . (string) $input['whatsapp_catalog_url'];
+            } else {
+                $origen_del_archivo = $archivo['filename'] . ' (' . substr($clave, 0, 12) . ')';
+            }
+
+            $tarea = $gestion->marcar_articulos_recibidos($client, $ticket, $origen_del_archivo);
+
+            return [
+                'estado'   => 'articulos_para_lucas',
+                'task_id'  => (int) $tarea->id,
+                'mensaje'  => 'Recibido. Los artículos los carga Lucas y te avisamos cuando estén.',
+                'filename' => $archivo['filename'],
+            ];
+        }
+
         if ($soporte_activo && $modelo !== 'article') {
             // Clientes y proveedores van al servicio de soporte nuevo de empresa (con resumen, código y deshacer):
             // una instancia sin esa ruta contesta 404 y es `version_vieja`, sin que nadie lea el archivo.
@@ -722,7 +746,7 @@ class PruebaImportacionService
             return ['estado' => 'no_es_prueba', 'mensaje' => 'El cliente del ticket no está en prueba gratuita: la importación desde el ticket es solo para la prueba.'];
         }
 
-        return null;
+        return $this->sin_implementacion($ticket->client);
     }
 
     public function puerta_activo(SupportTicket $ticket): ?array
@@ -745,7 +769,29 @@ class PruebaImportacionService
             return ['estado' => 'contacto_no_habilitado', 'mensaje' => 'El número del ticket no está registrado como contacto del dueño.'];
         }
 
-        return null;
+        return $this->sin_implementacion($client);
+    }
+
+    /**
+     * La compuerta de la implementación contratada (misión embudo-juan-pipeline, E2): Soporte importa sólo si el negocio contrató la
+     * implementación (`mitad`, `completa`) o es de los de antes (`incluida`). Con `no`, no se importa: se le pasa el video para que
+     * lo haga por su cuenta y se le ofrece la implementación. Todas las importaciones (artículos, clientes y proveedores de la
+     * prueba, y las de soporte) pasan por `puerta()` o `puerta_activo()`, así que esto las cierra a todas.
+     *
+     * @param Client|null $client
+     *
+     * @return array<string, mixed>|null null = pasa.
+     */
+    private function sin_implementacion($client): ?array
+    {
+        if (app(ImplementacionContratadaService::class)->importa_soporte($client)) {
+            return null;
+        }
+
+        return [
+            'estado'  => 'sin_implementacion',
+            'mensaje' => 'Este negocio no contrató la implementación: no se importa desde Soporte. Pasale el video para hacerlo por su cuenta y ofrecé la implementación.',
+        ];
     }
 
     public function es_entrante_del_dueno(SupportTicket $ticket, ?SupportMessage $mensaje): bool
