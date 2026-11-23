@@ -60,10 +60,10 @@ class ContratoPlanGestionTest extends BaseDeCobranzas
     public function test_los_cuatro_planes_y_a_medida_se_guardan_y_el_pdf_muestra_nombre_y_limite(): void
     {
         $esperado = [
-            ['inicial', 55900, 'Plan Inicial (hasta 100 operaciones por mes)'],
-            ['intermedio', 85400, 'Plan Intermedio (de 101 a 250 operaciones por mes)'],
+            ['inicial', 55900, 'Plan Inicial (hasta 200 operaciones por mes)'],
+            ['intermedio', 85400, 'Plan Intermedio (de 201 a 600 operaciones por mes)'],
             ['plus', 199400, 'Plan Plus (de 251 a 500 operaciones por mes)'],
-            ['empresa', 263000, 'Plan Empresa (de 501 a 3.000 operaciones por mes)'],
+            ['empresa', 263000, 'Plan Empresa (operaciones ilimitadas)'],
             ['a_medida', 400000, 'Plan A medida (más de 3.000 operaciones por mes)'],
         ];
         foreach ($esperado as [$plan, $abono, $texto]) {
@@ -180,7 +180,7 @@ class ContratoPlanGestionTest extends BaseDeCobranzas
         $lead = $this->lead();
         $this->putJson('/api/admin/lead/'.$lead->id, array_merge($this->condiciones('intermedio', 85400), ['contract_pago_anual' => true]))->assertOk();
         $html = $this->html($lead->fresh());
-        $this->assertStringContainsString('Plan Intermedio (de 101 a 250 operaciones por mes); referencia mensual cubierta en el pago anual', $html);
+        $this->assertStringContainsString('Plan Intermedio (de 201 a 600 operaciones por mes); referencia mensual cubierta en el pago anual', $html);
         $this->assertStringContainsString('819.840', $html);
     }
 
