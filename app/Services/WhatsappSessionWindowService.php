@@ -95,9 +95,15 @@ class WhatsappSessionWindowService
          * entrantes de soporte, leads e implementación llegaron al institucional y no abren nada
          * acá. Y al revés —un dueño que le escribe a su asistente— no habilita texto libre por el
          * número de leads, así que el camino de siempre tampoco mira esta tabla. */
-        $buscadores = $proposito === WhatsappConfig::PROPOSITO_ASISTENTE
-            ? ['find_asistente_inbound']
-            : ['find_support_inbound', 'find_lead_inbound', 'find_implementation_inbound'];
+        /* 🔴 El número personal tiene también el suyo (`whatsapp_personal_messages`): un entrante de un lead, de
+         * soporte o del asistente al mismo teléfono llegó a OTRO número y no abre nada acá. */
+        if ($proposito === WhatsappConfig::PROPOSITO_PERSONAL) {
+            $buscadores = ['find_personal_inbound'];
+        } elseif ($proposito === WhatsappConfig::PROPOSITO_ASISTENTE) {
+            $buscadores = ['find_asistente_inbound'];
+        } else {
+            $buscadores = ['find_support_inbound', 'find_lead_inbound', 'find_implementation_inbound'];
+        }
 
         $candidatos = [];
         foreach ($buscadores as $buscador) {
@@ -266,6 +272,33 @@ class WhatsappSessionWindowService
         });
 
         return $this->first_matching_row($rows, $phone, 'asistente');
+    }
+
+    /**
+     * Último entrante del número PERSONAL de ese teléfono dentro de la ventana.
+     *
+     * Cuenta cualquier entrante (`direccion = in`) de cualquier origen —incluido `history_sync`— mientras su
+     * `sent_at` (la hora real del mensaje, no la de llegada del webhook) esté dentro de las últimas 24 h: un
+     * historial viejo no abre nada, y uno reciente sí es un mensaje que el cliente mandó de verdad.
+     *
+     * @param string                    $phone  Teléfono buscado.
+     * @param \Illuminate\Support\Carbon $cutoff Momento a partir del cual cuenta.
+     *
+     * @return array{at: \Illuminate\Support\Carbon, origin: string}|null
+     */
+    private function find_personal_inbound(string $phone, $cutoff)
+    {
+        $rows = $this->rows_for('personal', function () use ($cutoff) {
+            return DB::table('whatsapp_personal_messages')
+                ->where('direccion', 'in')
+                ->whereNotNull('sent_at')
+                ->where('sent_at', '>=', $cutoff)
+                ->select('chat_telefono as phone', 'sent_at as at')
+                ->orderByDesc('sent_at')
+                ->get();
+        });
+
+        return $this->first_matching_row($rows, $phone, 'personal');
     }
 
     /**
