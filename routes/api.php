@@ -1118,6 +1118,21 @@ Route::prefix('admin')->group(function () {
         ->middleware('signed')
         ->middleware('throttle:adjuntos-firmados');
 
+    /* WhatsApp PERSONAL de Lucas (número en coexistencia con Kapso), sólo para agentes (misión wa-personal-coexistencia).
+     * `admin.solo_agente` va ANTES de `admin.solo_leads`: un humano o un `solo_leads` recibe 404 y no se entera de que existe.
+     * Ninguna de estas rutas está bajo `claude/*` ni en `whatsapp-config`. */
+    Route::middleware(['auth:sanctum', 'admin.solo_agente', 'admin.solo_leads'])
+        ->prefix('whatsapp-personal')
+        ->group(function () {
+            Route::get('estado', [\App\Http\Controllers\Api\WhatsappPersonalController::class, 'estado']);
+            Route::get('plantillas', [\App\Http\Controllers\Api\WhatsappPersonalController::class, 'plantillas']);
+            Route::get('chats', [\App\Http\Controllers\Api\WhatsappPersonalController::class, 'chats']);
+            Route::get('chats/{telefono}/mensajes', [\App\Http\Controllers\Api\WhatsappPersonalController::class, 'mensajes']);
+            Route::post('chats/{telefono}/leer', [\App\Http\Controllers\Api\WhatsappPersonalController::class, 'leer']);
+            Route::get('mensajes/{id}/media', [\App\Http\Controllers\Api\WhatsappPersonalController::class, 'media'])->whereNumber('id');
+            Route::post('enviar', [\App\Http\Controllers\Api\WhatsappPersonalController::class, 'enviar']);
+        });
+
     // `admin.solo_leads` (E5): perfil «Sólo Leads». Con el flag apagado vuelve en la primera línea; con él
     // encendido sólo deja pasar lo de AdminSoloLeadsPolicy. Toda ruta autenticada nueva debe pasar por acá.
     Route::middleware(['auth:sanctum', 'admin.solo_leads'])->group(function () {
