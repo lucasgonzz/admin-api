@@ -224,7 +224,7 @@ class WhatsappPersonalWebhookService
      *
      * @return void
      */
-    private function actualizar_chat(string $telefono, ?string $nombre, Carbon $sent_at, bool $es_entrante): void
+    public function actualizar_chat(string $telefono, ?string $nombre, Carbon $sent_at, bool $es_entrante): void
     {
         $ahora = Carbon::now()->toDateTimeString();
 
