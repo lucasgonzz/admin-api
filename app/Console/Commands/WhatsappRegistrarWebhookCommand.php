@@ -64,7 +64,7 @@ class WhatsappRegistrarWebhookCommand extends Command
      * @var string
      */
     protected $signature = 'whatsapp:registrar-webhook
-                            {--proposito=asistente : Propósito del número (principal|asistente)}
+                            {--proposito=asistente : Propósito del número (principal|asistente|personal)}
                             {--url= : URL del webhook; por defecto la de este admin}
                             {--secreto= : Secreto a usar; por defecto se genera uno nuevo}
                             {--solo-health : Solo consulta el health del número y no registra nada}
@@ -122,6 +122,13 @@ class WhatsappRegistrarWebhookCommand extends Command
         $proposito = trim((string) $this->option('proposito'));
         if ($proposito === '') {
             $proposito = WhatsappConfig::PROPOSITO_ASISTENTE;
+        }
+
+        $propositos_validos = [WhatsappConfig::PROPOSITO_PRINCIPAL, WhatsappConfig::PROPOSITO_ASISTENTE, WhatsappConfig::PROPOSITO_PERSONAL];
+        if (! in_array($proposito, $propositos_validos, true)) {
+            $this->error('Propósito "' . $proposito . '" inválido. Los válidos son: ' . implode(', ', $propositos_validos) . '.');
+
+            return 1;
         }
 
         if ((bool) $this->option('reemplazar') && $proposito !== WhatsappConfig::PROPOSITO_ASISTENTE) {

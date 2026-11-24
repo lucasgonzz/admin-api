@@ -77,11 +77,44 @@ class WhatsappEstadoCommand extends Command
         $this->bloque_de_numero('Leads y clientes (principal)', $principal, $sin_red, false);
         $this->bloque_de_numero('Agente personal de los dueños (asistente)', $asistente, $sin_red, true);
 
+        $this->bloque_del_numero_personal(WhatsappConfig::delProposito(WhatsappConfig::PROPOSITO_PERSONAL), $sin_red);
+
         $this->bloque_de_webhooks_de_proyecto($principal !== null ? $principal : $asistente, $sin_red);
         $this->bloque_de_plantillas($principal, $asistente, $sin_red);
         $this->bloque_de_salidas($asistente);
 
         return ($asistente !== null && $asistente->tieneLoNecesarioParaAtender()) ? 0 : 1;
+    }
+
+    /**
+     * Sección del número PERSONAL de Lucas (coexistencia): lo cargado y si está listo, sin ninguna clave ni secreto.
+     *
+     * Usa la fila aunque esté apagada, para poder decir «apagada». 🔴 El personal no tiene repliegue al principal: si no
+     * está listo, no envía ni recibe nada.
+     *
+     * @param WhatsappConfig|null $personal Fila personal (activa o no).
+     * @param bool                $sin_red  Si no se consulta a Kapso.
+     *
+     * @return void
+     */
+    private function bloque_del_numero_personal(?WhatsappConfig $personal, bool $sin_red): void
+    {
+        $this->bloque_de_numero('Número personal de Lucas (personal)', $personal, $sin_red, false);
+
+        if ($personal === null) {
+            return;
+        }
+
+        $faltan = $personal->loQueLeFaltaParaAtender();
+        if (! $personal->is_active) {
+            $faltan[] = 'activo';
+        }
+
+        if ($faltan === []) {
+            $this->info('  LISTO: este número ya lee y envía por su cuenta (nunca cae al principal).');
+        } else {
+            $this->warn('  NO está listo. Falta: ' . implode(', ', $faltan) . '.');
+        }
     }
 
     /**
