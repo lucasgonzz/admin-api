@@ -24,6 +24,21 @@ return [
     /* Caracteres máximos que se guardan del extracto de la respuesta en la auditoría. */
     'response_excerpt_chars' => 2000,
 
+    /*
+    | Días que se conservan los mensajes del WhatsApp personal de Lucas (misión wa-personal-coexistencia). Los borra a
+    | diario `whatsapp:personal-depurar`. Se cambia con WHATSAPP_PERSONAL_RETENCION_DIAS.
+    */
+    'whatsapp_personal_retencion_dias' => (int) env('WHATSAPP_PERSONAL_RETENCION_DIAS', 90),
+
+    /*
+    | Rutas («MÉTODO ruta» sin `api/admin/`) cuyo CONTENIDO no se guarda en la auditoría del agente: ni el payload, ni
+    | el extracto de la respuesta, ni los teléfonos del path. Quedan método, ruta, categoría, estado y duración, con
+    | «[omitido: chat privado]». Son los chats privados de Lucas: la auditoría no puede ser una copia de ellos.
+    */
+    'sin_contenido_en_auditoria' => [
+        '~^[A-Z]+ whatsapp-personal/~',
+    ],
+
     /* Caracteres máximos que se guardan del payload (query + body) en la auditoría. */
     'payload_max_chars' => 20000,
 
@@ -100,6 +115,8 @@ return [
         // Mensajes y mails a leads y clientes, deploys, instalaciones y sincronizaciones hacia sistemas de clientes.
         'terceros' => [
             'patterns' => [
+                // Mensaje desde el WhatsApp personal de Lucas: siempre con código de confirmación (explícito, no sólo por /enviar$).
+                '~^POST whatsapp-personal/enviar$~',
                 '~^(POST|PUT|PATCH) .*(send-|-mail$|/messages$|/message$|/enviar$|deploy/|/sync$|start|advance-stage|actions/\{action\}$|apply-diff|run-|promote|approve|recall-bot|calls/|offer-demo|avisar|prueba/instancias/|extensiones/acceso|agentes-ia$|link-dueno|pending-seeders/run|demo-token/reemitir|force-|check-demo|simulate-inbound|resume-with-claude|retry|reaction|modelos-ia|candado-sesion$|horarios$|followup-template|scheduled-messages|whatsapp-onboarding)~',
                 '~^POST (clients/\{client\}/)?installations$~',
                 '~^POST demo-installation$~',
