@@ -309,6 +309,9 @@ class ClaudeSupportCodexController extends Controller
             'migration_blocked_reason' => 'sometimes|required|string|max:2000|prohibited_unless:action,pedir_revision',
             'thread_id' => 'sometimes|string|max:150',
             'confirmation_message_id' => 'sometimes|nullable|integer|min:1',
+            // Contrato C3: sin regla de tipo a propósito; SupportCodexService::reply() devuelve 422
+            // `invalid_review_resolution` (un código que el monitor reconoce) si no es true o la acción no corresponde.
+            'review_resolved' => 'sometimes',
         ]);
         return response()->json($service->reply((int) $id, $data));
     }

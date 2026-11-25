@@ -424,7 +424,9 @@ class SupportCodexService
                 // Claim con rotate_thread + thread_id nuevo (misión cruzada ficha-del-cliente, 11/11/2026).
                 'thread_rotation' => true,
                 // POST .../no-reply: un entrante que no necesita respuesta (misión martin-descripcion-y-actualizaciones).
-                'no_reply' => true],
+                'no_reply' => true,
+                // reply admite `review_resolved: true` (contrato C3): apaga el rojo de una revisión pedida por el agente.
+                'agent_review_resolution' => true],
             'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
             'robotito_available' => $robotito_disponible,
@@ -873,6 +875,12 @@ class SupportCodexService
 
     public function reply(int $id, array $input): array
     {
+        // `review_resolved` (contrato C3, 25/11/2026): sólo `true` y sólo con una acción que contesta al cliente. Se
+        // valida antes de registrar nada para que el monitor reciba un código corregible y no un envío a medias.
+        if (array_key_exists('review_resolved', $input) && ($input['review_resolved'] !== true
+            || ! in_array($input['action'], ['responder', 'solicitar_confirmacion', 'cerrar'], true))) {
+            $this->fail(422, 'invalid_review_resolution', 'review_resolved va sólo en true y con responder, solicitar_confirmacion o cerrar.');
+        }
         $tour_requested = (bool) ($input['tour_requested'] ?? false);
         $tour_import_history_id = isset($input['tour_import_history_id']) ? (int) $input['tour_import_history_id'] : null;
         if ($tour_import_history_id !== null && (! $tour_requested || $tour_import_history_id < 1
@@ -961,6 +969,10 @@ class SupportCodexService
         }
         if (isset($input['mission_progress_hash'])) {
             $hash_payload[] = ['mission_progress_hash' => $input['mission_progress_hash'], 'mission_progress_state' => $input['mission_progress_state']];
+        }
+        // Solo si vino: el hash de los pedidos sin el campo queda igual que antes (replays tras el deploy).
+        if (! empty($input['review_resolved'])) {
+            $hash_payload[] = ['review_resolved' => true];
         }
         $hash = hash('sha256', json_encode($hash_payload));
         // La operación se confirma en una transacción ANTES de enviar. Si el proceso cae
@@ -1929,6 +1941,15 @@ class SupportCodexService
 
     private function apply_action(SupportTicket $ticket, SupportCodexCase $case, array $input): void
     {
+        /* La revisión que pidió el propio agente ya no aplica (contrato C3, misión martin-descripcion-y-actualizaciones):
+         * con el envío confirmado se apaga el rojo. Nunca un bloqueo técnico ni una pausa de Lucas: esos no tienen
+         * `review_requested_message_id` y `is_agent_requested_review()` da false. */
+        if (! empty($input['review_resolved']) && $case->is_agent_requested_review()) {
+            $case->review_reason = null;
+            $case->review_requested_message_id = null;
+            $ticket->support_attention_enabled = false;
+            $ticket->save();
+        }
         if (! empty($input['_delivery_confirmation']) && $input['action'] === 'responder') {
             $case->delivery_notice_mission_id = null;
             $case->state = trim((string) $case->mission) !== '' ? 'mission_pending' : 'ready';
