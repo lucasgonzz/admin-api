@@ -53,12 +53,43 @@ class LeadOrigenService
     /** Ninguna señal en el primer mensaje. */
     const ORIGEN_DESCONOCIDO = 'desconocido';
 
-    /** Los cuatro valores válidos de `leads.origen`. */
+    /** Lo recomendó un cliente (o alguien) de ComercioCity. Se carga a mano (misión leads-referidos-compromisos). */
+    const ORIGEN_REFERIDO = 'referido';
+
+    /** Escribió o habló con Lucas por su WhatsApp personal y se lo pasó al circuito. */
+    const ORIGEN_WHATSAPP_PERSONAL = 'whatsapp_personal';
+
+    /** Llegó por una llamada de teléfono. */
+    const ORIGEN_LLAMADA = 'llamada';
+
+    /** Cualquier otro medio que no sea ninguno de los anteriores. */
+    const ORIGEN_OTRO = 'otro';
+
+    /**
+     * Los valores válidos de `leads.origen`: los cuatro que calcula el sistema y los cuatro externos que se cargan a mano.
+     * Los de filtro de `claude/leads` y los del conteo de `leads:calcular-origen` salen de acá.
+     */
     const ORIGENES = [
         self::ORIGEN_ANUNCIO_WHATSAPP,
         self::ORIGEN_LANDING,
         self::ORIGEN_INSTAGRAM,
         self::ORIGEN_DESCONOCIDO,
+        self::ORIGEN_REFERIDO,
+        self::ORIGEN_WHATSAPP_PERSONAL,
+        self::ORIGEN_LLAMADA,
+        self::ORIGEN_OTRO,
+    ];
+
+    /**
+     * Los orígenes de un lead que NO pasó por el circuito pensado para los leads (no escribió por un anuncio ni por la
+     * web): se cargan a mano con el alta externa y nunca los calcula el sistema. Máximo 20 caracteres cada uno
+     * (`leads.origen` es string(20)).
+     */
+    const ORIGENES_EXTERNOS = [
+        self::ORIGEN_REFERIDO,
+        self::ORIGEN_WHATSAPP_PERSONAL,
+        self::ORIGEN_LLAMADA,
+        self::ORIGEN_OTRO,
     ];
 
     /**
@@ -392,6 +423,19 @@ class LeadOrigenService
             'primer_mensaje_id' => (int) $primero->id,
             'referral_id'       => null,
         ];
+    }
+
+    /**
+     * ¿El lead llegó por otro medio (referido, WhatsApp personal, llamada u otro)? Es lo que le saca la presentación
+     * de ComercioCity de cero y hace que la IA le conteste el primer mensaje.
+     *
+     * @param Lead $lead
+     *
+     * @return bool
+     */
+    public static function es_externo(Lead $lead): bool
+    {
+        return in_array((string) $lead->origen, self::ORIGENES_EXTERNOS, true);
     }
 
     /**

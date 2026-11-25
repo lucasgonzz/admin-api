@@ -656,6 +656,12 @@ Route::middleware('claude.task.key')
            confirm_count exacto y confirm_token del conjunto) están en ClaudeLeadsPipelineController.
            `leads/status-batch` se declara ANTES que cualquier ruta con {id} de este mismo bloque
            por la misma razón que `upgrades/preview`: que ninguna la capture. */
+        /* Alta de leads de OTROS medios (referidos, WhatsApp personal de Lucas, llamadas): misión
+           leads-referidos-compromisos, E1. `dry_run` por defecto TRUE; el contexto previo se AGREGA, nunca reemplaza.
+           `POST leads` va con los segmentos fijos, antes de toda ruta con {id}. */
+        Route::post('leads', 'Api\ClaudeLeadsExternosController@store_json');
+        Route::post('leads/{id}/contexto-previo', 'Api\ClaudeLeadsExternosController@contexto_previo_json')
+            ->whereNumber('id');
         Route::post('leads/status-batch', 'Api\ClaudeLeadsPipelineController@update_status_batch_json');
         Route::post('leads/{id}/status', 'Api\ClaudeLeadsPipelineController@update_status_json');
 
@@ -1413,6 +1419,8 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/marcar-respondido', [LeadChatsController::class, 'marcar_respondido_json'])->where('id', '[0-9]+');
         Route::get('lead/{id}', [LeadController::class, 'show_json']);
         Route::post('lead', [LeadController::class, 'store_json']);
+        /* Alta de un lead de otro medio (referido, WhatsApp personal, llamada): misión leads-referidos-compromisos, E1. */
+        Route::post('lead/externo', [\App\Http\Controllers\LeadAltaExternaController::class, 'store_json']);
         Route::put('lead/{id}', [LeadController::class, 'update_json']);
         Route::delete('lead/{id}', [LeadController::class, 'destroy_json']);
         Route::post('lead/{id}/send-presentation-mail', [LeadController::class, 'send_presentation_mail_json']);

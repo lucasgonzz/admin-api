@@ -11461,6 +11461,12 @@ Demo fecha: {$demo}
 {$extra}
 TXT;
 
+        /* Leads de otros medios (misión leads-referidos-compromisos, E1): cómo llegó, quién lo refirió y lo ya hablado. */
+        $bloque_de_origen = app(LeadAltaExternaService::class)->bloque_para_el_agente($lead);
+        if ($bloque_de_origen !== '') {
+            $txt .= "\n\n" . $bloque_de_origen;
+        }
+
         /* Tablero de Juan (E1): lo que Juan habló por teléfono con el lead (las últimas 5 llamadas), para no repreguntarlo. */
         $bloque_de_llamadas = app(LeadLlamadaService::class)->bloque_para_agente($lead);
         if ($bloque_de_llamadas !== '') {

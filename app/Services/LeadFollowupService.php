@@ -317,6 +317,16 @@ class LeadFollowupService
         }
 
         /*
+         * 🔴 Un lead que llegó por OTRO medio (referido, WhatsApp personal, llamada: misión leads-referidos-compromisos) no es de
+         * este cron. Las plantillas cc_seg_nuevo_* y cc_seg_contactado_* dicen «Hace un par de días te escribimos…», y a
+         * quien ya habló con Lucas o con Juan eso le suena a un sistema que no sabe quién es. Lo llevan Juan, Martín cuando el
+         * lead escribe y, desde E2, los compromisos. `null` y nada más: ni pausa ni evento, queda como estaba.
+         */
+        if (LeadOrigenService::es_externo($lead)) {
+            return null;
+        }
+
+        /*
          * Embudo nuevo (misión embudo-whatsapp-precios, E3): un lead que tiene pasos de seguimiento del embudo en un estado con
          * pasos (`nuevo`, `contactado`, `link_enviado`) lo llevan ellos, no este cron: si no, recibiría dos cadencias a la vez
          * (la de 48 h de este cron encima de la de 3 h y 22 h). Sale un resultado propio, `embudo`, para el log de la corrida.
