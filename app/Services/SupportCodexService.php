@@ -202,6 +202,14 @@ class SupportCodexService
                 // Una revisión pedida por el propio agente admite información nueva. Tomar el
                 // turno no la resuelve: su marcador y el aviso a Lucas se conservan hasta cerrar.
                 $human_reply_pause = $this->is_human_reply_pause($case);
+                // El rojo que puso el propio sistema (turnos vacíos, cierre rechazado viejo) no es algo que Lucas
+                // tenga que destrabar (pedido de Lucas, 25/11/2026): al tomar el entrante nuevo se apaga.
+                if ($this->is_automatic_review($case)) {
+                    $case->review_reason = null;
+                    $case->review_requested_message_id = null;
+                    $ticket->support_attention_enabled = false;
+                    $ticket->save();
+                }
                 $case->state = trim((string) $case->mission) !== '' ? 'mission_pending' : 'ready';
                 if ($human_reply_pause) {
                     $case->review_reason = null;
@@ -2798,6 +2806,50 @@ class SupportCodexService
             return 'follow_up';
         }
         return null;
+    }
+
+    /**
+     * Revisión que puso el propio sistema y no algo que Lucas tenga que destrabar: los dos turnos vacíos del
+     * monitor o el cierre rechazado de antes del ticket 168. Nunca una revisión pedida por el agente, una pausa
+     * de Lucas ni un bloqueo técnico (misión martin-descripcion-y-actualizaciones, ajuste de la revisión).
+     *
+     * @param SupportCodexCase $case
+     *
+     * @return bool
+     */
+    private function is_automatic_review(SupportCodexCase $case): bool
+    {
+        return $case->state === 'manual_review' && ! $case->is_agent_requested_review()
+            && ($case->is_empty_turns_review() || $case->review_reason === self::CONFIRMATION_REVIEW_REASON);
+    }
+
+    /**
+     * Apaga el rojo de los tickets abiertos que están en revisión automática (ver `is_automatic_review()`).
+     * Sólo `support_attention_enabled`: el caso conserva estado y motivo, así el próximo entrante del cliente lo
+     * reabre como siempre. No manda nada a nadie. Idempotente: un ticket ya apagado no se vuelve a listar.
+     *
+     * @param bool $dry_run Con true sólo devuelve los ids, sin cambiar nada.
+     *
+     * @return int[] Ids de los tickets afectados (o que se afectarían), de menor a mayor.
+     */
+    public function clear_automatic_reviews(bool $dry_run = false): array
+    {
+        $ids = [];
+        $cases = SupportCodexCase::where('state', 'manual_review')
+            ->whereIn('support_ticket_id', SupportTicket::where('status', 'open')->where(function ($rojo) {
+                $rojo->where('support_attention_enabled', true)->orWhereNull('support_attention_enabled');
+            })->select('id'))->orderBy('support_ticket_id')->get();
+        foreach ($cases as $case) {
+            if (! $this->is_automatic_review($case)) {
+                continue;
+            }
+            $ids[] = (int) $case->support_ticket_id;
+            if (! $dry_run) {
+                SupportTicket::where('id', $case->support_ticket_id)->update(['support_attention_enabled' => false]);
+            }
+        }
+
+        return $ids;
     }
 
     private function is_dispatch_review(SupportCodexCase $case): bool
