@@ -278,6 +278,8 @@ class ClientProperties
                 'key' => 'requires_upgrade',
                 'text' => 'Requiere actualización',
                 'type' => 'checkbox',
+                // Visible por defecto: Lucas tiene que ver a simple vista a quién actualizar.
+                'show' => true,
                 'only_show' => true,
                 'use_to_filter_in_search' => true,
                 'width' => 110,
