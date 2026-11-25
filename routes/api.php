@@ -1155,6 +1155,12 @@ Route::prefix('admin')->group(function () {
         Route::put('client/{id}', [ClientController::class, 'update_json']);
         Route::delete('client/{id}', [ClientController::class, 'destroy_json']);
 
+        /* Marcas «requiere actualización» (misión martin-descripcion-y-actualizaciones, contrato C6): listado por
+           cliente, alta idempotente por external_key y resolución manual. */
+        Route::get('client-upgrade-marks', [\App\Http\Controllers\ClientUpgradeMarkController::class, 'index']);
+        Route::post('client-upgrade-marks', [\App\Http\Controllers\ClientUpgradeMarkController::class, 'store']);
+        Route::patch('client-upgrade-marks/{id}/resolve', [\App\Http\Controllers\ClientUpgradeMarkController::class, 'resolve'])->whereNumber('id');
+
         // Configuración fiscal (AFIP) propia de ComercioCity: fila única, GET/PUT.
         Route::get('comerciocity-afip-config', [ComerciocityAfipConfigController::class, 'show_json']);
         Route::put('comerciocity-afip-config', [ComerciocityAfipConfigController::class, 'update_json']);

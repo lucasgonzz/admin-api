@@ -2568,6 +2568,11 @@ class SupportCodexService
             if ($mission !== null) {
                 if ($mission->completed_at === null) { $mission->update(['completed_at' => now()]); }
                 app(SupportMissionDeliveryService::class)->refresh($mission);
+                // El cliente queda marcado «requiere actualización» si la corrección toca lo que se le instala
+                // (misión martin-descripcion-y-actualizaciones, 25/11/2026). Nunca lanza.
+                if ($mission->installed_at === null) {
+                    app(ClientUpgradeMarkService::class)->from_mission($mission, $evidence);
+                }
             }
             return ['mission_fix_evidence' => $evidence->payload];
         });
