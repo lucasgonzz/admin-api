@@ -295,6 +295,13 @@ Route::middleware('admin.inbound.strict')->prefix('inbound/agentes')->group(func
     Route::get('soporte/{uuid}', 'Api\InboundAgentesController@conversacion')->whereUuid('uuid');
 });
 
+/* Aviso inmediato de pedido nuevo de la tienda (misión cruzada whatsapp-aviso-pedido, 25/11/2026, contrato C3):
+   el empresa-api del cliente avisa que llegó un pedido y el admin encola el WhatsApp del asistente. Clave
+   obligatoria: el cliente sale de X-Admin-Api-Key. Bloque aislado a propósito (otras misiones tocan este archivo). */
+Route::middleware('admin.inbound.strict')->prefix('inbound/asistente')->group(function () {
+    Route::post('pedido-nuevo', 'Api\InboundAsistentePedidoNuevoController@store');
+});
+
 Route::middleware('admin.inbound.key')
     ->prefix('inbound')
     ->group(function () {
