@@ -236,6 +236,7 @@ class AdminSoloLeadsPolicy
     const CAMPOS_MINIMOS_DE_RELACIONES = [
         'target_client'     => ['id', 'name', 'company_name'],
         'promoted_client'   => ['id', 'name', 'company_name'],
+        'referido_por_client' => ['id', 'name', 'company_name'],
         'demo'              => ['id', 'nombre', 'erp_spa_url', 'demo_id', 'demo_date', 'demo_start_time', 'demo_end_time', 'demo_setup_status'],
         'created_by_admin'  => ['id', 'name'],
         'sent_by_admin'     => ['id', 'name'],

@@ -555,6 +555,8 @@ class Lead extends Model
             'promoted_client.implementation',
             'promoted_client.client_ecommerce',
             'created_by_admin',
+            // Quien lo recomendó (leads de otros medios): la conversación y la ficha lo muestran en «Cómo llegó».
+            'referido_por_client',
             'demo',
             'personalized_demo_videos',
             'messages.attachments',
