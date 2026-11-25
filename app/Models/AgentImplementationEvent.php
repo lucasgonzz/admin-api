@@ -45,7 +45,17 @@ class AgentImplementationEvent extends Model
     /** Lo dejó una persona desde el panel. */
     const SOURCE_PANEL = 'panel';
 
-    /** Los orígenes posibles. */
+    /**
+     * Lo dejó el propio admin sin que nadie lo pida (misión onboarding-conversacional-whatsapp): por ejemplo, el hito
+     * `onboarding_completado` que marca solo AgentOnboardingSyncService cuando la empresa del cliente informa que el
+     * dueño ya contó su negocio.
+     *
+     * 🔴 Está FUERA de SOURCES a propósito: SOURCES es lo que la ruta de Claude acepta como `source`, y nadie desde
+     * afuera puede decir que algo lo hizo «el sistema».
+     */
+    const SOURCE_SISTEMA = 'sistema';
+
+    /** Los orígenes posibles (los que acepta la ruta de Claude). */
     const SOURCES = [self::SOURCE_MARTIN, self::SOURCE_CLAUDE, self::SOURCE_PANEL];
 
     /** Tope del texto (el largo de la columna). */
