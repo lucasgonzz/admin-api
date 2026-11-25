@@ -1136,6 +1136,17 @@ class Lead extends Model
     }
 
     /**
+     * Cliente de ComercioCity que recomendó a este lead (alta de un lead de otro medio, misión
+     * leads-referidos-compromisos). Null si no vino por un cliente o si el lead no es externo.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
+     */
+    public function referido_por_client()
+    {
+        return $this->belongsTo(Client::class, 'referido_por_client_id');
+    }
+
+    /**
      * Admin que activó el toggle de notificaciones para este lead (recibe el push en mensajes entrantes).
      *
      * @deprecated Reemplazado por notification_admins() (tabla pivot lead_admin_notifications).

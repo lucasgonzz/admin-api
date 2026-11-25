@@ -168,6 +168,10 @@ class LeadProperties
                     ['value' => LeadOrigenService::ORIGEN_LANDING, 'text' => 'Web', 'color' => '#d6e8fb'],
                     ['value' => LeadOrigenService::ORIGEN_INSTAGRAM, 'text' => 'Instagram', 'color' => '#f8dcec'],
                     ['value' => LeadOrigenService::ORIGEN_DESCONOCIDO, 'text' => 'Sin dato', 'color' => '#e9ecef'],
+                    ['value' => LeadOrigenService::ORIGEN_REFERIDO, 'text' => 'Referido', 'color' => '#fde8c8'],
+                    ['value' => LeadOrigenService::ORIGEN_WHATSAPP_PERSONAL, 'text' => 'WhatsApp de Lucas', 'color' => '#dcd6f7'],
+                    ['value' => LeadOrigenService::ORIGEN_LLAMADA, 'text' => 'Llamada', 'color' => '#d4ecf0'],
+                    ['value' => LeadOrigenService::ORIGEN_OTRO, 'text' => 'Otro medio', 'color' => '#e9ecef'],
                 ],
             ],
             [
