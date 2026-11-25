@@ -430,7 +430,9 @@ class SupportCodexService
                 'agent_review_resolution' => true,
                 'upgrade_coordination' => SupportUpgradeCoordination::enabled(),
                 // El monitor exige descripción (titular con resumen) antes de cada respuesta de Martín.
-                'ticket_description_every_reply' => true],
+                'ticket_description_every_reply' => true,
+                // mission-delivery-verified sin schedule_id para lo instalado por la actualización (contrato C5).
+                'delivery_without_schedule' => true],
             'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
             'robotito_available' => $robotito_disponible,

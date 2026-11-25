@@ -145,6 +145,153 @@ class ClientUpgradeMarkService
     }
 
     /**
+     * Vuelve a evaluar las marcas abiertas de todos los clientes (comando horario `client-upgrade-marks:refresh`).
+     *
+     * @return int Cuántos clientes se evaluaron.
+     */
+    public function refresh_all(): int
+    {
+        $clients = ClientUpgradeMark::whereNull('resolved_at')->distinct()->pluck('client_id')->all();
+        foreach ($clients as $client_id) {
+            $this->refresh_client((int) $client_id);
+        }
+
+        return count($clients);
+    }
+
+    /**
+     * Evalúa las marcas abiertas de un cliente: calcula desde qué versión publicada se puede actualizar y resuelve
+     * las que la versión instalada ya contiene. La llama el job que despacha el cierre de un upgrade (`terminada`)
+     * y el comando horario. Al final sincroniza `clients.requires_upgrade`.
+     *
+     * @param int $client_id
+     *
+     * @return void
+     */
+    public function refresh_client(int $client_id): void
+    {
+        $client = Client::with('current_version')->find($client_id);
+        if ($client === null) {
+            return;
+        }
+        $published = $this->published_versions();
+        foreach (ClientUpgradeMark::where('client_id', $client_id)->whereNull('resolved_at')->orderBy('id')->get() as $mark) {
+            $this->refresh_mark($mark, $client, $published);
+        }
+        $this->sync_client_flag($client_id);
+    }
+
+    /**
+     * Evalúa una marca abierta.
+     *
+     * Criterio medible (plan §2.5): la versión objetivo es la PRIMERA publicada (por comparador semántico) cuyo tag
+     * contiene todos los commits de empresa de la marca; sólo se miran las publicadas desde un día antes del merge.
+     * Sin commits, o con GitHub caído, se toma la primera publicada DESPUÉS del merge y queda `available_by: fecha`
+     * (se vuelve a intentar por tag en cada refresh). Con la versión instalada del cliente ≥ objetivo, la marca se
+     * resuelve como `instalada` y, si viene de una misión de soporte, la misión queda instalada sin acuerdo para que
+     * Martín verifique la entrega. Las marcas de tienda no se resuelven solas en esta misión.
+     *
+     * @param ClientUpgradeMark $mark
+     * @param Client            $client    Con `current_version` cargada.
+     * @param Version[]         $published Versiones publicadas, de la más vieja a la más nueva.
+     *
+     * @return void
+     */
+    private function refresh_mark(ClientUpgradeMark $mark, Client $client, array $published): void
+    {
+        if ($mark->target === 'tienda') {
+            return;
+        }
+        $latest = $published === [] ? null : $published[count($published) - 1];
+        // Sin versiones nuevas desde la última mirada y sin objetivo todavía: no hay nada nuevo que preguntarle a GitHub.
+        $sin_novedades = $mark->available_version_id === null && $latest !== null
+            && (int) $mark->last_checked_version_id === (int) $latest->id;
+        if (($mark->available_version_id === null || $mark->available_by === 'fecha') && ! $sin_novedades) {
+            list($version, $by) = $this->available_version_for($mark, $published);
+            $mark->available_version_id = $version === null ? null : $version->id;
+            $mark->available_by = $by;
+            $mark->last_checked_version_id = $latest === null ? null : $latest->id;
+            $mark->last_checked_at = now();
+            $mark->save();
+            $mark->load('available_version');
+        }
+        $target = $mark->available_version;
+        $current = $client->current_version;
+        if ($target === null || $current === null || VersionNumberComparator::compare($current->version, $target->version) < 0) {
+            return;
+        }
+        $mark->update(['resolved_at' => now(), 'resolved_reason' => 'instalada', 'resolved_version_id' => $current->id]);
+        if ($mark->support_codex_mission_id !== null) {
+            $mission = SupportCodexMission::find($mark->support_codex_mission_id);
+            if ($mission !== null) {
+                app(SupportMissionDeliveryService::class)->mark_installed($mission);
+            }
+        }
+    }
+
+    /**
+     * Primera versión publicada que contiene la corrección de la marca, y cómo se supo.
+     *
+     * @param ClientUpgradeMark $mark
+     * @param Version[]         $published De la más vieja a la más nueva.
+     *
+     * @return array{0: Version|null, 1: string|null} [versión, 'tag'|'fecha'] o [null, null].
+     */
+    private function available_version_for(ClientUpgradeMark $mark, array $published): array
+    {
+        $merged = $mark->merged_at ?: $mark->created_at;
+        $commits = array_intersect_key($mark->commits ?: [], array_flip(ClientUpgradeMark::REPOS_POR_TARGET['sistema']));
+        if ($commits !== []) {
+            try {
+                $github = app(ReleaseArtifactService::class);
+                foreach ($published as $version) {
+                    // Un día de margen: el merge y el release pueden registrarse con relojes distintos.
+                    if ($merged !== null && $version->published_at->lt($merged->copy()->subDay())) {
+                        continue;
+                    }
+                    $contains = true;
+                    foreach ($commits as $repo => $sha) {
+                        if (! $github->commit_in_tag($repo, $sha, $version->version)) {
+                            $contains = false;
+                            break;
+                        }
+                    }
+                    if ($contains) {
+                        return [$version, 'tag'];
+                    }
+                }
+
+                return [null, null];
+            } catch (\Throwable $error) {
+                Log::warning('No se pudo comprobar en GitHub la versión de una marca de actualización; se usa la fecha.',
+                    ['mark_id' => $mark->id, 'error' => $error->getMessage()]);
+            }
+        }
+        foreach ($published as $version) {
+            if ($merged === null || $version->published_at->gt($merged)) {
+                return [$version, 'fecha'];
+            }
+        }
+
+        return [null, null];
+    }
+
+    /**
+     * Versiones publicadas (con fecha) ordenadas por el comparador semántico, de la más vieja a la más nueva.
+     *
+     * @return Version[]
+     */
+    private function published_versions(): array
+    {
+        $versions = Version::where('status', 'published')->whereNotNull('published_at')->get()->all();
+        usort($versions, function (Version $a, Version $b) {
+            return VersionNumberComparator::compare($a->version, $b->version);
+        });
+
+        return $versions;
+    }
+
+    /**
      * Resuelve una marca a mano (`manual` o `descartada`). Si ya estaba resuelta no cambia nada.
      *
      * @param ClientUpgradeMark $mark
