@@ -1380,6 +1380,57 @@ return [
             ],
         ],
 
+        /* --------------------------------------------- Leads de otros medios (referidos, WhatsApp personal) */
+
+        'POST api/claude/leads' => [
+            'para_que'     => 'Da de alta un lead que llegó por OTRO medio —un referido, alguien que le escribió a Lucas por su WhatsApp personal, una llamada— con de dónde vino, quién lo recomendó y lo que ya se habló, para que entre al mismo circuito que cualquier lead (Martín le explica los paquetes sin presentarle ComercioCity de cero, y cuando quiere probar aparece en el tablero de Juan). Con completar_existente=true completa el lead que ya tenga ese teléfono en vez de crear otro (el caso de Ro).',
+            'escribe'      => true,
+            'peligrosidad' => 'media',
+            'frenos'       => [
+                '🔴 dry_run por defecto TRUE: sin dry_run=false explícito NO se escribe nada y devuelve lo que haría.',
+                '🔴 Dar de alta NO manda ningún WhatsApp: el primer contacto por plantilla sólo sale si se pide primer_contacto=plantilla_referido Y la plantilla de referido está registrada, activa y aprobada en Meta. Si no, el lead se crea igual y la respuesta dice por qué no se mandó.',
+                'Un teléfono que ya tiene lead es 409 {code: lead_existente, lead_id} y no se crea otro. Con completar_existente=true se completa ESE lead: el origen sólo se escribe si no tenía uno real (null o desconocido), quién lo refirió sólo si estaba vacío, y el contexto se AGREGA con encabezado, nunca reemplaza. No cambia el estado del lead.',
+                'El origen tiene que ser referido, whatsapp_personal, llamada u otro; los otros orígenes los calcula el sistema y no se cargan a mano.',
+                'phone y contact_name son obligatorios; el teléfono se normaliza y se busca igual que en el webhook, así que no se duplica un lead con el mismo número escrito de otra forma.',
+                'contexto_previo hasta 60.000 caracteres.',
+                'Deja un evento en la conversación (lead_alta_externa): hace que el onboarding genérico no corra y cuenta cómo llegó.',
+                'Entra al tablero de Juan sólo si nace en link_enviado o se pide entrar_al_tablero=true.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'phone', 'obligatorio' => true, 'validacion' => 'required|string, mínimo 8 dígitos', 'que_es' => 'Teléfono del lead, en cualquier formato.'],
+                ['nombre' => 'contact_name', 'obligatorio' => true, 'validacion' => 'required|string|max:150', 'que_es' => 'Nombre de la persona.'],
+                ['nombre' => 'origen', 'obligatorio' => true, 'validacion' => 'required|in:referido,whatsapp_personal,llamada,otro', 'que_es' => 'Por qué medio llegó.'],
+                ['nombre' => 'referido_por_client_id', 'obligatorio' => false, 'validacion' => 'nullable|integer, tiene que existir en clients', 'que_es' => 'Cliente de ComercioCity que lo recomendó.'],
+                ['nombre' => 'referido_por_texto', 'obligatorio' => false, 'validacion' => 'nullable|string|max:120', 'que_es' => 'Quien lo recomendó cuando no es un cliente cargado.'],
+                ['nombre' => 'contexto_previo', 'obligatorio' => false, 'validacion' => 'nullable|string|max:60000', 'que_es' => 'Lo que ya se habló con el lead antes del alta. Martín lo lee en cada turno.'],
+                ['nombre' => 'estado_inicial', 'obligatorio' => false, 'validacion' => 'nullable|in:nuevo,contactado,link_enviado — DEFAULT nuevo', 'que_es' => 'Estado en el que nace el lead.'],
+                ['nombre' => 'company_name', 'obligatorio' => false, 'validacion' => 'nullable|string|max:150', 'que_es' => 'Nombre del negocio.'],
+                ['nombre' => 'business_type', 'obligatorio' => false, 'validacion' => 'nullable|string|max:80', 'que_es' => 'Rubro.'],
+                ['nombre' => 'email', 'obligatorio' => false, 'validacion' => 'nullable|email|max:150', 'que_es' => 'Mail del lead.'],
+                ['nombre' => 'entrar_al_tablero', 'obligatorio' => false, 'validacion' => 'nullable|boolean — DEFAULT false', 'que_es' => 'Da de alta la tarjeta en «Interesados» del tablero de Juan.'],
+                ['nombre' => 'primer_contacto', 'obligatorio' => false, 'validacion' => 'nullable|in:ninguno,plantilla_referido — DEFAULT ninguno', 'que_es' => 'Manda el primer WhatsApp por la plantilla de referido, si está aprobada.'],
+                ['nombre' => 'completar_existente', 'obligatorio' => false, 'validacion' => 'nullable|boolean — DEFAULT false', 'que_es' => 'Si el teléfono ya tiene lead, lo completa en vez de responder 409.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Sin dry_run=false explícito no se escribe nada.'],
+            ],
+        ],
+        'POST api/claude/leads/{id}/contexto-previo' => [
+            'para_que'     => 'AGREGA texto a lo que ya se habló con un lead (contexto_previo), con un encabezado de fecha y fuente. Sirve para sumar lo que Lucas charló por su WhatsApp personal o lo que contó Juan, sin pisar lo que ya estaba. Martín lo lee en cada turno.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                '🔴 dry_run por defecto TRUE: sin dry_run=false explícito no se escribe nada.',
+                '🔴 AGREGA, nunca reemplaza: lo que ya estaba queda primero y entero, y lo nuevo va debajo con el encabezado — dd/mm/aaaa HH:MM (fuente) —.',
+                'Tope de 60.000 caracteres en total: un texto que lo pase es 422 y no cambia nada.',
+                'El lead se nombra por id, de a uno, y el {id} está restringido a dígitos.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL, sólo dígitos', 'que_es' => 'Lead al que se le agrega el contexto.'],
+                ['nombre' => 'texto', 'obligatorio' => true, 'validacion' => 'required|string', 'que_es' => 'Lo que se agrega.'],
+                ['nombre' => 'fuente', 'obligatorio' => false, 'validacion' => 'nullable|string|max:80', 'que_es' => 'De dónde sale (ej. «whatsapp personal de Lucas»). Va en el encabezado.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Sin dry_run=false explícito no se escribe nada.'],
+            ],
+        ],
+
         /* --------------------------------------------- Leads: agenda (lectura) y evento del closer */
 
         'GET api/claude/leads/{id}/availability' => [

@@ -106,6 +106,25 @@ class AdminSoloLeadsPolicy
     ];
 
     /**
+     * Rutas de leads de otros medios (misión leads-referidos-compromisos, E1): Juan carga un lead que le llegó por
+     * teléfono o por un referido. Se suman a `RUTAS_PERMITIDAS` SIN tocarla (los tests de E5 fijan esa lista).
+     * Mismo formato: «<MÉTODO> <uri>» como `Route::uri()`. Cada entrada existe y lleva `admin.solo_leads`.
+     *
+     * @var array<int, string>
+     */
+    const RUTAS_DE_LEADS_EXTERNOS = [
+        'POST api/admin/lead/externo',
+    ];
+
+    /**
+     * Claves anidadas que el perfil ve SÓLO en la respuesta de `RUTAS_DE_LEADS_EXTERNOS`: `primer_contacto` es un
+     * objeto `{estado, motivo?, plantilla?}` (sólo textos) que le dice a Juan si el primer WhatsApp salió o por qué no.
+     *
+     * @var array<int, string>
+     */
+    const CLAVES_DE_LEADS_EXTERNOS = ['primer_contacto'];
+
+    /**
      * Rutas del tablero cuyo recurso hay que verificar contra la base: «<MÉTODO> <uri>» => regla de
      * {@see SoloLeadsRecursos}. Sin esto el perfil abriría el tablero y las tarjetas de CUALQUIER pipeline (por ejemplo
      * «Agentes»): la URL sola no dice a qué pipeline pertenece el `{id}`.
@@ -297,7 +316,9 @@ class AdminSoloLeadsPolicy
     {
         $clave = $this->clave_de_ruta($metodo, $uri);
 
-        if (! in_array($clave, self::RUTAS_PERMITIDAS, true) && ! in_array($clave, self::RUTAS_DEL_TABLERO, true)) {
+        if (! in_array($clave, self::RUTAS_PERMITIDAS, true)
+            && ! in_array($clave, self::RUTAS_DEL_TABLERO, true)
+            && ! in_array($clave, self::RUTAS_DE_LEADS_EXTERNOS, true)) {
             return false;
         }
 
@@ -404,6 +425,10 @@ class AdminSoloLeadsPolicy
     {
         /* Sólo las rutas del tablero suman las claves anidadas del tablero; el resto filtra como siempre. */
         $extra = $clave_de_ruta !== null && in_array($clave_de_ruta, self::RUTAS_DEL_TABLERO, true) ? self::CLAVES_DEL_TABLERO : [];
+        /* El alta de un lead de otro medio suma `primer_contacto` (sólo textos) a su respuesta. */
+        if ($clave_de_ruta !== null && in_array($clave_de_ruta, self::RUTAS_DE_LEADS_EXTERNOS, true)) {
+            $extra = array_merge($extra, self::CLAVES_DE_LEADS_EXTERNOS);
+        }
 
         return $this->filtrar_nodo($valor, $extra);
     }
