@@ -3,7 +3,6 @@
 namespace App\Services;
 
 use App\Helpers\AppTime;
-use App\Helpers\WhatsappNormalizer;
 use App\Models\AdminSetting;
 use App\Models\Client;
 use App\Models\FollowupTemplate;
@@ -95,6 +94,15 @@ class LeadAltaExternaService
     {
         $limpios = $this->validar($datos);
 
+        /* 🔴 El perfil «Sólo Leads» (Juan) lee las conversaciones pero NO le escribe al lead (decisión P5 de la misión
+           embudo-whatsapp-precios). Se RECHAZA (422) y no se descarta en silencio: así la API le dice claro que esa
+           puerta está cerrada, y el modal ni le muestra la casilla. Vale también al completar un lead existente. */
+        if ($limpios['primer_contacto'] === self::PRIMER_CONTACTO_PLANTILLA && $actor !== null && app(AdminSoloLeadsPolicy::class)->tiene_perfil($actor)) {
+            throw PipelineRuleException::validacion([
+                'primer_contacto' => ['Tu perfil no puede escribirle al lead desde acá: el primer WhatsApp lo manda otra persona.'],
+            ]);
+        }
+
         $existente = BuscadorDeLeadPorTelefono::buscar($limpios['phone']);
         if ($existente !== null && ! $limpios['completar_existente']) {
             return [
@@ -168,18 +176,26 @@ class LeadAltaExternaService
      */
     public function bloque_para_el_agente(Lead $lead): string
     {
-        if (! LeadOrigenService::es_externo($lead)) {
+        $es_externo = LeadOrigenService::es_externo($lead);
+        $referente  = $this->describir_referente($lead);
+        $contexto   = trim((string) $lead->contexto_previo);
+
+        /* Un lead común (sin contexto ni referente cargados) no lleva bloque. Uno con origen real (anuncio, web) al que se
+           le COMPLETÓ el alta con contexto o con quien lo refirió sí: si no, Martín no vería lo que se le agregó. */
+        if (! $es_externo && $referente === '' && $contexto === '') {
             return '';
         }
 
-        $etiqueta  = $this->etiqueta_del_origen($lead);
-        $referente = $this->describir_referente($lead);
+        if ($es_externo) {
+            $bloque  = 'CÓMO LLEGÓ ESTE LEAD: ' . $this->etiqueta_del_origen($lead);
+            $bloque .= $referente !== '' ? ', referido por ' . $referente . '.' : '.';
+            $bloque .= ' Ya habló con nosotros antes';
+        } else {
+            $bloque  = 'LO QUE SE SABE DE ESTE LEAD POR OTRO MEDIO:';
+            $bloque .= $referente !== '' ? ' lo refirió ' . $referente . '.' : '';
+            $bloque .= ' Ya se habló con él';
+        }
 
-        $bloque  = 'CÓMO LLEGÓ ESTE LEAD: ' . $etiqueta;
-        $bloque .= $referente !== '' ? ', referido por ' . $referente . '.' : '.';
-        $bloque .= ' Ya habló con nosotros antes';
-
-        $contexto = trim((string) $lead->contexto_previo);
         if ($contexto !== '') {
             if (mb_strlen($contexto) > self::MAX_CONTEXTO_PARA_EL_AGENTE) {
                 $contexto = mb_substr($contexto, 0, self::MAX_CONTEXTO_PARA_EL_AGENTE) . '…';
@@ -189,8 +205,12 @@ class LeadAltaExternaService
             $bloque .= '.';
         }
 
-        $bloque .= "\nNo le presentes ComercioCity desde cero, no le repitas preguntas que ya contestó"
-            . ($referente !== '' ? ' y nombrá a quien lo refirió en tu primer mensaje.' : '.');
+        if ($es_externo) {
+            $bloque .= "\nNo le presentes ComercioCity desde cero, no le repitas preguntas que ya contestó"
+                . ($referente !== '' ? ' y nombrá a quien lo refirió en tu primer mensaje.' : '.');
+        } else {
+            $bloque .= "\nTenelo en cuenta y no le repitas preguntas que ya contestó.";
+        }
 
         return $bloque;
     }
@@ -302,7 +322,7 @@ class LeadAltaExternaService
                 'creado'          => false,
                 'completado'      => true,
                 'simulado'        => true,
-                'primer_contacto' => $this->sin_plantilla($this->evaluar_primer_contacto($limpios, $referente)),
+                'primer_contacto' => $this->sin_plantilla($this->evaluar_primer_contacto($limpios, $referente, $existente)),
                 'que_haria'       => $this->que_haria($limpios, true, $referente),
             ];
         }
@@ -364,9 +384,11 @@ class LeadAltaExternaService
         if ($telefono_tipeado === null) {
             $errores['phone'][] = 'El teléfono es obligatorio.';
         } else {
-            $telefono = $this->normalizar_telefono($telefono_tipeado);
-            if ($telefono === '' || strlen((string) preg_replace('/\D+/', '', $telefono)) < 8) {
-                $errores['phone'][] = 'El teléfono no parece válido: tiene que tener código de área y número.';
+            $interpretado = $this->normalizar_telefono($telefono_tipeado);
+            if ($interpretado['error'] !== null) {
+                $errores['phone'][] = $interpretado['error'];
+            } else {
+                $telefono = $interpretado['telefono'];
             }
         }
 
@@ -448,25 +470,62 @@ class LeadAltaExternaService
     }
 
     /**
-     * Deja el teléfono como lo guarda el resto del admin (E.164). Un número que empieza con «+» y no es argentino se
-     * conserva tal cual: `WhatsappNormalizer::normalize()` asume Argentina y lo deformaría.
+     * Deja el teléfono en la forma CANÓNICA que manda Meta: `+549` + 10 dígitos para un número argentino. Es lo que
+     * hace que, cuando la persona escriba, el webhook encuentre este lead y no cree otro (perdiendo origen, contexto y
+     * referente). Reconoce el «0» del código de área, el «+54»/«54», el «9» de móvil y el «15» tipeado después del área
+     * («3484 15 521016», «03484-15-521016», «11 15 2345 6789»). No usa `WhatsappNormalizer::normalize()` (compartido con
+     * el webhook, que no sabe sacar el 15): lo que no se puede deducir con seguridad es un error para quien lo carga.
+     * Un número con «+» que no empieza con 54 es de otro país y se conserva tal cual.
      *
      * @param string $telefono Tal como lo tipeó quien lo carga.
      *
-     * @return string '' si no hay dígitos.
+     * @return array{telefono: string, error: string|null} El teléfono canónico, o el motivo por el que no se pudo.
      */
-    private function normalizar_telefono(string $telefono): string
+    private function normalizar_telefono(string $telefono): array
     {
         $digitos = preg_replace('/\D+/', '', $telefono);
         if (! is_string($digitos) || $digitos === '') {
-            return '';
+            return ['telefono' => '', 'error' => 'El teléfono no parece válido: no tiene números.'];
         }
 
+        $consejo = 'sacá el 15 y escribilo con código de área, por ejemplo 3484 521016.';
+
+        // Otro país: «+» y un prefijo que no es el 54.
         if (strpos(trim($telefono), '+') === 0 && strpos($digitos, '54') !== 0) {
-            return '+' . $digitos;
+            return strlen($digitos) >= 8 && strlen($digitos) <= 15
+                ? ['telefono' => '+' . $digitos, 'error' => null]
+                : ['telefono' => '', 'error' => 'El teléfono no parece válido: revisá el largo.'];
         }
 
-        return WhatsappNormalizer::normalize($telefono);
+        // Argentino: se queda con lo nacional (área + número) sin el 54, el 9 de móvil ni el 0 de marcado.
+        $nacional = $digitos;
+        if (strpos($nacional, '54') === 0) {
+            $nacional = substr($nacional, 2);
+            if (strlen($nacional) >= 11 && strpos($nacional, '9') === 0) {
+                $nacional = substr($nacional, 1);
+            }
+        }
+        $nacional = ltrim($nacional, '0');
+
+        // Con el 15 de por medio son 12 dígitos: área (2 a 4) + «15» + número. Sólo vale si hay UNA posición posible.
+        if (strlen($nacional) === 12) {
+            $posiciones = [];
+            foreach ([2, 3, 4] as $largo_del_area) {
+                if (substr($nacional, $largo_del_area, 2) === '15') {
+                    $posiciones[] = $largo_del_area;
+                }
+            }
+            if (count($posiciones) !== 1) {
+                return ['telefono' => '', 'error' => 'No pude saber dónde termina el código de área: ' . $consejo];
+            }
+            $nacional = substr($nacional, 0, $posiciones[0]) . substr($nacional, $posiciones[0] + 2);
+        }
+
+        if (strlen($nacional) !== 10 || strpos($nacional, '15') === 0) {
+            return ['telefono' => '', 'error' => 'El teléfono no se pudo interpretar (' . strlen($nacional) . ' dígitos sin el 54): ' . $consejo];
+        }
+
+        return ['telefono' => '+549' . $nacional, 'error' => null];
     }
 
     /**
@@ -710,7 +769,7 @@ class LeadAltaExternaService
      */
     private function primer_contacto(Lead $lead, array $limpios): array
     {
-        $evaluacion = $this->evaluar_primer_contacto($limpios, $this->describir_referente($lead));
+        $evaluacion = $this->evaluar_primer_contacto($limpios, $this->describir_referente($lead), $lead);
         if ($evaluacion['estado'] !== 'enviable') {
             return $evaluacion;
         }
@@ -764,13 +823,33 @@ class LeadAltaExternaService
      *
      * @param array<string, mixed> $limpios
      * @param string               $referente Cómo se nombra a quien refirió ('' si nadie).
+     * @param Lead|null            $lead      El lead que ya existe (al completar o después de crearlo); null al simular un alta.
      *
      * @return array<string, mixed> `estado` = no_pedido | no_enviado (con `motivo`) | enviable (con `plantilla`).
      */
-    private function evaluar_primer_contacto(array $limpios, string $referente): array
+    private function evaluar_primer_contacto(array $limpios, string $referente, $lead = null): array
     {
         if ($limpios['primer_contacto'] !== self::PRIMER_CONTACTO_PLANTILLA) {
             return ['estado' => 'no_pedido'];
+        }
+
+        /* 🔴 Un lead que ya existía puede no corresponder: quien pidió no recibir mensajes (marca que sólo se saca desde el
+           panel y ningún parámetro saltea), un cliente (ganado o promovido) o alguien a quien ya se le mandó este primer
+           contacto (sin esto, completar dos veces lo mandaba dos veces). */
+        if ($lead !== null) {
+            if (! empty($lead->no_recibe_mensajes_at)) {
+                return ['estado' => 'no_enviado', 'motivo' => 'no_recibe_mensajes'];
+            }
+            if ((string) $lead->status === 'cerrado_ganado' || ! empty($lead->promoted_client_id)) {
+                return ['estado' => 'no_enviado', 'motivo' => 'ya_es_cliente'];
+            }
+            $ya_enviado = LeadMessage::query()
+                ->where('lead_id', (int) $lead->id)
+                ->where('system_message_kind', self::KIND_PRIMER_CONTACTO)
+                ->exists();
+            if ($ya_enviado) {
+                return ['estado' => 'no_enviado', 'motivo' => 'primer_contacto_ya_enviado'];
+            }
         }
 
         $nombre = trim((string) AdminSetting::get(self::SETTING_PLANTILLA, ''));

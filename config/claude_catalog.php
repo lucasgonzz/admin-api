@@ -1397,7 +1397,7 @@ return [
                 'Entra al tablero de Juan sólo si nace en link_enviado o se pide entrar_al_tablero=true.',
             ],
             'parametros'   => [
-                ['nombre' => 'phone', 'obligatorio' => true, 'validacion' => 'required|string, mínimo 8 dígitos', 'que_es' => 'Teléfono del lead, en cualquier formato.'],
+                ['nombre' => 'phone', 'obligatorio' => true, 'validacion' => 'required|string, mínimo 8 dígitos', 'que_es' => 'Teléfono del lead. Un argentino se guarda como +549 + 10 dígitos (sacando el 0 y el 15 tipeados); si no se puede deducir con seguridad es 422 en errors.phone.'],
                 ['nombre' => 'contact_name', 'obligatorio' => true, 'validacion' => 'required|string|max:150', 'que_es' => 'Nombre de la persona.'],
                 ['nombre' => 'origen', 'obligatorio' => true, 'validacion' => 'required|in:referido,whatsapp_personal,llamada,otro', 'que_es' => 'Por qué medio llegó.'],
                 ['nombre' => 'referido_por_client_id', 'obligatorio' => false, 'validacion' => 'nullable|integer, tiene que existir en clients', 'que_es' => 'Cliente de ComercioCity que lo recomendó.'],
@@ -1408,7 +1408,7 @@ return [
                 ['nombre' => 'business_type', 'obligatorio' => false, 'validacion' => 'nullable|string|max:80', 'que_es' => 'Rubro.'],
                 ['nombre' => 'email', 'obligatorio' => false, 'validacion' => 'nullable|email|max:150', 'que_es' => 'Mail del lead.'],
                 ['nombre' => 'entrar_al_tablero', 'obligatorio' => false, 'validacion' => 'nullable|boolean — DEFAULT false', 'que_es' => 'Da de alta la tarjeta en «Interesados» del tablero de Juan.'],
-                ['nombre' => 'primer_contacto', 'obligatorio' => false, 'validacion' => 'nullable|in:ninguno,plantilla_referido — DEFAULT ninguno', 'que_es' => 'Manda el primer WhatsApp por la plantilla de referido, si está aprobada.'],
+                ['nombre' => 'primer_contacto', 'obligatorio' => false, 'validacion' => 'nullable|in:ninguno,plantilla_referido — DEFAULT ninguno', 'que_es' => 'Manda el primer WhatsApp por la plantilla de referido, si está aprobada. No sale si el lead no recibe mensajes, ya es cliente o ya lo recibió (motivo en la respuesta). El perfil Sólo Leads lo tiene cerrado (422).'],
                 ['nombre' => 'completar_existente', 'obligatorio' => false, 'validacion' => 'nullable|boolean — DEFAULT false', 'que_es' => 'Si el teléfono ya tiene lead, lo completa en vez de responder 409.'],
                 ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Sin dry_run=false explícito no se escribe nada.'],
             ],

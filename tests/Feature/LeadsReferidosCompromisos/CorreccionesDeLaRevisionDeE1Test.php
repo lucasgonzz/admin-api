@@ -136,7 +136,7 @@ class CorreccionesDeLaRevisionDeE1Test extends BaseDeReferidosYCompromisos
 
         $casos = [
             '3484 15 521016'    => '+5493484521016',
-            '03484-15-521016'   => '+5493484521016',
+            '03484-15-521017'   => '+5493484521017',
             '11 15 2345 6789'   => '+5491123456789',
         ];
         foreach ($casos as $tipeado => $canonico) {
