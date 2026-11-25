@@ -402,7 +402,8 @@ class SupportCodexService
                 : ['message_id' => (int) $case->no_reply_message_id, 'reason' => (string) $case->no_reply_reason],
             // El helper debe verificar esta capacidad ANTES de pedir el modo nuevo: un admin
             // anterior ignoraría el campo y ejecutaría el resume que consume la consulta.
-            'capabilities' => ['multiple_missions' => true, 'upgrade_confirmation_message' => true, 'upgrade_reconfirmation' => true, 'overnight_upgrade' => true, 'mission_started_notice' => true, 'coordinated_maintenance' => SupportMaintenancePolicy::available(), 'support_store_upgrade' => SupportMaintenancePolicy::available(), 'mission_progress' => true, 'continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'migration_blocked_handoff' => true, 'whatsapp_catalog_import' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => $capacidades_de_prueba['prueba_import'], 'prueba_import_resolver' => $capacidades_de_prueba['prueba_import_resolver'],
+            // Coordinación de horarios (contrato C4, 25/11/2026): apagada por configuración, sus capacidades salen en false.
+            'capabilities' => ['multiple_missions' => true, 'upgrade_confirmation_message' => true, 'upgrade_reconfirmation' => SupportUpgradeCoordination::enabled(), 'overnight_upgrade' => SupportUpgradeCoordination::enabled(), 'mission_started_notice' => true, 'coordinated_maintenance' => SupportMaintenancePolicy::available() && SupportUpgradeCoordination::enabled(), 'support_store_upgrade' => SupportMaintenancePolicy::available(), 'mission_progress' => true, 'continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'migration_blocked_handoff' => true, 'whatsapp_catalog_import' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => SupportUpgradeCoordination::enabled(), 'mission_fix_evidence' => true, 'upgrade_agreement' => SupportUpgradeCoordination::enabled(), 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => $capacidades_de_prueba['prueba_import'], 'prueba_import_resolver' => $capacidades_de_prueba['prueba_import_resolver'],
                 'soporte_import' => $soporte_activo, 'soporte_import_resolver' => $soporte_activo,
                 'soporte_import_stock_existente' => $soporte_activo,
                 // Misión cruzada importaciones-de-martin (11/11/2026): la planilla derivada del PDF del dueño, el Excel
@@ -426,7 +427,10 @@ class SupportCodexService
                 // POST .../no-reply: un entrante que no necesita respuesta (misión martin-descripcion-y-actualizaciones).
                 'no_reply' => true,
                 // reply admite `review_resolved: true` (contrato C3): apaga el rojo de una revisión pedida por el agente.
-                'agent_review_resolution' => true],
+                'agent_review_resolution' => true,
+                'upgrade_coordination' => SupportUpgradeCoordination::enabled(),
+                // El monitor exige descripción (titular con resumen) antes de cada respuesta de Martín.
+                'ticket_description_every_reply' => true],
             'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
             'robotito_available' => $robotito_disponible,
@@ -2755,7 +2759,10 @@ class SupportCodexService
             && $this->puede_entregar($ticket)) {
             return 'mission_completed';
         }
-        if ($supports_upgrade_agreement && app(SupportUpgradeReconfirmationService::class)->needs_attention((int) $ticket->id)) {
+        // Con la coordinación de horarios apagada (25/11/2026) ni se reconfirma ni se ofrece coordinar: la corrección
+        // va en la próxima actualización nocturna que programa Lucas.
+        $coordinacion = SupportUpgradeCoordination::enabled();
+        if ($supports_upgrade_agreement && $coordinacion && app(SupportUpgradeReconfirmationService::class)->needs_attention((int) $ticket->id)) {
             return 'upgrade_reconfirmation';
         }
         if ($last->sender_type === 'user' && ($case === null || (int) $last->id > (int) $case->handled_message_id)) {
@@ -2773,7 +2780,7 @@ class SupportCodexService
                 return 'mission_progress';
             }
         }
-        if ($supports_upgrade_agreement && $case !== null
+        if ($supports_upgrade_agreement && $coordinacion && $case !== null
             && app(SupportCodexUpgradeAgreementService::class)->pending_offer($ticket, $case)
             && $this->puede_entregar($ticket)) {
             return 'fix_ready_for_upgrade';

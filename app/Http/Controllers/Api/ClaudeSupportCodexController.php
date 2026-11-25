@@ -194,6 +194,9 @@ class ClaudeSupportCodexController extends Controller
 
     public function upgrade_proposal(Request $request, $id, SupportCodexService $service, SupportCodexUpgradeAgreementService $agreements)
     {
+        // Coordinación de horarios apagada (contrato C4, 25/11/2026): no se propone horario ni se crea acuerdo.
+        abort_unless(\App\Services\SupportUpgradeCoordination::enabled(), 409,
+            'upgrade_coordination_disabled: La coordinación de horarios está apagada; la corrección va en la próxima actualización.');
         $data = $request->validate([
             'lease_token' => 'required|string|min:32|max:128',
             'expected_message_id' => 'required|integer|min:1',
