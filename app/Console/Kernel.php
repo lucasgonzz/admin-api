@@ -35,7 +35,7 @@ class Kernel extends ConsoleKernel
          * Agentes de IA abierta si el dueño ya contó su negocio (formulario de la app o los temas esenciales por
          * WhatsApp) y marca solo el hito `onboarding_completado`. Cada media hora alcanza (el dueño no lo nota) y
          * `withoutOverlapping` porque el barrido le pega al `empresa-api` de cada cliente, uno atrás del otro. */
-        $schedule->command('agentes:sincronizar-onboarding')->everyThirtyMinutes()->withoutOverlapping(10);
+        $schedule->command('agentes:sincronizar-onboarding')->cron('*/30 * * * *')->withoutOverlapping(10);
 
         /* Los informes de la mañana del mostrador, por WhatsApp, a los dueños con el asistente por
          * WhatsApp prendido (misión asistente-por-whatsapp, 16/9/2026).
