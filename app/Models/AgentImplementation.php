@@ -84,7 +84,7 @@ class AgentImplementation extends Model
             'hitos' => [
                 'app_link_enviado' => 'Acceso a ia.comerciocity.com enviado',
                 'acceso_sistema_verificado' => 'Asistente personal disponible en el sistema',
-                'onboarding_completado' => 'Conozcámonos respondido por el dueño',
+                'onboarding_completado' => 'Contexto del negocio contado por el dueño (app o WhatsApp)',
             ],
         ],
         'guia' => [
