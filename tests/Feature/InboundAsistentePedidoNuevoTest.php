@@ -367,7 +367,7 @@ class InboundAsistentePedidoNuevoTest extends BaseDelCanal
             'id'                 => self::ID_PEDIDO,
             'tarea_id'           => null,
             'fecha'              => now()->toDateString(),
-            'hora'               => now()->format('H:i'),
+            'hora'               => '', // contrato: el empresa-api manda la hora vacía en los pedidos de la tienda
             'detalle'            => self::DETALLE,
             'texto'              => self::TEXTO,
             'ai_conversation_id' => 77,
