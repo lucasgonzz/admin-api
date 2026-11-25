@@ -664,7 +664,7 @@ class OrigenDelLeadTest extends TestCase
         $this->assertTrue($propiedad['exclude_on_update']);
         $this->assertTrue($propiedad['use_to_filter_in_search']);
         $this->assertSame(LeadOrigenService::ORIGENES, array_column($propiedad['options'], 'value'));
-        $this->assertSame(['Anuncio de WhatsApp', 'Web', 'Instagram', 'Sin dato'], array_column($propiedad['options'], 'text'));
+        $this->assertSame(['Anuncio de WhatsApp', 'Web', 'Instagram', 'Sin dato', 'Referido', 'WhatsApp de Lucas', 'Llamada', 'Otro medio'], array_column($propiedad['options'], 'text'));
         foreach ($propiedad['options'] as $opcion) {
             $this->assertMatchesRegularExpression('/^#[0-9a-f]{6}$/i', $opcion['color']);
         }
