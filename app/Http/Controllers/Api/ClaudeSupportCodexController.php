@@ -54,7 +54,8 @@ class ClaudeSupportCodexController extends Controller
 
     public function pending(Request $request, SupportCodexService $service)
     {
-        return response()->json($service->pending($request->boolean('supports_upgrade_agreement'), $request->boolean('supports_mission_progress')) + ['local_missions' => true]);
+        return response()->json($service->pending($request->boolean('supports_upgrade_agreement'), $request->boolean('supports_mission_progress'),
+            $request->boolean('supports_delivery_verification')) + ['local_missions' => true]);
     }
 
     public function erp_verification_candidates(Request $request, SupportCodexErpVerificationService $service)
@@ -101,6 +102,8 @@ class ClaudeSupportCodexController extends Controller
             'execution_id' => 'required_if:dispatch_recovery,true|uuid',
             'supports_upgrade_agreement' => 'sometimes|boolean',
             'supports_mission_progress' => 'sometimes|boolean',
+            // Contrato C2 (25/11/2026): el monitor verifica entregas instaladas por la actualización, sin acuerdo.
+            'supports_delivery_verification' => 'sometimes|boolean',
             'expected_progress_hash' => ['sometimes', 'string', 'regex:/^[a-f0-9]{64}$/'],
             'supports_trial_import_quiet' => 'sometimes|boolean',
             // Rotación del hilo de Codex (misión cruzada ficha-del-cliente, 11/11/2026): con thread_id nuevo y execution_id.
@@ -308,6 +311,28 @@ class ClaudeSupportCodexController extends Controller
             'confirmation_message_id' => 'sometimes|nullable|integer|min:1',
         ]);
         return response()->json($service->reply((int) $id, $data));
+    }
+
+    /**
+     * Carril «no necesita respuesta» (contrato C1, misión martin-descripcion-y-actualizaciones, 25/11/2026): Martín da
+     * por atendido el último entrante sin escribirle al cliente. Reglas y errores en `SupportCodexService::no_reply()`.
+     *
+     * @param Request             $request Body: lease_token, expected_message_id, reason (10..300), execution_id?, thread_id?
+     * @param int|string          $id      Id del ticket.
+     * @param SupportCodexService $service
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function no_reply(Request $request, $id, SupportCodexService $service)
+    {
+        $data = $request->validate([
+            'lease_token' => 'required|string|min:32|max:128',
+            'expected_message_id' => 'required|integer|min:1',
+            'reason' => 'required|string|min:10|max:300',
+            'execution_id' => 'sometimes|nullable|string|max:64',
+            'thread_id' => 'sometimes|string|max:150|regex:/^[a-zA-Z0-9_-]+$/',
+        ]);
+        return response()->json($service->no_reply((int) $id, $data));
     }
 
     public function release(Request $request, $id, SupportCodexService $service)
