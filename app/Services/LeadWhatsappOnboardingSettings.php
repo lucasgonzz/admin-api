@@ -175,6 +175,13 @@ class LeadWhatsappOnboardingSettings
              * textos precargados de los anuncios (uno por línea; no cuentan como pregunta). El SPA de hoy los ignora. */
             'flujo_entrada_activo'                => LeadFlujoEntradaService::activo(),
             'flujo_textos_precargados'            => (string) AdminSetting::get(LeadFlujoEntradaService::KEY_TEXTOS_PRECARGADOS, ''),
+            /* Motor de compromisos y leads de otros medios (misión leads-referidos-compromisos, E2): los tres interruptores nacen
+             * APAGADOS y los dos nombres de plantilla de Meta. El SPA de hoy los ignora. */
+            'compromisos_activo'                  => LeadCompromisoService::activo(),
+            'compromisos_deteccion_ia'            => (string) AdminSetting::get(LeadCompromisoService::SETTING_DETECCION_IA, '0') === '1',
+            'compromisos_envio_automatico'        => LeadCompromisoService::envio_automatico_activo(),
+            'compromiso_plantilla'                => LeadCompromisoService::nombre_de_la_plantilla(),
+            'referido_plantilla'                  => trim((string) AdminSetting::get(LeadAltaExternaService::SETTING_PLANTILLA, '')),
         ];
     }
 
@@ -218,6 +225,26 @@ class LeadWhatsappOnboardingSettings
         /* La textarea vacía llega como null (el middleware convierte '' en null): con la clave presente es «borrar los textos». */
         if (array_key_exists('flujo_textos_precargados', $data)) {
             AdminSetting::set(LeadFlujoEntradaService::KEY_TEXTOS_PRECARGADOS, trim((string) $data['flujo_textos_precargados']));
+        }
+        /* Los cinco campos del motor de compromisos y de los leads de otros medios (misión leads-referidos-compromisos, E2) son
+         * OPCIONALES en el PUT, por la misma razón que el flujo de entrada: el SPA que ya está en producción no los manda, y un
+         * PUT sin ellos no puede apagar el motor ni borrar los nombres de plantilla. Se escriben sólo si vinieron. */
+        $interruptores_del_motor = [
+            'compromisos_activo'           => LeadCompromisoService::SETTING_ACTIVO,
+            'compromisos_deteccion_ia'     => LeadCompromisoService::SETTING_DETECCION_IA,
+            'compromisos_envio_automatico' => LeadCompromisoService::SETTING_ENVIO_AUTOMATICO,
+        ];
+        foreach ($interruptores_del_motor as $campo => $clave) {
+            if (array_key_exists($campo, $data) && $data[$campo] !== null) {
+                AdminSetting::set($clave, $data[$campo] ? '1' : '0');
+            }
+        }
+        /* Un nombre vacío llega como null (el middleware convierte '' en null): con la clave presente es «volver al default». */
+        if (array_key_exists('compromiso_plantilla', $data)) {
+            AdminSetting::set(LeadCompromisoService::SETTING_PLANTILLA, trim((string) $data['compromiso_plantilla']));
+        }
+        if (array_key_exists('referido_plantilla', $data)) {
+            AdminSetting::set(LeadAltaExternaService::SETTING_PLANTILLA, trim((string) $data['referido_plantilla']));
         }
         AdminSetting::set(self::KEY_AI_SUGGESTION_DELAY_SECONDS, (string) (int) $data['ai_suggestion_delay_seconds']);
         AdminSetting::set(
