@@ -165,9 +165,12 @@ class OnboardingDesdeLaEmpresaDelClienteTest extends BaseDeImplementaciones
             $this->assertSame($antes, AgentImplementationEvent::where('agent_implementation_id', $impl->id)->count(), $nombre . ': ni un evento.');
         }
 
-        // El comando entero tampoco lanza con una empresa vieja (404) en cada una de las implementaciones abiertas.
+        // El comando entero tampoco lanza con una empresa caída: en TODAS las implementaciones abiertas (no sólo la última
+        // que registró empresa_responde) el pedido a la ruta del estado falla por conexión.
         Http::swap(new HttpFactorySinSalida());
-        Http::fake(['*/' . self::RUTA_ESTADO => Http::response(['message' => 'no existe'], 404)]);
+        Http::fake(['*/' . self::RUTA_ESTADO => function () {
+            throw new ConnectionException('sin red');
+        }]);
 
         $this->assertSame(0, Artisan::call('agentes:sincronizar-onboarding'));
     }
@@ -233,8 +236,7 @@ class OnboardingDesdeLaEmpresaDelClienteTest extends BaseDeImplementaciones
 
         $evento = array_values($eventos)[0];
 
-        // Laravel 8 escribe «cada 30 minutos» como `0,30 * * * *` (equivale a `*/30 * * * *`).
-        $this->assertContains($evento->expression, ['0,30 * * * *', '*/30 * * * *']);
+        $this->assertSame('*/30 * * * *', $evento->expression);
         $this->assertTrue($evento->withoutOverlapping);
     }
 }
