@@ -110,6 +110,12 @@ class LeadScheduledMessage extends Model
     public const CANCELED_REANCLADO = 'reanclado';
 
     /**
+     * El lead tiene un compromiso de contacto vigente (misión leads-referidos-compromisos, E2): el próximo contacto ya está
+     * acordado para una fecha, así que el seguimiento genérico del embudo queda suspendido.
+     */
+    public const CANCELED_COMPROMISO_VIGENTE = 'compromiso_vigente';
+
+    /**
      * Estados de un lead a los que NO se les programa ni se les manda un mensaje comercial.
      *
      * 🔴 Es la MISMA lista para las dos puertas —programar y despachar— a propósito. Hasta el
