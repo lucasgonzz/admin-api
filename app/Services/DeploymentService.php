@@ -6171,10 +6171,8 @@ class DeploymentService
      * 🔴 Si no se puede saber con certeza, NO suelta: es preferible que lo suelte el vencimiento antes
      * que soltarlo con el sistema tocado. Por eso:
      *
-     *  - 🔴 no suelta si hay OTRO upgrade del mismo cliente en curso (`running`, `paused` o
-     *    `paused_post_tasks`): el aviso es UNO por dueño y `libre` ignora `upgrade_id`, así que soltarlo
-     *    desde acá le soltaría el aviso al otro, que puede estar en migraciones (por ejemplo, el candado lo tiene
-     *    A, el job de B vence el `block(10)` y su `failed()` miraba sólo los logs de B);
+     *  - 🔴 no suelta si hay OTRO upgrade del mismo cliente en curso: esa guarda vive en el punto común por
+     *    el que pasan TODOS los caminos que sueltan (aviso_liberar_con_reintentos()), no acá;
      *  - no suelta si, en la CORRIDA ACTUAL, ya hay una línea "liberado" como último movimiento del aviso
      *    (G5 ya lo hizo: sin esto, `failed()` repetiría el PUT después de un fallo de `run()` ya manejado).
      *    Se mira sólo desde el inicio de esta corrida —`deployment_running_since`, el ancla que estampan
@@ -6193,14 +6191,6 @@ class DeploymentService
     {
         try {
             if (! $this->aviso_activo() || $this->aviso_sistema_vivo_tocado()) {
-                return;
-            }
-
-            $otro_en_curso = ClientVersionUpgrade::where('client_id', $this->upgrade->client_id)
-                ->where('id', '!=', $this->upgrade->id)
-                ->whereIn('deployment_status', ['running', 'paused', 'paused_post_tasks'])
-                ->exists();
-            if ($otro_en_curso) {
                 return;
             }
 
@@ -6226,6 +6216,31 @@ class DeploymentService
     }
 
     /**
+     * Id de OTRO upgrade del mismo cliente que sigue en curso (`running`, `paused` o `paused_post_tasks`,
+     * los estados de ACTIVE_DEPLOYMENT_STATUSES), o null si no hay ninguno.
+     *
+     * El aviso es UNO por dueño y `PUT libre` ignora `upgrade_id`: soltarlo desde este upgrade se lo
+     * soltaría al otro, que puede estar en migraciones o esperando el post-cierre con el sistema
+     * bloqueado a propósito. Si no se puede consultar, se asume que sí hay otro (ante la duda no se suelta).
+     *
+     * @return int|null
+     */
+    private function aviso_otro_upgrade_activo_del_cliente()
+    {
+        try {
+            $otro = ClientVersionUpgrade::where('client_id', $this->upgrade->client_id)
+                ->where('id', '!=', $this->upgrade->id)
+                ->whereIn('deployment_status', ['running', 'paused', 'paused_post_tasks'])
+                ->orderBy('id')
+                ->value('id');
+
+            return $otro === null ? null : (int) $otro;
+        } catch (\Throwable $e) {
+            return 0;
+        }
+    }
+
+    /**
      * Suelta el aviso con reintentos reales: 3 intentos con espera creciente entre uno y otro (1 s y
      * 3 s por defecto: `aviso_de_actualizacion.esperas_de_reintento`). Un solo intento fallido dejaba a
      * los usuarios afuera hasta 120 minutos después de terminar, sin que nadie se enterara.
@@ -6246,6 +6261,20 @@ class DeploymentService
      */
     private function aviso_liberar_con_reintentos(string $etapa): void
     {
+        /* 🔴 La guarda de TODOS los caminos que sueltan (G4, G5 y los del job): si otro upgrade del cliente
+           sigue en curso, el aviso es suyo. */
+        $otro_upgrade = $this->aviso_otro_upgrade_activo_del_cliente();
+        if ($otro_upgrade !== null) {
+            $this->log(
+                $etapa,
+                'Aviso de actualización: no se suelta: el upgrade ' . ($otro_upgrade > 0 ? '#' . $otro_upgrade : '(no se pudo consultar)') . ' del cliente sigue en curso '
+                . '(el aviso es uno por dueño y lo suelta ese upgrade al terminar, o el vencimiento).',
+                'info'
+            );
+
+            return;
+        }
+
         $servicio = app(ClientAvisoDeActualizacionService::class);
         $client   = $this->upgrade->client;
         $esperas  = array_values((array) config('aviso_de_actualizacion.esperas_de_reintento', [1, 3]));
