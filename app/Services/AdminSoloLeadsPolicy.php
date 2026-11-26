@@ -125,6 +125,29 @@ class AdminSoloLeadsPolicy
     const CLAVES_DE_LEADS_EXTERNOS = ['primer_contacto'];
 
     /**
+     * Rutas de los compromisos de contacto (misión leads-referidos-compromisos, E2): Juan ve los compromisos de sus leads, anota el
+     * «llamame el viernes», lo reprograma y lo cancela. Se suman a `RUTAS_PERMITIDAS` SIN tocarla. Ninguna le escribe al lead: lo
+     * que el motor le mande sale por su camino de siempre (sugerencia con aprobación). Mismo formato: «<MÉTODO> <uri>» como
+     * `Route::uri()`; cada entrada existe y lleva `admin.solo_leads`.
+     *
+     * @var array<int, string>
+     */
+    const RUTAS_DE_COMPROMISOS = [
+        'GET api/admin/lead/{id}/compromisos',
+        'POST api/admin/lead/{id}/compromisos',
+        'PUT api/admin/lead-compromisos/{id}',
+        'POST api/admin/lead-compromisos/{id}/cancelar',
+    ];
+
+    /**
+     * Claves anidadas que el perfil ve SÓLO en las respuestas de `RUTAS_DE_COMPROMISOS`: `compromisos` es la lista del historial
+     * (cada uno con sus columnas escalares, sin relaciones).
+     *
+     * @var array<int, string>
+     */
+    const CLAVES_DE_COMPROMISOS = ['compromisos'];
+
+    /**
      * Rutas del tablero cuyo recurso hay que verificar contra la base: «<MÉTODO> <uri>» => regla de
      * {@see SoloLeadsRecursos}. Sin esto el perfil abriría el tablero y las tarjetas de CUALQUIER pipeline (por ejemplo
      * «Agentes»): la URL sola no dice a qué pipeline pertenece el `{id}`.
@@ -319,7 +342,8 @@ class AdminSoloLeadsPolicy
 
         if (! in_array($clave, self::RUTAS_PERMITIDAS, true)
             && ! in_array($clave, self::RUTAS_DEL_TABLERO, true)
-            && ! in_array($clave, self::RUTAS_DE_LEADS_EXTERNOS, true)) {
+            && ! in_array($clave, self::RUTAS_DE_LEADS_EXTERNOS, true)
+            && ! in_array($clave, self::RUTAS_DE_COMPROMISOS, true)) {
             return false;
         }
 
@@ -429,6 +453,11 @@ class AdminSoloLeadsPolicy
         /* El alta de un lead de otro medio suma `primer_contacto` (sólo textos) a su respuesta. */
         if ($clave_de_ruta !== null && in_array($clave_de_ruta, self::RUTAS_DE_LEADS_EXTERNOS, true)) {
             $extra = array_merge($extra, self::CLAVES_DE_LEADS_EXTERNOS);
+        }
+
+        /* Los compromisos de contacto suman la lista `compromisos` (sólo escalares) a su respuesta. */
+        if ($clave_de_ruta !== null && in_array($clave_de_ruta, self::RUTAS_DE_COMPROMISOS, true)) {
+            $extra = array_merge($extra, self::CLAVES_DE_COMPROMISOS);
         }
 
         return $this->filtrar_nodo($valor, $extra);
