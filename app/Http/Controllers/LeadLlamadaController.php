@@ -66,7 +66,7 @@ class LeadLlamadaController extends Controller
         $lead = Lead::query()->findOrFail((int) $id);
 
         $llamadas = LeadLlamada::query()
-            ->with(['admin', 'cargada_por'])
+            ->with(['admin', 'cargada_por', 'grabacion'])
             ->where('lead_id', (int) $lead->id)
             ->orderByDesc('created_at')
             ->orderByDesc('id')
