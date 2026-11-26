@@ -47,6 +47,14 @@ return [
     'vence_en_minutos' => 120,
 
     /**
+     * Segundos de espera ANTES de cada reintento al soltar el aviso (G4 y G5 del pipeline): con dos
+     * esperas son tres intentos en total (el primero, y uno tras 1 s y otro tras 3 s). Un solo intento
+     * fallido dejaba a los usuarios afuera hasta que el aviso venciera, sin que nadie se enterara. Los
+     * tests lo ponen en [0, 0] para no dormir.
+     */
+    'esperas_de_reintento' => [1, 3],
+
+    /**
      * Minutos por defecto que tienen las computadoras para responder el pedido de OK. Pasado ese
      * plazo, empresa-api le cierra la sesión a las que no contestaron y sigue.
      */
