@@ -384,9 +384,11 @@ class LeadCompromisoService
             ? (string) $datos['origen']
             : LeadCompromiso::ORIGEN_MANUAL;
         $origen_id    = isset($datos['origen_id']) && $datos['origen_id'] !== null ? (int) $datos['origen_id'] : null;
+        /* Lo que carga un admin «Sólo Leads» (o lo que hereda de uno al reprogramarse) nunca sale solo. */
+        $sin_envio_automatico = $this->es_de_solo_leads($admin_id) || ! empty($opciones['sin_envio_automatico']);
         $con_tarjeta  = ! array_key_exists('tarjeta', $opciones) || $opciones['tarjeta'] !== false;
 
-        $nuevo = DB::transaction(function () use ($lead, $limpios, $origen, $origen_id, $admin_id) {
+        $nuevo = DB::transaction(function () use ($lead, $limpios, $origen, $origen_id, $admin_id, $sin_envio_automatico) {
             /* El candado del lead: dos compromisos que nacen a la vez (la llamada de Juan y el mensaje del lead) se hacen la cola
                y el segundo ve al primero como vigente en lugar de dejar dos. */
             $bloqueado = Lead::query()->whereKey((int) $lead->id)->lockForUpdate()->first();
@@ -406,13 +408,14 @@ class LeadCompromisoService
                 'cita_del_lead'       => $limpios['cita_del_lead'],
                 'status'              => LeadCompromiso::STATUS_VIGENTE,
                 'created_by_admin_id' => $admin_id !== null ? (int) $admin_id : null,
+                'sin_envio_automatico' => $sin_envio_automatico,
             ]));
 
-            /* El vigente anterior queda reemplazado. Sólo el vigente: uno que está `procesando` lo está ejecutando una corrida
-               del comando y lo termina ella. */
+            /* El vigente anterior (y uno que quedó para revisar) queda reemplazado. Uno que está `procesando` lo está ejecutando una
+               corrida del comando y lo termina ella. */
             LeadCompromiso::query()
                 ->where('lead_id', (int) $bloqueado->id)
-                ->where('status', LeadCompromiso::STATUS_VIGENTE)
+                ->whereIn('status', [LeadCompromiso::STATUS_VIGENTE, LeadCompromiso::STATUS_REVISAR])
                 ->where('id', '!=', (int) $nuevo->id)
                 ->update(['status' => LeadCompromiso::STATUS_REEMPLAZADO, 'reemplazado_por_id' => (int) $nuevo->id, 'updated_at' => AppTime::now()]);
 
@@ -467,6 +470,10 @@ class LeadCompromisoService
         }
         if ($trae_accion) {
             $compromiso->accion = $accion;
+        }
+        /* Si lo toca un admin «Sólo Leads», el mensaje que genere nunca sale solo (aunque lo haya cargado otro). */
+        if ($this->es_de_solo_leads($admin_id)) {
+            $compromiso->sin_envio_automatico = true;
         }
         if (array_key_exists('resumen', $datos)) {
             $compromiso->resumen = mb_substr(trim((string) $datos['resumen']), 0, self::MAX_RESUMEN);
@@ -529,7 +536,8 @@ class LeadCompromisoService
     }
 
     /**
-     * Da por cumplido el compromiso vigente del lead: hubo contacto (una llamada sin fecha nueva) y ya no hace falta.
+     * Da por cumplido el compromiso vigente del lead (y uno que había quedado para revisar): hubo contacto (una llamada sin fecha
+     * nueva) y ya no hace falta.
      *
      * @param Lead   $lead
      * @param string $resultado Qué pasó (queda en `resultado`).
@@ -541,13 +549,52 @@ class LeadCompromisoService
     {
         LeadCompromiso::query()
             ->where('lead_id', (int) $lead->id)
-            ->where('status', LeadCompromiso::STATUS_VIGENTE)
+            ->whereIn('status', [LeadCompromiso::STATUS_VIGENTE, LeadCompromiso::STATUS_REVISAR])
             ->update([
                 'status'               => LeadCompromiso::STATUS_CUMPLIDO,
                 'resultado'            => mb_substr($resultado, 0, 1000),
                 'cerrado_por_admin_id' => $admin_id !== null ? (int) $admin_id : null,
                 'updated_at'           => AppTime::now(),
             ]);
+    }
+
+    /**
+     * Cancela todos los compromisos abiertos del lead (vigente, procesando o para revisar): lo usa una llamada que cierra el caso.
+     *
+     * @param Lead        $lead
+     * @param string      $motivo
+     * @param int|null    $admin_id
+     *
+     * @return void
+     */
+    public function cancelar_los_abiertos(Lead $lead, string $motivo, $admin_id = null): void
+    {
+        $abiertos = LeadCompromiso::query()
+            ->where('lead_id', (int) $lead->id)
+            ->whereIn('status', [LeadCompromiso::STATUS_VIGENTE, LeadCompromiso::STATUS_PROCESANDO, LeadCompromiso::STATUS_REVISAR])
+            ->get();
+
+        foreach ($abiertos as $compromiso) {
+            $this->cancelar($compromiso, $motivo, $admin_id);
+        }
+    }
+
+    /**
+     * ¿El admin tiene el perfil «Sólo Leads» (Juan)? Sus compromisos nunca mandan un mensaje solos.
+     *
+     * @param int|null $admin_id
+     *
+     * @return bool
+     */
+    private function es_de_solo_leads($admin_id): bool
+    {
+        if ($admin_id === null) {
+            return false;
+        }
+
+        $admin = \App\Models\Admin::query()->find((int) $admin_id);
+
+        return $admin !== null && app(AdminSoloLeadsPolicy::class)->tiene_perfil($admin);
     }
 
     // ------------------------------------------------------------------------------------------
@@ -797,10 +844,23 @@ class LeadCompromisoService
                 continue;
             }
 
+            /* Si mientras tanto nació otro vigente, el colgado ya no es el contacto acordado: queda reemplazado (nunca dos abiertos). */
+            $otro = LeadCompromiso::query()
+                ->where('lead_id', (int) $compromiso->lead_id)
+                ->where('status', LeadCompromiso::STATUS_VIGENTE)
+                ->where('id', '!=', (int) $compromiso->id)
+                ->orderByDesc('id')
+                ->first();
+            $cambios = ['status' => LeadCompromiso::STATUS_VIGENTE, 'procesando_desde' => null, 'intentos' => $intentos, 'updated_at' => AppTime::now()];
+            if ($otro !== null) {
+                $cambios['status']             = LeadCompromiso::STATUS_REEMPLAZADO;
+                $cambios['reemplazado_por_id'] = (int) $otro->id;
+            }
+
             LeadCompromiso::query()
                 ->where('id', (int) $compromiso->id)
                 ->where('status', LeadCompromiso::STATUS_PROCESANDO)
-                ->update(['status' => LeadCompromiso::STATUS_VIGENTE, 'procesando_desde' => null, 'intentos' => $intentos, 'updated_at' => AppTime::now()]);
+                ->update($cambios);
         }
 
         return $colgados->count();
@@ -892,7 +952,7 @@ class LeadCompromisoService
                 'cita_del_lead' => $compromiso->cita_del_lead,
                 'origen'        => LeadCompromiso::ORIGEN_REEVALUACION,
                 'origen_id'     => (int) $compromiso->id,
-            ], null);
+            ], null, ['sin_envio_automatico' => (bool) $compromiso->sin_envio_automatico]);
         } catch (PipelineRuleException $e) {
             $nuevo = null;
         }
@@ -966,6 +1026,16 @@ class LeadCompromisoService
         }
         if (! empty($lead->promoted_client_id) || in_array((string) $lead->status, LeadScheduledMessage::STATUSES_DE_LEAD_QUE_FRENAN, true)) {
             $this->cerrar($compromiso, LeadCompromiso::STATUS_CANCELADO, 'El lead ya es cliente o está cerrado: no se le escribe.');
+            $this->limpiar_la_tarjeta($lead, null);
+
+            return;
+        }
+
+        /* El número de un cliente (o de su equipo, o de un admin) no recibe mensajes de lead: el mismo freno que los otros envíos
+           automáticos ({@see ClientPhoneDirectory}). */
+        $motivo_de_cliente = (new ClientPhoneDirectory())->motivo_de_lead_de_un_cliente($lead);
+        if ($motivo_de_cliente !== null) {
+            $this->cerrar($compromiso, LeadCompromiso::STATUS_CANCELADO, 'El teléfono es de un cliente (' . $motivo_de_cliente . '): no se le escribe.');
             $this->limpiar_la_tarjeta($lead, null);
 
             return;
@@ -1054,8 +1124,15 @@ class LeadCompromisoService
         $lead->fresh()->sync_suggestion_flags();
         \App\Services\LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $mensaje->id);
 
+        $solo_borrador = $ventana_cerrada && $plantilla === null;
+        /* Un borrador con la ventana cerrada no se puede mandar como texto: además de la sugerencia, Juan recibe su tarea (nadie
+           queda sin contacto). */
+        if ($solo_borrador) {
+            $this->crear_la_tarea($compromiso, $lead, 'Escribile a ' . $this->nombre_para_el_titulo($lead) . ': quedaron para hoy', $this->contenido_de_la_tarea($compromiso, $lead) . "\n\nDejé un borrador como sugerencia en la conversación, pero la ventana de 24 h está cerrada: " . (string) $por_que_no . '.');
+        }
+
         $resultado = 'Mensaje sugerido para aprobar.';
-        if (self::envio_automatico_activo() && ! ($ventana_cerrada && $plantilla === null)) {
+        if (self::envio_automatico_activo() && ! $solo_borrador && ! (bool) $compromiso->sin_envio_automatico) {
             $enviado   = app(LeadSuggestionSendService::class)->send_suggestion($mensaje, null, null, true);
             $resultado = (string) $enviado->status === 'enviado' ? 'Mensaje enviado.' : 'Mensaje creado; quedó para aprobar.';
         }
@@ -1064,41 +1141,69 @@ class LeadCompromisoService
     }
 
     /**
-     * Las variables y el texto de la plantilla del compromiso. {{1}} es el primer nombre (la regla de siempre); cualquier otra
-     * variable lleva lo que dijo el lead tal cual (`cita_del_lead`), que es lo que pide `cc_coord_dia_acordado`.
+     * Las variables y el texto de la plantilla del compromiso, completos de punta a punta. {{1}} es el primer nombre (la regla de
+     * siempre); cualquier otra variable lleva lo que dijo el lead tal cual (`cita_del_lead`), que es lo que pide
+     * `cc_coord_dia_acordado` ({{2}} = el momento en sus palabras).
      *
-     * @param FollowupTemplate $plantilla
-     * @param Lead             $lead
-     * @param LeadCompromiso   $compromiso
+     * 🔴 Es la ÚNICA definición de qué se ve y qué sale: la usa quien arma la sugerencia y la usa el envío al aprobarla
+     * ({@see self::armar_para_el_envio()}), así lo que lee Juan es lo que recibe el lead. Si no se puede completar (cuerpo vacío o
+     * alguna variable sin valor) devuelve null y la plantilla no se usa.
      *
-     * @return array{texto: string, variables: array<int, string>}|null Null si una variable no tiene con qué completarse.
+     * @param FollowupTemplate    $plantilla
+     * @param Lead                $lead
+     * @param LeadCompromiso|null $compromiso
+     *
+     * @return array{texto: string, variables: array<int, string>}|null
      */
-    private function armar_la_plantilla(FollowupTemplate $plantilla, Lead $lead, LeadCompromiso $compromiso)
+    public function armar_la_plantilla(FollowupTemplate $plantilla, Lead $lead, $compromiso)
     {
-        $seguimientos = app(LeadFollowupService::class);
-        $variables    = array_values($seguimientos->build_template_variables($plantilla, $lead));
-
-        $cita = trim((string) $compromiso->cita_del_lead);
-        foreach ($variables as $indice => $valor) {
-            if ($indice === 0 || trim((string) $valor) !== '') {
-                continue;
-            }
-            if ($cita === '') {
-                return null;
-            }
-            $variables[$indice] = $cita;
+        $cuerpo = trim((string) $plantilla->body_template);
+        if ($cuerpo === '') {
+            return null;
         }
 
-        /* El texto del hilo sale de la plantilla con los MISMOS valores que se le mandan a Meta. */
-        $texto = $seguimientos->render_template_body($plantilla, $lead);
-        $lista = is_array($plantilla->variables) ? array_values($plantilla->variables) : [];
-        foreach ($lista as $indice => $definicion) {
-            if ($indice > 0 && isset($definicion['placeholder'], $variables[$indice])) {
-                $texto = str_replace((string) $definicion['placeholder'], (string) $variables[$indice], $texto);
+        $huecos  = is_array($plantilla->variables) ? array_values($plantilla->variables) : [];
+        $valores = array_values(app(LeadFollowupService::class)->build_template_variables($plantilla, $lead));
+
+        /* Meta rechaza saltos de línea y espacios repetidos en una variable: se acomoda lo que dijo el lead. */
+        $cita = $compromiso !== null ? trim((string) preg_replace('/\s+/u', ' ', (string) $compromiso->cita_del_lead)) : '';
+        $cita = mb_substr($cita, 0, 100);
+
+        $variables = [];
+        $texto     = $cuerpo;
+        foreach ($huecos as $indice => $hueco) {
+            $valor = isset($valores[$indice]) ? trim((string) $valores[$indice]) : '';
+            if ($valor === '' && $indice > 0) {
+                $valor = $cita;
             }
+            if ($valor === '' || ! isset($hueco['placeholder'])) {
+                return null;
+            }
+            $variables[] = $valor;
+            $texto       = str_replace((string) $hueco['placeholder'], $valor, $texto);
         }
 
         return ['texto' => $texto, 'variables' => $variables];
+    }
+
+    /**
+     * Lo mismo que se vio en la sugerencia, rearmado al aprobarla: busca el compromiso que dejó ese mensaje y resuelve la plantilla
+     * igual. Lo llama {@see LeadSuggestionSendService} para los mensajes del motor.
+     *
+     * @param LeadMessage      $mensaje
+     * @param FollowupTemplate $plantilla
+     * @param Lead             $lead
+     *
+     * @return array{texto: string, variables: array<int, string>}|null Null si ya no se puede completar: el envío se frena.
+     */
+    public function armar_para_el_envio(LeadMessage $mensaje, FollowupTemplate $plantilla, Lead $lead)
+    {
+        $compromiso = LeadCompromiso::query()->where('lead_message_id', (int) $mensaje->id)->first();
+        if ($compromiso === null) {
+            return null;
+        }
+
+        return $this->armar_la_plantilla($plantilla, $lead, $compromiso);
     }
 
     /**

@@ -78,6 +78,10 @@ class CreateLeadCompromisosTable extends Migration
             $table->unsignedTinyInteger('intentos')->default(0);
             $table->dateTime('procesando_desde')->nullable();
 
+            // 1 = un admin «Sólo Leads» lo cargó o lo pasó a escribir: el mensaje NUNCA sale solo (siempre sugerencia), aunque el
+            // envío automático esté prendido.
+            $table->boolean('sin_envio_automatico')->default(false);
+
             // Quién lo creó y quién lo cerró (null = el sistema o un agente).
             $table->unsignedBigInteger('created_by_admin_id')->nullable();
             $table->unsignedBigInteger('cerrado_por_admin_id')->nullable();
