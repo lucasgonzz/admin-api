@@ -208,10 +208,10 @@ class ComandosDelNumeroPersonalTest extends BaseDelNumeroPersonal
         $this->assertSame(2, DB::table('whatsapp_personal_chats')->count());
         $this->assertSame($antes, $this->foto_de_la_base(), 'Ninguna otra tabla se toca.');
 
-        // Configurable: con 30 días se va también el de hace 40.
+        // Configurable: con 30 días se van también el de hace 89 y el de hace 40; queda sólo el de hace 2.
         config(['panel_agent.whatsapp_personal_retencion_dias' => 30]);
         $this->correr('whatsapp:personal-depurar');
-        $this->assertSame(2, DB::table('whatsapp_personal_messages')->count());
+        $this->assertSame(1, DB::table('whatsapp_personal_messages')->count());
 
         // Y por opción: con 1 día no queda nada.
         $this->correr('whatsapp:personal-depurar', ['--dias' => 1]);
