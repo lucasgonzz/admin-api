@@ -239,4 +239,29 @@ class McpAutorizacionTest extends TestCase
         $this->assertArrayNotHasKey('code', $consulta);
         $this->assertSame(0, DB::table('mcp_oauth_codes')->count());
     }
+
+    /**
+     * El admin de Lucas tiene "Lucas" como email (no es una dirección): la pantalla no puede exigir formato de email
+     * (el navegador bloquea el envío con type=email) y el login tiene que encontrarlo tal cual, como el login del admin.
+     *
+     * @return void
+     */
+    public function test_usuario_sin_formato_de_email(): void
+    {
+        $admin     = $this->admin_de_mcp(['email' => 'Lucas' . uniqid()]);
+        $client_id = $this->registrar_cliente_de_chatgpt();
+        list(, $challenge) = $this->par_pkce();
+        $parametros = $this->parametros_de_autorizacion($client_id, $challenge);
+
+        // La pantalla no usa type="email" en el campo del usuario.
+        $pantalla = $this->get('/mcp/oauth/authorize?' . http_build_query($parametros));
+        $pantalla->assertStatus(200);
+        $pantalla->assertDontSee('type="email"', false);
+
+        // Con el usuario tal cual (mayúscula incluida) emite el código.
+        $respuesta = $this->enviar_consentimiento($parametros, $admin->email, 'clave-segura-mcp-1');
+        $respuesta->assertStatus(302);
+        $consulta = $this->consulta_del_redirect($respuesta);
+        $this->assertMatchesRegularExpression('/^[0-9a-f]{64}$/', (string) $consulta['code']);
+    }
 }
