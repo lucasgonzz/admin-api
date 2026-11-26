@@ -41,6 +41,12 @@ class PcSnapshotService
     /** Orígenes de una misión (contrato A v2). */
     const ORIGENES = ['openclaw', 'claude-code', 'soporte', 'codex', 'dots', 'desconocido'];
 
+    /**
+     * Formato del identificador de un pedido de Dots (misión dots-openclaw): `aaaammdd-hhmm-tema`. Lo genera
+     * `cola_misiones.py pedido-id`; no es texto libre, por eso puede viajar (el texto del pedido nunca viaja).
+     */
+    const REGEX_PEDIDO_ID = '/^[0-9]{8}-[0-9]{4}-[a-z0-9-]{1,40}$/';
+
     /** Estados de una misión. */
     const ESTADOS_MISION = ['trabajando', 'esperando_lucas', 'trabada', 'terminada'];
 
@@ -116,6 +122,8 @@ class PcSnapshotService
             'misiones.*.fase'              => ['nullable', 'string', 'regex:' . self::REGEX_FASE],
             'misiones.*.fase_inferida'     => 'nullable|boolean',
             'misiones.*.slug'              => 'nullable|string|max:120',
+            // Pedido de Dots vinculado (opcional). Nunca da 422 por formato: un valor raro se guarda como null.
+            'misiones.*.pedido_id'         => 'nullable|string|max:80',
             'misiones.*.tarjeta_id'        => 'nullable|string|max:64',
             'misiones.*.ticket'            => 'nullable|integer|min:1',
             'misiones.*.repos'             => 'nullable|array|max:8',
@@ -192,6 +200,7 @@ class PcSnapshotService
             'cola.en_espera.*.titulo'      => 'nullable|string|max:160',
             'cola.en_espera.*.prioridad'   => 'nullable|in:' . implode(',', self::PRIORIDADES),
             'cola.en_espera.*.origen'      => 'nullable|string|max:20',
+            'cola.en_espera.*.pedido_id'   => 'nullable|string|max:80',
             'cola.en_espera.*.encolada_at' => 'nullable|date',
             'cola.en_espera.*.primera_retencion_at' => 'nullable|date',
             'cola.en_espera.*.espera_min'  => 'nullable|numeric|min:0',
@@ -717,6 +726,7 @@ class PcSnapshotService
             'fase'                => $this->texto_o_null(isset($m['fase']) ? $m['fase'] : null),
             'fase_inferida'       => ! empty($m['fase_inferida']),
             'slug'                => $this->texto_o_null(isset($m['slug']) ? $m['slug'] : null),
+            'pedido_id'           => $this->pedido_id_o_null(isset($m['pedido_id']) ? $m['pedido_id'] : null),
             'tarjeta_id'          => $this->texto_o_null(isset($m['tarjeta_id']) ? $m['tarjeta_id'] : null),
             'ticket'              => $this->entero_o_null(isset($m['ticket']) ? $m['ticket'] : null),
             'repos'               => $repos,
@@ -894,6 +904,7 @@ class PcSnapshotService
                 'titulo'                => $this->recortar_texto(isset($e['titulo']) ? $e['titulo'] : null, 120),
                 'prioridad'             => $this->texto_o_null(isset($e['prioridad']) ? $e['prioridad'] : null),
                 'origen'                => $this->texto_o_null(isset($e['origen']) ? $e['origen'] : null),
+                'pedido_id'             => $this->pedido_id_o_null(isset($e['pedido_id']) ? $e['pedido_id'] : null),
                 'encolada_at'           => $this->iso_o_null(isset($e['encolada_at']) ? $e['encolada_at'] : null),
                 'espera_min'            => isset($e['espera_min']) && is_numeric($e['espera_min']) ? $e['espera_min'] + 0 : null,
                 'motivos'               => $motivos,
@@ -1101,6 +1112,25 @@ class PcSnapshotService
     private function lista(array $datos, $clave)
     {
         return isset($datos[$clave]) && is_array($datos[$clave]) ? $datos[$clave] : [];
+    }
+
+    /**
+     * El identificador de pedido si cumple {@see self::REGEX_PEDIDO_ID}; si no, null.
+     *
+     * Un valor con otro formato (texto libre, por ejemplo) se descarta en silencio: no puede tirar el reporte
+     * entero con un 422 ni quedar guardado (privacidad: el texto del pedido no viaja).
+     *
+     * @param mixed $valor Lo que vino en el reporte.
+     *
+     * @return string|null
+     */
+    private function pedido_id_o_null($valor)
+    {
+        if (! is_string($valor)) {
+            return null;
+        }
+
+        return preg_match(self::REGEX_PEDIDO_ID, $valor) === 1 ? $valor : null;
     }
 
     /**
