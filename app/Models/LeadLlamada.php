@@ -129,6 +129,16 @@ class LeadLlamada extends Model
     }
 
     /**
+     * La grabación de esta llamada (misión leads-referidos-compromisos, etapa E3): una por llamada, la más nueva si hubiera dos.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasOne
+     */
+    public function grabacion()
+    {
+        return $this->hasOne(LeadLlamadaGrabacion::class, 'lead_llamada_id')->latest('id');
+    }
+
+    /**
      * La etiqueta legible del resultado (null si no hay).
      *
      * @return string|null

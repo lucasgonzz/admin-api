@@ -270,6 +270,11 @@ class Lead extends Model
             /* Los compromisos de contacto del lead (misión leads-referidos-compromisos, E2), también en cascada Eloquent. */
             LeadCompromiso::query()->where('lead_id', $lead->id)->delete();
 
+            /* Las grabaciones de las llamadas del lead (misión leads-referidos-compromisos, E3): las filas y, sobre todo, los AUDIOS y
+               sus transcripciones (datos personales) del disco privado: un lead borrado no deja su voz en el servidor. */
+            LeadLlamadaGrabacion::query()->where('lead_id', $lead->id)->delete();
+            \Illuminate\Support\Facades\Storage::disk('local')->deleteDirectory('lead_llamadas/' . (int) $lead->id);
+
             /* 🔴 NO se usa la relación scheduled_messages(): está filtrada a los estados visibles, así
                que borraría solo una parte y dejaría huérfanas las filas enviadas y canceladas. Acá
                se borran TODAS las del lead.
