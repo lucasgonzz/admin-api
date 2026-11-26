@@ -6173,7 +6173,7 @@ class DeploymentService
      *
      *  - 🔴 no suelta si hay OTRO upgrade del mismo cliente en curso (`running`, `paused` o
      *    `paused_post_tasks`): el aviso es UNO por dueño y `libre` ignora `upgrade_id`, así que soltarlo
-     *    desde acá le soltaría el aviso al otro, que puede estar en migraciones (caso: el candado lo tiene
+     *    desde acá le soltaría el aviso al otro, que puede estar en migraciones (por ejemplo, el candado lo tiene
      *    A, el job de B vence el `block(10)` y su `failed()` miraba sólo los logs de B);
      *  - no suelta si, en la CORRIDA ACTUAL, ya hay una línea "liberado" como último movimiento del aviso
      *    (G5 ya lo hizo: sin esto, `failed()` repetiría el PUT después de un fallo de `run()` ya manejado).
