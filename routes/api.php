@@ -2076,6 +2076,15 @@ Route::prefix('admin')->group(function () {
     });
 });
 
+/* Conector MCP de sólo lectura (misión dots-openclaw, 25/11/2026): registro dinámico de clientes, token y el
+   endpoint JSON-RPC. Públicos a nivel de ruta: cada uno hace su propia validación (el registro sólo acepta los
+   redirects de ChatGPT, el token exige código + PKCE o refresh, el endpoint exige bearer). Con `mcp.enabled = false`
+   dan 404. Los metadatos y la pantalla de consentimiento están en web.php. */
+Route::post('/mcp/oauth/register', [\App\Http\Controllers\Api\McpOauthController::class, 'registrar_json'])->withoutMiddleware('throttle:api')->middleware('throttle:mcp-registro');
+Route::post('/mcp/oauth/token', [\App\Http\Controllers\Api\McpOauthController::class, 'token_json'])->withoutMiddleware('throttle:api')->middleware('throttle:mcp-token');
+Route::post('/mcp', [\App\Http\Controllers\Api\McpController::class, 'mensaje'])->withoutMiddleware('throttle:api')->middleware('throttle:mcp-endpoint');
+Route::match(['GET', 'DELETE'], '/mcp', [\App\Http\Controllers\Api\McpController::class, 'no_permitido']);
+
 // Debug: control del tiempo virtual (solo accesible en local — el controller aborta 404 en producción)
 Route::get('/debug/virtual-time', [DebugVirtualTimeController::class, 'show']);
 Route::post('/debug/virtual-time', [DebugVirtualTimeController::class, 'set']);
