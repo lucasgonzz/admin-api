@@ -6,6 +6,7 @@ use App\Models\Admin;
 use App\Models\McpOauthToken;
 use App\Models\McpWhatsappConfirmation;
 use App\Models\WhatsappConfig;
+use App\Services\ClaudeLeadQueryService;
 use App\Services\WhatsappPersonal\WhatsappPersonalEnvioService;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -24,7 +25,7 @@ use Illuminate\Support\Facades\Log;
  * 🔴 Reglas que no se negocian:
  *  - Sólo se envía desde las cuentas de `mcp.whatsapp_cuentas_envio` (hoy el personal; el principal NUNCA).
  *  - `lucas_request_literal` (lo que Lucas pidió, textual) es obligatorio y no puede ser igual a un mensaje
- *    ENTRANTE de ese chat: un mensaje recibido jamás autoriza un envío.
+ *    ENTRANTE reciente de ningún chat que lee el conector (personal, leads, soporte): un mensaje recibido jamás autoriza un envío.
  *  - La tabla de códigos y los logs NO guardan el texto, ni el literal de Lucas (sólo su sha256), ni el código en claro.
  *  - Reintento con la misma `op` = el mismo resultado (`ya_enviado`), sin duplicar. Otra `op` con un código usado
  *    es `codigo_ya_usado`.
@@ -219,8 +220,8 @@ class McpWhatsappEnvioService
      * `whatsapp_confirm_send`: consume el código y envía (o devuelve el resultado de la misma `op`).
      *
      * Orden de chequeos: forma del pedido → código existente y del mismo admin y cliente → código ya usado con otra
-     * `op` → que cuenta, teléfono, contenido y `op` coincidan con lo preparado → vencimiento (sólo si no se usó) →
-     * consumo atómico → envío.
+     * `op` → que cuenta, teléfono, contenido y `op` coincidan con lo preparado → vencimiento (un código usado vencido
+     * sólo devuelve el resultado de un envío que ya salió) → consumo atómico → envío.
      *
      * @param array<string, mixed> $argumentos Argumentos del pedido.
      * @param Admin                $admin      Admin del token.
@@ -266,11 +267,16 @@ class McpWhatsappEnvioService
             return $this->resultado_de_error('confirmacion_no_coincide', 'La cuenta, el teléfono, el contenido o la op no coinciden con lo preparado. No se envió nada.');
         }
 
-        if (! $ya_usado) {
-            if (Carbon::now()->greaterThan($fila->expires_at)) {
-                return $this->resultado_de_error('codigo_vencido', 'El código venció. Preparalo de nuevo.');
-            }
+        // 🔴 El vencimiento rige SIEMPRE. Pasado el vencimiento, un código ya usado sólo puede devolver el resultado
+        // de un envío que efectivamente salió (la fila de su op en estado enviado); si el primer intento no salió
+        // (tope, ventana, número no listo, rechazo), nunca produce un envío nuevo. Dentro del vencimiento el
+        // reintento con la misma op sigue permitido.
+        $vencido = Carbon::now()->greaterThan($fila->expires_at);
+        if ($vencido && (! $ya_usado || ! $this->el_envio_ya_salio($pedido['op']))) {
+            return $this->resultado_de_error('codigo_vencido', 'El código venció. Preparalo de nuevo.');
+        }
 
+        if (! $ya_usado) {
             // Consumo atómico: si dos confirmaciones llegan a la vez, el envío igual sale una sola vez por la op.
             McpWhatsappConfirmation::query()->where('id', $fila->id)->whereNull('used_at')->update(['used_at' => Carbon::now()]);
         }
@@ -504,10 +510,28 @@ class McpWhatsappEnvioService
     }
 
     /**
-     * Si el pedido literal de Lucas es igual (sin mayúsculas ni espacios de los bordes) a un mensaje ENTRANTE
-     * reciente de ese chat.
+     * Si el envío de esa `op` del conector ya salió (su fila en el historial del personal quedó `enviado`, o
+     * `simulado` en modo prueba). Sólo lectura.
      *
-     * @param string $telefono Chat (E.164).
+     * @param string $op `op` del pedido (sin el prefijo `mcp:` del historial).
+     *
+     * @return bool
+     */
+    private function el_envio_ya_salio($op)
+    {
+        return DB::table('whatsapp_personal_messages')
+            ->where('op_id', 'mcp:' . $op)
+            ->whereIn('estado', ['enviado', 'simulado'])
+            ->exists();
+    }
+
+    /**
+     * Si el pedido literal de Lucas es igual (sin mayúsculas ni espacios de los bordes) a un mensaje ENTRANTE
+     * reciente de CUALQUIER cuenta o chat que lee el conector: los entrantes de todos los chats del número personal
+     * y, del principal, los mensajes de leads (sender `lead`) y los de tickets de soporte escritos por el cliente.
+     * No importa a qué chat llegó: lo que dice un mensaje recibido nunca es un pedido de Lucas. Sólo SELECT.
+     *
+     * @param string $telefono Destino del envío (E.164); ya no limita la búsqueda, se conserva por compatibilidad.
      * @param string $literal  Pedido literal de Lucas.
      *
      * @return bool
@@ -515,19 +539,43 @@ class McpWhatsappEnvioService
     private function es_un_entrante($telefono, $literal)
     {
         $buscado = mb_strtolower(trim($literal));
+        $desde   = Carbon::now()->subDays(self::DIAS_DE_ENTRANTES)->toDateTimeString();
 
-        $entrantes = DB::table('whatsapp_personal_messages')
-            ->where('chat_telefono', $telefono)
+        // Número personal: entrantes de cualquier chat.
+        $personal = DB::table('whatsapp_personal_messages')
             ->where('direccion', 'in')
             ->whereNotNull('cuerpo')
-            ->where('sent_at', '>=', Carbon::now()->subDays(self::DIAS_DE_ENTRANTES)->toDateTimeString())
+            ->where('sent_at', '>=', $desde)
             ->orderByDesc('sent_at')
             ->limit(self::MAX_ENTRANTES_COMPARADOS)
             ->pluck('cuerpo');
 
-        foreach ($entrantes as $cuerpo) {
-            if (mb_strtolower(trim((string) $cuerpo)) === $buscado) {
-                return true;
+        // Principal, leads: mensajes que escribió el lead (misma hora de referencia que la lectura del principal).
+        $leads = DB::table('lead_messages')
+            ->where('lead_messages.sender', 'lead')
+            ->whereNotNull('lead_messages.content')
+            ->whereRaw(ClaudeLeadQueryService::message_time_sql() . ' >= ?', [$desde])
+            ->orderByDesc('lead_messages.id')
+            ->limit(self::MAX_ENTRANTES_COMPARADOS)
+            ->pluck('lead_messages.content');
+
+        // Principal, soporte: mensajes del cliente (sender_type `user`) en tickets de WhatsApp, sin borradores de IA.
+        $soporte = DB::table('support_messages')
+            ->join('support_tickets', 'support_tickets.id', '=', 'support_messages.support_ticket_id')
+            ->where('support_tickets.source', 'whatsapp')
+            ->where('support_messages.sender_type', 'user')
+            ->where('support_messages.is_ai_suggestion_draft', false)
+            ->whereNotNull('support_messages.body')
+            ->where('support_messages.created_at', '>=', $desde)
+            ->orderByDesc('support_messages.id')
+            ->limit(self::MAX_ENTRANTES_COMPARADOS)
+            ->pluck('support_messages.body');
+
+        foreach ([$personal, $leads, $soporte] as $entrantes) {
+            foreach ($entrantes as $cuerpo) {
+                if (mb_strtolower(trim((string) $cuerpo)) === $buscado) {
+                    return true;
+                }
             }
         }
 

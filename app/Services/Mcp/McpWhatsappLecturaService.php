@@ -155,8 +155,12 @@ class McpWhatsappLecturaService
         $crudo   = trim((string) $crudo);
         $digitos = (string) preg_replace('/\D+/', '', $crudo);
 
+        // Con prefijo internacional (`+` o `00`) el número no es de marcado local argentino: el "15" ahí es parte
+        // del número (ej. +49 151 1234567) y no se toca. Un `+54` / `0054` ya sale completo y no entra al bloque.
+        $es_internacional = preg_match('/^(\+|00)/', $crudo) === 1;
+
         // Marcado local con "15": [0]área(2 a 4) + 15 + número = 10 dígitos sin el 15 (ej. 0341 15 2345678).
-        if ($crudo !== '' && preg_match('/^[0-9+\-\s().]+$/', $crudo) === 1) {
+        if (! $es_internacional && $crudo !== '' && preg_match('/^[0-9+\-\s().]+$/', $crudo) === 1) {
             $sin_ceros = ltrim($digitos, '0');
             if (strlen($sin_ceros) === 12 && substr($sin_ceros, 0, 2) !== '54') {
                 for ($area = 2; $area <= 4; $area++) {
