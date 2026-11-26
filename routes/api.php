@@ -2060,6 +2060,15 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/compromisos', [\App\Http\Controllers\LeadCompromisoController::class, 'store_json'])->whereNumber('id');
         Route::put('lead-compromisos/{id}', [\App\Http\Controllers\LeadCompromisoController::class, 'update_json'])->whereNumber('id');
         Route::post('lead-compromisos/{id}/cancelar', [\App\Http\Controllers\LeadCompromisoController::class, 'cancelar_json'])->whereNumber('id');
+
+        /* Grabación de la llamada de Juan (misión leads-referidos-compromisos, E3): subida por partes de 4 MB, estado y reintento.
+           Sólo suben y transcriben un audio: ninguna le escribe al lead (las puede usar el perfil «Sólo Leads»). */
+        Route::post('lead/{id}/llamadas/{llamada_id}/grabacion', [\App\Http\Controllers\LeadLlamadaGrabacionController::class, 'iniciar_json'])->whereNumber('id')->whereNumber('llamada_id');
+        Route::post('lead/{id}/llamadas/{llamada_id}/grabacion/partes', [\App\Http\Controllers\LeadLlamadaGrabacionController::class, 'parte_json'])->whereNumber('id')->whereNumber('llamada_id');
+        Route::post('lead/{id}/llamadas/{llamada_id}/grabacion/completar', [\App\Http\Controllers\LeadLlamadaGrabacionController::class, 'completar_json'])->whereNumber('id')->whereNumber('llamada_id');
+        Route::post('lead/{id}/llamadas/{llamada_id}/grabacion/reintentar', [\App\Http\Controllers\LeadLlamadaGrabacionController::class, 'reintentar_json'])->whereNumber('id')->whereNumber('llamada_id');
+        Route::post('lead/{id}/llamadas/{llamada_id}/grabacion/resumir', [\App\Http\Controllers\LeadLlamadaGrabacionController::class, 'resumir_json'])->whereNumber('id')->whereNumber('llamada_id');
+        Route::get('lead/{id}/llamadas/{llamada_id}/grabacion', [\App\Http\Controllers\LeadLlamadaGrabacionController::class, 'mostrar_json'])->whereNumber('id')->whereNumber('llamada_id');
         Route::get('lead-tablero/mis-tareas', [LeadTableroController::class, 'mis_tareas_json']);
         Route::get('lead-tablero/candidatos', [LeadTableroController::class, 'candidatos_json']);
         Route::post('lead-tablero/tareas/{id}/hecha', [LeadTableroController::class, 'tarea_hecha_json'])->whereNumber('id');

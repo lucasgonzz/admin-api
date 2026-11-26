@@ -148,6 +148,32 @@ class AdminSoloLeadsPolicy
     const CLAVES_DE_COMPROMISOS = ['compromisos'];
 
     /**
+     * Rutas de la grabación de la llamada (misión leads-referidos-compromisos, E3): Juan sube el audio de la llamada que hizo a uno de
+     * sus leads, ve cómo va la transcripción y la reintenta. Se suman a `RUTAS_PERMITIDAS` SIN tocarla. Ninguna le escribe al lead: sólo
+     * suben un archivo y lo transcriben. Mismo formato: «<MÉTODO> <uri>» como `Route::uri()`; cada entrada existe y lleva
+     * `admin.solo_leads`.
+     *
+     * @var array<int, string>
+     */
+    const RUTAS_DE_GRABACION = [
+        'POST api/admin/lead/{id}/llamadas/{llamada_id}/grabacion',
+        'POST api/admin/lead/{id}/llamadas/{llamada_id}/grabacion/partes',
+        'POST api/admin/lead/{id}/llamadas/{llamada_id}/grabacion/completar',
+        'POST api/admin/lead/{id}/llamadas/{llamada_id}/grabacion/reintentar',
+        'POST api/admin/lead/{id}/llamadas/{llamada_id}/grabacion/resumir',
+        'GET api/admin/lead/{id}/llamadas/{llamada_id}/grabacion',
+    ];
+
+    /**
+     * Claves anidadas que el perfil ve SÓLO en las respuestas de `RUTAS_DE_GRABACION` y en el listado de llamadas
+     * (`GET lead/{id}/llamadas`): `grabacion` es el estado de la grabación (sólo columnas escalares, sin la ruta del archivo ni su
+     * huella) y `faltantes` la lista de partes que no llegaron.
+     *
+     * @var array<int, string>
+     */
+    const CLAVES_DE_GRABACION = ['grabacion', 'faltantes'];
+
+    /**
      * Rutas del tablero cuyo recurso hay que verificar contra la base: «<MÉTODO> <uri>» => regla de
      * {@see SoloLeadsRecursos}. Sin esto el perfil abriría el tablero y las tarjetas de CUALQUIER pipeline (por ejemplo
      * «Agentes»): la URL sola no dice a qué pipeline pertenece el `{id}`.
@@ -343,7 +369,8 @@ class AdminSoloLeadsPolicy
         if (! in_array($clave, self::RUTAS_PERMITIDAS, true)
             && ! in_array($clave, self::RUTAS_DEL_TABLERO, true)
             && ! in_array($clave, self::RUTAS_DE_LEADS_EXTERNOS, true)
-            && ! in_array($clave, self::RUTAS_DE_COMPROMISOS, true)) {
+            && ! in_array($clave, self::RUTAS_DE_COMPROMISOS, true)
+            && ! in_array($clave, self::RUTAS_DE_GRABACION, true)) {
             return false;
         }
 
@@ -458,6 +485,11 @@ class AdminSoloLeadsPolicy
         /* Los compromisos de contacto suman la lista `compromisos` (sólo escalares) a su respuesta. */
         if ($clave_de_ruta !== null && in_array($clave_de_ruta, self::RUTAS_DE_COMPROMISOS, true)) {
             $extra = array_merge($extra, self::CLAVES_DE_COMPROMISOS);
+        }
+
+        /* La grabación de la llamada suma `grabacion` y `faltantes`; el listado de llamadas (que ya es del tablero) suma `grabacion`. */
+        if ($clave_de_ruta !== null && (in_array($clave_de_ruta, self::RUTAS_DE_GRABACION, true) || $clave_de_ruta === 'GET api/admin/lead/{id}/llamadas')) {
+            $extra = array_merge($extra, self::CLAVES_DE_GRABACION);
         }
 
         return $this->filtrar_nodo($valor, $extra);

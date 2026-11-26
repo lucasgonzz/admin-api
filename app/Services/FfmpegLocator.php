@@ -42,6 +42,14 @@ class FfmpegLocator
     protected static $path_was_looked_up = false;
 
     /**
+     * Cuántos caracteres de la salida de ffmpeg devuelve {@see run_process()}. Son 500 (alcanza para un mensaje de error), salvo
+     * mientras {@see duracion_en_segundos()} lee la cabecera del archivo, que trae los metadatos antes de la línea `Duration:`.
+     *
+     * @var int
+     */
+    protected $output_limit = 500;
+
+    /**
      * Ruta absoluta del ejecutable ffmpeg, o null si no está o no se puede ejecutar.
      *
      * El resultado se cachea en memoria del proceso; una subclase de test que sobrescribe este método (o
@@ -156,6 +164,47 @@ class FfmpegLocator
     }
 
     /**
+     * Duración de un archivo de audio en segundos (redondeada para arriba), leyendo la línea `Duration:` que ffmpeg imprime al abrirlo.
+     *
+     * Sirve para saber en cuántos tramos partir una llamada larga (misión leads-referidos-compromisos, etapa E3). `ffmpeg -i` sin
+     * archivo de salida termina con código 1 a propósito: sólo importa lo que imprime, así que el código de salida no se mira.
+     *
+     * @param string $ffmpeg_path     Ruta del ejecutable (de {@see path()}).
+     * @param string $input_path      Archivo de audio.
+     * @param int    $timeout_seconds Segundos máximos antes de matar a ffmpeg.
+     *
+     * @return int|null Segundos, o null si ffmpeg no pudo leer el archivo o no informó la duración.
+     */
+    public function duracion_en_segundos(string $ffmpeg_path, string $input_path, int $timeout_seconds = self::DEFAULT_TIMEOUT_SECONDS): ?int
+    {
+        // Tope de salida anterior: se restituye siempre, aunque el proceso falle.
+        $tope_anterior      = $this->output_limit;
+        $this->output_limit = 20000;
+
+        try {
+            $result = $this->run_process([$ffmpeg_path, '-hide_banner', '-i', $input_path], $timeout_seconds);
+        } finally {
+            $this->output_limit = $tope_anterior;
+        }
+
+        if ($result['timed_out']) {
+            return null;
+        }
+
+        // «Duration: 00:40:12.34»: horas, minutos, segundos y fracción. «Duration: N/A» no coincide y devuelve null.
+        if (preg_match('/Duration:\s*(\d+):(\d{2}):(\d{2})(?:\.(\d+))?/', $result['output'], $partes) !== 1) {
+            return null;
+        }
+
+        $segundos = ((int) $partes[1]) * 3600 + ((int) $partes[2]) * 60 + (int) $partes[3];
+        if (isset($partes[4]) && (int) $partes[4] > 0) {
+            $segundos++;
+        }
+
+        return $segundos > 0 ? $segundos : null;
+    }
+
+    /**
      * Arma el comando de ffmpeg como lista de argumentos.
      *
      * Es un método aparte (protegido) para poder sustituir el proceso por uno de prueba.
@@ -261,6 +310,6 @@ class FfmpegLocator
         $output = is_file($output_file) ? (string) @file_get_contents($output_file) : '';
         @unlink($output_file);
 
-        return ['exit_code' => $exit_code, 'output' => trim(substr($output, 0, 500)), 'timed_out' => $timed_out];
+        return ['exit_code' => $exit_code, 'output' => trim(substr($output, 0, $this->output_limit)), 'timed_out' => $timed_out];
     }
 }
