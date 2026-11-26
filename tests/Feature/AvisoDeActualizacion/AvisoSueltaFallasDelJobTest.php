@@ -25,10 +25,11 @@ use Tests\TestCase;
  * prendido (hasta 120 minutos, renovado por `deploy/start`) con el sistema del cliente intacto:
  *
  *  1. `RunDeploymentJob::handle()` → `$service->connect()` lanza (SSH rechazado, host inalcanzable);
- *  2. el candado `client-deployment-<cliente>` tarda más de 10 s y el job vuelve en silencio;
+ *  2. el candado `client-deployment-<cliente>` tarda más de 10 s y el job vuelve en silencio (este camino
+ *     NO suelta el aviso: ver el test del candado);
  *  3. el worker mata el job por timeout (o la cola lo da por agotado) y sólo corre `failed()`.
  *
- * Cada uno llama a `DeploymentService::aviso_soltar_si_no_se_toco()`, que reusa la lógica de G5: suelta
+ * Los caminos 1 y 3 llaman a `DeploymentService::aviso_soltar_si_no_se_toco()`, que reusa la lógica de G5: suelta
  * sólo si el interruptor está prendido, es en el lugar y NO hay señal de que el sistema vivo se tocó
  * (marca en los logs, mantenimiento…); si no se puede saber con certeza, NO suelta. Nunca lanza.
  *
@@ -264,11 +265,14 @@ class AvisoSueltaFallasDelJobTest extends TestCase
      |========================================================================================= */
 
     /**
-     * 🔴 El candado del cliente está tomado por otro proceso más de 10 s y el job vuelve sin correr ni
-     * fallar (`LockTimeoutException` sin otro upgrade del cliente en marcha): el aviso queda prendido
-     * y nadie está actualizando, así que se suelta. (Este test espera los 10 s reales del `block()`.)
+     * 🔴 DECISIÓN DEL COORDINADOR (25/11/2026), que reemplaza al test anterior de este camino (el que
+     * exigía soltar): si el candado del cliente lo tiene otro proceso y el job vuelve en silencio, el
+     * aviso NO se suelta. Ese otro proceso es el dueño de la corrida y sus G4/G5 lo sueltan; y si
+     * estaba en migraciones o ya pasó el `up`, soltar con una heurística de "sin logs recientes"
+     * dejaría entrar a los usuarios en plena actualización. Ante la duda no se suelta: si de verdad no
+     * hay nadie, lo suelta el vencimiento. (Este test espera los 10 s reales del `block()`.)
      */
-    public function test_si_el_candado_tarda_y_el_job_vuelve_en_silencio_suelta_el_aviso(): void
+    public function test_si_el_candado_tarda_y_el_job_vuelve_en_silencio_no_suelta_el_aviso(): void
     {
         $upgrade = $this->upgrade_en_marcha();
 
@@ -282,33 +286,8 @@ class AvisoSueltaFallasDelJobTest extends TestCase
         }
 
         $this->assertNull($error, 'El job vuelve en silencio, sin lanzar.');
-        $this->assertSame(1, $this->libres(), implode("\n", $this->marcas));
-    }
-
-    /**
-     * El método público no suelta si hay actividad reciente en los logs del upgrade: otro proceso
-     * puede estar corriendo ESTE upgrade (el candado lo tiene tomado) y no se sabe con certeza. Con los
-     * logs quietos, sí.
-     */
-    public function test_con_actividad_reciente_no_suelta_pero_sin_ella_si(): void
-    {
-        $upgrade = $this->upgrade_en_marcha();
-
-        DeploymentLog::create([
-            'client_version_upgrade_id' => $upgrade->id,
-            'step'                      => 'compile_spa',
-            'level'                     => 'info',
-            'line'                      => 'Una línea de un proceso que sigue corriendo.',
-            'created_at'                => now(),
-        ]);
-
-        (new DeploymentService($upgrade))->aviso_soltar_si_no_se_toco(5);
-        $this->assertSame(0, $this->libres(), 'Hay actividad reciente: no se sabe con certeza, no se suelta.');
-
-        DeploymentLog::where('client_version_upgrade_id', $upgrade->id)->update(['created_at' => now()->subMinutes(30)]);
-
-        (new DeploymentService($upgrade->fresh()))->aviso_soltar_si_no_se_toco(5);
-        $this->assertSame(1, $this->libres(), 'Con los logs quietos hace media hora, se suelta.');
+        $this->assertSame('running', (string) $upgrade->fresh()->deployment_status, 'El job no toca el estado de la corrida ajena.');
+        $this->assertSame(0, $this->libres(), 'Con el candado en manos de otro proceso, el aviso NO se suelta: ' . implode("\n", $this->marcas));
     }
 
     /* ==========================================================================================
