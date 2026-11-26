@@ -473,6 +473,11 @@ class LeadCompromisoService
         }
 
         if ($trae_fecha) {
+            /* 🔴 El momento («el viernes a la mañana») era del día viejo: si la fecha cambia y el pedido no trae uno nuevo, queda en null
+               y la plantilla no se usa (tarea para Juan con la ventana cerrada). «Cambiar fecha» de la pantalla manda sólo `vence_at`. */
+            if (! $compromiso->vence_at->equalTo($fecha) && ! array_key_exists('momento', $datos)) {
+                $compromiso->momento = null;
+            }
             $compromiso->vence_at = $fecha;
         }
         if ($trae_accion) {
@@ -1063,15 +1068,19 @@ class LeadCompromisoService
 
         /* Fuera de la franja no sale nada: se corre al próximo inicio de franja (09:01) y el compromiso sigue vigente. */
         if (! FranjaHorariaDeSeguimientos::ahora_esta_dentro()) {
+            $corrido = FranjaHorariaDeSeguimientos::momento_para_reprogramar(AppTime::now());
+
+            /* Si la franja lo corre a OTRO día, el momento («el jueves a la noche») deja de valer y se borra: la plantilla no se usa. Si
+               sólo corre la hora dentro del mismo día, sigue valiendo. */
             LeadCompromiso::query()
                 ->where('id', (int) $compromiso->id)
                 ->where('status', LeadCompromiso::STATUS_PROCESANDO)
                 ->update([
                     'status'           => LeadCompromiso::STATUS_VIGENTE,
-                    'vence_at'         => FranjaHorariaDeSeguimientos::momento_para_reprogramar(AppTime::now())->format('Y-m-d H:i:s'),
+                    'vence_at'         => $corrido->format('Y-m-d H:i:s'),
                     'procesando_desde' => null,
                     'updated_at'       => AppTime::now(),
-                ]);
+                ] + ($corrido->toDateString() !== $compromiso->vence_at->toDateString() ? ['momento' => null] : []));
 
             return;
         }
