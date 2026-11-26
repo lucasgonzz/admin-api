@@ -490,6 +490,8 @@ Route::middleware('claude.task.key')
         Route::post('support-codex/tickets/{id}/tour', 'Api\SupportTourController@ofrecer')->whereNumber('id');
         Route::post('support-codex/tickets/{id}/tour/prepare', 'Api\SupportTourController@preparar')->whereNumber('id');
         Route::post('support-codex/tickets/{id}/release', 'Api\ClaudeSupportCodexController@release');
+        // Carril «no necesita respuesta» de Martín (misión martin-descripcion-y-actualizaciones, contrato C1).
+        Route::post('support-codex/tickets/{id}/no-reply', 'Api\ClaudeSupportCodexController@no_reply')->whereNumber('id');
         Route::post('support-codex/tickets/{id}/resume', 'Api\ClaudeSupportCodexController@resume');
         Route::post('support-codex/tickets/{id}/mission-started', 'Api\ClaudeSupportCodexController@mission_started');
         Route::get('support-codex/tickets/{id}/scheduled-upgrade', 'Api\ClaudeSupportScheduledUpgradeController@show')
@@ -1176,6 +1178,12 @@ Route::prefix('admin')->group(function () {
         Route::post('client', [ClientController::class, 'store_json']);
         Route::put('client/{id}', [ClientController::class, 'update_json']);
         Route::delete('client/{id}', [ClientController::class, 'destroy_json']);
+
+        /* Marcas «requiere actualización» (misión martin-descripcion-y-actualizaciones, contrato C6): listado por
+           cliente, alta idempotente por external_key y resolución manual. */
+        Route::get('client-upgrade-marks', [\App\Http\Controllers\ClientUpgradeMarkController::class, 'index']);
+        Route::post('client-upgrade-marks', [\App\Http\Controllers\ClientUpgradeMarkController::class, 'store']);
+        Route::patch('client-upgrade-marks/{id}/resolve', [\App\Http\Controllers\ClientUpgradeMarkController::class, 'resolve'])->whereNumber('id');
 
         // Configuración fiscal (AFIP) propia de ComercioCity: fila única, GET/PUT.
         Route::get('comerciocity-afip-config', [ComerciocityAfipConfigController::class, 'show_json']);

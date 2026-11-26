@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\ClientUpgradeMark;
 use App\Models\SupportCodexMission;
 use App\Models\SupportCodexMissionFixEvidence;
 use App\Models\SupportCodexReleaseClaim;
@@ -62,14 +63,49 @@ class SupportMissionDeliveryService
         return true;
     }
 
+    /**
+     * La misión quedó instalada por una actualización del cliente, sin acuerdo de horario (misión
+     * martin-descripcion-y-actualizaciones, 25/11/2026): la marca «requiere actualización» de su corrección se
+     * resolvió porque el cliente instaló una versión que la contiene. Deja `installed_at` sin
+     * `installed_schedule_id`, y con eso el admin le ofrece a Martín `mission_delivery_verification`.
+     *
+     * @param SupportCodexMission $mission
+     *
+     * @return void
+     */
+    public function mark_installed(SupportCodexMission $mission): void
+    {
+        if ($mission->installed_at !== null) { return; }
+        $mission->update(['completed_at' => $mission->completed_at ?: now(), 'installed_schedule_id' => null, 'installed_at' => now()]);
+    }
+
+    /**
+     * Contexto de entrega de la misión (contrato C5). `schedule_id` es null y `installed_via` es `actualizacion`
+     * cuando la instaló la actualización del cliente (sin acuerdo); la versión y el destino salen entonces de la
+     * marca resuelta.
+     *
+     * @param SupportCodexMission|null $mission
+     *
+     * @return array<string, mixed>|null
+     */
     public function context(?SupportCodexMission $mission): ?array
     {
         if ($mission === null || $mission->installed_at === null) { return null; }
-        $schedule = SupportCodexScheduledUpgrade::find($mission->installed_schedule_id);
-        return ['mission_id' => (int) $mission->id, 'schedule_id' => (int) $mission->installed_schedule_id,
+        $schedule = $mission->installed_schedule_id === null ? null : SupportCodexScheduledUpgrade::find($mission->installed_schedule_id);
+        $target = $schedule === null ? null : ($schedule->target ?: 'sistema');
+        $version = $schedule === null ? null : $schedule->version;
+        if ($mission->installed_schedule_id === null) {
+            $mark = ClientUpgradeMark::with('resolved_version')->where('support_codex_mission_id', $mission->id)
+                ->whereNotNull('resolved_at')->orderByRaw("target = 'sistema' desc")->orderBy('id')->first();
+            $target = $mark === null ? null : $mark->target;
+            $version = $mark === null || $mark->resolved_version === null ? null : $mark->resolved_version->version;
+        }
+        return ['mission_id' => (int) $mission->id,
+            'schedule_id' => $mission->installed_schedule_id === null ? null : (int) $mission->installed_schedule_id,
             'status' => $mission->delivery_verified_at === null ? 'installed_pending_verification' : 'verified',
-            'target' => $schedule === null ? null : ($schedule->target ?: 'sistema'),
-            'version' => $schedule === null ? null : $schedule->version,
+            'installed_via' => $mission->installed_schedule_id === null ? 'actualizacion' : 'acuerdo',
+            'target' => $target,
+            'version' => $version,
             'verification_evidence' => $mission->delivery_verification_evidence];
     }
 
@@ -77,9 +113,14 @@ class SupportMissionDeliveryService
     {
         return DB::transaction(function () use ($ticket_id, $input) {
             $mission = SupportCodexMission::where('support_ticket_id', $ticket_id)->lockForUpdate()->findOrFail($input['mission_id']);
-            $schedule = SupportCodexScheduledUpgrade::where('support_ticket_id', $ticket_id)->findOrFail($input['schedule_id']);
-            abort_unless($schedule->status === SupportCodexScheduledUpgrade::VERIFIED && $mission->installed_at !== null
-                && (int) $mission->installed_schedule_id === (int) $schedule->id, 409, 'La misión no tiene esa instalación comprobada.');
+            abort_unless($mission->installed_at !== null, 409, 'La misión todavía no está instalada.');
+            // Sin acuerdo (instalada por la actualización del cliente) no hay programación que citar; con acuerdo,
+            // `schedule_id` sigue siendo obligatorio y tiene que coincidir (contrato C5).
+            if ($mission->installed_schedule_id !== null) {
+                $schedule = SupportCodexScheduledUpgrade::where('support_ticket_id', $ticket_id)->findOrFail($input['schedule_id'] ?? 0);
+                abort_unless($schedule->status === SupportCodexScheduledUpgrade::VERIFIED
+                    && (int) $mission->installed_schedule_id === (int) $schedule->id, 409, 'La misión no tiene esa instalación comprobada.');
+            }
             if ($mission->delivery_verified_at === null) {
                 $mission->update(['delivery_verified_at' => now(), 'delivery_verification_evidence' => trim($input['evidencia'])]);
             }

@@ -358,6 +358,18 @@ return [
                 ['nombre' => 'confirmation_message_id', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|integer|min:1', 'que_es' => 'Mensaje del cliente con confirmación clara, obligatorio al cerrar.'],
             ],
         ],
+        'POST api/claude/support-codex/tickets/{id}/no-reply' => [
+            'para_que' => 'Martín registra que el último mensaje del cliente no necesita respuesta (un acuse, un «Sí»): marca el entrante como atendido, guarda el motivo y libera la reserva. El ticket no se vuelve a disparar ni queda en rojo hasta un mensaje nuevo del cliente. Responde {registered, replayed, ticket}.',
+            'escribe' => true, 'peligrosidad' => 'baja',
+            'frenos' => ['Exige el token vigente y el mismo mensaje esperado (423 invalid_lease, 409 stale_message); no aplica a casos en revisión ni a motivos distintos de inbound (409 manual_review / not_pending). No toca la atención ni el estado del caso.'],
+            'parametros' => [
+                ['nombre' => 'lease_token', 'obligatorio' => true, 'validacion' => 'required|string|min:32|max:128', 'que_es' => 'Reserva actual.'],
+                ['nombre' => 'expected_message_id', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'Entrante que se da por atendido.'],
+                ['nombre' => 'reason', 'obligatorio' => true, 'validacion' => 'required|string|min:10|max:300', 'que_es' => 'Por qué no hace falta responder.'],
+                ['nombre' => 'execution_id', 'obligatorio' => false, 'validacion' => 'sometimes|string|max:64', 'que_es' => 'Ejecución de Martín.'],
+                ['nombre' => 'thread_id', 'obligatorio' => false, 'validacion' => 'sometimes|string|max:150', 'que_es' => 'Vincula la conversación.'],
+            ],
+        ],
         'POST api/claude/support-codex/tickets/{id}/release' => [
             'para_que' => 'Libera una reserva y opcionalmente pausa el caso para revisión humana.',
             'escribe' => true, 'peligrosidad' => 'baja',
