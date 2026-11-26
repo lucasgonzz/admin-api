@@ -182,4 +182,93 @@ class RondaTresDeRevisionDeE2Test extends BaseDeReferidosYCompromisos
         $this->assertSame('el martes te escribo', $this->compromiso_vigente_de($con)->cita_del_lead);
         $this->assertNull($this->compromiso_vigente_de($sin)->momento);
     }
+
+    // ------------------------------------------------------------------------------------------
+    // El momento no sobrevive a un cambio de día
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * «Cambiar fecha» manda sólo `vence_at`: el momento viejo («el viernes a la mañana») ya no vale para el día nuevo. Queda en null y,
+     * a la hora, la plantilla no se usa (tarea para Juan con la ventana cerrada).
+     *
+     * @return void
+     */
+    public function test_cambiar_la_fecha_borra_el_momento(): void
+    {
+        $lead = $this->compromiso_con_la_ventana_cerrada(['cita_del_lead' => 'el viernes te aviso', 'momento' => 'el viernes a la mañana']);
+        $fila = $this->compromiso_vigente_de($lead);
+        $this->loguear_a($this->admin);
+
+        $this->putJson('/api/admin/lead-compromisos/' . $fila->id, ['vence_at' => '2026-12-02 10:00'])->assertStatus(200);
+
+        $this->assertNull($this->compromiso((int) $fila->id)->momento, 'El día cambió: el momento viejo no sirve.');
+
+        $this->fakear_la_ia_caida();
+        $this->ir_a('2026-12-02 10:00:30');
+        $this->assertSame(0, $this->correr_el_comando_de_compromisos());
+        $this->assertSame([], $this->envios->plantillas);
+        $this->assertCount(1, $this->tareas_del_motor($lead), 'Sin momento no hay plantilla: tarea para Juan.');
+    }
+
+    /**
+     * Si el pedido trae un `momento` nuevo junto con la fecha, se respeta; y un PUT que no cambia la fecha no lo toca.
+     *
+     * @return void
+     */
+    public function test_cambiar_la_fecha_con_un_momento_nuevo_lo_conserva(): void
+    {
+        $lead = $this->compromiso_con_la_ventana_cerrada(['momento' => 'el viernes a la mañana']);
+        $fila = $this->compromiso_vigente_de($lead);
+        $this->loguear_a($this->admin);
+
+        $this->putJson('/api/admin/lead-compromisos/' . $fila->id, ['resumen' => 'Otro resumen.'])->assertStatus(200);
+        $this->assertSame('el viernes a la mañana', $this->compromiso((int) $fila->id)->momento, 'Sin cambiar la fecha no se toca.');
+
+        $this->putJson('/api/admin/lead-compromisos/' . $fila->id, ['vence_at' => '2026-12-02 10:00', 'momento' => 'el miércoles a la mañana'])->assertStatus(200);
+        $this->assertSame('el miércoles a la mañana', $this->compromiso((int) $fila->id)->momento);
+    }
+
+    /**
+     * Si la franja horaria corre la ejecución a OTRO día (vence a las 22:30 y sale a las 9 del día siguiente), el momento no se usa:
+     * la plantilla no sale y queda la tarea.
+     *
+     * @return void
+     */
+    public function test_corrido_al_dia_siguiente_no_usa_el_momento(): void
+    {
+        $lead = $this->compromiso_con_la_ventana_cerrada(['vence_at' => '2026-11-26 22:30', 'momento' => 'el jueves a la noche']);
+        $fila = $this->compromiso_vigente_de($lead);
+        $this->fakear_la_ia_caida();
+
+        $this->ir_a('2026-11-26 22:30:30');
+        $this->assertSame(0, $this->correr_el_comando_de_compromisos());
+        $this->assertSame('vigente', $this->compromiso((int) $fila->id)->status);
+        $this->assertNull($this->compromiso((int) $fila->id)->momento, 'Salió otro día: el momento ya no es ese.');
+
+        $this->ir_a('2026-11-27 09:06:00');
+        $this->assertSame(0, $this->correr_el_comando_de_compromisos());
+        $this->assertSame([], $this->envios->plantillas);
+        $this->assertCount(1, $this->tareas_del_motor($lead));
+    }
+
+    /**
+     * Si la franja sólo corre la HORA dentro del mismo día (vence a las 7 y sale a las 9), el momento sigue valiendo y sale la plantilla.
+     *
+     * @return void
+     */
+    public function test_corrido_dentro_del_mismo_dia_conserva_el_momento(): void
+    {
+        $lead = $this->compromiso_con_la_ventana_cerrada(['vence_at' => '2026-11-27 07:00', 'momento' => 'el viernes a la mañana']);
+        $fila = $this->compromiso_vigente_de($lead);
+        $this->fakear_la_ia_caida();
+
+        $this->ir_a('2026-11-27 07:00:30');
+        $this->assertSame(0, $this->correr_el_comando_de_compromisos());
+        $this->assertSame('el viernes a la mañana', $this->compromiso((int) $fila->id)->momento);
+
+        $this->ir_a('2026-11-27 09:06:00');
+        $this->assertSame(0, $this->correr_el_comando_de_compromisos());
+        $this->assertCount(1, $this->mensajes_del_motor($lead));
+        $this->assertTrue((bool) $this->mensajes_del_motor($lead)->first()->is_followup, 'Sale por plantilla, con el mismo momento.');
+    }
 }
