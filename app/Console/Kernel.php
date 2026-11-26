@@ -28,6 +28,10 @@ class Kernel extends ConsoleKernel
             $schedule->exec(self::artisan_sin_el_lock_del_cron('support:process-scheduled-upgrades'))
                 ->everyMinute()->withoutOverlapping(5)->runInBackground();
         }
+        /* Retención del WhatsApp personal de Lucas (misión wa-personal-coexistencia): borra los mensajes de más de
+         * 90 días y los chats que quedan vacíos. De madrugada, cuando nadie está escribiendo. */
+        $schedule->command('whatsapp:personal-depurar')->dailyAt('04:10')->withoutOverlapping();
+
         // Una vez por día alcanza: un cliente se queda sin teléfono cargado una vez, no cada cinco minutos.
         $schedule->command('support:check-clients-without-phone')->dailyAt('09:00');
 
