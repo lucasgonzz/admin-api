@@ -23,7 +23,7 @@ class EscenaOficinaOpenclawTest extends TestCase
     use ReporteV2Fixture;
 
     /** Mismo orden de claves de `oficina` que fija `EscenaDelLocalTest`. */
-    const CLAVES_OFICINA = ['reporter', 'planificador', 'slots', 'modo', 'misiones', 'por_origen', 'slots_en_uso', 'openclaw', 'cola', 'umbrales_demora'];
+    const CLAVES_OFICINA = ['reporter', 'planificador', 'slots', 'modo', 'misiones', 'misiones_recorte', 'por_origen', 'slots_en_uso', 'openclaw', 'cola', 'umbrales_demora'];
 
     /**
      * @return void
