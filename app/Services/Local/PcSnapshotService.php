@@ -247,17 +247,37 @@ class PcSnapshotService
             }
         }
 
+        /* El historial de fases vive en la tabla `local_mission_phases` y la escena lo lee de ahí: el snapshot no
+           lo guarda (ahorra espacio y deja entrar más misiones en los 60 KB). Se lo retiene aparte por misión. */
+        $historial_por_mision = [];
+        foreach ($misiones as $indice => $mision) {
+            $historial_por_mision[$mision['id']] = $mision['fase_historial'];
+            unset($misiones[$indice]['fase_historial']);
+        }
+
+        // Misiones omitidas por el propio reporter (su tope), antes del recorte de acá.
+        $omitidas_reporter = $this->entero_o_null(isset($datos['misiones_omitidas']) ? $datos['misiones_omitidas'] : null) ?: 0;
+
         $doc_misiones = [
             'reportado_at' => $reportado_at,
             'items'        => $misiones,
-            'omitidas'     => $this->entero_o_null(isset($datos['misiones_omitidas']) ? $datos['misiones_omitidas'] : null) ?: 0,
+            'omitidas'     => $omitidas_reporter,
             'recortado'    => false,
         ];
         $doc_misiones = $this->recortar($doc_misiones, 'items', function ($mision) {
             // Se descarta primero la terminada y, entre iguales, la de actividad más vieja.
             return [$mision['estado'] === 'terminada' ? 0 : 1, $this->segundos($mision['ultima_actividad_at'])];
         });
+        // Las que se descartaron acá se suman a las omitidas: la escena muestra el total que no entra.
+        $doc_misiones['omitidas'] = $omitidas_reporter + (count($misiones) - count($doc_misiones['items']));
         $this->guardar_json(self::KEY_MISIONES, $doc_misiones);
+
+        // Las misiones que quedaron, con su historial, para guardarlo en la tabla.
+        $misiones_con_historial = [];
+        foreach ($doc_misiones['items'] as $mision) {
+            $mision['fase_historial'] = $historial_por_mision[$mision['id']];
+            $misiones_con_historial[] = $mision;
+        }
 
         /* ---- OpenClaw: Workboard y tareas programadas ---- */
         $openclaw = isset($datos['openclaw']) && is_array($datos['openclaw']) ? $datos['openclaw'] : null;
@@ -281,7 +301,7 @@ class PcSnapshotService
             $this->borrar_clave(self::KEY_COLA);
         }
 
-        $this->save_phase_history($doc_misiones['items'], $ahora);
+        $this->save_phase_history($misiones_con_historial, $ahora);
 
         return count($doc_misiones['items']);
     }
@@ -321,9 +341,13 @@ class PcSnapshotService
         $ahora_db  = $this->formato_db($ahora);
         $nuevas    = [];
 
+        // Por misión, lo que trajo este reporte: claves de fila, `desde` de cada fase y si alguna era inferida.
+        $reportado = [];
+
         foreach ($misiones as $mision) {
             // Vuelta de cada fase dentro de la misión: la 1ª aparición es la vuelta 1, la 2ª la vuelta 2…
             $vueltas = [];
+            $reportado[$mision['id']] = ['claves' => [], 'desdes' => [], 'hay_inferida' => false];
 
             foreach ($mision['fase_historial'] as $entrada) {
                 $fase = $entrada['fase'];
@@ -339,6 +363,12 @@ class PcSnapshotService
                 }
                 $inferida = $entrada['inferida'] ? 1 : 0;
                 $titulo   = $mision['titulo'];
+
+                $reportado[$mision['id']]['claves'][$clave] = true;
+                $reportado[$mision['id']]['desdes'][]       = $desde;
+                if ($inferida === 1) {
+                    $reportado[$mision['id']]['hay_inferida'] = true;
+                }
 
                 if (! isset($guardadas[$clave])) {
                     $nuevas[] = [
@@ -393,8 +423,119 @@ class PcSnapshotService
             }
         }
 
+        $this->resolve_stale_open_phases($guardadas, $reportado, $ahora, $ahora_db);
+
         if (count($nuevas) > 0) {
             LocalMissionPhase::query()->insert($nuevas);
+        }
+
+        $this->ensure_single_open_phase(array_keys($reportado), $ahora_db);
+    }
+
+    /**
+     * Resuelve las filas abiertas (`hasta` null) de una misión que el reporte actual ya no trae.
+     *
+     * Sin esto una fase inferida que el reporter renombra (contexto -> plan con el mismo `desde`) o que pasa a
+     * venir del registro quedaba abierta para siempre (REVISION-1 R4). Por cada fila guardada abierta que no
+     * vino:
+     * - si otra fase reportada tiene el mismo `desde` (renombre inferido), se borra;
+     * - si el historial reportado ya no es inferido y la fila sí lo era (pasó de inferido a registro), se borra;
+     * - en otro caso se cierra con `hasta` = `desde` de la siguiente fase reportada (o la hora del reporte) y los
+     *   `segundos` calculados.
+     *
+     * @param array<string, \App\Models\LocalMissionPhase> $guardadas Filas guardadas, por misión|fase|vuelta.
+     * @param array<string, array<string, mixed>>           $reportado Lo que trajo el reporte, por misión.
+     * @param Carbon                                        $ahora     Momento de recepción.
+     * @param string                                        $ahora_db  El mismo momento en formato de base.
+     *
+     * @return void
+     */
+    private function resolve_stale_open_phases(array $guardadas, array $reportado, Carbon $ahora, $ahora_db)
+    {
+        // Ids de las filas a borrar.
+        $a_borrar = [];
+
+        foreach ($guardadas as $clave => $fila) {
+            $mision_key = $fila->mission_key;
+            if (! isset($reportado[$mision_key]) || isset($reportado[$mision_key]['claves'][$clave])) {
+                continue;
+            }
+            // Sólo las abiertas.
+            if ($fila->getRawOriginal('hasta') !== null) {
+                continue;
+            }
+
+            $desde_fila = (string) $fila->getRawOriginal('desde');
+            $trajo      = $reportado[$mision_key];
+
+            // Renombre inferido: otra fase reportada empieza en el mismo instante.
+            if (in_array($desde_fila, $trajo['desdes'], true)) {
+                $a_borrar[] = $fila->id;
+                continue;
+            }
+
+            // De inferido a registro: la fila era una estimación y el reporte ya no lo es.
+            if ((int) $fila->inferida === 1 && ! $trajo['hay_inferida']) {
+                $a_borrar[] = $fila->id;
+                continue;
+            }
+
+            // Se cierra donde empieza la siguiente fase reportada; sin ninguna posterior, con la hora del reporte.
+            $hasta = $ahora_db;
+            foreach ($trajo['desdes'] as $desde_reportado) {
+                if ($desde_reportado > $desde_fila && $desde_reportado < $hasta) {
+                    $hasta = $desde_reportado;
+                }
+            }
+            $segundos = max(0, Carbon::parse($hasta)->getTimestamp() - Carbon::parse($desde_fila)->getTimestamp());
+
+            LocalMissionPhase::query()->where('id', $fila->id)->update([
+                'hasta'        => $hasta,
+                'segundos'     => $segundos,
+                'reportado_at' => $ahora_db,
+                'updated_at'   => $ahora_db,
+            ]);
+        }
+
+        if (count($a_borrar) > 0) {
+            LocalMissionPhase::query()->whereIn('id', $a_borrar)->delete();
+        }
+    }
+
+    /**
+     * Garantiza a lo sumo una fase abierta por misión: si después de guardar quedan varias, todas menos la de
+     * `desde` más nuevo se cierran en el `desde` de la siguiente abierta (REVISION-1 R4, red de seguridad).
+     *
+     * @param array<int, string> $mission_keys Misiones del reporte.
+     * @param string             $ahora_db     Momento de recepción en formato de base.
+     *
+     * @return void
+     */
+    private function ensure_single_open_phase(array $mission_keys, $ahora_db)
+    {
+        $abiertas = LocalMissionPhase::query()
+            ->whereIn('mission_key', $mission_keys)
+            ->whereNull('hasta')
+            ->orderBy('mission_key')->orderBy('desde')->orderBy('id')
+            ->get();
+
+        // Filas abiertas agrupadas por misión, de la más vieja a la más nueva.
+        $por_mision = [];
+        foreach ($abiertas as $fila) {
+            $por_mision[$fila->mission_key][] = $fila;
+        }
+
+        foreach ($por_mision as $filas) {
+            for ($i = 0; $i < count($filas) - 1; $i++) {
+                $desde_fila = (string) $filas[$i]->getRawOriginal('desde');
+                $hasta      = (string) $filas[$i + 1]->getRawOriginal('desde');
+                LocalMissionPhase::query()->where('id', $filas[$i]->id)->update([
+                    'hasta'        => $hasta,
+                    'segundos'     => max(0, Carbon::parse($hasta)->getTimestamp() - Carbon::parse($desde_fila)->getTimestamp()),
+                    'reportado_at' => $ahora_db,
+                    'updated_at'   => $ahora_db,
+                ]);
+            }
         }
     }
 
@@ -676,7 +817,7 @@ class PcSnapshotService
     }
 
     /**
-     * Documento de `local_pc_cola`.
+     * Documento de `local_pc_cola`, recortado a {@see self::MAX_BYTES} (`recortado` true si se descartó algo).
      *
      * @param array<string, mixed> $cola         Bloque `cola` validado.
      * @param string               $reportado_at Momento de recepción (ISO).
@@ -720,14 +861,27 @@ class PcSnapshotService
             }
         }
 
-        return [
+        $doc = [
             'reportado_at'   => $reportado_at,
             'ok'             => ! array_key_exists('ok', $cola) || $cola['ok'] === null ? true : (bool) $cola['ok'],
             'en_espera'      => $en_espera,
             'fallidas'       => $this->entero_o_null(isset($cola['fallidas']) ? $cola['fallidas'] : null) ?: 0,
             'ultimo_chequeo' => $ultimo,
             'chequeos'       => $chequeos,
+            'recortado'      => false,
         ];
+
+        /* Mismo techo de 60 KB que los demás bloques. Primero se descartan los chequeos más viejos del historial
+           y, si aun así no entra, las esperas encoladas más recientemente (las más antiguas son las que más
+           importan en una cola). */
+        $doc = $this->recortar($doc, 'chequeos', function ($chequeo) {
+            return [1, $this->segundos($chequeo['at'])];
+        });
+        $doc = $this->recortar($doc, 'en_espera', function ($espera) {
+            return [1, -$this->segundos($espera['encolada_at'])];
+        });
+
+        return $doc;
     }
 
     /**

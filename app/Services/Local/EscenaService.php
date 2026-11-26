@@ -982,7 +982,7 @@ class EscenaService
      *     es OpenClaw. Ver {@see self::oficina_de_misiones()}.
      *
      * Las claves van SIEMPRE en el mismo orden (contrato B extendido): `reporter`, `planificador`, `slots`,
-     * `modo`, `misiones`, `por_origen`, `slots_en_uso`, `openclaw`, `cola`, `umbrales_demora`. En modo slots las
+     * `modo`, `misiones`, `misiones_recorte`, `por_origen`, `slots_en_uso`, `openclaw`, `cola`, `umbrales_demora`. En modo slots las
      * cinco nuevas llevan sus valores vacíos.
      *
      * @return array<string, mixed>
@@ -1034,6 +1034,7 @@ class EscenaService
             'slots'           => $slots,
             'modo'            => 'slots',
             'misiones'        => [],
+            'misiones_recorte' => ['recortado' => false, 'omitidas' => 0],
             'por_origen'      => [],
             'slots_en_uso'    => null,
             'openclaw'        => null,
@@ -1104,6 +1105,15 @@ class EscenaService
         foreach ($visibles as $fila) {
             $misiones[] = $this->mision_de_la_escena($fila['mision'], $sin_senal_misiones, isset($fases_por_mision[$fila['mision']['id']]) ? $fases_por_mision[$fila['mision']['id']] : []);
         }
+
+        /* Recorte visible (REVISION-1 R6): las que el reporter omitió, las que el admin descartó para entrar en
+           60 KB y las que no entran en el tope de la lista de la escena. */
+        $omitidas_guardado = isset($lectura['misiones']['omitidas']) ? (int) $lectura['misiones']['omitidas'] : 0;
+        $omitidas_escena   = $omitidas_guardado + max(0, count($guardadas) - count($visibles));
+        $misiones_recorte  = [
+            'recortado' => $omitidas_escena > 0 || ! empty($lectura['misiones']['recortado']),
+            'omitidas'  => $omitidas_escena,
+        ];
 
         /* ---- OpenClaw: gateway, Workboard y tareas ---- */
         $openclaw = null;
@@ -1177,6 +1187,7 @@ class EscenaService
             'slots'           => [],
             'modo'            => 'misiones',
             'misiones'        => $misiones,
+            'misiones_recorte' => $misiones_recorte,
             'por_origen'      => $por_origen,
             'slots_en_uso'    => count($carpetas),
             'openclaw'        => $openclaw,
@@ -1192,7 +1203,9 @@ class EscenaService
      *   cuentan juntas). Sale del historial de la tabla (la mejor estimación) y, si no hay, de lo reportado.
      * - `minutos_en_etapa`: desde `etapa_desde` hasta ahora.
      * - `umbral_min`: el de su etapa en `config/el_local.php`.
-     * - `demorada`: no terminada y con más minutos que el umbral.
+     * - `demorada`: sólo si está `trabajando` y lleva más minutos que el umbral. `esperando_lucas` y `trabada`
+     *   se ven con su propio estado, no como demora (REVISION-1 R5).
+     * - `fase_historial`: el historial completo de la tabla (el snapshot ya no lo guarda, REVISION-1 R6).
      * - `fases`: las últimas {@see self::TOPE_FASES} fases de la tabla, por `desde`.
      *
      * @param array<string, mixed>             $mision      Misión guardada.
@@ -1251,7 +1264,7 @@ class EscenaService
 
         $umbrales = $this->umbrales_demora();
         $umbral   = $etapa !== null && isset($umbrales[$etapa]) ? $umbrales[$etapa] : null;
-        $demorada = $mision['estado'] !== 'terminada' && $minutos !== null && $umbral !== null && $minutos > $umbral;
+        $demorada = $mision['estado'] === 'trabajando' && $minutos !== null && $umbral !== null && $minutos > $umbral;
 
         $salida = $mision;
         $salida['ruta']             = ! empty($mision['ticket']) ? $this->ruta_de_ticket($mision['ticket']) : null;
@@ -1261,6 +1274,7 @@ class EscenaService
         $salida['umbral_min']       = $umbral;
         $salida['demorada']         = $demorada;
         $salida['fases']            = array_slice($historial, -self::TOPE_FASES);
+        $salida['fase_historial']   = $historial;
 
         return $salida;
     }
