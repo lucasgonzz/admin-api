@@ -415,7 +415,7 @@ class EscenaDelLocalTest extends TestCase
         $this->assertLessThanOrEqual(50, count($escena['bandeja']));
         $this->assertGreaterThanOrEqual(count($escena['bandeja']), $escena['resumen']['para_lucas']);
 
-        $this->assertSame(['reporter', 'planificador', 'slots'], array_keys($escena['oficina']));
+        $this->assertSame(['reporter', 'planificador', 'slots', 'modo', 'misiones', 'por_origen', 'slots_en_uso', 'openclaw', 'cola', 'umbrales_demora'], array_keys($escena['oficina']));
         $this->assertSame(['ok', 'last_seen_at', 'version'], array_keys($escena['oficina']['reporter']));
         $this->assertSame(['estado'], array_keys($escena['oficina']['planificador']));
 
