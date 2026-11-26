@@ -512,7 +512,12 @@ class AvisoSeguroAnteFallasTest extends TestCase
         $this->assertLessThan($prende[0], $staging, 'El freno de staging corre ANTES de prender el aviso.');
         $this->assertLessThan($prende[0], $escribir, 'El freno de escritura corre ANTES de prender el aviso.');
         $this->assertLessThan($vacia, $prende[0], 'El aviso se prende ANTES de vaciar el SPA vivo.');
-        $this->assertCount(1, $prende, 'En upload_spa se prende UNA vez.');
+        /* Antes del down se prende UNA vez (G1); la segunda es G2, después de migrar. */
+        $antes_del_down = array_filter($prende, function ($posicion) {
+            return $posicion < $this->ssh->posicion_de('php artisan down');
+        });
+        $this->assertCount(1, $antes_del_down, 'En upload_spa se prende UNA vez, antes del down.');
+        $this->assertCount(2, $prende, 'G1 y G2.');
     }
 
     /**
