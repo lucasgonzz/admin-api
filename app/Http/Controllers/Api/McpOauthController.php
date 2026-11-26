@@ -127,8 +127,10 @@ class McpOauthController extends Controller
         }
 
         // Límite de intentos fallidos por email + IP (además del throttle de la ruta).
-        $email = strtolower(trim($this->campo($request, 'email')));
-        $clave = 'mcp-login:' . sha1($email . '|' . $request->ip());
+        // El usuario se busca tal cual (sin pasarlo a minúsculas), igual que el login del admin: hay admins cuyo
+        // "email" es un nombre de usuario ("Lucas"). El límite de intentos sí usa minúsculas para no duplicar claves.
+        $email = trim($this->campo($request, 'email'));
+        $clave = 'mcp-login:' . sha1(strtolower($email) . '|' . $request->ip());
         $maximo = max(1, (int) config('mcp.login_max_intentos', 5));
         if (RateLimiter::tooManyAttempts($clave, $maximo)) {
             return $this->vista($pedido, 429, 'Demasiados intentos. Esperá unos minutos y probá de nuevo.', $email);

@@ -21,7 +21,7 @@
                         background: #e3f6ea; color: #14683a; margin-bottom: 14px; }
         .destino { font-size: 14px; color: #52606d; }
         label { display: block; font-size: 14px; font-weight: 600; margin: 12px 0 4px; }
-        input[type=email], input[type=password] { width: 100%; padding: 10px 12px; font-size: 16px; border: 1px solid #c4ccd4;
+        input[type=text], input[type=password] { width: 100%; padding: 10px 12px; font-size: 16px; border: 1px solid #c4ccd4;
                         border-radius: 8px; background: #fff; color: inherit; }
         .error { background: #fde8e8; color: #9b1c1c; border-radius: 8px; padding: 10px 12px; margin: 0 0 14px; font-size: 14px; }
         .botones { display: flex; gap: 10px; margin-top: 20px; }
@@ -32,7 +32,7 @@
             body { background: #111418; color: #e4e7eb; }
             .tarjeta { background: #1c2128; box-shadow: none; }
             .destino { color: #9aa5b1; }
-            input[type=email], input[type=password] { background: #111418; border-color: #3e4c59; }
+            input[type=text], input[type=password] { background: #111418; border-color: #3e4c59; }
             .solo-lectura { background: #123d28; color: #8fe0b0; }
             .error { background: #4a1d1d; color: #ffb3b3; }
             .negar { border-color: #3e4c59; }
@@ -62,8 +62,8 @@
                 <input type="hidden" name="{{ $nombre }}" value="{{ $valor }}">
             @endforeach
 
-            <label for="email">Email del admin</label>
-            <input id="email" type="email" name="email" value="{{ $email }}" autocomplete="username" required>
+            <label for="email">Usuario del admin (el mismo con el que entrás al admin)</label>
+            <input id="email" type="text" name="email" autocapitalize="none" spellcheck="false" value="{{ $email }}" autocomplete="username" required>
 
             <label for="password">Contraseña</label>
             <input id="password" type="password" name="password" autocomplete="current-password">
