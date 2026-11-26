@@ -555,6 +555,8 @@ class Lead extends Model
             'promoted_client.implementation',
             'promoted_client.client_ecommerce',
             'created_by_admin',
+            // Quien lo recomendó (leads de otros medios): la conversación y la ficha lo muestran en «Cómo llegó».
+            'referido_por_client',
             'demo',
             'personalized_demo_videos',
             'messages.attachments',
@@ -1133,6 +1135,17 @@ class Lead extends Model
     public function created_by_admin()
     {
         return $this->belongsTo(Admin::class, 'created_by_admin_id');
+    }
+
+    /**
+     * Cliente de ComercioCity que recomendó a este lead (alta de un lead de otro medio, misión
+     * leads-referidos-compromisos). Null si no vino por un cliente o si el lead no es externo.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
+     */
+    public function referido_por_client()
+    {
+        return $this->belongsTo(Client::class, 'referido_por_client_id');
     }
 
     /**

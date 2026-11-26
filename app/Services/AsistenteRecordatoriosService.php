@@ -618,10 +618,12 @@ class AsistenteRecordatoriosService
      * a una variable que diga solo «(hoy 10:00)».
      *
      * @param array<string, mixed> $recordatorio Recordatorio normalizado.
+     * @param bool                 $con_hora     Si es false no se agrega « (hoy HH:MM)»: la variable es el
+     *                                           detalle solo (lo usa el aviso de pedido de la tienda).
      *
      * @return string Cadena vacía si no quedó nada que mandar.
      */
-    public function armar_variable_de_plantilla(array $recordatorio): string
+    public function armar_variable_de_plantilla(array $recordatorio, bool $con_hora = true): string
     {
         $detalle = $this->opener->sanitize_template_variable((string) $recordatorio['detalle']);
         if ($detalle === '') {
@@ -632,7 +634,8 @@ class AsistenteRecordatoriosService
             return '';
         }
 
-        $cuando = $this->cuando($recordatorio);
+        // El aviso de pedido de la tienda no lleva hora: «llegó un pedido» no es una tarea con horario.
+        $cuando = $con_hora ? $this->cuando($recordatorio) : '';
         $sufijo = $cuando !== '' ? ' (' . $cuando . ')' : '';
 
         $lugar = self::LARGO_MAXIMO_DE_VARIABLE - 1 - mb_strlen($sufijo);
@@ -673,7 +676,11 @@ class AsistenteRecordatoriosService
     {
         $recordatorio['detalle'] = (string) $recordatorio['resumen'];
 
-        return $this->armar_variable_de_plantilla($recordatorio);
+        // Los ítems `recordatorio:pedido_tienda:*` (aviso de pedido nuevo) mandan el resumen tal cual, sin
+        // la hora; las tareas del asistente siguen con su « (hoy 17:00)».
+        $es_pedido_de_tienda = strpos((string) $recordatorio['id'], 'recordatorio:pedido_tienda:') === 0;
+
+        return $this->armar_variable_de_plantilla($recordatorio, !$es_pedido_de_tienda);
     }
 
     /**

@@ -61,7 +61,16 @@ class SupportCodexService
     /** `tipo` de `implementation-note` para la implementación de Agentes de IA (misión `implementacion-agentes-ia`). */
     const NOTE_TYPE_AGENTES = 'agentes';
 
-    public function pending(bool $supports_upgrade_agreement = false, bool $supports_mission_progress = false): array
+    /**
+     * Tickets que el monitor tiene que atender ahora.
+     *
+     * @param bool $supports_upgrade_agreement     El monitor conoce los acuerdos de actualización (flag viejo).
+     * @param bool $supports_mission_progress      El monitor conoce los avances de misión.
+     * @param bool $supports_delivery_verification El monitor verifica entregas sin acuerdo (contrato C2, 25/11/2026).
+     *
+     * @return array<string, mixed>
+     */
+    public function pending(bool $supports_upgrade_agreement = false, bool $supports_mission_progress = false, bool $supports_delivery_verification = false): array
     {
         $settings = SupportCodexSettings::to_array();
         $items = [];
@@ -87,7 +96,7 @@ class SupportCodexService
                 if ($case !== null && $case->lease_expires_at !== null && $case->lease_expires_at->isFuture()) {
                     continue;
                 }
-                $reason = $this->pending_reason($ticket, $case, $supports_upgrade_agreement, $supports_mission_progress);
+                $reason = $this->pending_reason($ticket, $case, $supports_upgrade_agreement, $supports_mission_progress, $supports_delivery_verification);
                 if ($reason === null) {
                     continue;
                 }
@@ -170,7 +179,8 @@ class SupportCodexService
                 $case->state = trim((string) $case->mission) !== '' ? 'mission_pending' : 'ready';
                 $case->review_reason = null;
             }
-            $reason = $this->pending_reason($ticket, $case, ! empty($input['supports_upgrade_agreement']), ! empty($input['supports_mission_progress']));
+            $reason = $this->pending_reason($ticket, $case, ! empty($input['supports_upgrade_agreement']), ! empty($input['supports_mission_progress']),
+                ! empty($input['supports_delivery_verification']));
             if ($reason === null) {
                 $this->fail(409, 'not_pending', 'El ticket ya fue atendido o necesita revisión humana.');
             }
@@ -192,6 +202,14 @@ class SupportCodexService
                 // Una revisión pedida por el propio agente admite información nueva. Tomar el
                 // turno no la resuelve: su marcador y el aviso a Lucas se conservan hasta cerrar.
                 $human_reply_pause = $this->is_human_reply_pause($case);
+                // El rojo que puso el propio sistema (turnos vacíos, cierre rechazado viejo) no es algo que Lucas
+                // tenga que destrabar (pedido de Lucas, 25/11/2026): al tomar el entrante nuevo se apaga.
+                if ($this->is_automatic_review($case)) {
+                    $case->review_reason = null;
+                    $case->review_requested_message_id = null;
+                    $ticket->support_attention_enabled = false;
+                    $ticket->save();
+                }
                 $case->state = trim((string) $case->mission) !== '' ? 'mission_pending' : 'ready';
                 if ($human_reply_pause) {
                     $case->review_reason = null;
@@ -386,10 +404,14 @@ class SupportCodexService
             'mission_progress' => $this->mission_progress_context($ticket, $case, $fix_evidence !== null),
             'upgrade_agreement' => app(SupportCodexUpgradeAgreementService::class)->context($fix_evidence),
             'review_reason' => $case ? $case->review_reason : null,
-            'reason' => $this->pending_reason($ticket, $case, true, true),
+            'reason' => $this->pending_reason($ticket, $case, true, true, true),
+            // Carril «no necesita respuesta» (contrato C1): el último entrante que Martín dio por atendido sin responder.
+            'no_reply' => $case === null || $case->no_reply_message_id === null ? null
+                : ['message_id' => (int) $case->no_reply_message_id, 'reason' => (string) $case->no_reply_reason],
             // El helper debe verificar esta capacidad ANTES de pedir el modo nuevo: un admin
             // anterior ignoraría el campo y ejecutaría el resume que consume la consulta.
-            'capabilities' => ['multiple_missions' => true, 'upgrade_confirmation_message' => true, 'upgrade_reconfirmation' => true, 'overnight_upgrade' => true, 'mission_started_notice' => true, 'coordinated_maintenance' => SupportMaintenancePolicy::available(), 'support_store_upgrade' => SupportMaintenancePolicy::available(), 'mission_progress' => true, 'continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'migration_blocked_handoff' => true, 'whatsapp_catalog_import' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => true, 'mission_fix_evidence' => true, 'upgrade_agreement' => true, 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => $capacidades_de_prueba['prueba_import'], 'prueba_import_resolver' => $capacidades_de_prueba['prueba_import_resolver'],
+            // Coordinación de horarios (contrato C4, 25/11/2026): apagada por configuración, sus capacidades salen en false.
+            'capabilities' => ['multiple_missions' => true, 'upgrade_confirmation_message' => true, 'upgrade_reconfirmation' => SupportUpgradeCoordination::enabled(), 'overnight_upgrade' => SupportUpgradeCoordination::enabled(), 'mission_started_notice' => true, 'coordinated_maintenance' => SupportMaintenancePolicy::available() && SupportUpgradeCoordination::enabled(), 'support_store_upgrade' => SupportMaintenancePolicy::available(), 'mission_progress' => true, 'continue_pending' => true, 'mission_started' => true, 'feature_handoff_closure' => true, 'human_review_action' => true, 'migration_blocked_handoff' => true, 'whatsapp_catalog_import' => true, 'human_approval' => true, 'recover_dispatch' => true, 'natural_thanks_closure' => true, 'outbound_attachments' => true, 'upgrade_window' => SupportUpgradeCoordination::enabled(), 'mission_fix_evidence' => true, 'upgrade_agreement' => SupportUpgradeCoordination::enabled(), 'scheduled_upgrade' => SupportScheduledUpgradeService::enabled(), 'verification_fallback' => SupportScheduledUpgradeService::enabled(), 'prueba_import' => $capacidades_de_prueba['prueba_import'], 'prueba_import_resolver' => $capacidades_de_prueba['prueba_import_resolver'],
                 'soporte_import' => $soporte_activo, 'soporte_import_resolver' => $soporte_activo,
                 'soporte_import_stock_existente' => $soporte_activo,
                 // Misión cruzada importaciones-de-martin (11/11/2026): la planilla derivada del PDF del dueño, el Excel
@@ -409,7 +431,16 @@ class SupportCodexService
                 'support_tour_path' => true,
                 'support_tour_offer' => SupportTourService::entrante_admite_oferta($ticket, $last),
                 // Claim con rotate_thread + thread_id nuevo (misión cruzada ficha-del-cliente, 11/11/2026).
-                'thread_rotation' => true],
+                'thread_rotation' => true,
+                // POST .../no-reply: un entrante que no necesita respuesta (misión martin-descripcion-y-actualizaciones).
+                'no_reply' => true,
+                // reply admite `review_resolved: true` (contrato C3): apaga el rojo de una revisión pedida por el agente.
+                'agent_review_resolution' => true,
+                'upgrade_coordination' => SupportUpgradeCoordination::enabled(),
+                // El monitor exige descripción (titular con resumen) antes de cada respuesta de Martín.
+                'ticket_description_every_reply' => true,
+                // mission-delivery-verified sin schedule_id para lo instalado por la actualización (contrato C5).
+                'delivery_without_schedule' => true],
             'requires_verification' => (bool) $ticket->requiere_verificacion_mensajes,
             'expected_message_id' => $last ? (int) $last->id : null,
             'robotito_available' => $robotito_disponible,
@@ -858,6 +889,12 @@ class SupportCodexService
 
     public function reply(int $id, array $input): array
     {
+        // `review_resolved` (contrato C3, 25/11/2026): sólo `true` y sólo con una acción que contesta al cliente. Se
+        // valida antes de registrar nada para que el monitor reciba un código corregible y no un envío a medias.
+        if (array_key_exists('review_resolved', $input) && ($input['review_resolved'] !== true
+            || ! in_array($input['action'], ['responder', 'solicitar_confirmacion', 'cerrar'], true))) {
+            $this->fail(422, 'invalid_review_resolution', 'review_resolved va sólo en true y con responder, solicitar_confirmacion o cerrar.');
+        }
         $tour_requested = (bool) ($input['tour_requested'] ?? false);
         $tour_import_history_id = isset($input['tour_import_history_id']) ? (int) $input['tour_import_history_id'] : null;
         if ($tour_import_history_id !== null && (! $tour_requested || $tour_import_history_id < 1
@@ -946,6 +983,10 @@ class SupportCodexService
         }
         if (isset($input['mission_progress_hash'])) {
             $hash_payload[] = ['mission_progress_hash' => $input['mission_progress_hash'], 'mission_progress_state' => $input['mission_progress_state']];
+        }
+        // Solo si vino: el hash de los pedidos sin el campo queda igual que antes (replays tras el deploy).
+        if (! empty($input['review_resolved'])) {
+            $hash_payload[] = ['review_resolved' => true];
         }
         $hash = hash('sha256', json_encode($hash_payload));
         // La operación se confirma en una transacción ANTES de enviar. Si el proceso cae
@@ -1914,6 +1955,15 @@ class SupportCodexService
 
     private function apply_action(SupportTicket $ticket, SupportCodexCase $case, array $input): void
     {
+        /* La revisión que pidió el propio agente ya no aplica (contrato C3, misión martin-descripcion-y-actualizaciones):
+         * con el envío confirmado se apaga el rojo. Nunca un bloqueo técnico ni una pausa de Lucas: esos no tienen
+         * `review_requested_message_id` y `is_agent_requested_review()` da false. */
+        if (! empty($input['review_resolved']) && $case->is_agent_requested_review()) {
+            $case->review_reason = null;
+            $case->review_requested_message_id = null;
+            $ticket->support_attention_enabled = false;
+            $ticket->save();
+        }
         if (! empty($input['_delivery_confirmation']) && $input['action'] === 'responder') {
             $case->delivery_notice_mission_id = null;
             $case->state = trim((string) $case->mission) !== '' ? 'mission_pending' : 'ready';
@@ -2006,6 +2056,57 @@ class SupportCodexService
             $case->lease_expires_at = null;
             $case->save();
             return ['released' => true];
+        });
+    }
+
+    /**
+     * Carril «no necesita respuesta» (contrato C1, misión martin-descripcion-y-actualizaciones, 25/11/2026).
+     *
+     * Martín da por atendido el último entrante sin escribirle al cliente (un acuse, un «ok»): queda registrado
+     * con su motivo, se suelta la reserva y el ticket no se vuelve a disparar hasta un mensaje nuevo del cliente.
+     * 🔴 No toca `support_attention_enabled` ni el estado del caso: no responder no es motivo para poner rojo
+     * (antes, dos turnos vacíos terminaban en revisión manual) ni para sacar un rojo que ya estaba.
+     *
+     * @param int                  $id    Id del ticket.
+     * @param array<string, mixed> $input lease_token, expected_message_id, reason, execution_id?, thread_id?
+     *
+     * @return array{registered: bool, replayed: bool, ticket: array<string, mixed>}
+     */
+    public function no_reply(int $id, array $input): array
+    {
+        return DB::transaction(function () use ($id, $input) {
+            $ticket = SupportTicket::lockForUpdate()->findOrFail($id);
+            $case = SupportCodexCase::where('support_ticket_id', $id)->lockForUpdate()->first();
+            $expected = (int) $input['expected_message_id'];
+            // Repetición del mismo pedido (el monitor reintenta tras un corte): ya no hay reserva que validar
+            // porque la primera vez se soltó; se devuelve lo registrado sin cambiar nada.
+            if ($case !== null && $case->no_reply_message_id !== null && (int) $case->no_reply_message_id === $expected
+                && (int) $case->handled_message_id >= $expected) {
+                return ['registered' => true, 'replayed' => true, 'ticket' => $this->context($ticket, $case)];
+            }
+            $this->assert_managed($ticket);
+            $this->assert_lease($case, (string) $input['lease_token']);
+            if (in_array($case->state, ['manual_review', 'closed'], true) || $this->has_unfinished_operation($id)) {
+                $this->fail(409, 'manual_review', 'La atención está pausada y requiere revisión.');
+            }
+            $last = $this->last_real_message($id);
+            if ($last === null || (int) $last->id !== $expected || ! $ticket->mensaje_confiable_para_codex($last)) {
+                $this->fail(409, 'stale_message', 'Llegó un mensaje más nuevo; volvé a leer la conversación.');
+            }
+            if ($this->pending_reason_for($ticket, $case, $last) !== 'inbound') {
+                $this->fail(409, 'not_pending', 'No hay un entrante del cliente sin atender para dar por respondido.');
+            }
+            if (! empty($input['thread_id'])) {
+                $this->bind_thread($case, $input['thread_id']);
+            }
+            $case->handled_message_id = max((int) $case->handled_message_id, $expected);
+            $case->no_reply_message_id = $expected;
+            $case->no_reply_reason = mb_substr(trim((string) $input['reason']), 0, 300);
+            $case->lease_hash = null;
+            $case->lease_expires_at = null;
+            $case->save();
+
+            return ['registered' => true, 'replayed' => false, 'ticket' => $this->context($ticket, $case)];
         });
     }
 
@@ -2477,6 +2578,11 @@ class SupportCodexService
             if ($mission !== null) {
                 if ($mission->completed_at === null) { $mission->update(['completed_at' => now()]); }
                 app(SupportMissionDeliveryService::class)->refresh($mission);
+                // El cliente queda marcado «requiere actualización» si la corrección toca lo que se le instala
+                // (misión martin-descripcion-y-actualizaciones, 25/11/2026). Nunca lanza.
+                if ($mission->installed_at === null) {
+                    app(ClientUpgradeMarkService::class)->from_mission($mission, $evidence);
+                }
             }
             return ['mission_fix_evidence' => $evidence->payload];
         });
@@ -2570,14 +2676,14 @@ class SupportCodexService
         });
     }
 
-    private function pending_reason(SupportTicket $ticket, ?SupportCodexCase $case, bool $supports_upgrade_agreement = false, bool $supports_mission_progress = false): ?string
+    private function pending_reason(SupportTicket $ticket, ?SupportCodexCase $case, bool $supports_upgrade_agreement = false, bool $supports_mission_progress = false, bool $supports_delivery_verification = false): ?string
     {
         $last = $this->last_real_message($ticket->id);
         if ($last === null || ! $ticket->mensaje_confiable_para_codex($last)) {
             return null;
         }
 
-        return $this->pending_reason_for($ticket, $case, $last, $supports_upgrade_agreement, $supports_mission_progress);
+        return $this->pending_reason_for($ticket, $case, $last, $supports_upgrade_agreement, $supports_mission_progress, $supports_delivery_verification);
     }
 
     /** El solicitante debe haber seleccionado el último mensaje real del ticket. */
@@ -2642,7 +2748,13 @@ class SupportCodexService
             || ! $ticket->claude_auto_reply || $this->has_unfinished_operation($ticket->id);
     }
 
-    private function pending_reason_for(SupportTicket $ticket, ?SupportCodexCase $case, SupportMessage $last, bool $supports_upgrade_agreement = false, bool $supports_mission_progress = false): ?string
+    /**
+     * Por qué el monitor tiene que atender el ticket ahora, o null.
+     *
+     * @param bool $supports_delivery_verification Con true (o con el flag viejo de acuerdos) puede devolver
+     *                                             `mission_delivery_verification` (contrato C2, 25/11/2026).
+     */
+    private function pending_reason_for(SupportTicket $ticket, ?SupportCodexCase $case, SupportMessage $last, bool $supports_upgrade_agreement = false, bool $supports_mission_progress = false, bool $supports_delivery_verification = false): ?string
     {
         if ($this->callado_para_codex($ticket, $case)) {
             return null;
@@ -2650,8 +2762,10 @@ class SupportCodexService
         if ($case !== null && $case->state === 'manual_review') {
             // La procedencia durable distingue pedir_revision de errores de envío, conciliación
             // o pausas técnicas. Un entrante no borra el motivo: solo permite que Martín lo lea.
+            // Los dos turnos vacíos del monitor tampoco son un bloqueo técnico (25/11/2026): sin esto el ticket
+            // quedaba trabado en rojo aunque el cliente volviera a escribir.
             return ($this->is_human_reply_pause($case) || $case->is_agent_requested_review() || $this->is_dispatch_review($case)
-                || $case->review_reason === self::CONFIRMATION_REVIEW_REASON) && $last->sender_type === 'user'
+                || $case->review_reason === self::CONFIRMATION_REVIEW_REASON || $case->is_empty_turns_review()) && $last->sender_type === 'user'
                 && (int) $last->id > max((int) $case->expected_message_id, (int) $case->handled_message_id)
                 ? 'inbound' : null;
         }
@@ -2660,14 +2774,17 @@ class SupportCodexService
             && $this->puede_entregar($ticket)) {
             return 'mission_completed';
         }
-        if ($supports_upgrade_agreement && app(SupportUpgradeReconfirmationService::class)->needs_attention((int) $ticket->id)) {
+        // Con la coordinación de horarios apagada (25/11/2026) ni se reconfirma ni se ofrece coordinar: la corrección
+        // va en la próxima actualización nocturna que programa Lucas.
+        $coordinacion = SupportUpgradeCoordination::enabled();
+        if ($supports_upgrade_agreement && $coordinacion && app(SupportUpgradeReconfirmationService::class)->needs_attention((int) $ticket->id)) {
             return 'upgrade_reconfirmation';
         }
         if ($last->sender_type === 'user' && ($case === null || (int) $last->id > (int) $case->handled_message_id)) {
             return 'inbound';
         }
         $case = $this->attention_mission_case($ticket, $case);
-        if ($supports_upgrade_agreement && $case !== null) {
+        if (($supports_upgrade_agreement || $supports_delivery_verification) && $case !== null) {
             $delivery_mission = SupportCodexMission::where('support_ticket_id', $ticket->id)->where('mission_hash', hash('sha256', (string) $case->mission))->first();
             if ($delivery_mission !== null && $delivery_mission->installed_at !== null && $delivery_mission->delivery_verified_at === null && $this->puede_entregar($ticket)) { return 'mission_delivery_verification'; }
         }
@@ -2678,7 +2795,7 @@ class SupportCodexService
                 return 'mission_progress';
             }
         }
-        if ($supports_upgrade_agreement && $case !== null
+        if ($supports_upgrade_agreement && $coordinacion && $case !== null
             && app(SupportCodexUpgradeAgreementService::class)->pending_offer($ticket, $case)
             && $this->puede_entregar($ticket)) {
             return 'fix_ready_for_upgrade';
@@ -2689,6 +2806,50 @@ class SupportCodexService
             return 'follow_up';
         }
         return null;
+    }
+
+    /**
+     * Revisión que puso el propio sistema y no algo que Lucas tenga que destrabar: los dos turnos vacíos del
+     * monitor o el cierre rechazado de antes del ticket 168. Nunca una revisión pedida por el agente, una pausa
+     * de Lucas ni un bloqueo técnico (misión martin-descripcion-y-actualizaciones, ajuste de la revisión).
+     *
+     * @param SupportCodexCase $case
+     *
+     * @return bool
+     */
+    private function is_automatic_review(SupportCodexCase $case): bool
+    {
+        return $case->state === 'manual_review' && ! $case->is_agent_requested_review()
+            && ($case->is_empty_turns_review() || $case->review_reason === self::CONFIRMATION_REVIEW_REASON);
+    }
+
+    /**
+     * Apaga el rojo de los tickets abiertos que están en revisión automática (ver `is_automatic_review()`).
+     * Sólo `support_attention_enabled`: el caso conserva estado y motivo, así el próximo entrante del cliente lo
+     * reabre como siempre. No manda nada a nadie. Idempotente: un ticket ya apagado no se vuelve a listar.
+     *
+     * @param bool $dry_run Con true sólo devuelve los ids, sin cambiar nada.
+     *
+     * @return int[] Ids de los tickets afectados (o que se afectarían), de menor a mayor.
+     */
+    public function clear_automatic_reviews(bool $dry_run = false): array
+    {
+        $ids = [];
+        $cases = SupportCodexCase::where('state', 'manual_review')
+            ->whereIn('support_ticket_id', SupportTicket::where('status', 'open')->where(function ($rojo) {
+                $rojo->where('support_attention_enabled', true)->orWhereNull('support_attention_enabled');
+            })->select('id'))->orderBy('support_ticket_id')->get();
+        foreach ($cases as $case) {
+            if (! $this->is_automatic_review($case)) {
+                continue;
+            }
+            $ids[] = (int) $case->support_ticket_id;
+            if (! $dry_run) {
+                SupportTicket::where('id', $case->support_ticket_id)->update(['support_attention_enabled' => false]);
+            }
+        }
+
+        return $ids;
     }
 
     private function is_dispatch_review(SupportCodexCase $case): bool

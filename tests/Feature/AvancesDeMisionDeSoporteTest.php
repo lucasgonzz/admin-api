@@ -33,6 +33,8 @@ class AvancesDeMisionDeSoporteTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+        // La coordinación de horarios quedó apagada por defecto (martin-descripcion-y-actualizaciones, CA5); acá se prueba encendida.
+        config(['services.support_codex.upgrade_coordination' => true]);
         Carbon::setTestNow(Carbon::parse('2026-11-12 12:00:00'));
         config(['services.claude_task_ingest.key' => 'avance-test']);
         AdminSetting::set(SupportCodexSettings::KEY_ENABLED, '1');
