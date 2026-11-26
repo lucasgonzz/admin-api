@@ -724,6 +724,16 @@ class ClaudeUpgradeOpsController extends Controller
                             'aviso'   => $lectura_del_aviso['aviso'],
                         ], 409);
                     }
+
+                    /* 🔴 Los usuarios ya dieron el OK (estado `actualizando`, que el pedido deja con un
+                       vencimiento corto: 30 minutos). Se RENUEVA a 120 antes de encolar, para que el
+                       deploy no se quede esperando en la cola con el aviso vencido y los usuarios
+                       vuelvan a entrar. Si el PUT falla, el start sigue igual: el aviso no aborta nada. */
+                    if ($aviso_de_actualizacion['estado'] === 'actualizando') {
+                        $renovacion_del_aviso = $servicio_del_aviso->prender($client, $upgrade, 120);
+
+                        $aviso_de_actualizacion['renovado'] = $renovacion_del_aviso['aviso'] !== null;
+                    }
                 } elseif ($lectura_del_aviso['soportado'] === false) {
                     /* 404: la versión instalada del cliente todavía no tiene el aviso. Sigue como hoy. */
                     $aviso_de_actualizacion['soportado'] = false;
