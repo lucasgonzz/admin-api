@@ -1371,6 +1371,28 @@ class LeadSuggestionSendService
          */
         $variables = app(LeadFollowupService::class)->build_template_variables($template, $lead);
 
+        /*
+         * Mensajes del motor de compromisos (misión leads-referidos-compromisos, E2): sus variables NO salen de
+         * `build_template_variables` (que deja `{{2}}` vacío en `cc_coord_dia_acordado`), sino de lo que dijo el lead. Se rearman con la
+         * MISMA función que armó la sugerencia, así lo que Juan leyó es lo que recibe el lead. Si ya no se puede completar, el mensaje no
+         * sale: se rechaza (nunca se manda una plantilla con un hueco).
+         */
+        if ((string) $message->system_message_kind === LeadCompromisoService::KIND_DEL_MENSAJE) {
+            $armado = app(LeadCompromisoService::class)->armar_para_el_envio($message, $template, $lead);
+            if ($armado === null) {
+                $message->update([
+                    'status'              => 'rechazado',
+                    'sent_at'             => null,
+                    'whatsapp_send_error' => 'La plantilla del compromiso ya no se puede completar (falta lo que dijo el lead).',
+                ]);
+                $lead->sync_suggestion_flags();
+                LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
+
+                return $this->fresh_o_en_memoria($message);
+            }
+            $variables = $armado['variables'];
+        }
+
         $context = 'Seguimiento aprobado - Lead #' . $lead->id
             . (! empty($lead->contact_name) ? " ({$lead->contact_name})" : '');
 

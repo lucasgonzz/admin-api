@@ -203,6 +203,16 @@ class Kernel extends ConsoleKernel
 
         $schedule->command('leads:check-followups')->everyTwoHours();
 
+        /* El motor de compromisos de contacto (misión leads-referidos-compromisos, E2): cada minuto toma los compromisos vencidos y
+         * los ejecuta (tarea para Juan o mensaje de Martín) o los re-evalúa con IA. Con `lead_compromisos_activo` apagado no hace nada.
+         * 🔴 En segundo plano y sin heredar el candado del cron (`artisan_sin_el_lock_del_cron()`): la re-evaluación y la redacción
+         * llaman a la IA (hasta 30 s) y en primer plano clavarían `schedule:run`. `withoutOverlapping(10)` con el número a mano: el
+         * default del candado son 24 HORAS. Además cada compromiso se toma con su propio candado en la base. */
+        $schedule->exec(self::artisan_sin_el_lock_del_cron('leads:compromisos'))
+            ->everyMinute()
+            ->withoutOverlapping(10)
+            ->runInBackground();
+
         /* Estado de las plantillas de WhatsApp en Meta (misión plantillas-meta-y-leads-humano,
          * 13/10/2026).
          *

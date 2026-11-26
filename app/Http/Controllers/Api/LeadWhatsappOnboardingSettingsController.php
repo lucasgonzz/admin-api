@@ -59,6 +59,13 @@ class LeadWhatsappOnboardingSettingsController extends Controller
              * los escribe sólo si vinieron). */
             'flujo_entrada_activo'          => 'sometimes|nullable|boolean',
             'flujo_textos_precargados'      => 'sometimes|nullable|string|max:8000',
+            /* Motor de compromisos y leads de otros medios (misión leads-referidos-compromisos, E2): tres interruptores y dos nombres de
+             * plantilla de Meta. OPCIONALES por la misma razón: un SPA que no los manda no puede apagar el motor. */
+            'compromisos_activo'            => 'sometimes|nullable|boolean',
+            'compromisos_deteccion_ia'      => 'sometimes|nullable|boolean',
+            'compromisos_envio_automatico'  => 'sometimes|nullable|boolean',
+            'compromiso_plantilla'          => 'sometimes|nullable|string|max:120',
+            'referido_plantilla'            => 'sometimes|nullable|string|max:120',
         ]);
 
         // La variante con nombre debe incluir el placeholder para personalizar saludos.

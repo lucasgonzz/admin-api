@@ -267,6 +267,9 @@ class Lead extends Model
             // un borrado extra por llamada acá.
             $lead->calls()->delete();
 
+            /* Los compromisos de contacto del lead (misión leads-referidos-compromisos, E2), también en cascada Eloquent. */
+            LeadCompromiso::query()->where('lead_id', $lead->id)->delete();
+
             /* 🔴 NO se usa la relación scheduled_messages(): está filtrada a los estados visibles, así
                que borraría solo una parte y dejaría huérfanas las filas enviadas y canceladas. Acá
                se borran TODAS las del lead.
@@ -1135,6 +1138,16 @@ class Lead extends Model
     public function created_by_admin()
     {
         return $this->belongsTo(Admin::class, 'created_by_admin_id');
+    }
+
+    /**
+     * Los compromisos de contacto del lead (misión leads-referidos-compromisos, E2), del más nuevo al más viejo.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function compromisos()
+    {
+        return $this->hasMany(LeadCompromiso::class, 'lead_id')->orderByDesc('id');
     }
 
     /**

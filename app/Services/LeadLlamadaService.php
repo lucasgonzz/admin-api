@@ -164,8 +164,70 @@ class LeadLlamadaService
 
             $this->cerrar_las_tareas_del_embudo($lead, $hecha_por);
 
+            /* Compromisos (misión leads-referidos-compromisos, E2): la fecha de la llamada pasa a ser el próximo contacto acordado. */
+            $this->actualizar_el_compromiso($lead->fresh(), $llamada, $limpios, $hecha_por);
+
             return ['llamada' => $llamada->fresh(['admin', 'cargada_por']), 'tarjeta' => $this->tarjeta_para_responder($lead), 'duplicada' => false];
         });
+    }
+
+    /**
+     * Compromiso de contacto que deja la llamada (sólo con el motor prendido; apagado, no hace nada).
+     *
+     *  - Con fecha de próxima llamada (no atendió, «volver a llamar», «implementación acordada» o «sigue solo» con fecha) nace un
+     *    compromiso `llamar` que reemplaza al vigente.
+     *  - Una llamada que cierra el caso (no le interesa, ya contrató, pagó la mitad) cancela el vigente: ya no hay nada que retomar.
+     *  - Cualquier otra llamada sin fecha (la fecha automática del día 5 de «sigue solo» NO es un compromiso: nadie la acordó)
+     *    da por cumplido al vigente, porque hubo contacto.
+     * Nunca tira la llamada: un fallo del motor se loguea y la llamada queda registrada.
+     *
+     * @param Lead                 $lead
+     * @param LeadLlamada          $llamada Recién guardada: la huella la incluye para que no cuente como «un cambio».
+     * @param array<string, mixed> $limpios Salida de `validar()`.
+     * @param int                  $hecha_por
+     *
+     * @return void
+     */
+    private function actualizar_el_compromiso(Lead $lead, LeadLlamada $llamada, array $limpios, int $hecha_por)
+    {
+        if (! LeadCompromisoService::activo()) {
+            return;
+        }
+
+        try {
+            $servicio = app(LeadCompromisoService::class);
+            $cierra   = in_array((string) $limpios['resultado'], [LeadLlamada::RESULTADO_NO_LE_INTERESA, LeadLlamada::RESULTADO_YA_CONTRATO, LeadLlamada::RESULTADO_PAGO_LA_MITAD], true);
+
+            if ($cierra) {
+                $servicio->cancelar_los_abiertos($lead, 'La llamada cerró el caso.', $hecha_por);
+
+                return;
+            }
+
+            if ($limpios['proxima_llamada_at'] !== null) {
+                try {
+                    $servicio->crear($lead, [
+                        'vence_at'  => $limpios['proxima_llamada_at'],
+                        'accion'    => \App\Models\LeadCompromiso::ACCION_LLAMAR,
+                        'resumen'   => (string) $limpios['notas'],
+                        'origen'    => \App\Models\LeadCompromiso::ORIGEN_LLAMADA,
+                        'origen_id' => (int) $llamada->id,
+                    ], $hecha_por, ['tarjeta' => false]);
+
+                    return;
+                } catch (PipelineRuleException $e) {
+                    /* El motor rechazó la fecha (a más de 90 días): no se traga en silencio. Igual hubo contacto, así que el
+                       compromiso anterior se cumple abajo. */
+                    \Illuminate\Support\Facades\Log::channel('daily')->warning('LeadLlamadaService: el motor de compromisos rechazó la fecha de la llamada; no se creó compromiso.', [
+                        'lead_id' => $lead->id, 'llamada_id' => $llamada->id, 'errores' => $e->errors(),
+                    ]);
+                }
+            }
+
+            $servicio->cumplir_el_vigente($lead, 'Hubo una llamada sin fecha nueva.', $hecha_por);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::channel('daily')->error('LeadLlamadaService: la llamada quedó registrada pero el compromiso falló.', ['lead_id' => $lead->id, 'error' => $e->getMessage()]);
+        }
     }
 
     /**

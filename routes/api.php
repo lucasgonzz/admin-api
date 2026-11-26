@@ -664,6 +664,14 @@ Route::middleware('claude.task.key')
         Route::post('leads', 'Api\ClaudeLeadsExternosController@store_json');
         Route::post('leads/{id}/contexto-previo', 'Api\ClaudeLeadsExternosController@contexto_previo_json')
             ->whereNumber('id');
+        /* Compromisos de contacto (misión leads-referidos-compromisos, E2): lo que Lucas pacta en su WhatsApp personal («escribile el
+           martes»). `dry_run` por defecto TRUE en las dos escrituras; sin la clave, 401 como todo `claude/*`. */
+        Route::get('leads/{id}/compromisos', 'Api\ClaudeLeadsExternosController@compromisos_index_json')
+            ->whereNumber('id');
+        Route::post('leads/{id}/compromisos', 'Api\ClaudeLeadsExternosController@compromisos_store_json')
+            ->whereNumber('id');
+        Route::post('lead-compromisos/{id}/cancelar', 'Api\ClaudeLeadsExternosController@compromiso_cancelar_json')
+            ->whereNumber('id');
         Route::post('leads/status-batch', 'Api\ClaudeLeadsPipelineController@update_status_batch_json');
         Route::post('leads/{id}/status', 'Api\ClaudeLeadsPipelineController@update_status_json');
 
@@ -2046,6 +2054,12 @@ Route::prefix('admin')->group(function () {
         /* Tablero de Juan (misión embudo-juan-pipeline): «Registrar llamada», «Mis tareas» y la búsqueda de candidatos. */
         Route::post('lead/{id}/llamadas', [LeadLlamadaController::class, 'store_json'])->whereNumber('id');
         Route::get('lead/{id}/llamadas', [LeadLlamadaController::class, 'index_json'])->whereNumber('id');
+
+        /* Compromisos de contacto con el lead (misión leads-referidos-compromisos, E2). Ninguna de estas rutas le escribe al lead. */
+        Route::get('lead/{id}/compromisos', [\App\Http\Controllers\LeadCompromisoController::class, 'index_json'])->whereNumber('id');
+        Route::post('lead/{id}/compromisos', [\App\Http\Controllers\LeadCompromisoController::class, 'store_json'])->whereNumber('id');
+        Route::put('lead-compromisos/{id}', [\App\Http\Controllers\LeadCompromisoController::class, 'update_json'])->whereNumber('id');
+        Route::post('lead-compromisos/{id}/cancelar', [\App\Http\Controllers\LeadCompromisoController::class, 'cancelar_json'])->whereNumber('id');
         Route::get('lead-tablero/mis-tareas', [LeadTableroController::class, 'mis_tareas_json']);
         Route::get('lead-tablero/candidatos', [LeadTableroController::class, 'candidatos_json']);
         Route::post('lead-tablero/tareas/{id}/hecha', [LeadTableroController::class, 'tarea_hecha_json'])->whereNumber('id');

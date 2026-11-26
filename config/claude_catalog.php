@@ -1452,6 +1452,55 @@ return [
             ],
         ],
 
+        /* --------------------------------------------- Leads: compromisos de contacto (E2) */
+
+        'GET api/claude/leads/{id}/compromisos' => [
+            'para_que'     => 'Los compromisos de contacto de un lead (el próximo contacto acordado: Juan lo llama el viernes, Martín le escribe el martes, el lead iba a avisar): el abierto primero y después el historial, con su fecha, acción, origen, resumen y cómo terminó. Sirve para no pactar dos veces lo mismo y para ver qué quedó vigente antes de cargar uno nuevo.',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL, sólo dígitos', 'que_es' => 'Lead del que se leen los compromisos.'],
+            ],
+        ],
+        'POST api/claude/leads/{id}/compromisos' => [
+            'para_que'     => 'Anota un compromiso de contacto con un lead: lo que Lucas pactó en su WhatsApp personal («escribile el martes», «llamalo el viernes a la mañana»). Mientras esté vigente, el lead no recibe los seguimientos genéricos del embudo; a la hora, el sistema revisa si cambió algo (mensajes, llamadas, estado) y ejecuta lo acordado (una tarea para Juan o un mensaje de Martín) o lo re-evalúa con IA.',
+            'escribe'      => true,
+            'peligrosidad' => 'media',
+            'frenos'       => [
+                '🔴 dry_run por defecto TRUE: sin dry_run=false explícito NO se escribe nada y devuelve lo que haría.',
+                '🔴 Nada sale al lead al crearlo: a su hora, un mensaje de Martín queda como SUGERENCIA para aprobar (salvo que Lucas haya prendido el envío automático) y un llamar deja una tarea para Juan.',
+                'Siempre hay como mucho UN compromiso vigente por lead: crear uno reemplaza al anterior (gana el último).',
+                'La fecha tiene que ser futura y a menos de 90 días; con sólo el día, la hora es 10:00 (llamar y escribir) o 18:00 (esperar).',
+                'Con el motor de compromisos apagado (Cuenta) responde 409 y no guarda nada.',
+                'El lead se nombra por id, de a uno, y el {id} está restringido a dígitos.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL, sólo dígitos', 'que_es' => 'Lead al que se le debe el contacto.'],
+                ['nombre' => 'vence_at', 'obligatorio' => true, 'validacion' => 'required, AAAA-MM-DD HH:MM o AAAA-MM-DD, futura y a menos de 90 días', 'que_es' => 'Cuándo toca (hora de Argentina).'],
+                ['nombre' => 'accion', 'obligatorio' => true, 'validacion' => 'required|in:llamar,escribir,esperar', 'que_es' => 'llamar = Juan lo llama; escribir = Martín le escribe; esperar = el lead iba a avisar y, si no avisa, Martín lo retoma.'],
+                ['nombre' => 'resumen', 'obligatorio' => false, 'validacion' => 'nullable|string|max:2000', 'que_es' => 'Qué hay que hacer y de qué se habló. Lo lee Juan en su tarea y Martín en su contexto.'],
+                ['nombre' => 'cita_del_lead', 'obligatorio' => false, 'validacion' => 'nullable|string|max:500', 'que_es' => 'Lo que dijo el lead, tal cual («el martes te escribo»).'],
+                ['nombre' => 'momento', 'obligatorio' => false, 'validacion' => 'nullable|string|max:100', 'que_es' => 'SÓLO el momento, en palabras del lead y sin verbo («el viernes a la mañana»). Es lo que va en la plantilla de WhatsApp si la ventana de 24 h está cerrada; sin él, la plantilla no se usa y le queda una tarea a Juan.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Sin dry_run=false explícito no se escribe nada.'],
+            ],
+        ],
+        'POST api/claude/lead-compromisos/{id}/cancelar' => [
+            'para_que'     => 'Cancela un compromiso de contacto (el lead ya no lo necesita o se arregló por otro lado). Los seguimientos genéricos del lead vuelven a poder correr.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                '🔴 dry_run por defecto TRUE: sin dry_run=false explícito no se cancela nada.',
+                'Sólo se cancela un compromiso abierto o que quedó para revisar; uno ya cerrado es 422.',
+                'El compromiso se nombra por id, de a uno, y el {id} está restringido a dígitos.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL, sólo dígitos', 'que_es' => 'Compromiso a cancelar (no es el id del lead).'],
+                ['nombre' => 'motivo', 'obligatorio' => false, 'validacion' => 'nullable|string|max:1000', 'que_es' => 'Por qué se cancela. Queda en el historial.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Sin dry_run=false explícito no se cancela nada.'],
+            ],
+        ],
+
         /* --------------------------------------------- Leads: agenda (lectura) y evento del closer */
 
         'GET api/claude/leads/{id}/availability' => [

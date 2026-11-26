@@ -11473,6 +11473,13 @@ TXT;
             $txt .= "\n\n" . $bloque_de_llamadas;
         }
 
+        /* Compromisos de contacto (misión leads-referidos-compromisos, E2): si ya quedó acordado cuándo se retoma el contacto,
+           Martín lo sabe y no propone otro día. Vacío con el motor apagado o sin compromiso abierto. */
+        $bloque_del_compromiso = app(LeadCompromisoService::class)->bloque_para_el_agente($lead);
+        if ($bloque_del_compromiso !== '') {
+            $txt .= "\n\n" . $bloque_del_compromiso;
+        }
+
         /* Inyectar disponibilidad de demos si se provee (segunda llamada con slots). */
         if ($availability_context !== '') {
             $txt .= "\n\nDISPONIBILIDAD DE DEMOS:\n{$availability_context}";

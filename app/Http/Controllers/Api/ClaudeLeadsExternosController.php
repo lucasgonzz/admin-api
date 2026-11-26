@@ -4,7 +4,9 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Lead;
+use App\Models\LeadCompromiso;
 use App\Services\LeadAltaExternaService;
+use App\Services\LeadCompromisoService;
 use Illuminate\Http\Request;
 
 /**
@@ -20,7 +22,15 @@ use Illuminate\Http\Request;
  *  - `POST claude/leads/{id}/contexto-previo`: `{texto, fuente, dry_run}` AGREGA texto al contexto previo con
  *    encabezado (nunca reemplaza) hasta 60.000 caracteres en total.
  *
- * Sin lógica de negocio (vive en {@see LeadAltaExternaService}); sin `$request->validate()`, el servicio responde el 422.
+ * Y los compromisos de contacto (etapa E2), para lo que Lucas pacta en su WhatsApp personal («escribile el martes»):
+ *
+ *  - `GET claude/leads/{id}/compromisos`: 200 `{compromisos}` (el abierto primero).
+ *  - `POST claude/leads/{id}/compromisos`: `{vence_at, accion, resumen, cita_del_lead, dry_run}`. 🔴 `dry_run` por defecto TRUE
+ *    (200 con lo que haría, cero escrituras); con `dry_run=false` crea (201, `origen = agente`) y reemplaza al vigente.
+ *  - `POST claude/lead-compromisos/{id}/cancelar`: `{motivo, dry_run}`, con el mismo freno.
+ *
+ * Sin lógica de negocio (vive en {@see LeadAltaExternaService} y {@see LeadCompromisoService}); sin `$request->validate()`, el
+ * servicio responde el 422.
  */
 class ClaudeLeadsExternosController extends Controller
 {
@@ -113,5 +123,102 @@ class ClaudeLeadsExternosController extends Controller
         }
 
         return filter_var($request->input('dry_run'), FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) !== false;
+    }
+
+    /**
+     * Los compromisos del lead.
+     *
+     * @param int|string            $id
+     * @param LeadCompromisoService $servicio
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function compromisos_index_json($id, LeadCompromisoService $servicio)
+    {
+        $lead = Lead::query()->find((int) $id);
+        if ($lead === null) {
+            return response()->json(['message' => 'El lead no existe.'], 404);
+        }
+
+        $modelos = [];
+        foreach ($servicio->listar($lead) as $compromiso) {
+            $modelos[] = $servicio->a_json($compromiso);
+        }
+
+        return response()->json(['compromisos' => $modelos], 200);
+    }
+
+    /**
+     * Crea un compromiso para el lead (simulado por defecto).
+     *
+     * @param Request               $request  vence_at, accion, resumen, cita_del_lead, dry_run.
+     * @param int|string            $id
+     * @param LeadCompromisoService $servicio
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function compromisos_store_json(Request $request, $id, LeadCompromisoService $servicio)
+    {
+        $lead = Lead::query()->find((int) $id);
+        if ($lead === null) {
+            return response()->json(['message' => 'El lead no existe.'], 404);
+        }
+
+        if (! LeadCompromisoService::activo()) {
+            return response()->json([
+                'message' => 'El motor de compromisos está apagado: no se guardó nada. Se prende desde Cuenta.',
+                'code'    => 'motor_apagado',
+                'dry_run' => $this->es_simulacion($request),
+            ], 409);
+        }
+
+        /* La misma validación que el alta real, sin escribir: un dry_run que dice «va a andar» y después falla no sirve. */
+        $limpios = $servicio->limpiar_datos($request->all());
+
+        if ($this->es_simulacion($request)) {
+            return response()->json([
+                'dry_run'   => true,
+                'message'   => 'Simulación: no se escribió nada. Mandá dry_run=false para crear el compromiso.',
+                'que_haria' => [
+                    'accion'              => $limpios['accion'],
+                    'vence_at'            => $limpios['vence_at']->format('Y-m-d H:i:s'),
+                    'resumen'             => $limpios['resumen'],
+                    'reemplaza_al_vigente' => $servicio->abierto_de($lead) !== null,
+                ],
+            ], 200);
+        }
+
+        $compromiso = $servicio->crear($lead, array_merge($request->all(), ['origen' => LeadCompromiso::ORIGEN_AGENTE]), null);
+
+        return response()->json(['dry_run' => false, 'model' => $servicio->a_json($compromiso)], 201);
+    }
+
+    /**
+     * Cancela un compromiso (simulado por defecto).
+     *
+     * @param Request               $request  motivo, dry_run.
+     * @param int|string            $id       Id del compromiso.
+     * @param LeadCompromisoService $servicio
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function compromiso_cancelar_json(Request $request, $id, LeadCompromisoService $servicio)
+    {
+        $compromiso = LeadCompromiso::query()->find((int) $id);
+        if ($compromiso === null) {
+            return response()->json(['message' => 'El compromiso no existe.'], 404);
+        }
+
+        if ($this->es_simulacion($request)) {
+            return response()->json([
+                'dry_run'   => true,
+                'message'   => 'Simulación: no se canceló nada. Mandá dry_run=false para cancelarlo.',
+                'que_haria' => ['compromiso_id' => (int) $compromiso->id, 'status_actual' => (string) $compromiso->status, 'pasaria_a' => LeadCompromiso::STATUS_CANCELADO],
+            ], 200);
+        }
+
+        $compromiso = $servicio->cancelar($compromiso, $request->input('motivo'), null);
+
+        return response()->json(['dry_run' => false, 'model' => $servicio->a_json($compromiso)], 200);
     }
 }
