@@ -43,7 +43,7 @@ class CortadorDeAudioEnTramos
      * Parte el audio en tramos y devuelve las rutas de los archivos, en orden.
      *
      * @param string $ruta_absoluta Archivo de audio original (no se modifica).
-     * @param string $extension     Su extensión, en minúsculas (informativa: ffmpeg detecta el formato por el contenido).
+     * @param string $extension     Su extensión, en minúsculas (sólo informativa, porque ffmpeg detecta el formato por el contenido).
      *
      * @return array<int, string> Rutas absolutas de los tramos mp3, en el orden de la llamada.
      *
