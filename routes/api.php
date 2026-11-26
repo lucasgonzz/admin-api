@@ -2088,8 +2088,10 @@ Route::match(['GET', 'DELETE'], '/mcp', [\App\Http\Controllers\Api\McpController
    lectura (`whatsapp.read`) y otro de envío (`whatsapp.send`). Con `mcp.whatsapp_enabled = false` (el default) dan 404. */
 Route::post('/mcp/whatsapp', [\App\Http\Controllers\Api\McpController::class, 'mensaje_whatsapp'])->withoutMiddleware('throttle:api')->middleware('throttle:mcp-endpoint');
 Route::post('/mcp/whatsapp-envio', [\App\Http\Controllers\Api\McpController::class, 'mensaje_whatsapp_envio'])->withoutMiddleware('throttle:api')->middleware('throttle:mcp-endpoint');
-Route::match(['GET', 'DELETE'], '/mcp/whatsapp', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_whatsapp']);
-Route::match(['GET', 'DELETE'], '/mcp/whatsapp-envio', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_whatsapp']);
+Route::get('/mcp/whatsapp', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_whatsapp']);
+Route::delete('/mcp/whatsapp', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_whatsapp']);
+Route::get('/mcp/whatsapp-envio', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_whatsapp']);
+Route::delete('/mcp/whatsapp-envio', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_whatsapp']);
 
 // Debug: control del tiempo virtual (solo accesible en local — el controller aborta 404 en producción)
 Route::get('/debug/virtual-time', [DebugVirtualTimeController::class, 'show']);
