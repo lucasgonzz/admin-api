@@ -7,6 +7,7 @@ use App\Models\Admin;
 use App\Models\AdminTask;
 use App\Models\Lead;
 use App\Models\LeadLlamada;
+use App\Models\LeadLlamadaGrabacion;
 use App\Models\LeadPipelineStatus;
 use App\Models\PipelineOpportunity;
 use App\Models\PipelineStage;
@@ -59,6 +60,9 @@ class LeadLlamadaService
 
     /** Caracteres de la transcripción de cada llamada en el contexto de Martín. */
     const TRANSCRIPCION_PARA_MARTIN = 1500;
+
+    /** Cuántos caracteres del resumen de una grabación (E3) ve Martín por llamada: el resumen ya viene acotado a 1.500. */
+    const RESUMEN_DE_GRABACION_PARA_MARTIN = 1500;
 
     /** @var TableroDeJuanService */
     private $tablero;
@@ -285,7 +289,7 @@ class LeadLlamadaService
      */
     public function a_json(LeadLlamada $llamada)
     {
-        $llamada->loadMissing(['admin', 'cargada_por']);
+        $llamada->loadMissing(['admin', 'cargada_por', 'grabacion']);
 
         return [
             'id'                   => (int) $llamada->id,
@@ -304,6 +308,9 @@ class LeadLlamadaService
             'cargada_por_admin_id' => $llamada->cargada_por_admin_id === null ? null : (int) $llamada->cargada_por_admin_id,
             'cargada_por'          => $llamada->cargada_por ? ['id' => (int) $llamada->cargada_por->id, 'name' => (string) $llamada->cargada_por->name] : null,
             'transcripcion'        => $llamada->transcripcion,
+            /* La grabación de la llamada (E3), sin su transcripción completa: esa se pide con `GET …/grabacion` al desplegarla. Aditivo:
+               una llamada sin grabación trae `grabacion: null`. */
+            'grabacion'            => $llamada->grabacion ? app(LeadLlamadaGrabacionService::class)->a_json($llamada->grabacion, false) : null,
             'created_at'           => $llamada->created_at ? $llamada->created_at->format('Y-m-d H:i:s') : null,
         ];
     }
@@ -340,6 +347,14 @@ class LeadLlamadaService
             return '';
         }
 
+        /* Resúmenes de las grabaciones ya transcriptas (E3), de una sola consulta: `llamada_id => resumen`. */
+        $resumenes = LeadLlamadaGrabacion::query()
+            ->whereIn('lead_llamada_id', $llamadas->pluck('id')->all())
+            ->where('status', LeadLlamadaGrabacion::STATUS_LISTA)
+            ->whereNotNull('resumen')
+            ->orderBy('id')
+            ->pluck('resumen', 'lead_llamada_id');
+
         $lineas = ['LLAMADAS DEL EQUIPO (Juan):'];
         foreach ($llamadas as $llamada) {
             $partes = [
@@ -355,7 +370,10 @@ class LeadLlamadaService
             if ((string) $llamada->notas !== '') {
                 $partes[] = 'Notas: ' . $this->recortar((string) $llamada->notas, self::NOTAS_PARA_MARTIN);
             }
-            if ((string) $llamada->transcripcion !== '') {
+            if (isset($resumenes[$llamada->id]) && trim((string) $resumenes[$llamada->id]) !== '') {
+                /* La llamada se grabó y se transcribió: Martín lee el RESUMEN (hasta 1.500 caracteres), no la transcripción de una hora. */
+                $partes[] = 'Resumen de la grabación: ' . $this->recortar(trim((string) $resumenes[$llamada->id]), self::RESUMEN_DE_GRABACION_PARA_MARTIN);
+            } elseif ((string) $llamada->transcripcion !== '') {
                 $partes[] = 'Transcripción: ' . $this->recortar((string) $llamada->transcripcion, self::TRANSCRIPCION_PARA_MARTIN);
             }
             $lineas[] = '- ' . implode(' · ', $partes);

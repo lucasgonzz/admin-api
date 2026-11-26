@@ -447,6 +447,24 @@ class Kernel extends ConsoleKernel
         ))
             ->everyMinute()
             ->runInBackground();
+
+        /*
+         * Worker de la cola `transcripciones` (misión leads-referidos-compromisos, E3, 26/11/2026): transcribir la grabación de una
+         * llamada de Juan son varios pedidos a OpenAI y una llamada larga tarda varios minutos. Cola y worker propios para que no
+         * demore a los demás jobs (ni al revés).
+         *
+         * 🔴 `--timeout=1500` (25 minutos) es el mismo número que `TranscribirGrabacionDeLlamadaJob::$timeout`, y los dos tienen que
+         * quedar DEBAJO del `retry_after` de la conexión `database` (2400, `config/queue.php`): si no, el job se vuelve a ofrecer mientras
+         * sigue corriendo. Sin `--timeout` el worker usaría 60 s y mataría la transcripción a la mitad.
+         * 🔴 `--queue=…` va en el MEDIO del comando a propósito, igual que el del asistente: así el texto
+         * `queue:work database --stop-when-empty` sigue identificando a UN solo evento (el worker de `default`), que es lo que fija
+         * `SchedulerSinElLockDelCronTest`. Sin `withoutOverlapping()` por el mismo motivo que los otros: serializaría la cola.
+         */
+        $schedule->exec(self::artisan_sin_el_lock_del_cron(
+            'queue:work database --queue=' . \App\Models\LeadLlamadaGrabacion::COLA . ' --timeout=1500 --stop-when-empty'
+        ))
+            ->everyMinute()
+            ->runInBackground();
     }
 
     /**
