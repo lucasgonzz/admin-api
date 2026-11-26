@@ -288,6 +288,9 @@ class WhatsappPersonalEnvioService
         $sender = new WhatsappSendService();
         // 🔴 `para()` y NO `paraProposito()`: este último cae al principal si el canal no está listo.
         $sender->para($personal);
+        // 🔴 Un envío = UN POST: sin el `retry()` de Laravel, que ante un timeout de lectura o un 5xx repetiría el
+        // POST y el cliente podría recibir el mensaje dos veces. La falla termina en `incierto` y no se reenvía sola.
+        $sender->sin_reintentos();
 
         $this->silenciar_avisos_a_admins();
         try {
