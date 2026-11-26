@@ -210,6 +210,14 @@ class LeadAiSuggestionScheduler
             return true;
         }
 
+        /* 🔴 Un lead que llegó por otro medio (referido, WhatsApp personal, llamada) tampoco pasa por el onboarding: el
+           evento de su alta ya es historial en el hilo. Sin esto su primer mensaje quedaba SIN RESPUESTA (misión
+           leads-referidos-compromisos, PLAN §1.2). */
+        $lead = Lead::query()->find($lead_id);
+        if ($lead !== null && LeadOrigenService::es_externo($lead)) {
+            return true;
+        }
+
         return LeadFlujoEntradaService::ia_contesta_el_primer_mensaje($lead_id);
     }
 

@@ -464,6 +464,11 @@ class LeadFlujoEntradaService
             if ($datos['paso'] !== 1) {
                 continue;
             }
+            /* A quien llegó por otro medio (referido, WhatsApp personal) no se le vuelve a presentar ComercioCity: ya
+               sabe qué es y el recurso `referidos` lo prohíbe. El resto del flujo sigue igual. */
+            if ($punto === 'presentacion' && LeadOrigenService::es_externo($lead)) {
+                continue;
+            }
             if (isset($entregados[$punto])) {
                 $ultimo_del_paso_1 = max($ultimo_del_paso_1, $entregados[$punto]);
             } else {
