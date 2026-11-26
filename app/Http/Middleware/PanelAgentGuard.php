@@ -27,6 +27,9 @@ use Illuminate\Support\Facades\RateLimiter;
  */
 class PanelAgentGuard
 {
+    /** Lo que se guarda en la auditoría en lugar del contenido de un chat privado. */
+    const TEXTO_OMITIDO = '[omitido: chat privado]';
+
     /** @var PanelAgentOperationClassifier Única fuente de categorías de las operaciones. */
     private $classifier;
 
@@ -85,6 +88,8 @@ class PanelAgentGuard
         $category = $this->classifier->classify($method, $route->uri(), $payload);
         $braked   = $this->classifier->is_braked($category);
         $started  = microtime(true);
+        // 🔴 Rutas de chats privados: la auditoría guarda que pasó, no qué se dijo (ver `sin_contenido_en_auditoria`).
+        $omitir   = $this->sin_contenido($method, $route);
 
         // Throttle propio del agente: se mide antes de abrir la auditoría, que igual registra el corte.
         $throttle_key = 'panel-agent:' . $user->id;
@@ -98,7 +103,7 @@ class PanelAgentGuard
         $confirm_code = $request->header('X-Agente-Confirmar');
 
         // Fila de auditoría abierta ANTES de ejecutar. Si no se puede: un GET sigue, el resto se cierra (fail-closed).
-        $log = $this->open_audit($request, $route, $user, $method, $category, $braked, $dry_run, $payload);
+        $log = $this->open_audit($request, $route, $user, $method, $category, $braked, $dry_run, $payload, $omitir);
         if ($log === false) {
             if ($method !== 'GET') {
                 return response()->json([
@@ -111,7 +116,7 @@ class PanelAgentGuard
 
         if ($throttled) {
             $retry_in = RateLimiter::availableIn($throttle_key);
-            $this->close_audit($log, 'frenada', 429, '{"code":"agente_throttle"}', $started);
+            $this->close_audit($log, 'frenada', 429, '{"code":"agente_throttle"}', $started, false, $omitir);
 
             return response()->json([
                 'code'          => 'agente_throttle',
@@ -123,7 +128,7 @@ class PanelAgentGuard
         // Una operación excluida nunca se ejecuta con un token de agente.
         if ($category === 'excluida') {
             $preview = $this->preview($request, $route, $category, true, 'agente_excluida', $payload, false);
-            $this->close_audit($log, 'excluida', 403, $this->redactor->to_json_excerpt($preview, $this->excerpt_limit()), $started);
+            $this->close_audit($log, 'excluida', 403, $this->redactor->to_json_excerpt($preview, $this->excerpt_limit()), $started, false, $omitir);
 
             return response()->json($preview, 403);
         }
@@ -131,7 +136,7 @@ class PanelAgentGuard
         // Dry run (cualquier categoría): se muestra qué haría, sin ejecutar.
         if ($dry_run) {
             $preview = $this->preview($request, $route, $category, $braked, 'agente_dry_run', $payload, $braked);
-            $this->close_audit($log, 'dry_run', 200, $this->redactor->to_json_excerpt($preview, $this->excerpt_limit()), $started);
+            $this->close_audit($log, 'dry_run', 200, $this->redactor->to_json_excerpt($preview, $this->excerpt_limit()), $started, false, $omitir);
 
             return response()->json($preview, 200);
         }
@@ -148,7 +153,7 @@ class PanelAgentGuard
                     // Aviso explícito: el código ya se usó, éste es un preview nuevo con otro código.
                     $preview['confirmacion_usada'] = true;
                 }
-                $this->close_audit($log, 'frenada', 428, $this->redactor->to_json_excerpt($preview, $this->excerpt_limit()), $started);
+                $this->close_audit($log, 'frenada', 428, $this->redactor->to_json_excerpt($preview, $this->excerpt_limit()), $started, false, $omitir);
 
                 return response()->json($preview, 428);
             }
@@ -158,11 +163,11 @@ class PanelAgentGuard
         try {
             $response = $next($request);
         } catch (\Throwable $exception) {
-            $this->close_audit($log, 'ejecutada', 500, '[excepción: ' . get_class($exception) . ']', $started, $confirmed);
+            $this->close_audit($log, 'ejecutada', 500, '[excepción: ' . get_class($exception) . ']', $started, $confirmed, $omitir);
             throw $exception;
         }
 
-        $this->close_audit($log, 'ejecutada', (int) $response->getStatusCode(), $this->response_excerpt($response), $started, $confirmed);
+        $this->close_audit($log, 'ejecutada', (int) $response->getStatusCode(), $this->response_excerpt($response), $started, $confirmed, $omitir);
 
         return $response;
     }
@@ -178,9 +183,10 @@ class PanelAgentGuard
      * @param  bool    $braked   Si la categoría frena.
      * @param  bool    $dry_run  Si el agente pidió dry run.
      * @param  array<string, mixed> $payload Query + body sin redactar.
+     * @param  bool    $omitir   Si es una ruta de chat privado: no se guarda payload, motivo ni teléfonos del path.
      * @return PanelAgentAuditLog|false La fila abierta, o false si no se pudo abrir.
      */
-    private function open_audit(Request $request, Route $route, Admin $user, string $method, string $category, bool $braked, bool $dry_run, array $payload)
+    private function open_audit(Request $request, Route $route, Admin $user, string $method, string $category, bool $braked, bool $dry_run, array $payload, bool $omitir = false)
     {
         try {
             return $this->logger->open([
@@ -190,14 +196,16 @@ class PanelAgentGuard
                 'method'          => $method,
                 'route_uri'       => $this->redactor->clean_text($this->classifier->panel_path($route->uri()), 255),
                 // El path viene del pedido: puede traer bytes que no son UTF-8, y la columna es utf8mb4 estricta.
-                'path'            => $this->redactor->clean_text($request->path(), 500),
+                'path'            => $this->redactor->clean_text($omitir ? $this->path_sin_telefonos($request->path()) : $request->path(), 500),
                 'route_name'      => $route->getName() ? $this->redactor->clean_text($route->getName(), 150) : null,
                 'action'          => $this->redactor->clean_text($this->classifier->action_label($route), 200),
                 'category'        => $category,
                 'braked'          => $braked,
                 'dry_run'         => $dry_run,
-                'reason'          => $this->header_or_null($request, 'X-Agente-Motivo', 500),
-                'request_payload' => $this->redactor->to_json_excerpt($payload, (int) config('panel_agent.payload_max_chars', 20000)),
+                'reason'          => $omitir ? null : $this->header_or_null($request, 'X-Agente-Motivo', 500),
+                'request_payload' => $omitir
+                    ? self::TEXTO_OMITIDO
+                    : $this->redactor->to_json_excerpt($payload, (int) config('panel_agent.payload_max_chars', 20000)),
                 'ip'              => $request->ip(),
             ]);
         } catch (\Throwable $exception) {
@@ -216,12 +224,17 @@ class PanelAgentGuard
      * @param  string|null             $excerpt     Extracto redactado de la respuesta.
      * @param  float                   $started     microtime(true) del inicio.
      * @param  bool                    $confirmed   Si se ejecutó con código de confirmación.
+     * @param  bool                    $omitir      Si es una ruta de chat privado: el extracto se reemplaza por una nota.
      * @return void
      */
-    private function close_audit($log, string $result, int $status_code, $excerpt, float $started, bool $confirmed = false): void
+    private function close_audit($log, string $result, int $status_code, $excerpt, float $started, bool $confirmed = false, bool $omitir = false): void
     {
         if ($log === null) {
             return;
+        }
+
+        if ($omitir) {
+            $excerpt = self::TEXTO_OMITIDO;
         }
 
         try {
@@ -303,6 +316,40 @@ class PanelAgentGuard
     private function excerpt_limit(): int
     {
         return (int) config('panel_agent.response_excerpt_chars', 2000);
+    }
+
+    /**
+     * Si la ruta es de un chat privado (`panel_agent.sin_contenido_en_auditoria`): el texto de los mensajes ni los
+     * teléfonos pueden quedar copiados en la auditoría.
+     *
+     * @param  string $method Verbo.
+     * @param  Route  $route  Ruta resuelta.
+     * @return bool
+     */
+    private function sin_contenido(string $method, Route $route): bool
+    {
+        $clave = $method . ' ' . $this->classifier->panel_path($route->uri());
+
+        foreach ((array) config('panel_agent.sin_contenido_en_auditoria', []) as $patron) {
+            if (@preg_match($patron, $clave) === 1) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Path del pedido con los teléfonos tapados (queda sólo el final), para la auditoría de un chat privado.
+     *
+     * @param  string $path Path real, p. ej. `api/admin/whatsapp-personal/chats/%2B5493412345678/mensajes`.
+     * @return string
+     */
+    private function path_sin_telefonos(string $path): string
+    {
+        return (string) preg_replace_callback('/\d{8,}/', function (array $coincidencia) {
+            return '***' . substr($coincidencia[0], -4);
+        }, $path);
     }
 
     /**
