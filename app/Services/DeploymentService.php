@@ -6171,8 +6171,17 @@ class DeploymentService
      * 🔴 Si no se puede saber con certeza, NO suelta: es preferible que lo suelte el vencimiento antes
      * que soltarlo con el sistema tocado. Por eso:
      *
-     *  - no suelta si ya hay una línea "liberado" como último movimiento del aviso (G5 ya lo hizo: sin
-     *    esto, `failed()` repetiría el PUT después de un fallo de `run()` ya manejado).
+     *  - 🔴 no suelta si hay OTRO upgrade del mismo cliente en curso (`running`, `paused` o
+     *    `paused_post_tasks`): el aviso es UNO por dueño y `libre` ignora `upgrade_id`, así que soltarlo
+     *    desde acá le soltaría el aviso al otro, que puede estar en migraciones (caso: el candado lo tiene
+     *    A, el job de B vence el `block(10)` y su `failed()` miraba sólo los logs de B);
+     *  - no suelta si, en la CORRIDA ACTUAL, ya hay una línea "liberado" como último movimiento del aviso
+     *    (G5 ya lo hizo: sin esto, `failed()` repetiría el PUT después de un fallo de `run()` ya manejado).
+     *    Se mira sólo desde el inicio de esta corrida —`deployment_running_since`, el ancla que estampan
+     *    TODOS los caminos que arrancan un deployment (panel, `claude/upgrades` y soporte)—: una
+     *    reanudación conserva los logs, y el "liberado" de un intento anterior no puede impedir soltar el
+     *    aviso renovado. Sin ancla (no ocurre en producción) se miran todos los logs. Las señales de
+     *    "sistema tocado" NO se acotan a la corrida: lo que el sistema vivo ya sufrió sigue siendo verdad.
      *
      * El camino del candado tomado por otro proceso NO lo llama: ese proceso es el dueño de la corrida.
      *
@@ -6187,10 +6196,25 @@ class DeploymentService
                 return;
             }
 
-            $ultimo_movimiento = DeploymentLog::where('client_version_upgrade_id', $this->upgrade->id)
-                ->where('line', 'like', 'Aviso de actualización:%')
-                ->orderByDesc('id')
-                ->value('line');
+            $otro_en_curso = ClientVersionUpgrade::where('client_id', $this->upgrade->client_id)
+                ->where('id', '!=', $this->upgrade->id)
+                ->whereIn('deployment_status', ['running', 'paused', 'paused_post_tasks'])
+                ->exists();
+            if ($otro_en_curso) {
+                return;
+            }
+
+            $movimientos = DeploymentLog::where('client_version_upgrade_id', $this->upgrade->id)
+                ->where('line', 'like', 'Aviso de actualización:%');
+
+            $inicio_de_la_corrida = $this->upgrade->deployment_running_since !== null
+                ? $this->upgrade->deployment_running_since
+                : $this->upgrade->deployment_started_at;
+            if ($inicio_de_la_corrida !== null) {
+                $movimientos->where('created_at', '>=', $inicio_de_la_corrida);
+            }
+
+            $ultimo_movimiento = $movimientos->orderByDesc('id')->value('line');
             if ($ultimo_movimiento !== null && strpos((string) $ultimo_movimiento, 'Aviso de actualización: liberado') === 0) {
                 return;
             }

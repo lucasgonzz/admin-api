@@ -212,7 +212,10 @@ class RunDeploymentJob implements ShouldQueue
         /* Aviso de actualización: el worker mató el job (timeout) o la cola lo dio por agotado, y run() no
            llegó a su G5. Se suelta si el sistema vivo no se tocó. */
         try {
-            (new DeploymentService($upgrade))->aviso_soltar_si_no_se_toco();
+            /* Con LockTimeoutException este job nunca tuvo el candado: el aviso es de quien lo tiene. */
+            if (! ($e instanceof LockTimeoutException)) {
+                (new DeploymentService($upgrade))->aviso_soltar_si_no_se_toco();
+            }
         } catch (\Throwable $ignorado) {
             /* El aviso nunca puede romper el cierre de un job fallado. */
         }
