@@ -117,7 +117,7 @@ class OficinaIngestPorClaudeTest extends TestCase
         $respuesta = $this->postJson('/api/claude/local/oficina', $this->reporte(), $this->headers());
 
         $respuesta->assertStatus(200);
-        $this->assertSame(['ok', 'recibido_at', 'slots'], array_keys($respuesta->json()));
+        $this->assertSame(['ok', 'recibido_at', 'slots', 'misiones', 'contrato'], array_keys($respuesta->json()));
         $this->assertTrue($respuesta->json('ok'));
         $this->assertSame(35, $respuesta->json('slots'));
         $this->assertMatchesRegularExpression('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/', $respuesta->json('recibido_at'));
