@@ -105,6 +105,9 @@ class LeadCompromisoService
     /** Tope de caracteres de lo que dijo el lead (la columna es string(500)). */
     const MAX_CITA = 500;
 
+    /** Tope de caracteres del momento (la columna es string(100)). */
+    const MAX_MOMENTO = 100;
+
     /** Cuántos compromisos trae el listado de un lead. */
     const LIMITE_DEL_LISTADO = 50;
 
@@ -202,6 +205,7 @@ class LeadCompromisoService
             'origen_id'            => $compromiso->origen_id,
             'resumen'              => $compromiso->resumen,
             'cita_del_lead'        => $compromiso->cita_del_lead,
+            'momento'              => $compromiso->momento,
             'status'               => (string) $compromiso->status,
             'resultado'            => $compromiso->resultado,
             'admin_task_id'        => $compromiso->admin_task_id,
@@ -281,7 +285,7 @@ class LeadCompromisoService
      * @param string|null          $accion_vigente  La acción que ya tiene el compromiso que se está editando (sirve para la
      *                                              hora por defecto cuando el pedido no trae `accion`).
      *
-     * @return array{vence_at: Carbon, accion: string, resumen: string, cita_del_lead: string|null}
+     * @return array{vence_at: Carbon, accion: string, resumen: string, cita_del_lead: string|null, momento: string|null}
      *
      * @throws PipelineRuleException 422 con `errors.vence_at` y/o `errors.accion`.
      */
@@ -302,12 +306,14 @@ class LeadCompromisoService
 
         $resumen = isset($datos['resumen']) ? trim((string) $datos['resumen']) : '';
         $cita    = isset($datos['cita_del_lead']) ? trim((string) $datos['cita_del_lead']) : '';
+        $momento = isset($datos['momento']) ? trim((string) preg_replace('/\s+/u', ' ', (string) $datos['momento'])) : '';
 
         return [
             'vence_at'      => $vence_at,
             'accion'        => $accion,
             'resumen'       => mb_substr($resumen, 0, self::MAX_RESUMEN),
             'cita_del_lead' => $cita !== '' ? mb_substr($cita, 0, self::MAX_CITA) : null,
+            'momento'       => $momento !== '' ? mb_substr($momento, 0, self::MAX_MOMENTO) : null,
         ];
     }
 
@@ -406,6 +412,7 @@ class LeadCompromisoService
                 'origen_id'           => $origen_id,
                 'resumen'             => $limpios['resumen'],
                 'cita_del_lead'       => $limpios['cita_del_lead'],
+                'momento'             => $limpios['momento'],
                 'status'              => LeadCompromiso::STATUS_VIGENTE,
                 'created_by_admin_id' => $admin_id !== null ? (int) $admin_id : null,
                 'sin_envio_automatico' => $sin_envio_automatico,
@@ -477,6 +484,10 @@ class LeadCompromisoService
         }
         if (array_key_exists('resumen', $datos)) {
             $compromiso->resumen = mb_substr(trim((string) $datos['resumen']), 0, self::MAX_RESUMEN);
+        }
+        if (array_key_exists('momento', $datos)) {
+            $momento = trim((string) preg_replace('/\s+/u', ' ', (string) $datos['momento']));
+            $compromiso->momento = $momento !== '' ? mb_substr($momento, 0, self::MAX_MOMENTO) : null;
         }
         if (array_key_exists('cita_del_lead', $datos)) {
             $cita = trim((string) $datos['cita_del_lead']);
@@ -950,6 +961,7 @@ class LeadCompromisoService
                 'accion'        => $decision['accion'],
                 'resumen'       => (string) $compromiso->resumen,
                 'cita_del_lead' => $compromiso->cita_del_lead,
+                'momento'       => null,
                 'origen'        => LeadCompromiso::ORIGEN_REEVALUACION,
                 'origen_id'     => (int) $compromiso->id,
             ], null, ['sin_envio_automatico' => (bool) $compromiso->sin_envio_automatico]);
@@ -1142,8 +1154,8 @@ class LeadCompromisoService
 
     /**
      * Las variables y el texto de la plantilla del compromiso, completos de punta a punta. {{1}} es el primer nombre (la regla de
-     * siempre); cualquier otra variable lleva lo que dijo el lead tal cual (`cita_del_lead`), que es lo que pide
-     * `cc_coord_dia_acordado` ({{2}} = el momento en sus palabras).
+     * siempre); cualquier otra variable lleva el MOMENTO del compromiso («el viernes a la mañana»), que es lo que pide
+     * `cc_coord_dia_acordado` ({{2}}); la cita textual no sirve para eso.
      *
      * 🔴 Es la ÚNICA definición de qué se ve y qué sale: la usa quien arma la sugerencia y la usa el envío al aprobarla
      * ({@see self::armar_para_el_envio()}), así lo que lee Juan es lo que recibe el lead. Si no se puede completar (cuerpo vacío o
@@ -1162,19 +1174,25 @@ class LeadCompromisoService
             return null;
         }
 
+        /* Con `esperar` el que había quedado en escribir era el lead: «Te escribo como quedamos» sería falso. */
+        if ($compromiso !== null && (string) $compromiso->accion === LeadCompromiso::ACCION_ESPERAR) {
+            return null;
+        }
+
         $huecos  = is_array($plantilla->variables) ? array_values($plantilla->variables) : [];
         $valores = array_values(app(LeadFollowupService::class)->build_template_variables($plantilla, $lead));
 
-        /* Meta rechaza saltos de línea y espacios repetidos en una variable: se acomoda lo que dijo el lead. */
-        $cita = $compromiso !== null ? trim((string) preg_replace('/\s+/u', ' ', (string) $compromiso->cita_del_lead)) : '';
-        $cita = mb_substr($cita, 0, 100);
+        /* Los huecos que no son el nombre piden «el momento que propuso el lead, en sus palabras» (`cc_coord_dia_acordado`): se llenan
+           SÓLO con el momento del compromiso, nunca con la cita (que es la frase entera: «el martes te escribo»). Sin momento, la
+           plantilla no se usa. */
+        $momento = $compromiso !== null ? trim((string) $compromiso->momento) : '';
 
         $variables = [];
         $texto     = $cuerpo;
         foreach ($huecos as $indice => $hueco) {
             $valor = isset($valores[$indice]) ? trim((string) $valores[$indice]) : '';
             if ($valor === '' && $indice > 0) {
-                $valor = $cita;
+                $valor = $momento;
             }
             if ($valor === '' || ! isset($hueco['placeholder'])) {
                 return null;

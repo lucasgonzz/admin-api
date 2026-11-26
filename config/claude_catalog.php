@@ -1460,6 +1460,7 @@ return [
                 ['nombre' => 'accion', 'obligatorio' => true, 'validacion' => 'required|in:llamar,escribir,esperar', 'que_es' => 'llamar = Juan lo llama; escribir = Martín le escribe; esperar = el lead iba a avisar y, si no avisa, Martín lo retoma.'],
                 ['nombre' => 'resumen', 'obligatorio' => false, 'validacion' => 'nullable|string|max:2000', 'que_es' => 'Qué hay que hacer y de qué se habló. Lo lee Juan en su tarea y Martín en su contexto.'],
                 ['nombre' => 'cita_del_lead', 'obligatorio' => false, 'validacion' => 'nullable|string|max:500', 'que_es' => 'Lo que dijo el lead, tal cual («el martes te escribo»).'],
+                ['nombre' => 'momento', 'obligatorio' => false, 'validacion' => 'nullable|string|max:100', 'que_es' => 'SÓLO el momento, en palabras del lead y sin verbo («el viernes a la mañana»). Es lo que va en la plantilla de WhatsApp si la ventana de 24 h está cerrada; sin él, la plantilla no se usa y le queda una tarea a Juan.'],
                 ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Sin dry_run=false explícito no se escribe nada.'],
             ],
         ],

@@ -79,7 +79,7 @@ class RondaDosDeRevisionDeE2Test extends BaseDeReferidosYCompromisos
         $lead = $this->lead_de_ro(array_merge(['phone' => '+54935113' . random_int(10000, 99999)], $atributos));
         $this->entrante_a_las($lead, 'Dale, lo vemos el viernes.', '2026-11-24 11:00:00');
         $fila = $this->crear_compromiso_por_el_panel($lead, [
-            'vence_at' => self::VIERNES, 'accion' => 'escribir', 'resumen' => 'Retomar la demo.', 'cita_del_lead' => $cita,
+            'vence_at' => self::VIERNES, 'accion' => 'escribir', 'resumen' => 'Retomar la demo.', 'cita_del_lead' => $cita, 'momento' => $cita,
         ]);
 
         return [$lead->fresh(), $fila];

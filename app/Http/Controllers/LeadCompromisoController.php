@@ -84,7 +84,7 @@ class LeadCompromisoController extends Controller
     {
         $compromiso = LeadCompromiso::query()->findOrFail((int) $id);
 
-        $compromiso = $servicio->actualizar($compromiso, $request->only(['vence_at', 'accion', 'resumen', 'cita_del_lead']), $request->user() !== null ? (int) $request->user()->id : null);
+        $compromiso = $servicio->actualizar($compromiso, $request->only(['vence_at', 'accion', 'resumen', 'cita_del_lead', 'momento']), $request->user() !== null ? (int) $request->user()->id : null);
 
         return response()->json(['model' => $servicio->a_json($compromiso)], 200);
     }

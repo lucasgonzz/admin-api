@@ -56,6 +56,10 @@ class CreateLeadCompromisosTable extends Migration
             $table->text('resumen')->nullable();
             $table->string('cita_del_lead', 500)->nullable();
 
+            // El momento en palabras, corto y sin verbo («el viernes a la mañana»): es lo único que va en el {{2}} de la plantilla
+            // cc_coord_dia_acordado. La cita es la frase textual y NO sirve para eso.
+            $table->string('momento', 100)->nullable();
+
             // vigente | procesando | ejecutado | reprogramado | reemplazado | cumplido | cancelado | revisar.
             $table->string('status', 15)->default('vigente');
 

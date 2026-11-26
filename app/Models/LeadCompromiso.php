@@ -18,6 +18,7 @@ use Illuminate\Database\Eloquent\Model;
  * @property int|null            $origen_id                 Llamada, mensaje o compromiso que lo originó, según el origen.
  * @property string|null         $resumen
  * @property string|null         $cita_del_lead             Lo que dijo el lead, tal cual.
+ * @property string|null         $momento                   El momento en palabras («el viernes a la mañana»), para la plantilla.
  * @property string              $status                    Uno de {@see self::STATUSES}.
  * @property int|null            $baseline_lead_message_id  Huella: último mensaje del hilo al crearlo.
  * @property int|null            $baseline_llamada_id       Huella: última llamada al crearlo.

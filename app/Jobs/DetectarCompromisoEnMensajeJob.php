@@ -107,6 +107,7 @@ class DetectarCompromisoEnMensajeJob implements ShouldQueue
                 'accion'        => $deteccion['accion'],
                 'resumen'       => $this->resumen_para($deteccion['accion'], (string) $deteccion['cita']),
                 'cita_del_lead' => $deteccion['cita'],
+                'momento'       => $deteccion['momento'],
                 'origen'        => LeadCompromiso::ORIGEN_IA_MENSAJE,
                 'origen_id'     => (int) $mensaje->id,
             ], null);
