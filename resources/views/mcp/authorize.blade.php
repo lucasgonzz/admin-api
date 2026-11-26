@@ -19,6 +19,8 @@
         p { margin: 0 0 12px; line-height: 1.45; }
         .solo-lectura { display: inline-block; font-size: 13px; font-weight: 600; padding: 3px 10px; border-radius: 999px;
                         background: #e3f6ea; color: #14683a; margin-bottom: 14px; }
+        .envio { display: inline-block; font-size: 13px; font-weight: 600; padding: 3px 10px; border-radius: 999px;
+                 background: #fff1d6; color: #8a5300; margin-bottom: 14px; }
         .destino { font-size: 14px; color: #52606d; }
         label { display: block; font-size: 14px; font-weight: 600; margin: 12px 0 4px; }
         input[type=text], input[type=password] { width: 100%; padding: 10px 12px; font-size: 16px; border: 1px solid #c4ccd4;
@@ -34,6 +36,7 @@
             .destino { color: #9aa5b1; }
             input[type=text], input[type=password] { background: #111418; border-color: #3e4c59; }
             .solo-lectura { background: #123d28; color: #8fe0b0; }
+            .envio { background: #4a3406; color: #ffd37a; }
             .error { background: #4a1d1d; color: #ffb3b3; }
             .negar { border-color: #3e4c59; }
         }
@@ -47,9 +50,19 @@
         <p class="destino">Cerrá esta pestaña y volvé a intentar la conexión desde ChatGPT.</p>
     @else
         <h1>Conectar ComercioCity</h1>
-        <span class="solo-lectura">Sólo lectura</span>
-        <p><strong>{{ $cliente->client_name ?: 'Una aplicación' }}</strong> quiere leer el estado de tus misiones, del Workboard,
-           de las tareas de OpenClaw y de tu Agenda. <strong>Sólo lectura</strong>: no puede cambiar nada.</p>
+        @if(($perfil ?? 'consulta') === 'whatsapp_lectura')
+            <span class="solo-lectura">Leer tu WhatsApp</span>
+            <p><strong>{{ $cliente->client_name ?: 'Una aplicación' }}</strong> quiere leer tu WhatsApp personal y el del número de
+               ComercioCity (leads y soporte). No marca nada como leído ni puede enviar.</p>
+        @elseif(($perfil ?? 'consulta') === 'whatsapp_envio')
+            <span class="envio">Enviar mensajes de WhatsApp</span>
+            <p><strong>{{ $cliente->client_name ?: 'Una aplicación' }}</strong> quiere enviar mensajes de WhatsApp desde tu número
+               personal. Cada envío te pide confirmación y respeta los topes del número.</p>
+        @else
+            <span class="solo-lectura">Sólo lectura</span>
+            <p><strong>{{ $cliente->client_name ?: 'Una aplicación' }}</strong> quiere leer el estado de tus misiones, del Workboard,
+               de las tareas de OpenClaw y de tu Agenda. <strong>Sólo lectura</strong>: no puede cambiar nada.</p>
+        @endif
         <p class="destino">Al permitir, vas a volver a <strong>{{ $host }}</strong>.</p>
 
         @if($error)

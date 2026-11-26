@@ -2084,6 +2084,14 @@ Route::post('/mcp/oauth/register', [\App\Http\Controllers\Api\McpOauthController
 Route::post('/mcp/oauth/token', [\App\Http\Controllers\Api\McpOauthController::class, 'token_json'])->withoutMiddleware('throttle:api')->middleware('throttle:mcp-token');
 Route::post('/mcp', [\App\Http\Controllers\Api\McpController::class, 'mensaje'])->withoutMiddleware('throttle:api')->middleware('throttle:mcp-endpoint');
 Route::match(['GET', 'DELETE'], '/mcp', [\App\Http\Controllers\Api\McpController::class, 'no_permitido']);
+/* WhatsApp directo desde Dotin/ChatGPT (misión dotin-whatsapp-admin, 26/11/2026): dos recursos OAuth separados, uno de
+   lectura (`whatsapp.read`) y otro de envío (`whatsapp.send`). Con `mcp.whatsapp_enabled = false` (el default) dan 404. */
+Route::post('/mcp/whatsapp', [\App\Http\Controllers\Api\McpController::class, 'mensaje_whatsapp'])->withoutMiddleware('throttle:api')->middleware('throttle:mcp-endpoint');
+Route::post('/mcp/whatsapp-envio', [\App\Http\Controllers\Api\McpController::class, 'mensaje_whatsapp_envio'])->withoutMiddleware('throttle:api')->middleware('throttle:mcp-endpoint');
+Route::get('/mcp/whatsapp', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_whatsapp']);
+Route::delete('/mcp/whatsapp', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_whatsapp']);
+Route::get('/mcp/whatsapp-envio', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_whatsapp']);
+Route::delete('/mcp/whatsapp-envio', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_whatsapp']);
 
 // Debug: control del tiempo virtual (solo accesible en local — el controller aborta 404 en producción)
 Route::get('/debug/virtual-time', [DebugVirtualTimeController::class, 'show']);

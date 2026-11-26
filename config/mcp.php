@@ -52,6 +52,36 @@ return [
      */
     'admin_emails' => (string) env('MCP_ADMIN_EMAILS', ''),
 
+    /*
+     | WhatsApp directo desde Dotin/ChatGPT (misión dotin-whatsapp-admin, 26/11/2026).
+     |
+     | 🔴 Nace APAGADO: con `whatsapp_enabled = false` los dos endpoints (`/api/mcp/whatsapp` y
+     | `/api/mcp/whatsapp-envio`), sus metadatos y sus scopes no existen y los tokens de WhatsApp ya emitidos dejan
+     | de servir. Se prende en el `.env` de producción (`MCP_WHATSAPP_ENABLED=true`) con el OK de Lucas.
+     */
+    'whatsapp_enabled' => (bool) env('MCP_WHATSAPP_ENABLED', false),
+
+    /* Recurso (audiencia de los tokens) del endpoint de LECTURA de WhatsApp: scope `whatsapp.read`. */
+    'whatsapp_read_resource' => rtrim((string) env('MCP_WHATSAPP_READ_RESOURCE', 'https://api-admin.comerciocity.com/api/mcp/whatsapp'), '/'),
+
+    /* Recurso (audiencia de los tokens) del endpoint de ENVÍO de WhatsApp: scope `whatsapp.send`. */
+    'whatsapp_send_resource' => rtrim((string) env('MCP_WHATSAPP_SEND_RESOURCE', 'https://api-admin.comerciocity.com/api/mcp/whatsapp-envio'), '/'),
+
+    /*
+     | Usuarios del admin (separados por coma) que pueden conectar los conectores de WhatsApp. 🔴 Vacío = NADIE
+     | (falla cerrada): son los chats personales de Lucas.
+     */
+    'whatsapp_admin_emails' => (string) env('MCP_WHATSAPP_ADMIN_EMAILS', ''),
+
+    /* Segundos de vida del código de confirmación de un envío (se prepara, Lucas confirma, se envía). */
+    'whatsapp_confirm_ttl_seg' => 600,
+
+    /* Cuentas que se pueden LEER por el conector (nunca `asistente`: son los dueños con su IA). */
+    'whatsapp_cuentas_lectura' => ['personal', 'principal'],
+
+    /* Cuentas desde las que se puede ENVIAR por el conector (el principal queda fuera: es de clientes y leads). */
+    'whatsapp_cuentas_envio' => ['personal'],
+
     /* Scope de lectura que otorga el conector. */
     'scope' => 'comerciocity.read',
 
