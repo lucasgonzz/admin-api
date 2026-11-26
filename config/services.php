@@ -649,13 +649,21 @@ return [
     // NO interviene: subir una grabación es un pedido explícito de Juan.
     //  - model: `gpt-4o-transcribe` se apaga el 26/2/2027 (guía de OpenAI): antes de esa fecha se prueba `gpt-transcribe` y se
     //    cambia esta variable del .env, sin tocar código.
-    //  - tramo_segundos: con ffmpeg el audio se parte en tramos de esta duración (600 = 10 minutos, los del ejemplo de la guía de
-    //    OpenAI). Si una transcripción vuelve cortada, se baja a 300.
+    //  - tramo_segundos / tramo_corto_segundos: con ffmpeg el audio se parte en tramos de la duración MENOR de las dos. El corto (300 s,
+    //    5 minutos) es el que manda: `gpt-4o-transcribe` documenta 2.000 tokens de salida y hay reportes de transcripciones cortadas en
+    //    silencio a los 8-9 minutos y de errores por duración, así que un tramo largo puede perder el final sin avisar.
+    //  - model_sin_ffmpeg: sin ffmpeg el archivo entero (hasta 24 MB) va a este modelo. `whisper-1` no tiene tope de salida (sólo 25 MB
+    //    por archivo), que es lo que hace falta cuando no se puede partir.
+    //  - max_output_tokens: guardia de corte. Si la respuesta de OpenAI trae `usage.output_tokens` igual o mayor a este número, se
+    //    considera cortada por el tope (el de `gpt-4o-transcribe` es 2.000) y nunca se guarda como transcripción completa.
     //  - max_bytes: tope del archivo que se acepta al subir (200 MB por defecto; `LEAD_CALL_RECORDING_MAX_MB` lo cambia).
     'openai_call_transcription' => [
-        'model'          => env('OPENAI_CALL_TRANSCRIPTION_MODEL', 'gpt-4o-transcribe'),
-        'tramo_segundos' => (int) env('OPENAI_CALL_TRANSCRIPTION_TRAMO_SEGUNDOS', 600),
-        'max_bytes'      => (int) env('LEAD_CALL_RECORDING_MAX_MB', 200) * 1048576,
+        'model'                => env('OPENAI_CALL_TRANSCRIPTION_MODEL', 'gpt-4o-transcribe'),
+        'model_sin_ffmpeg'     => env('OPENAI_CALL_TRANSCRIPTION_MODEL_SIN_FFMPEG', 'whisper-1'),
+        'tramo_segundos'       => (int) env('OPENAI_CALL_TRANSCRIPTION_TRAMO_SEGUNDOS', 600),
+        'tramo_corto_segundos' => (int) env('OPENAI_CALL_TRANSCRIPTION_TRAMO_CORTO_SEGUNDOS', 300),
+        'max_output_tokens'    => (int) env('OPENAI_CALL_TRANSCRIPTION_MAX_OUTPUT_TOKENS', 1800),
+        'max_bytes'            => (int) env('LEAD_CALL_RECORDING_MAX_MB', 200) * 1048576,
     ],
 
 ];
