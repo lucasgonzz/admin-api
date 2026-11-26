@@ -82,6 +82,29 @@ class ReleaseArtifactService
         return ($comparison['status'] ?? null) === 'ahead' && ($comparison['merge_base_commit']['sha'] ?? null) === $fix;
     }
 
+    /**
+     * Indica si el tag `v{version}` del repo contiene el commit (misión martin-descripcion-y-actualizaciones,
+     * 25/11/2026): GitHub compara `sha...v{version}` y responde `ahead` (el tag está adelante del commit) o
+     * `identical` (el tag ES ese commit). `behind` o `diverged` = la versión no lo trae.
+     *
+     * Lo usa `ClientUpgradeMarkService` para saber desde qué versión publicada un cliente marcado ya puede
+     * actualizarse. Lanza si GitHub falla (sin red, 401, 404 del tag…): el que llama cae a la fecha de publicación.
+     *
+     * @param string $repo    empresa-api | empresa-spa | tienda-api | tienda-spa.
+     * @param string $sha     Commit de la corrección (40 hex).
+     * @param string $version Número de versión sin la `v` (ej. 4.3.86).
+     *
+     * @return bool
+     *
+     * @throws \RuntimeException|\InvalidArgumentException
+     */
+    public function commit_in_tag(string $repo, string $sha, string $version): bool
+    {
+        $comparison = $this->support_metadata($repo, 'compare/' . $sha . '...' . rawurlencode('v' . $version));
+
+        return in_array($comparison['status'] ?? null, ['ahead', 'identical'], true);
+    }
+
     public function verify_support_release(string $repo, string $version, string $develop, string $trigger, string $tag_commit, array $artifact): bool
     {
         $tag = 'v' . $version;

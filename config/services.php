@@ -5,6 +5,15 @@ return [
         'enabled' => env('SUPPORT_CODEX_SCHEDULED_UPGRADES_ENABLED', false),
     ],
 
+    /*
+    | Coordinación de horarios de actualización con el negocio desde soporte (ventana, propuesta, reconfirmación,
+    | madrugada). Apagada por defecto desde el 25/11/2026 (misión martin-descripcion-y-actualizaciones): la
+    | corrección queda para la próxima actualización nocturna que programa Lucas. Encendida = comportamiento anterior.
+    */
+    'support_codex' => [
+        'upgrade_coordination' => env('SUPPORT_CODEX_UPGRADE_COORDINATION', false),
+    ],
+
     'support_erp_verifier' => [
         'key' => env('ADMIN_SUPPORT_ERP_VERIFIER_KEY'),
     ],
