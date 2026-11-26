@@ -961,7 +961,7 @@ class LeadFollowupService
      *
      * @return string Texto a registrar en LeadMessage::content.
      */
-    private function render_template_body(FollowupTemplate $template, Lead $lead): string
+    public function render_template_body(FollowupTemplate $template, Lead $lead): string
     {
         /* Texto literal de la plantilla (puede ser null si no fue cargado). */
         $body = trim((string) ($template->body_template ?? ''));

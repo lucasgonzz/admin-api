@@ -4,10 +4,13 @@ namespace App\Services;
 
 use App\Helpers\AppTime;
 use App\Models\AdminSetting;
+use App\Models\AdminTask;
+use App\Models\FollowupTemplate;
 use App\Models\Lead;
 use App\Models\LeadCompromiso;
 use App\Models\LeadLlamada;
 use App\Models\LeadMessage;
+use App\Models\LeadScheduledMessage;
 use App\Services\Pipelines\PipelineFieldsService;
 use App\Services\Pipelines\PipelineOpportunityService;
 use App\Services\Pipelines\PipelineRuleException;
@@ -694,5 +697,572 @@ class LeadCompromisoService
         }
 
         return 'llamar al lead';
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // La ejecución (el comando `leads:compromisos`, cada minuto)
+    // ------------------------------------------------------------------------------------------
+
+    /** `created_via` de las tareas que deja el motor. 🔴 `admin_tasks.created_via` es varchar(20): 17 caracteres entran, y el
+     *  prefijo `embudo_` hace que «Registrar llamada» la cierre sola. */
+    const CREATED_VIA_DE_LA_TAREA = 'embudo_compromiso';
+
+    /** `system_message_kind` de los mensajes que deja el motor. */
+    const KIND_DEL_MENSAJE = 'lead_compromiso';
+
+    /** Cuántos compromisos vencidos toma cada corrida del comando. */
+    const LOTE_POR_CORRIDA = 20;
+
+    /** Minutos que un compromiso puede estar «procesando» antes de darlo por colgado (la corrida murió). */
+    const MINUTOS_PARA_DAR_POR_COLGADO = 15;
+
+    /** Cuántas veces se reintenta un compromiso colgado antes de mandarlo a revisar. */
+    const INTENTOS_MAXIMOS = 3;
+
+    /**
+     * Una corrida del comando: recupera los compromisos colgados, toma los vencidos (hasta 20) y los ejecuta o re-evalúa.
+     * Con el motor apagado no hace nada.
+     *
+     * @return array{recuperados: int, tomados: int, ejecutados: int}
+     */
+    public function correr(): array
+    {
+        $estadisticas = ['recuperados' => 0, 'tomados' => 0, 'ejecutados' => 0];
+        if (! self::activo()) {
+            return $estadisticas;
+        }
+
+        $estadisticas['recuperados'] = $this->recuperar_los_colgados();
+
+        $vencidos = LeadCompromiso::query()
+            ->where('status', LeadCompromiso::STATUS_VIGENTE)
+            ->where('vence_at', '<=', AppTime::now())
+            ->orderBy('vence_at')
+            ->limit(self::LOTE_POR_CORRIDA)
+            ->pluck('id');
+
+        foreach ($vencidos as $id) {
+            /* 🔴 El candado contra corridas dobles: se toma con un UPDATE condicional. Una fila afectada = es mío; cero = otra
+               corrida (o una persona que lo reemplazó o canceló) se me adelantó. */
+            $tomado = LeadCompromiso::query()
+                ->where('id', (int) $id)
+                ->where('status', LeadCompromiso::STATUS_VIGENTE)
+                ->update(['status' => LeadCompromiso::STATUS_PROCESANDO, 'procesando_desde' => AppTime::now(), 'updated_at' => AppTime::now()]);
+            if ($tomado !== 1) {
+                continue;
+            }
+
+            $estadisticas['tomados']++;
+            $compromiso = LeadCompromiso::query()->find((int) $id);
+            try {
+                $this->procesar($compromiso);
+                $estadisticas['ejecutados']++;
+            } catch (\Throwable $e) {
+                /* Queda `procesando`: la recuperación de los colgados lo vuelve a poner en cola (contando el intento) y, al tercero,
+                   lo manda a revisar. Nunca un mensaje al lead desde una falla. */
+                Log::channel('daily')->error('LeadCompromisoService: falló la ejecución de un compromiso.', ['compromiso_id' => $id, 'error' => $e->getMessage()]);
+            }
+        }
+
+        return $estadisticas;
+    }
+
+    /**
+     * Los compromisos que quedaron «procesando» más de 15 minutos (la corrida murió) vuelven a la cola contando el intento; al
+     * tercero pasan a `revisar` con una tarea para Juan.
+     *
+     * @return int Cuántos se tocaron.
+     */
+    private function recuperar_los_colgados(): int
+    {
+        $colgados = LeadCompromiso::query()
+            ->where('status', LeadCompromiso::STATUS_PROCESANDO)
+            ->where('procesando_desde', '<', AppTime::now()->subMinutes(self::MINUTOS_PARA_DAR_POR_COLGADO))
+            ->orderBy('id')
+            ->limit(self::LOTE_POR_CORRIDA)
+            ->get();
+
+        foreach ($colgados as $compromiso) {
+            $intentos = (int) $compromiso->intentos + 1;
+
+            if ($intentos >= self::INTENTOS_MAXIMOS) {
+                $compromiso->intentos = $intentos;
+                $compromiso->save();
+                $lead = Lead::query()->find((int) $compromiso->lead_id);
+                if ($lead !== null) {
+                    $this->mandar_a_revisar($compromiso, $lead, 'No se pudo ejecutar después de ' . self::INTENTOS_MAXIMOS . ' intentos.');
+                } else {
+                    $this->cerrar($compromiso, LeadCompromiso::STATUS_CANCELADO, 'El lead ya no existe.');
+                }
+                continue;
+            }
+
+            LeadCompromiso::query()
+                ->where('id', (int) $compromiso->id)
+                ->where('status', LeadCompromiso::STATUS_PROCESANDO)
+                ->update(['status' => LeadCompromiso::STATUS_VIGENTE, 'procesando_desde' => null, 'intentos' => $intentos, 'updated_at' => AppTime::now()]);
+        }
+
+        return $colgados->count();
+    }
+
+    /**
+     * Procesa un compromiso ya tomado (`procesando`): si nada cambió desde su huella ejecuta lo acordado; si cambió algo, lo
+     * re-evalúa con IA con el contexto completo.
+     *
+     * @param LeadCompromiso $compromiso
+     *
+     * @return void
+     */
+    public function procesar(LeadCompromiso $compromiso): void
+    {
+        $lead = Lead::query()->find((int) $compromiso->lead_id);
+        if ($lead === null) {
+            $this->cerrar($compromiso, LeadCompromiso::STATUS_CANCELADO, 'El lead ya no existe.');
+
+            return;
+        }
+
+        if ($this->hubo_cambios($compromiso, $lead)) {
+            $this->reevaluar($compromiso, $lead);
+
+            return;
+        }
+
+        $this->ejecutar($compromiso, $lead);
+    }
+
+    /**
+     * Ejecuta lo acordado: `llamar` deja una tarea para Juan; `escribir` y `esperar` dejan el mensaje de Martín.
+     *
+     * @param LeadCompromiso $compromiso
+     * @param Lead           $lead
+     *
+     * @return void
+     */
+    private function ejecutar(LeadCompromiso $compromiso, Lead $lead): void
+    {
+        if ((string) $compromiso->accion === LeadCompromiso::ACCION_LLAMAR) {
+            $this->dejar_la_tarea_de_llamar($compromiso, $lead);
+
+            return;
+        }
+
+        $this->dejar_el_mensaje($compromiso, $lead);
+    }
+
+    /**
+     * La re-evaluación: la IA decide con el contexto completo si se ejecuta, se reprograma o se cancela. Cualquier cosa que no se
+     * pueda creer (IA caída, JSON roto, fecha inventada) manda el compromiso a revisar: nunca un mensaje al lead desde una falla.
+     *
+     * @param LeadCompromiso $compromiso
+     * @param Lead           $lead
+     *
+     * @return void
+     */
+    private function reevaluar(LeadCompromiso $compromiso, Lead $lead): void
+    {
+        $decision = app(LeadCompromisoIaService::class)->reevaluar($lead, $compromiso);
+
+        if (! $decision['ok']) {
+            $this->mandar_a_revisar($compromiso, $lead, 'La re-evaluación no dio una decisión creíble (' . (string) $decision['motivo'] . ').');
+
+            return;
+        }
+
+        if ($decision['decision'] === 'ejecutar') {
+            $this->ejecutar($compromiso, $lead);
+
+            return;
+        }
+
+        if ($decision['decision'] === 'cancelar') {
+            $this->cerrar($compromiso, LeadCompromiso::STATUS_CANCELADO, 'Cancelado al re-evaluar: ' . (string) $decision['motivo']);
+            $this->limpiar_la_tarjeta($lead, null);
+
+            return;
+        }
+
+        /* Reprogramar: nace el compromiso nuevo (con huella nueva, así no se re-evalúa solo) y el viejo queda `reprogramado`. */
+        try {
+            $nuevo = $this->crear($lead, [
+                'vence_at'      => $decision['vence_at'],
+                'accion'        => $decision['accion'],
+                'resumen'       => (string) $compromiso->resumen,
+                'cita_del_lead' => $compromiso->cita_del_lead,
+                'origen'        => LeadCompromiso::ORIGEN_REEVALUACION,
+                'origen_id'     => (int) $compromiso->id,
+            ], null);
+        } catch (PipelineRuleException $e) {
+            $nuevo = null;
+        }
+
+        if ($nuevo === null) {
+            $this->mandar_a_revisar($compromiso, $lead, 'No se pudo crear el compromiso reprogramado.');
+
+            return;
+        }
+
+        LeadCompromiso::query()
+            ->where('id', (int) $compromiso->id)
+            ->where('status', LeadCompromiso::STATUS_PROCESANDO)
+            ->update([
+                'status'             => LeadCompromiso::STATUS_REPROGRAMADO,
+                'reemplazado_por_id' => (int) $nuevo->id,
+                'resultado'          => 'Reprogramado al re-evaluar: ' . (string) $decision['motivo'],
+                'procesando_desde'   => null,
+                'updated_at'         => AppTime::now(),
+            ]);
+    }
+
+    /**
+     * `llamar`: una tarea para Juan con todo lo que hay que saber para la llamada. Idempotente: si el compromiso ya dejó su
+     * tarea (una corrida anterior murió después de crearla) no crea otra.
+     *
+     * @param LeadCompromiso $compromiso
+     * @param Lead           $lead
+     *
+     * @return void
+     */
+    private function dejar_la_tarea_de_llamar(LeadCompromiso $compromiso, Lead $lead): void
+    {
+        if ($compromiso->admin_task_id === null) {
+            $this->crear_la_tarea($compromiso, $lead, 'Llamar a ' . $this->nombre_para_el_titulo($lead) . ': quedaron para hoy', $this->contenido_de_la_tarea($compromiso, $lead));
+        }
+
+        $this->cerrar($compromiso->fresh(), LeadCompromiso::STATUS_EJECUTADO, 'Tarea para llamar creada.');
+    }
+
+    /**
+     * `escribir` y `esperar`: el mensaje de Martín que retoma lo último que dijo el lead.
+     *
+     * Reglas, en orden (todas fijadas por los hallazgos de E1: nada de lo que decida la IA las saltea):
+     *  1. Un lead que pidió no recibir mensajes, que ya es cliente o que está cerrado no recibe nada: el compromiso se cancela.
+     *  2. Fuera de la franja de 9 a 21 h el compromiso se corre al próximo inicio de franja.
+     *  3. Con la ventana de 24 h abierta lo redacta la IA (validado); con la ventana cerrada sale la plantilla del compromiso si está
+     *     aprobada. Si no hay un texto válido ni una plantilla aprobada, se le avisa a Juan con una tarea: nunca se manda algo que
+     *     no se pueda justificar.
+     *  4. Queda como SUGERENCIA para aprobar; con el envío automático prendido sale por el camino de siempre.
+     *
+     * @param LeadCompromiso $compromiso
+     * @param Lead           $lead
+     *
+     * @return void
+     */
+    private function dejar_el_mensaje(LeadCompromiso $compromiso, Lead $lead): void
+    {
+        /* Una corrida anterior ya dejó el mensaje: no se duplica. */
+        if ($compromiso->lead_message_id !== null) {
+            $this->cerrar($compromiso, LeadCompromiso::STATUS_EJECUTADO, 'El mensaje ya estaba creado.');
+
+            return;
+        }
+
+        if (! empty($lead->no_recibe_mensajes_at)) {
+            $this->cerrar($compromiso, LeadCompromiso::STATUS_CANCELADO, 'El lead pidió no recibir mensajes: no se le escribe.');
+            $this->limpiar_la_tarjeta($lead, null);
+
+            return;
+        }
+        if (! empty($lead->promoted_client_id) || in_array((string) $lead->status, LeadScheduledMessage::STATUSES_DE_LEAD_QUE_FRENAN, true)) {
+            $this->cerrar($compromiso, LeadCompromiso::STATUS_CANCELADO, 'El lead ya es cliente o está cerrado: no se le escribe.');
+            $this->limpiar_la_tarjeta($lead, null);
+
+            return;
+        }
+
+        $telefono = trim((string) $lead->phone);
+        if ($telefono === '') {
+            $this->crear_la_tarea($compromiso, $lead, 'Escribile a ' . $this->nombre_para_el_titulo($lead) . ': quedaron para hoy (no tiene teléfono cargado)', $this->contenido_de_la_tarea($compromiso, $lead));
+            $this->cerrar($compromiso->fresh(), LeadCompromiso::STATUS_EJECUTADO, 'Sin teléfono: tarea para Juan.');
+
+            return;
+        }
+
+        /* Fuera de la franja no sale nada: se corre al próximo inicio de franja (09:01) y el compromiso sigue vigente. */
+        if (! FranjaHorariaDeSeguimientos::ahora_esta_dentro()) {
+            LeadCompromiso::query()
+                ->where('id', (int) $compromiso->id)
+                ->where('status', LeadCompromiso::STATUS_PROCESANDO)
+                ->update([
+                    'status'           => LeadCompromiso::STATUS_VIGENTE,
+                    'vence_at'         => FranjaHorariaDeSeguimientos::momento_para_reprogramar(AppTime::now())->format('Y-m-d H:i:s'),
+                    'procesando_desde' => null,
+                    'updated_at'       => AppTime::now(),
+                ]);
+
+            return;
+        }
+
+        $texto           = null;
+        $plantilla       = null;
+        $variables       = [];
+        $por_que_no      = null;
+        $ventana_cerrada = ! app(WhatsappSessionWindowService::class)->is_open($telefono);
+
+        /* Ventana cerrada: sale la plantilla del compromiso si se puede usar. */
+        if ($ventana_cerrada) {
+            $estado = FollowupTemplate::estado_para_enviar(self::nombre_de_la_plantilla());
+            if ($estado['motivo'] !== null) {
+                $por_que_no = 'la ventana de 24 h está cerrada y la plantilla no se puede usar (' . (string) $estado['motivo'] . ')';
+            } else {
+                $armado = $this->armar_la_plantilla($estado['fila'], $lead, $compromiso);
+                if ($armado === null) {
+                    $por_que_no = 'la plantilla pide datos que el compromiso no tiene';
+                } else {
+                    $plantilla = $estado['fila'];
+                    $texto     = $armado['texto'];
+                    $variables = $armado['variables'];
+                }
+            }
+        }
+
+        /* Ventana abierta, o cerrada sin plantilla usable: lo redacta la IA (validado). Con la ventana cerrada es sólo un borrador
+           para que una persona decida cómo retomarlo: nunca sale solo (un texto libre no se puede mandar fuera de la ventana). */
+        if ($texto === null) {
+            $redaccion = app(LeadCompromisoIaService::class)->redactar($lead, $compromiso);
+            if ($redaccion['ok']) {
+                $texto = (string) $redaccion['texto'];
+            } else {
+                $por_que_no = ($por_que_no !== null ? $por_que_no . '; ' : '') . 'la IA no dio un texto válido (' . (string) $redaccion['motivo'] . ')';
+            }
+        }
+
+        if ($texto === null) {
+            $this->crear_la_tarea($compromiso, $lead, 'Escribile a ' . $this->nombre_para_el_titulo($lead) . ': quedaron para hoy', $this->contenido_de_la_tarea($compromiso, $lead) . "\n\nNo se le escribió solo: " . $por_que_no . '.');
+            $this->cerrar($compromiso->fresh(), LeadCompromiso::STATUS_EJECUTADO, 'Tarea para escribirle: ' . $por_que_no . '.');
+
+            return;
+        }
+
+        $mensaje = LeadMessage::create([
+            'lead_id'               => (int) $lead->id,
+            'sender'                => 'sistema',
+            'content'               => $texto,
+            'status'                => 'sugerido',
+            'is_followup'           => $plantilla !== null,
+            'followup_template_id'  => $plantilla !== null ? (int) $plantilla->id : null,
+            'requiere_verificacion' => true,
+            'system_message_kind'   => self::KIND_DEL_MENSAJE,
+            'ai_reasoning'          => 'Compromiso #' . $compromiso->id . ': ' . ($compromiso->resumen !== null && trim((string) $compromiso->resumen) !== '' ? trim((string) $compromiso->resumen) : 'retomar el contacto acordado')
+                . ($ventana_cerrada && $plantilla === null ? ' (la ventana de 24 h está cerrada: hay que retomarlo con una plantilla)' : ''),
+        ]);
+        LeadCompromiso::query()->where('id', (int) $compromiso->id)->update(['lead_message_id' => (int) $mensaje->id]);
+
+        /* Sin el temporizador de auto-envío de respaldo a propósito: con el envío automático apagado nada sale sin que una persona lo
+           apruebe. */
+        $lead->fresh()->sync_suggestion_flags();
+        \App\Services\LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $mensaje->id);
+
+        $resultado = 'Mensaje sugerido para aprobar.';
+        if (self::envio_automatico_activo() && ! ($ventana_cerrada && $plantilla === null)) {
+            $enviado   = app(LeadSuggestionSendService::class)->send_suggestion($mensaje, null, null, true);
+            $resultado = (string) $enviado->status === 'enviado' ? 'Mensaje enviado.' : 'Mensaje creado; quedó para aprobar.';
+        }
+
+        $this->cerrar($compromiso->fresh(), LeadCompromiso::STATUS_EJECUTADO, $resultado);
+    }
+
+    /**
+     * Las variables y el texto de la plantilla del compromiso. {{1}} es el primer nombre (la regla de siempre); cualquier otra
+     * variable lleva lo que dijo el lead tal cual (`cita_del_lead`), que es lo que pide `cc_coord_dia_acordado`.
+     *
+     * @param FollowupTemplate $plantilla
+     * @param Lead             $lead
+     * @param LeadCompromiso   $compromiso
+     *
+     * @return array{texto: string, variables: array<int, string>}|null Null si una variable no tiene con qué completarse.
+     */
+    private function armar_la_plantilla(FollowupTemplate $plantilla, Lead $lead, LeadCompromiso $compromiso)
+    {
+        $seguimientos = app(LeadFollowupService::class);
+        $variables    = array_values($seguimientos->build_template_variables($plantilla, $lead));
+
+        $cita = trim((string) $compromiso->cita_del_lead);
+        foreach ($variables as $indice => $valor) {
+            if ($indice === 0 || trim((string) $valor) !== '') {
+                continue;
+            }
+            if ($cita === '') {
+                return null;
+            }
+            $variables[$indice] = $cita;
+        }
+
+        /* El texto del hilo sale de la plantilla con los MISMOS valores que se le mandan a Meta. */
+        $texto = $seguimientos->render_template_body($plantilla, $lead);
+        $lista = is_array($plantilla->variables) ? array_values($plantilla->variables) : [];
+        foreach ($lista as $indice => $definicion) {
+            if ($indice > 0 && isset($definicion['placeholder'], $variables[$indice])) {
+                $texto = str_replace((string) $definicion['placeholder'], (string) $variables[$indice], $texto);
+            }
+        }
+
+        return ['texto' => $texto, 'variables' => $variables];
+    }
+
+    /**
+     * Un compromiso que no se pudo resolver solo: queda en `revisar` y Juan recibe una tarea «Revisá a …».
+     *
+     * @param LeadCompromiso $compromiso
+     * @param Lead           $lead
+     * @param string         $motivo
+     *
+     * @return void
+     */
+    private function mandar_a_revisar(LeadCompromiso $compromiso, Lead $lead, string $motivo): void
+    {
+        if ($compromiso->admin_task_id === null) {
+            $this->crear_la_tarea($compromiso, $lead, 'Revisá a ' . $this->nombre_para_el_titulo($lead) . ': el compromiso de hoy cambió de contexto', $this->contenido_de_la_tarea($compromiso, $lead) . "\n\nPor qué lo tenés que mirar: " . $motivo);
+        }
+
+        $this->cerrar($compromiso->fresh(), LeadCompromiso::STATUS_REVISAR, $motivo);
+    }
+
+    /**
+     * Cierra un compromiso que está `procesando` con su status final. Sólo actúa si sigue `procesando`: uno que una persona
+     * reemplazó o canceló mientras tanto no se pisa.
+     *
+     * @param LeadCompromiso $compromiso
+     * @param string         $status
+     * @param string         $resultado
+     *
+     * @return void
+     */
+    private function cerrar(LeadCompromiso $compromiso, string $status, string $resultado): void
+    {
+        $cambios = [
+            'status'           => $status,
+            'resultado'        => mb_substr($resultado, 0, 1000),
+            'procesando_desde' => null,
+            'updated_at'       => AppTime::now(),
+        ];
+        if ($status === LeadCompromiso::STATUS_EJECUTADO) {
+            $cambios['ejecutado_at'] = AppTime::now();
+        }
+
+        LeadCompromiso::query()
+            ->where('id', (int) $compromiso->id)
+            ->where('status', LeadCompromiso::STATUS_PROCESANDO)
+            ->update($cambios);
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Las tareas de Juan
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * «Ro (Ferretería de Ro)» para el título de una tarea; sin nombre, la empresa o el teléfono.
+     *
+     * @param Lead $lead
+     *
+     * @return string
+     */
+    private function nombre_para_el_titulo(Lead $lead): string
+    {
+        $nombre  = trim((string) $lead->contact_name);
+        $empresa = trim((string) $lead->company_name);
+
+        if ($nombre === '') {
+            $nombre  = $empresa !== '' ? $empresa : (trim((string) $lead->phone) !== '' ? trim((string) $lead->phone) : 'Lead #' . $lead->id);
+            $empresa = '';
+        }
+
+        return $nombre . ($empresa !== '' ? ' (' . $empresa . ')' : '');
+    }
+
+    /**
+     * El cuerpo de la tarea: qué se acordó y todo lo que Juan necesita para retomar (lo que dijo el lead, su última llamada, los
+     * últimos mensajes y el link a la conversación).
+     *
+     * @param LeadCompromiso $compromiso
+     * @param Lead           $lead
+     *
+     * @return string
+     */
+    private function contenido_de_la_tarea(LeadCompromiso $compromiso, Lead $lead): string
+    {
+        $lineas = [];
+        if (trim((string) $compromiso->resumen) !== '') {
+            $lineas[] = 'Quedaron en: ' . trim((string) $compromiso->resumen);
+        }
+        if (trim((string) $compromiso->cita_del_lead) !== '') {
+            $lineas[] = 'Lo que dijo el lead: «' . trim((string) $compromiso->cita_del_lead) . '»';
+        }
+        $lineas[] = 'Teléfono: ' . (trim((string) $lead->phone) !== '' ? trim((string) $lead->phone) : 'sin cargar');
+
+        $llamada = LeadLlamada::query()->where('lead_id', (int) $lead->id)->orderByDesc('id')->first();
+        if ($llamada !== null) {
+            $detalle  = $llamada->atendio ? 'atendió' : 'no atendió';
+            $lineas[] = 'Última llamada (' . $llamada->created_at->format('d/m H:i') . ', ' . $detalle . '): ' . (trim((string) $llamada->notas) !== '' ? mb_substr(trim((string) $llamada->notas), 0, 300) : 'sin notas');
+        }
+
+        $ultimos = LeadMessage::query()
+            ->where('lead_id', (int) $lead->id)
+            ->where('is_status_event', false)
+            ->where(function ($query) {
+                $query->where('sender', 'lead')->orWhere('status', 'enviado');
+            })
+            ->orderByDesc('id')
+            ->limit(3)
+            ->get()
+            ->reverse();
+        if ($ultimos->count() > 0) {
+            $lineas[] = 'Últimos mensajes:';
+            foreach ($ultimos as $mensaje) {
+                $lineas[] = '- ' . ((string) $mensaje->sender === 'lead' ? 'Lead' : 'Nosotros') . ': ' . mb_substr(trim((string) $mensaje->content), 0, 200);
+            }
+        }
+
+        $base     = rtrim((string) config('app.frontend_url', env('FRONTEND_URL', 'https://admin.comerciocity.com')), '/');
+        $lineas[] = 'Conversación: ' . $base . '/leads/' . (int) $lead->id . '/conversacion';
+
+        return implode("\n", $lineas);
+    }
+
+    /**
+     * Crea la tarea para Juan (asignada como las del embudo) y la ata al compromiso. La tarea y el vínculo se guardan juntos: si
+     * la corrida muere después, el reintento ve `admin_task_id` y no crea otra. El aviso va aparte: un aviso caído no tira la tarea.
+     *
+     * @param LeadCompromiso $compromiso
+     * @param Lead           $lead
+     * @param string         $titulo
+     * @param string         $contenido
+     *
+     * @return AdminTask|null
+     */
+    private function crear_la_tarea(LeadCompromiso $compromiso, Lead $lead, string $titulo, string $contenido)
+    {
+        $tarea = DB::transaction(function () use ($compromiso, $lead, $titulo, $contenido) {
+            $tarea = AdminTask::create([
+                /* Creador cero: la tarea la crea el sistema (mismo criterio que {@see LeadTareaVendedorService}). */
+                'created_by_admin_id' => 0,
+                'assigned_admin_id'   => null,
+                'lead_id'             => (int) $lead->id,
+                'title'               => mb_substr($titulo, 0, 250),
+                'content'             => $contenido,
+                'todos'               => null,
+                'is_done'             => false,
+                'sort_order'          => 0,
+                'created_via'         => self::CREATED_VIA_DE_LA_TAREA,
+            ]);
+            LeadCompromiso::query()->where('id', (int) $compromiso->id)->update(['admin_task_id' => (int) $tarea->id]);
+
+            return $tarea;
+        });
+
+        try {
+            $ids = AdminTaskAssignmentResolver::for_embudo_task();
+            if (! empty($ids)) {
+                $tarea->assigned_admins()->sync($ids);
+                $tarea->assigned_admin_id = $ids[0];
+                $tarea->save();
+            }
+            AdminTaskNotificationService::create_for_task($tarea);
+        } catch (\Throwable $e) {
+            Log::channel('daily')->error('LeadCompromisoService: la tarea quedó creada pero la asignación o el aviso fallaron.', ['task_id' => $tarea->id, 'error' => $e->getMessage()]);
+        }
+
+        return $tarea;
     }
 }
