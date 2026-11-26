@@ -1204,7 +1204,7 @@ class EscenaService
      * - `minutos_en_etapa`: desde `etapa_desde` hasta ahora.
      * - `umbral_min`: el de su etapa en `config/el_local.php`.
      * - `demorada`: sólo si está `trabajando` y lleva más minutos que el umbral. `esperando_lucas` y `trabada`
-     *   se ven con su propio estado, no como demora (REVISION-1 R5).
+     *   se ven con su propio estado, no como demora (REVISION-1 R5); la etapa `cierre` tampoco (REVISION-2 R14).
      * - `fase_historial`: el historial completo de la tabla (el snapshot ya no lo guarda, REVISION-1 R6).
      * - `fases`: las últimas {@see self::TOPE_FASES} fases de la tabla, por `desde`.
      *
@@ -1264,7 +1264,8 @@ class EscenaService
 
         $umbrales = $this->umbrales_demora();
         $umbral   = $etapa !== null && isset($umbrales[$etapa]) ? $umbrales[$etapa] : null;
-        $demorada = $mision['estado'] === 'trabajando' && $minutos !== null && $umbral !== null && $minutos > $umbral;
+        // El cierre (informe/entregada) nunca se marca demorado (REVISION-2 R14).
+        $demorada = $mision['estado'] === 'trabajando' && $etapa !== 'cierre' && $minutos !== null && $umbral !== null && $minutos > $umbral;
 
         $salida = $mision;
         $salida['ruta']             = ! empty($mision['ticket']) ? $this->ruta_de_ticket($mision['ticket']) : null;

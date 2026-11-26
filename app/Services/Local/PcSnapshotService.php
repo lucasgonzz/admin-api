@@ -309,8 +309,9 @@ class PcSnapshotService
     /**
      * Guarda el historial de fases de las misiones del reporte en `local_mission_phases`.
      *
-     * Una sola consulta trae las filas de esas misiones; por cada `(mission_key, fase, vuelta)` inserta o, si
-     * ya existe, actualiza sólo si algo cambió. Una fase `inferida` conserva el `desde` más viejo que se vio
+     * Una sola consulta trae las filas de esas misiones; una fila se identifica por `(mission_key, fase, desde)`
+     * (REVISION-2 R13: la vuelta no se deduce de la posición, porque el reporter manda sólo las últimas 20
+     * fases): si existe se actualiza ESA fila y si no se inserta con vuelta = máx(vuelta) de la fase + 1. Actualiza sólo si algo cambió. Una fase `inferida` conserva el `desde` más viejo que se vio
      * (la primera vez que se la vio es la mejor estimación, porque el reporter infiere con el `mtime` y eso
      * llega siempre un poco tarde); una no inferida pisa el `desde`. Una misión que deja de venir conserva sus
      * filas: eso es lo «consultable después».
@@ -332,56 +333,92 @@ class PcSnapshotService
             return;
         }
 
-        // Filas ya guardadas, indexadas por misión|fase|vuelta.
-        $guardadas = [];
+        // Filas ya guardadas, por id; y su índice misión|fase|desde (la identidad de una fila, REVISION-2 R13).
+        $guardadas   = [];
+        $por_desde   = [];
+        $max_vuelta  = [];
         foreach (LocalMissionPhase::query()->whereIn('mission_key', $claves)->get() as $fila) {
-            $guardadas[$fila->mission_key . '|' . $fila->fase . '|' . (int) $fila->vuelta] = $fila;
+            $guardadas[$fila->id] = $fila;
+            $por_desde[$fila->mission_key . '|' . $fila->fase . '|' . (string) $fila->getRawOriginal('desde')] = $fila->id;
+            $clave_vuelta = $fila->mission_key . '|' . $fila->fase;
+            $max_vuelta[$clave_vuelta] = max(isset($max_vuelta[$clave_vuelta]) ? $max_vuelta[$clave_vuelta] : 0, (int) $fila->vuelta);
         }
 
         $ahora_db  = $this->formato_db($ahora);
         $nuevas    = [];
 
-        // Por misión, lo que trajo este reporte: claves de fila, `desde` de cada fase y si alguna era inferida.
+        // Por misión, lo que trajo este reporte: ids de filas guardadas que corresponden, `desde` de cada fase y
+        // si alguna era inferida.
         $reportado = [];
 
         foreach ($misiones as $mision) {
-            // Vuelta de cada fase dentro de la misión: la 1ª aparición es la vuelta 1, la 2ª la vuelta 2…
-            $vueltas = [];
-            $reportado[$mision['id']] = ['claves' => [], 'desdes' => [], 'hay_inferida' => false];
+            $reportado[$mision['id']] = ['ids' => [], 'desdes' => [], 'hay_inferida' => false];
 
+            // Entradas con sus valores ya en formato de base.
+            $entradas = [];
             foreach ($mision['fase_historial'] as $entrada) {
-                $fase = $entrada['fase'];
-                $vueltas[$fase] = isset($vueltas[$fase]) ? $vueltas[$fase] + 1 : 1;
-                $vuelta = min(255, $vueltas[$fase]);
-                $clave  = $mision['id'] . '|' . $fase . '|' . $vuelta;
-
                 $desde    = $this->formato_db(Carbon::parse($entrada['desde']));
                 $hasta    = $entrada['hasta'] === null ? null : $this->formato_db(Carbon::parse($entrada['hasta']));
                 $segundos = $entrada['segundos'];
-                if ($segundos === null && $hasta !== null) {
-                    $segundos = max(0, Carbon::parse($entrada['hasta'])->getTimestamp() - Carbon::parse($entrada['desde'])->getTimestamp());
+                if ($hasta !== null) {
+                    // Una fase cerrada nunca termina antes de empezar (REVISION-2 R15).
+                    if ($hasta < $desde) {
+                        $hasta    = $desde;
+                        $segundos = 0;
+                    } elseif ($segundos === null) {
+                        $segundos = max(0, Carbon::parse($hasta)->getTimestamp() - Carbon::parse($desde)->getTimestamp());
+                    }
                 }
-                $inferida = $entrada['inferida'] ? 1 : 0;
-                $titulo   = $mision['titulo'];
-
-                $reportado[$mision['id']]['claves'][$clave] = true;
-                $reportado[$mision['id']]['desdes'][]       = $desde;
-                if ($inferida === 1) {
+                $entradas[] = [
+                    'fase' => $entrada['fase'], 'etapa' => $entrada['etapa'], 'desde' => $desde, 'hasta' => $hasta,
+                    'segundos' => $segundos, 'inferida' => $entrada['inferida'] ? 1 : 0, 'fila_id' => null,
+                ];
+                $reportado[$mision['id']]['desdes'][] = $desde;
+                if ($entrada['inferida']) {
                     $reportado[$mision['id']]['hay_inferida'] = true;
                 }
+            }
 
-                if (! isset($guardadas[$clave])) {
+            // Pasada 1: coincidencia exacta por (misión, fase, desde).
+            foreach ($entradas as $i => $e) {
+                $clave = $mision['id'] . '|' . $e['fase'] . '|' . $e['desde'];
+                if (isset($por_desde[$clave]) && ! isset($reportado[$mision['id']]['ids'][$por_desde[$clave]])) {
+                    $entradas[$i]['fila_id'] = $por_desde[$clave];
+                    $reportado[$mision['id']]['ids'][$por_desde[$clave]] = true;
+                }
+            }
+
+            // Pasada 2: sin coincidencia exacta, la entrada retoma la fila abierta e inferida de esa fase (el
+            // reporter infiere con el mtime y su `desde` se corre un poco); si no hay, es una aparición nueva.
+            foreach ($entradas as $i => $e) {
+                if ($e['fila_id'] === null) {
+                    foreach ($guardadas as $id => $fila) {
+                        if ($fila->mission_key === $mision['id'] && $fila->fase === $e['fase'] && (int) $fila->inferida === 1
+                            && $fila->getRawOriginal('hasta') === null && ! isset($reportado[$mision['id']]['ids'][$id])) {
+                            $entradas[$i]['fila_id'] = $id;
+                            $reportado[$mision['id']]['ids'][$id] = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            foreach ($entradas as $e) {
+                if ($e['fila_id'] === null) {
+                    // Aparición nueva: vuelta = máximo guardado de esa fase + 1.
+                    $clave_vuelta = $mision['id'] . '|' . $e['fase'];
+                    $max_vuelta[$clave_vuelta] = (isset($max_vuelta[$clave_vuelta]) ? $max_vuelta[$clave_vuelta] : 0) + 1;
                     $nuevas[] = [
                         'mission_key'  => $mision['id'],
                         'origen'       => $mision['origen'],
-                        'titulo'       => $titulo,
-                        'fase'         => $fase,
-                        'etapa'        => $entrada['etapa'],
-                        'vuelta'       => $vuelta,
-                        'desde'        => $desde,
-                        'hasta'        => $hasta,
-                        'segundos'     => $segundos,
-                        'inferida'     => $inferida,
+                        'titulo'       => $mision['titulo'],
+                        'fase'         => $e['fase'],
+                        'etapa'        => $e['etapa'],
+                        'vuelta'       => min(255, $max_vuelta[$clave_vuelta]),
+                        'desde'        => $e['desde'],
+                        'hasta'        => $e['hasta'],
+                        'segundos'     => $e['segundos'],
+                        'inferida'     => $e['inferida'],
                         'reportado_at' => $ahora_db,
                         'created_at'   => $ahora_db,
                         'updated_at'   => $ahora_db,
@@ -389,22 +426,29 @@ class PcSnapshotService
                     continue;
                 }
 
-                $fila = $guardadas[$clave];
+                $fila  = $guardadas[$e['fila_id']];
+                $desde = $e['desde'];
 
                 // Inferida: se queda con el desde más viejo entre lo guardado y lo reportado.
                 $guardado_desde = $fila->getRawOriginal('desde');
-                if ($inferida === 1 && $guardado_desde !== null && (string) $guardado_desde < $desde) {
+                if ($e['inferida'] === 1 && $guardado_desde !== null && (string) $guardado_desde < $desde) {
                     $desde = (string) $guardado_desde;
+                }
+                $hasta    = $e['hasta'];
+                $segundos = $e['segundos'];
+                if ($hasta !== null && $hasta < $desde) {
+                    $hasta    = $desde;
+                    $segundos = 0;
                 }
 
                 $cambios = [
                     'origen'   => $mision['origen'],
-                    'titulo'   => $titulo,
-                    'etapa'    => $entrada['etapa'],
+                    'titulo'   => $mision['titulo'],
+                    'etapa'    => $e['etapa'],
                     'desde'    => $desde,
                     'hasta'    => $hasta,
                     'segundos' => $segundos,
-                    'inferida' => $inferida,
+                    'inferida' => $e['inferida'],
                 ];
 
                 $distinto = false;
@@ -443,7 +487,7 @@ class PcSnapshotService
      * - en otro caso se cierra con `hasta` = `desde` de la siguiente fase reportada (o la hora del reporte) y los
      *   `segundos` calculados.
      *
-     * @param array<string, \App\Models\LocalMissionPhase> $guardadas Filas guardadas, por misión|fase|vuelta.
+     * @param array<int, \App\Models\LocalMissionPhase>    $guardadas Filas guardadas, por id.
      * @param array<string, array<string, mixed>>           $reportado Lo que trajo el reporte, por misión.
      * @param Carbon                                        $ahora     Momento de recepción.
      * @param string                                        $ahora_db  El mismo momento en formato de base.
@@ -457,11 +501,12 @@ class PcSnapshotService
 
         foreach ($guardadas as $clave => $fila) {
             $mision_key = $fila->mission_key;
-            if (! isset($reportado[$mision_key]) || isset($reportado[$mision_key]['claves'][$clave])) {
+            if (! isset($reportado[$mision_key]) || isset($reportado[$mision_key]['ids'][$fila->id])) {
                 continue;
             }
-            // Sólo las abiertas.
-            if ($fila->getRawOriginal('hasta') !== null) {
+            $abierta = $fila->getRawOriginal('hasta') === null;
+            // Una cerrada sólo interesa si es inferida (renombre inferido, REVISION-2 R15).
+            if (! $abierta && (int) $fila->inferida !== 1) {
                 continue;
             }
 
@@ -471,6 +516,9 @@ class PcSnapshotService
             // Renombre inferido: otra fase reportada empieza en el mismo instante.
             if (in_array($desde_fila, $trajo['desdes'], true)) {
                 $a_borrar[] = $fila->id;
+                continue;
+            }
+            if (! $abierta) {
                 continue;
             }
 
@@ -486,6 +534,10 @@ class PcSnapshotService
                 if ($desde_reportado > $desde_fila && $desde_reportado < $hasta) {
                     $hasta = $desde_reportado;
                 }
+            }
+            // `hasta` nunca queda antes de `desde` (REVISION-2 R15).
+            if ($hasta < $desde_fila) {
+                $hasta = $desde_fila;
             }
             $segundos = max(0, Carbon::parse($hasta)->getTimestamp() - Carbon::parse($desde_fila)->getTimestamp());
 
