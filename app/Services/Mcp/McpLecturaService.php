@@ -556,8 +556,8 @@ class McpLecturaService
         $salida = ['misiones_recorte' => $recorte];
 
         if (! empty($recorte['recortado'])) {
-            $salida['advertencia'] = 'El avance puede estar incompleto: la escena recortó misiones (omitidas: '
-                . (int) (isset($recorte['omitidas']) ? $recorte['omitidas'] : 0) . ') y no se cuentan acá. No lo des por completo.';
+            $salida['advertencia'] = 'El avance puede estar incompleto: la escena recortó misiones, omitidas '
+                . (int) (isset($recorte['omitidas']) ? $recorte['omitidas'] : 0) . ', y no se cuentan acá. No lo des por completo.';
         }
 
         return $salida;
