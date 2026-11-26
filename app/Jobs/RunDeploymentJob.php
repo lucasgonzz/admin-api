@@ -115,12 +115,21 @@ class RunDeploymentJob implements ShouldQueue
                     function (string $step) use ($scheduled, $row) { $scheduled->before_continuation($row->id, $step); }
                 );
             }
-            $service->connect();
+            try {
+                $service->connect();
+            } catch (\Throwable $e_conexion) {
+                /* Aviso de actualización: si ni siquiera se pudo conectar, el sistema del cliente no se tocó. */
+                $service->aviso_soltar_si_no_se_toco();
+                throw $e_conexion;
+            }
             $service->run($this->resume_from_step);
         } catch (\Throwable $e) {
             if ($e instanceof LockTimeoutException && ! ClientVersionUpgrade::where('client_id', $upgrade->client_id)
                 ->where('id', '!=', $upgrade->id)->where('deployment_status', 'running')->exists()) {
                 // La misma etapa ya puede estar ejecutándose. Este job no cambia su estado.
+                /* Aviso de actualización: si nadie está corriendo el upgrade (sin logs en 5 minutos) y no se tocó
+                   nada, el aviso no puede quedar prendido. */
+                $service->aviso_soltar_si_no_se_toco(5);
                 Log::warning('Se omitió una ejecución simultánea del mismo upgrade.', ['upgrade_id' => $upgrade->id]);
                 return;
             }
@@ -198,6 +207,14 @@ class RunDeploymentJob implements ShouldQueue
         ]);
 
         event(new DeploymentLogCreated($deployment_log));
+
+        /* Aviso de actualización: el worker mató el job (timeout) o la cola lo dio por agotado, y run() no
+           llegó a su G5. Se suelta si el sistema vivo no se tocó. */
+        try {
+            (new DeploymentService($upgrade))->aviso_soltar_si_no_se_toco();
+        } catch (\Throwable $ignorado) {
+            /* El aviso nunca puede romper el cierre de un job fallado. */
+        }
 
         Log::warning('RunDeploymentJob: el job falló', [
             'upgrade_id'       => (int) $upgrade->id,

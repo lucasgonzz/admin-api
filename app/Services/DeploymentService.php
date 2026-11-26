@@ -6139,6 +6139,7 @@ class DeploymentService
      *    (un respaldo con la marca TOCADO, o el `down` en el disco);
      *  - `mantenimiento_posible`: el sistema está (o estuvo en esta corrida) en mantenimiento;
      *  - `spa_vaciandose` y `spa_nuevo_con_api_vieja`: el SPA vivo se está reemplazando o ya se reemplazó;
+     *  - una "Etapa en curso" de la ventana de mantenimiento sin `up` posterior en los logs (el `down` sigue puesto);
      *  - la línea MARCA_SISTEMA_TOCADO en los logs del upgrade (la de un intento anterior que una
      *    reanudación conserva). Un `deploy/start` limpio BORRA los logs: si el intento anterior tocó lo
      *    vivo y se arrancó de cero, el archivo TOCADO del respaldo (que sólo se lee en backup_in_place)
@@ -6154,7 +6155,57 @@ class DeploymentService
             || $this->mantenimiento_posible
             || $this->spa_vaciandose
             || $this->spa_nuevo_con_api_vieja
-            || self::sistema_vivo_tocado_segun_los_logs((int) $this->upgrade->id);
+            || self::sistema_vivo_tocado_segun_los_logs((int) $this->upgrade->id)
+            || self::ultima_etapa_en_curso_en_los_logs((int) $this->upgrade->id) !== null;
+    }
+
+    /**
+     * Suelta el aviso si el sistema vivo del cliente NO se tocó, para las fallas del arranque que pasan
+     * FUERA de run() y por lo tanto no llegan a G5 (ronda 3): `RunDeploymentJob` lo llama cuando
+     * `connect()` lanza, cuando el candado del cliente tarda y el job vuelve en silencio, y desde
+     * `failed()` cuando el worker mata el job (timeout) o la cola lo da por agotado.
+     *
+     * Es público porque lo usa el job; es el único método público del bloque `aviso_*`. Reusa la lógica
+     * de G5 (`aviso_activo()` + `aviso_sistema_vivo_tocado()` + `aviso_liberar_con_reintentos()`), pero
+     * en una instancia que quizá nunca corrió `run()`: sólo cuentan las señales que se PERSISTEN (la
+     * marca MARCA_SISTEMA_TOCADO en los logs, una etapa de la ventana de mantenimiento sin `up`).
+     * 🔴 Si no se puede saber con certeza, NO suelta: es preferible que lo suelte el vencimiento antes
+     * que soltarlo con el sistema tocado. Por eso:
+     *
+     *  - no suelta si ya hay una línea "liberado" como último movimiento del aviso (G5 ya lo hizo: sin
+     *    esto, `failed()` repetiría el PUT después de un fallo de `run()` ya manejado);
+     *  - con `$minutos_sin_actividad` > 0 no suelta si el upgrade tiene logs más recientes que eso: el
+     *    candado lo tiene otro proceso y puede ser el mismo upgrade corriendo.
+     *
+     * 🔴 Nunca lanza.
+     *
+     * @param  int  $minutos_sin_actividad  0 = no mira la actividad; N = exige N minutos sin logs nuevos.
+     * @return void
+     */
+    public function aviso_soltar_si_no_se_toco(int $minutos_sin_actividad = 0): void
+    {
+        try {
+            if (! $this->aviso_activo() || $this->aviso_sistema_vivo_tocado()) {
+                return;
+            }
+
+            $ultimo_movimiento = DeploymentLog::where('client_version_upgrade_id', $this->upgrade->id)
+                ->where('line', 'like', 'Aviso de actualización:%')
+                ->orderByDesc('id')
+                ->value('line');
+            if ($ultimo_movimiento !== null && strpos((string) $ultimo_movimiento, 'Aviso de actualización: liberado') === 0) {
+                return;
+            }
+
+            if ($minutos_sin_actividad > 0 && DeploymentLog::where('client_version_upgrade_id', $this->upgrade->id)
+                ->where('created_at', '>=', now()->subMinutes($minutos_sin_actividad))->exists()) {
+                return;
+            }
+
+            $this->aviso_liberar_con_reintentos('deployment');
+        } catch (\Throwable $e) {
+            /* Sin log: corre en caminos de falla y no puede sumar un segundo fallo. */
+        }
     }
 
     /**
