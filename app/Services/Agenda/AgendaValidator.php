@@ -2,6 +2,7 @@
 
 namespace App\Services\Agenda;
 
+use App\Models\AgendaTask;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\ValidationException;
@@ -71,7 +72,11 @@ class AgendaValidator
     const CAMPOS_DE_TAREA = [
         'title', 'notes', 'date', 'start_time', 'all_day', 'duration_minutes',
         'color', 'icon', 'repeat', 'repeat_until', 'sort_order',
+        'assignee', 'link_type', 'link_ref',
     ];
+
+    /** Largo máximo de la referencia del vínculo (columna `link_ref`). */
+    const MAX_LINK_REF = 120;
 
     /**
      * Valida los campos de una tarea que vinieron en el request, uno por uno.
@@ -108,6 +113,9 @@ class AgendaValidator
             'repeat'           => 'sometimes|nullable|string|in:' . implode(',', self::REPETICIONES),
             'repeat_until'     => 'sometimes|nullable|date_format:Y-m-d|after_or_equal:' . self::FECHA_MINIMA . '|before_or_equal:' . self::FECHA_MAXIMA,
             'sort_order'       => 'sometimes|integer|between:-1000000,1000000',
+            'assignee'         => 'sometimes|string|in:' . implode(',', AgendaTask::ASSIGNEES),
+            'link_type'        => 'sometimes|nullable|string|in:' . implode(',', AgendaTask::LINK_TYPES),
+            'link_ref'         => 'sometimes|nullable|string|max:' . self::MAX_LINK_REF . '|regex:/^[A-Za-z0-9._:-]+$/',
             'subtasks'         => 'sometimes|nullable|array|max:' . self::MAX_SUBPASOS,
         ];
 
@@ -195,11 +203,89 @@ class AgendaValidator
             }
         }
 
+        /* El vínculo es de a dos: tipo y referencia. Sin tipo no hay referencia (y si la mandaron
+           explícita es un error de quien llama: no se adivina), y con tipo hace falta la referencia.
+           Mandar `link_type: null` limpia también la referencia que había. */
+        if ($final['link_type'] === null) {
+            if (array_key_exists('link_ref', $cambios) && $cambios['link_ref'] !== null) {
+                $errores['link_ref'][] = '«link_ref» necesita «link_type» (workboard o mision): mandá también el tipo.';
+            }
+
+            $final['link_ref'] = null;
+        } elseif ($final['link_ref'] === null) {
+            $errores['link_ref'][] = '«link_ref» es obligatorio con «link_type»: mandá el id de la tarjeta o el slug de la misión.';
+        }
+
         if (! empty($errores)) {
             $this->fallar($errores);
         }
 
         return $final;
+    }
+
+    /**
+     * Decide el origen del pedido (`origin`) de una tarea que se está creando.
+     *
+     * El origen se fija SOLO en el alta y no se edita. Por el panel es siempre `panel` (lo que venga
+     * en el body se ignora: el panel no tiene de dónde sacar otro). Por Claude es opcional, uno de
+     * `dots | conversacion | openclaw` (default `conversacion`); `panel` u otro valor es 422, porque
+     * «panel» no puede decirlo quien llama por la ruta de Claude.
+     *
+     * @param array  $input       Body del request.
+     * @param string $created_via Ruta por la que entra la tarea: `panel` o `claude`.
+     *
+     * @return string El origen a guardar.
+     *
+     * @throws ValidationException 422 si, por Claude, el origen no es válido.
+     */
+    public function validar_origen(array $input, string $created_via): string
+    {
+        if ($created_via !== 'claude') {
+            return 'panel';
+        }
+
+        if (! array_key_exists('origin', $input) || $input['origin'] === null) {
+            return 'conversacion';
+        }
+
+        $permitidos = array_values(array_diff(AgendaTask::ORIGINS, ['panel']));
+
+        if (! is_string($input['origin']) || ! in_array($input['origin'], $permitidos, true)) {
+            $this->fallar(['origin' => ['«origin» tiene que ser uno de estos: ' . implode(', ', $permitidos) . '.']]);
+        }
+
+        return (string) $input['origin'];
+    }
+
+    /**
+     * Valida los filtros opcionales de un listado: el responsable y si se piden las vencidas.
+     *
+     * `vencidas` se parsea a mano (como `incluir_completadas`) porque llega por query string y ahí
+     * `"true"` / `"false"` son texto que la regla `boolean` de Laravel rechaza.
+     *
+     * @param array $input Los parámetros del request (`assignee?`, `vencidas?`).
+     *
+     * @return array{0: string|null, 1: bool} [assignee o null si no se filtra, si se piden las vencidas].
+     *
+     * @throws ValidationException 422 con el parámetro que falla.
+     */
+    public function validar_filtros(array $input): array
+    {
+        $this->correr($input, [
+            'assignee' => 'sometimes|nullable|string|in:' . implode(',', AgendaTask::ASSIGNEES),
+        ]);
+
+        $vencidas = false;
+        if (array_key_exists('vencidas', $input) && $input['vencidas'] !== null) {
+            $vencidas = $this->a_booleano($input['vencidas']);
+            if ($vencidas === null) {
+                $this->fallar(['vencidas' => ['«vencidas» tiene que ser verdadero o falso (true/false o 1/0).']]);
+            }
+        }
+
+        $assignee = isset($input['assignee']) ? (string) $input['assignee'] : null;
+
+        return [$assignee, (bool) $vencidas];
     }
 
     /**
@@ -509,6 +595,10 @@ class AgendaValidator
             case 'duration_minutes':
             case 'sort_order':
                 return (int) $valor;
+            case 'link_type':
+            case 'link_ref':
+                // Sin vínculo es null (no cadena vacía): así se distingue «sin vínculo» de «vínculo vacío».
+                return $valor === null ? null : (string) $valor;
             case 'repeat':
                 // `repeat: null` se lee como "no se repite".
                 return $valor === null ? 'none' : (string) $valor;
@@ -564,6 +654,13 @@ class AgendaValidator
             'repeat_until.before_or_equal'  => 'El fin de la repetición no puede ser posterior al año 2100.',
             'sort_order.integer'            => 'El orden tiene que ser un número entero.',
             'sort_order.between'            => 'El orden está fuera de rango.',
+            'assignee.string'               => '«assignee» tiene que ser uno de estos: ' . implode(', ', AgendaTask::ASSIGNEES) . '.',
+            'assignee.in'                   => '«assignee» tiene que ser uno de estos: ' . implode(', ', AgendaTask::ASSIGNEES) . '.',
+            'link_type.string'              => '«link_type» tiene que ser uno de estos: ' . implode(', ', AgendaTask::LINK_TYPES) . ' (o null para quitar el vínculo).',
+            'link_type.in'                  => '«link_type» tiene que ser uno de estos: ' . implode(', ', AgendaTask::LINK_TYPES) . ' (o null para quitar el vínculo).',
+            'link_ref.string'               => '«link_ref» tiene que ser texto.',
+            'link_ref.max'                  => '«link_ref» no puede pasar de ' . self::MAX_LINK_REF . ' caracteres.',
+            'link_ref.regex'                => '«link_ref» solo puede tener letras, números y los signos . _ : - (sin espacios ni barras).',
             'subtasks.array'                => 'Los subpasos tienen que venir como una lista.',
             'subtasks.max'                  => 'Una tarea no puede tener más de ' . self::MAX_SUBPASOS . ' subpasos.',
             'desde.required'                => 'Falta «desde»: el primer día del rango (AAAA-MM-DD).',

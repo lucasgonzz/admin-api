@@ -761,7 +761,7 @@ return [
            reglas de validación de abajo son las de AgendaValidator::validar_campos(), copiadas el
            31/10/2026: si se toca una regla allá, se toca acá. */
         'GET api/claude/agenda' => [
-            'para_que'     => 'La agenda de un admin: las ocurrencias del rango (las repetidas ya expandidas, cada una con su occurrence_date y su hecha/no hecha), la bandeja (tareas sin fecha) y el admin dueño. Sin desde/hasta es hoy..hoy+7 (con uno solo, el otro a 7 días); el rango no puede pasar de 100 días. Con «buscar» suma «coincidencias»: tareas sin expandir del mismo admin cuyo título o notas contienen el texto, sin importar el rango, las más nuevas primero, tope 50. Sin admin_id ni admin_name es la agenda del admin por defecto de las tareas de Claude (CLAUDE_TASK_INGEST_CREATOR_ADMIN_ID → is_default_task_assignee → primer admin).',
+            'para_que'     => 'La agenda de un admin: las ocurrencias del rango (las repetidas ya expandidas, cada una con su occurrence_date y su hecha/no hecha), la bandeja (tareas sin fecha) y el admin dueño. Sin desde/hasta es hoy..hoy+7 (con uno solo, el otro a 7 días); el rango no puede pasar de 100 días. Con «buscar» suma «coincidencias»: tareas sin expandir del mismo admin cuyo título o notas contienen el texto, sin importar el rango, las más nuevas primero, tope 50. Sin admin_id ni admin_name es la agenda del admin por defecto de las tareas de Claude (CLAUDE_TASK_INGEST_CREATOR_ADMIN_ID → is_default_task_assignee → primer admin). Cada tarea trae, además de lo de siempre, assignee (owner|openclaw), origin (panel|dots|conversacion|openclaw), link_type (workboard|mision|null) y link_ref (id de la tarjeta o slug de la misión, o null). Con vencidas=true la respuesta suma «vencidas» (ver el parámetro) y con assignee solo trae las de ese responsable.',
             'escribe'      => false,
             'peligrosidad' => 'lectura',
             'frenos'       => [],
@@ -772,6 +772,8 @@ return [
                 ['nombre' => 'admin_id', 'obligatorio' => false, 'validacion' => 'id de un admin existente (si no, 422)', 'que_es' => 'De quién es la agenda. GET claude/admins los lista.'],
                 ['nombre' => 'admin_name', 'obligatorio' => false, 'validacion' => 'LIKE sin distinguir mayúsculas; 0 o más de 1 coincidencia es 422 con la lista', 'que_es' => 'De quién es la agenda, por nombre.'],
                 ['nombre' => 'buscar', 'obligatorio' => false, 'validacion' => 'texto (se usan hasta 200 caracteres)', 'que_es' => 'Busca en título y notas de TODAS las tareas del admin y devuelve «coincidencias».'],
+                ['nombre' => 'assignee', 'obligatorio' => false, 'validacion' => 'nullable|string|in:owner,openclaw (otro valor es 422)', 'que_es' => 'Filtra por quién hace la tarea (owner = el dueño de esa agenda, openclaw): ocurrencias, bandeja y vencidas. Sin esto vienen todas.'],
+                ['nombre' => 'vencidas', 'obligatorio' => false, 'validacion' => 'true/false o 1/0 (default false; otro valor es 422)', 'que_es' => 'Con true suma la clave «vencidas»: las tareas NO repetidas del admin con date anterior a hoy (hora argentina) y sin completar, sin límite de rango, de la más vieja a la más nueva, tope 200. Las repetidas no cuentan como vencidas. Sin true la clave no aparece. «De hoy» es desde=hoy&hasta=hoy.'],
             ],
         ],
         'GET api/claude/agenda/{id}' => [
@@ -805,6 +807,10 @@ return [
                 ['nombre' => 'sort_order', 'obligatorio' => false, 'validacion' => 'integer', 'que_es' => 'Orden en la bandeja. Por defecto, al final.'],
                 ['nombre' => 'admin_id', 'obligatorio' => false, 'validacion' => 'id de un admin existente (si no, 422)', 'que_es' => 'En la agenda de quién se crea. Sin esto ni admin_name, el admin por defecto de las tareas de Claude.'],
                 ['nombre' => 'admin_name', 'obligatorio' => false, 'validacion' => 'LIKE sin distinguir mayúsculas; 0 o más de 1 coincidencia es 422', 'que_es' => 'En la agenda de quién se crea, por nombre.'],
+                ['nombre' => 'assignee', 'obligatorio' => false, 'validacion' => 'string|in:owner,openclaw (default owner)', 'que_es' => 'Quién hace la tarea: owner (el dueño de esa agenda; en la de Lucas, Lucas) u openclaw.'],
+                ['nombre' => 'origin', 'obligatorio' => false, 'validacion' => 'in:dots,conversacion,openclaw (default conversacion); «panel» u otro valor es 422', 'que_es' => 'De dónde vino el pedido. Se fija en el alta y no se edita. El panel siempre guarda «panel».'],
+                ['nombre' => 'link_type', 'obligatorio' => false, 'validacion' => 'nullable|string|in:workboard,mision; sin link_ref es 422', 'que_es' => 'Tipo del vínculo opcional: una tarjeta del Workboard de OpenClaw o una misión.'],
+                ['nombre' => 'link_ref', 'obligatorio' => false, 'validacion' => 'nullable|string|max:120|regex:/^[A-Za-z0-9._:-]+$/; sin link_type es 422', 'que_es' => 'Referencia del vínculo: el id de la tarjeta o el slug de la misión.'],
             ],
         ],
         'PATCH api/claude/agenda/{id}' => [
@@ -832,6 +838,9 @@ return [
                 ['nombre' => 'repeat_until', 'obligatorio' => false, 'validacion' => 'nullable|date_format:Y-m-d', 'que_es' => 'Fin nuevo de la repetición. Si no viene y se mueve la serie, el fin se corre solo los mismos días que la base.'],
                 ['nombre' => 'subtasks[]', 'obligatorio' => false, 'validacion' => 'nullable|array|max:100; cada ítem un string o {id?, title, done?}', 'que_es' => 'REEMPLAZA el conjunto de subpasos.'],
                 ['nombre' => 'sort_order', 'obligatorio' => false, 'validacion' => 'integer', 'que_es' => 'Orden en la bandeja.'],
+                ['nombre' => 'assignee', 'obligatorio' => false, 'validacion' => 'string|in:owner,openclaw', 'que_es' => 'Cambia quién hace la tarea. («origin» no se edita: si viene en el body se ignora.)'],
+                ['nombre' => 'link_type', 'obligatorio' => false, 'validacion' => 'nullable|string|in:workboard,mision', 'que_es' => 'Tipo del vínculo. null saca el vínculo y limpia también link_ref. Con tipo hace falta que la tarea tenga o reciba link_ref (si no, 422).'],
+                ['nombre' => 'link_ref', 'obligatorio' => false, 'validacion' => 'nullable|string|max:120|regex:/^[A-Za-z0-9._:-]+$/', 'que_es' => 'Referencia del vínculo (id de tarjeta o slug de misión). Sin tipo en la tarea es 422.'],
             ],
         ],
         'DELETE api/claude/agenda/{id}' => [
@@ -2935,7 +2944,7 @@ return [
             ],
         ],
         'POST api/claude/agent-implementations/{id}/stages/{n}' => [
-            'para_que'     => 'Registra una etapa (1 a 8): su estado, lo que se suma a su data (se MEZCLA: las claves nuevas pisan las del mismo nombre, el resto queda) y una nota opcional (evento nota). Si el estado cambió deja un evento avance. Recalcula current_stage = la primera etapa que no está completed ni skipped (8 si todas). in_progress pone started_at; completed/skipped ponen completed_at; pending limpia las dos. 200 {model}.',
+            'para_que'     => 'Registra una etapa (1 a 8): su estado, lo que se suma a su data (se MEZCLA: las claves nuevas pisan las del mismo nombre, el resto queda) y una nota opcional (evento nota). Si el estado cambió deja un evento avance. Recalcula current_stage = la etapa MÁS ALTA iniciada (en curso o completa), sin contar la 7 (Pago y verificación, que se adelanta); si ya está completa, la primera abierta por encima (8 si todas); si nada está iniciado, la primera que no está completed ni skipped. Una Preparación sin cerrar no frena la actual. in_progress pone started_at; completed/skipped ponen completed_at; pending limpia las dos. 200 {model}.',
             'escribe'      => true,
             'peligrosidad' => 'baja',
             'frenos'       => [
@@ -2949,7 +2958,7 @@ return [
                 ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'La implementación.'],
                 ['nombre' => '{n} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; 1 a 8', 'que_es' => 'La etapa.'],
                 ['nombre' => 'status', 'obligatorio' => true, 'validacion' => 'required|string|in:pending,in_progress,completed,skipped', 'que_es' => 'El estado de la etapa.'],
-                ['nombre' => 'data', 'obligatorio' => false, 'validacion' => 'nullable|array (objeto JSON)', 'que_es' => 'Preparación flujo2 exige true booleano en version_ok, extension_ok, numero_personal_solicitado, numero_personal_cargado, asistente_whatsapp_activo, agente_personal_probado, app_link_enviado, acceso_sistema_verificado, onboarding_completado y pdf_agentes_enviado; además pdf_agentes_url HTTPS terminada en .pdf. El PDF se registra después de WhatsApp y onboarding. onboarding_completado lo marca solo el admin (agentes:sincronizar-onboarding, cada 30 minutos) cuando la empresa del cliente informa que el dueño ya contó su negocio, en «Conozcámonos» o con los 13 temas esenciales por WhatsApp (versión con el onboarding conversacional); registrarlo a mano sigue valiendo. Otras claves sugeridas en AgentImplementation::STAGES.'],
+                ['nombre' => 'data', 'obligatorio' => false, 'validacion' => 'nullable|array (objeto JSON)', 'que_es' => 'Preparación flujo2 exige true booleano en version_ok, extension_ok, numero_personal_solicitado, numero_personal_cargado, asistente_whatsapp_activo, agente_personal_probado, app_link_enviado, acceso_sistema_verificado, onboarding_completado y pdf_agentes_enviado; además pdf_agentes_url HTTPS terminada en .pdf. El PDF se registra después de WhatsApp y onboarding. onboarding_completado lo marca solo el admin (agentes:sincronizar-onboarding, cada 30 minutos) cuando la empresa del cliente informa que el dueño ya contó su negocio, en «Conozcámonos» o con los 13 temas esenciales por WhatsApp (versión con el onboarding conversacional); registrarlo a mano sigue valiendo. Convención de «quién frena» (la lee el despacho de OpenClaw; no cambia el contrato): data.frena = nosotros|cliente|tercero|lucas y data.frena_nota (texto de hasta 300 caracteres) en la etapa actual; para cargarlos sin crear evento mandá el mismo status que ya tiene la etapa y sin nota. Otras claves sugeridas en AgentImplementation::STAGES.'],
                 ['nombre' => 'nota', 'obligatorio' => false, 'validacion' => 'nullable|string|max:1000', 'que_es' => 'Una nota que queda como evento de la etapa.'],
             ],
         ],

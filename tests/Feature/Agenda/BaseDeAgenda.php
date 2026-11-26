@@ -37,12 +37,14 @@ abstract class BaseDeAgenda extends TestCase
     /** Clave de ingesta del bloque claude/* (en el .env del slot está vacía y el middleware es fail-closed). */
     const CLAVE = 'clave-de-prueba-agenda-admin';
 
-    /** Las claves exactas de la forma de una tarea (contrato del plan, igual en panel y Claude). */
+    /** Las claves exactas de la forma de una tarea (contrato del plan, igual en panel y Claude): las 24 de siempre + las 4 de la misión agenda-openclaw-empuje. */
     const CLAVES_DE_TAREA = [
         'id', 'admin_id', 'title', 'notes', 'date', 'occurrence_date', 'start_time', 'end_time',
         'all_day', 'duration_minutes', 'color', 'icon', 'repeat', 'repeat_until', 'is_recurring',
         'completed', 'completed_at', 'subtasks', 'subtasks_done', 'subtasks_total', 'sort_order',
         'created_via', 'created_at', 'updated_at',
+        // Misión agenda-openclaw-empuje (25/11/2026): quién la hace, de dónde vino el pedido y el vínculo opcional.
+        'assignee', 'origin', 'link_type', 'link_ref',
     ];
 
     /**
