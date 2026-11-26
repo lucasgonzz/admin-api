@@ -59,8 +59,11 @@ abstract class BaseDeReferidosYCompromisos extends BaseDelTableroDeJuan
     /** @var object Espía de WhatsApp: `plantillas` y `textos` con lo que el código quiso mandar. */
     protected $envios;
 
-    /** @var array<int, string> URLs de los pedidos HTTP que nadie previó (tienen que quedar vacías). */
-    protected $pedidos_http_sin_stub = [];
+    /** Cuerpo de la respuesta que recibe un pedido HTTP que ningún stub atendió (lo reconoce `pedidos_sin_stub()`). */
+    const MARCA_DE_PEDIDO_SIN_STUB = 'pedido HTTP sin stub en el test';
+
+    /** @var bool El test de control del guardián ya comprobó que denuncia y se hace cargo del pedido sin stub que provocó. */
+    protected $guardian_comprobado = false;
 
     /**
      * Deja el entorno: webhook firmable, HTTP cerrado, espía de WhatsApp, tablero de Juan sembrado y clave de Claude.
@@ -79,12 +82,14 @@ abstract class BaseDeReferidosYCompromisos extends BaseDelTableroDeJuan
            Flujo de entrada apagado: los tests que lo necesitan lo prenden. */
         $this->preparar_flujo_de_entrada(false, false);
 
-        /* Último stub: todo lo que no tiene dueño se anota y devuelve 500, así un envío real nunca "funciona". */
+        /* Último stub: todo lo que no tiene dueño devuelve 500 con una marca, así un envío real nunca "funciona".
+           🔴 NO anota nada desde acá: Laravel 8 invoca TODOS los stubs de un pedido (`buildStubHandler` hace `map->__invoke`) y se
+           queda con la primera respuesta que no es null, así que este callback corre también para los pedidos que atiende otro
+           stub (la IA simulada) y los denunciaría como ajenos. Los pedidos sin dueño se detectan en el `tearDown` por la
+           RESPUESTA que recibieron (la de este stub), con `pedidos_sin_stub()`. */
         Http::fake([
             '*' => function ($request) {
-                $this->pedidos_http_sin_stub[] = $request->method() . ' ' . $request->url();
-
-                return Http::response(['error' => 'pedido HTTP sin stub en el test'], 500);
+                return Http::response(['error' => self::MARCA_DE_PEDIDO_SIN_STUB], 500);
             },
         ]);
 
@@ -102,14 +107,32 @@ abstract class BaseDeReferidosYCompromisos extends BaseDelTableroDeJuan
      */
     protected function tearDown(): void
     {
-        $ajenos = $this->pedidos_http_sin_stub;
-        $this->pedidos_http_sin_stub = [];
+        $ajenos = $this->guardian_comprobado ? [] : $this->pedidos_sin_stub();
 
         $this->desarmar_flujo_de_entrada();
 
         parent::tearDown();
 
         $this->assertSame([], $ajenos, 'Salió a la red algo que el test no previó (OpenAI/DeepSeek/Meta/otro).');
+    }
+
+    /**
+     * Los pedidos HTTP de este test que ningún stub atendió: los que recibieron la respuesta del stub `'*'` (la marca
+     * `MARCA_DE_PEDIDO_SIN_STUB`). Un pedido que atendió otro stub (la IA simulada) no cuenta, aunque el `'*'` también se invoque.
+     *
+     * @return array<int, string> `MÉTODO url` de cada uno; vacío si todo tuvo dueño.
+     */
+    protected function pedidos_sin_stub(): array
+    {
+        $ajenos = [];
+        foreach (Http::recorded() as $par) {
+            $cuerpo = $par[1]->json();
+            if (is_array($cuerpo) && isset($cuerpo['error']) && $cuerpo['error'] === self::MARCA_DE_PEDIDO_SIN_STUB) {
+                $ajenos[] = $par[0]->method() . ' ' . $par[0]->url();
+            }
+        }
+
+        return $ajenos;
     }
 
     // ------------------------------------------------------------------------------------------
