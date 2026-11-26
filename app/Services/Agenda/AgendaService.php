@@ -55,7 +55,13 @@ class AgendaService
         'icon'             => 'check2-square',
         'repeat'           => 'none',
         'repeat_until'     => null,
+        'assignee'         => 'owner',
+        'link_type'        => null,
+        'link_ref'         => null,
     ];
+
+    /** Tope de tareas que devuelve la clave `vencidas` de un listado (las más viejas primero). */
+    const TOPE_VENCIDAS = 200;
 
     /** @var AgendaValidator */
     private $validator;
@@ -91,24 +97,33 @@ class AgendaService
      * el día primero, hora, id. La bandeja va por `sort_order` e id.
      *
      * @param int   $admin_id    Dueño de la agenda.
-     * @param array $input       Parámetros del request (`desde`, `hasta`, `incluir_completadas`).
+     * Filtros opcionales (misión agenda-openclaw-empuje): `assignee` (owner|openclaw) filtra las
+     * ocurrencias, la bandeja y las vencidas; `vencidas=true` suma la clave `vencidas` con las tareas
+     * NO repetidas con fecha anterior a hoy y sin completar, sin límite de rango (ver
+     * {@see vencidas_de()}). Sin `vencidas=true` esa clave no aparece. «De hoy» es `desde=hoy&hasta=hoy`.
+     *
+     * @param array $input       Parámetros del request (`desde`, `hasta`, `incluir_completadas`, `assignee`, `vencidas`).
      * @param bool  $obligatorio Si `desde`/`hasta` son obligatorios (panel) u opcionales (Claude).
      *
-     * @return array{desde: string, hasta: string, hoy: string, ocurrencias: array, bandeja: array}
+     * @return array{desde: string, hasta: string, hoy: string, ocurrencias: array, bandeja: array, vencidas?: array}
      *
-     * @throws \Illuminate\Validation\ValidationException 422 si el rango no es válido.
+     * @throws \Illuminate\Validation\ValidationException 422 si el rango o un filtro no es válido.
      */
     public function listar(int $admin_id, array $input, bool $obligatorio): array
     {
         $hoy = $this->hoy();
 
         list($desde, $hasta, $incluir_completadas) = $this->validator->validar_rango($input, $obligatorio, $hoy);
+        list($assignee, $con_vencidas)             = $this->validator->validar_filtros($input);
 
         /* Las candidatas: las no repetidas con fecha adentro del rango, y las repetidas que empiezan
            antes del fin del rango y no terminaron antes de su comienzo. La expansión fina (qué días
            caen adentro) la hace ocurrencias_en_rango(). */
         $tareas = AgendaTask::with('subtasks')
             ->where('admin_id', $admin_id)
+            ->when($assignee !== null, function ($q) use ($assignee) {
+                $q->where('assignee', $assignee);
+            })
             ->whereNotNull('date')
             ->where(function ($q) use ($desde, $hasta) {
                 $q->where(function ($q) use ($desde, $hasta) {
@@ -165,6 +180,9 @@ class AgendaService
         $bandeja = AgendaTask::with('subtasks')
             ->where('admin_id', $admin_id)
             ->whereNull('date')
+            ->when($assignee !== null, function ($q) use ($assignee) {
+                $q->where('assignee', $assignee);
+            })
             ->when(! $incluir_completadas, function ($q) {
                 $q->whereNull('completed_at');
             })
@@ -177,13 +195,56 @@ class AgendaService
             ->values()
             ->all();
 
-        return [
+        $respuesta = [
             'desde'       => $desde,
             'hasta'       => $hasta,
             'hoy'         => $hoy,
             'ocurrencias' => $ocurrencias,
             'bandeja'     => $bandeja,
         ];
+
+        // La clave `vencidas` existe SOLO si se pidió: un cliente viejo recibe la misma respuesta de siempre.
+        if ($con_vencidas) {
+            $respuesta['vencidas'] = $this->vencidas_de($admin_id, $hoy, $assignee);
+        }
+
+        return $respuesta;
+    }
+
+    /**
+     * Las tareas vencidas de un admin: no repetidas, con fecha anterior a hoy y sin completar.
+     *
+     * Sin límite de rango (una tarea no hecha de hace cuatro meses cuenta), de la más vieja a la más
+     * nueva y con tope {@see TOPE_VENCIDAS}. Las repetidas no cuentan: una ocurrencia salteada de una
+     * serie no es una deuda, es un día que no se hizo y la serie sigue.
+     *
+     * @param int         $admin_id Dueño de la agenda.
+     * @param string      $hoy      El día de hoy (Y-m-d, hora argentina).
+     * @param string|null $assignee Filtro de responsable, o null para todos.
+     *
+     * @return array<int, array> Tareas serializadas.
+     */
+    private function vencidas_de(int $admin_id, string $hoy, ?string $assignee): array
+    {
+        return AgendaTask::with('subtasks')
+            ->where('admin_id', $admin_id)
+            ->where('repeat', 'none')
+            ->whereNotNull('date')
+            ->where('date', '<', $hoy)
+            ->whereNull('completed_at')
+            ->when($assignee !== null, function ($q) use ($assignee) {
+                $q->where('assignee', $assignee);
+            })
+            ->orderBy('date')
+            ->orderBy('start_time')
+            ->orderBy('id')
+            ->limit(self::TOPE_VENCIDAS)
+            ->get()
+            ->map(function ($tarea) {
+                return $this->serializar($tarea);
+            })
+            ->values()
+            ->all();
     }
 
     /**
@@ -270,11 +331,15 @@ class AgendaService
         $datos  = $this->validator->validar_campos($input, true);
         $estado = $this->validator->resolver_estado(self::POR_DEFECTO, $datos);
 
-        $tarea = DB::transaction(function () use ($admin_id, $datos, $estado, $created_via) {
+        // El origen del pedido se fija acá, en el alta, y no se edita nunca más.
+        $origen = $this->validator->validar_origen($input, $created_via);
+
+        $tarea = DB::transaction(function () use ($admin_id, $datos, $estado, $created_via, $origen) {
             $tarea = new AgendaTask();
             $tarea->fill($this->columnas_de_estado($estado));
             $tarea->admin_id     = $admin_id;
             $tarea->created_via  = $created_via;
+            $tarea->origin       = $origen;
             $tarea->completed_at = null;
             $tarea->sort_order   = array_key_exists('sort_order', $datos)
                 ? (int) $datos['sort_order']
@@ -413,6 +478,11 @@ class AgendaService
             $copia->fill($this->columnas_de_estado($this->estado_de($tarea)));
             $copia->admin_id     = (int) $tarea->admin_id;
             $copia->created_via  = $created_via;
+            // La copia es un pedido nuevo de quien duplica (panel o conversación) y conserva el responsable...
+            $copia->origin       = $created_via === 'claude' ? 'conversacion' : 'panel';
+            // ...pero NO el vínculo: una copia no es la misma tarjeta ni la misma misión.
+            $copia->link_type    = null;
+            $copia->link_ref     = null;
             $copia->completed_at = null;
             $copia->sort_order   = $this->siguiente_orden((int) $tarea->admin_id);
             $copia->save();
@@ -709,6 +779,10 @@ class AgendaService
             'subtasks_total'   => count($subtasks),
             'sort_order'       => (int) $tarea->sort_order,
             'created_via'      => (string) $tarea->created_via,
+            'assignee'         => $tarea->assignee !== null ? (string) $tarea->assignee : 'owner',
+            'origin'           => $tarea->origin !== null ? (string) $tarea->origin : 'panel',
+            'link_type'        => $tarea->link_type !== null ? (string) $tarea->link_type : null,
+            'link_ref'         => $tarea->link_ref !== null ? (string) $tarea->link_ref : null,
             'created_at'       => $this->fecha_hora($tarea->created_at),
             'updated_at'       => $this->fecha_hora($tarea->updated_at),
         ];
@@ -1117,6 +1191,9 @@ class AgendaService
             'icon'             => (string) $tarea->icon,
             'repeat'           => (string) $tarea->repeat,
             'repeat_until'     => $tarea->repeat_until !== null ? (string) $tarea->repeat_until : null,
+            'assignee'         => $tarea->assignee !== null ? (string) $tarea->assignee : 'owner',
+            'link_type'        => $tarea->link_type !== null ? (string) $tarea->link_type : null,
+            'link_ref'         => $tarea->link_ref !== null ? (string) $tarea->link_ref : null,
         ];
     }
 

@@ -28,8 +28,18 @@ class Kernel extends ConsoleKernel
             $schedule->exec(self::artisan_sin_el_lock_del_cron('support:process-scheduled-upgrades'))
                 ->everyMinute()->withoutOverlapping(5)->runInBackground();
         }
+        /* Retención del WhatsApp personal de Lucas (misión wa-personal-coexistencia): borra los mensajes de más de
+         * 90 días y los chats que quedan vacíos. De madrugada, cuando nadie está escribiendo. */
+        $schedule->command('whatsapp:personal-depurar')->dailyAt('04:10')->withoutOverlapping();
+
         // Una vez por día alcanza: un cliente se queda sin teléfono cargado una vez, no cada cinco minutos.
         $schedule->command('support:check-clients-without-phone')->dailyAt('09:00');
+
+        /* Marcas «requiere actualización» (misión martin-descripcion-y-actualizaciones, 25/11/2026): cada hora mira si
+         * salió una versión que contiene cada corrección pendiente (GitHub, sólo si hay versiones nuevas o la marca se
+         * resolvió por fecha) y resuelve las que el cliente ya instaló. El cierre de un upgrade lo dispara además al
+         * instante; esto cubre lo que se haya perdido. */
+        $schedule->command('client-upgrade-marks:refresh')->hourly()->withoutOverlapping(30);
 
         /* Misión onboarding-conversacional-whatsapp: le pregunta a la empresa de cada cliente con una implementación de
          * Agentes de IA abierta si el dueño ya contó su negocio (formulario de la app o los temas esenciales por

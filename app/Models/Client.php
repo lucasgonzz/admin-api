@@ -54,6 +54,8 @@ class Client extends Model
 
     protected $casts = [
         'is_active'                => 'boolean',
+        /* Tiene marcas abiertas en client_upgrade_marks (la mantiene sólo ClientUpgradeMarkService). */
+        'requires_upgrade'         => 'boolean',
         'user_id'                  => 'integer',
         'shared_database_group_id' => 'integer',
         // Datos de configuración recolectados en la Etapa 1 de implementación (para UserSetup).
@@ -564,6 +566,15 @@ class Client extends Model
      */
     public function client_ecommerce() {
         return $this->hasOne(ClientEcommerce::class);
+    }
+
+    /**
+     * Marcas «requiere actualización» del cliente (misión martin-descripcion-y-actualizaciones), la más nueva primero.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function upgrade_marks() {
+        return $this->hasMany(ClientUpgradeMark::class)->orderByDesc('id');
     }
 
     /**

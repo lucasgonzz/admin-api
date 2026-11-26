@@ -269,6 +269,21 @@ class ClientProperties
                 'use_to_filter_in_search' => true,
                 'width' => 140,
             ],
+            /**
+             * Tiene marcas abiertas en client_upgrade_marks (misión martin-descripcion-y-actualizaciones, contrato C6).
+             * Sólo lectura (`only_show`): la mantiene ClientUpgradeMarkService, el formulario no la escribe; filtrable
+             * con el checkbox genérico del listado (POST search/client/null/1).
+             */
+            [
+                'key' => 'requires_upgrade',
+                'text' => 'Requiere actualización',
+                'type' => 'checkbox',
+                // Visible por defecto: Lucas tiene que ver a simple vista a quién actualizar.
+                'show' => true,
+                'only_show' => true,
+                'use_to_filter_in_search' => true,
+                'width' => 110,
+            ],
             [
                 'key' => 'is_active',
                 'text' => 'Activo',

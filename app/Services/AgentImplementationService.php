@@ -299,7 +299,8 @@ class AgentImplementationService
     }
 
     /**
-     * Recalcula y guarda `current_stage` (la primera etapa que no está completed ni skipped; 8 si todas).
+     * Recalcula y guarda `current_stage` según el avance real (la etapa más alta iniciada; ver
+     * {@see AgentImplementation::compute_current_stage()}). En Lite es siempre 1.
      *
      * @param AgentImplementation $implementation La implementación.
      *
