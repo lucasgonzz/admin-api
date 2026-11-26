@@ -6162,8 +6162,7 @@ class DeploymentService
     /**
      * Suelta el aviso si el sistema vivo del cliente NO se tocó, para las fallas del arranque que pasan
      * FUERA de run() y por lo tanto no llegan a G5 (ronda 3): `RunDeploymentJob` lo llama cuando
-     * `connect()` lanza, cuando el candado del cliente tarda y el job vuelve en silencio, y desde
-     * `failed()` cuando el worker mata el job (timeout) o la cola lo da por agotado.
+     * `connect()` lanza y desde `failed()` cuando el worker mata el job (timeout) o la cola lo da por agotado.
      *
      * Es público porque lo usa el job; es el único método público del bloque `aviso_*`. Reusa la lógica
      * de G5 (`aviso_activo()` + `aviso_sistema_vivo_tocado()` + `aviso_liberar_con_reintentos()`), pero
@@ -6173,16 +6172,15 @@ class DeploymentService
      * que soltarlo con el sistema tocado. Por eso:
      *
      *  - no suelta si ya hay una línea "liberado" como último movimiento del aviso (G5 ya lo hizo: sin
-     *    esto, `failed()` repetiría el PUT después de un fallo de `run()` ya manejado);
-     *  - con `$minutos_sin_actividad` > 0 no suelta si el upgrade tiene logs más recientes que eso: el
-     *    candado lo tiene otro proceso y puede ser el mismo upgrade corriendo.
+     *    esto, `failed()` repetiría el PUT después de un fallo de `run()` ya manejado).
+     *
+     * El camino del candado tomado por otro proceso NO lo llama: ese proceso es el dueño de la corrida.
      *
      * 🔴 Nunca lanza.
      *
-     * @param  int  $minutos_sin_actividad  0 = no mira la actividad; N = exige N minutos sin logs nuevos.
      * @return void
      */
-    public function aviso_soltar_si_no_se_toco(int $minutos_sin_actividad = 0): void
+    public function aviso_soltar_si_no_se_toco(): void
     {
         try {
             if (! $this->aviso_activo() || $this->aviso_sistema_vivo_tocado()) {
@@ -6194,11 +6192,6 @@ class DeploymentService
                 ->orderByDesc('id')
                 ->value('line');
             if ($ultimo_movimiento !== null && strpos((string) $ultimo_movimiento, 'Aviso de actualización: liberado') === 0) {
-                return;
-            }
-
-            if ($minutos_sin_actividad > 0 && DeploymentLog::where('client_version_upgrade_id', $this->upgrade->id)
-                ->where('created_at', '>=', now()->subMinutes($minutos_sin_actividad))->exists()) {
                 return;
             }
 
