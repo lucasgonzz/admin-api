@@ -24,6 +24,11 @@ use Illuminate\Support\Facades\Validator;
  * 422), para que un reporter más nuevo que el admin no se quede afuera; las conocidas se validan con sus
  * enums exactos.
  *
+ * Contrato A v2 (misión el-local-linux, 25/11/2026): si el reporte trae `contrato >= 2` (el reporter de Linux), en
+ * lugar del pool de slots llegan las misiones, el Workboard y las tareas de OpenClaw y la cola de misiones por
+ * recursos; todo eso lo valida y guarda {@see PcSnapshotService}. Sin `contrato` el reporte es v1 y se hace
+ * exactamente lo de siempre (compatibilidad hacia atrás: el reporter de Windows sigue funcionando).
+ *
  * Las fechas llegan ISO con zona (los claims y el reflog en -03:00, los transcripts en UTC) y se guardan en
  * la hora del admin, que es la de `config('app.timezone')`.
  */
@@ -31,6 +36,20 @@ class OficinaIngestService
 {
     /** Clave de `admin_settings` donde queda el pulso del reporter. */
     const PULSO_KEY = 'local_reporter_pulso';
+
+    /** Contrato mínimo que activa el modo misiones (reporter de Linux). */
+    const CONTRATO_MISIONES = 2;
+
+    /** @var PcSnapshotService Valida y guarda el snapshot v2 (misiones, OpenClaw, cola, historial de fases). */
+    private $snapshot;
+
+    /**
+     * @param PcSnapshotService|null $snapshot Guarda el snapshot del contrato v2 (el contenedor lo inyecta).
+     */
+    public function __construct(PcSnapshotService $snapshot = null)
+    {
+        $this->snapshot = $snapshot !== null ? $snapshot : new PcSnapshotService();
+    }
 
     /** Tope de slots por reporte (contrato A). */
     const TOPE_SLOTS = 60;
@@ -47,11 +66,13 @@ class OficinaIngestService
      * 🔴 `slot` y `estado` son obligatorios en cada fila: sin el número no hay qué actualizar, y sin el
      * estado la mesa no se puede dibujar (inventarle "libre" mentiría). Todo lo demás es opcional.
      *
-     * @return array<string, string>
+     * Desde el contrato v2 se SUMAN las reglas de {@see PcSnapshotService::rules()} (todas opcionales).
+     *
+     * @return array<string, mixed>
      */
     public function reglas()
     {
-        return [
+        $v1 = [
             'reporter'               => 'nullable|array',
             'reporter.version'       => 'nullable|string|max:40',
             'reporter.host'          => 'nullable|string|max:120',
@@ -82,6 +103,8 @@ class OficinaIngestService
             'slots.*.agentes.*.desde_at'    => 'nullable|date',
             'slots.*.agentes.*.nombre'      => 'nullable|string|max:120',
         ];
+
+        return array_merge($v1, $this->snapshot->rules());
     }
 
     /**
@@ -104,17 +127,26 @@ class OficinaIngestService
     }
 
     /**
-     * Guarda un reporte ya validado: upsert de los slots y pulso del reporter, en una transacción.
+     * Guarda un reporte ya validado, en una transacción.
+     *
+     * - v1: upsert de los slots y pulso del reporter (como siempre).
+     * - v2 (`contrato >= 2`): guarda el snapshot de misiones / OpenClaw / cola y el historial de fases, BORRA todas
+     *   las filas de `local_oficina_slots` (el pool de 35 slots ya no existe y las filas viejas de la ASUS
+     *   quedarían dibujándose) y agrega `contrato` y `plataforma` al pulso.
      *
      * @param array<string, mixed> $datos Body validado.
      *
-     * @return array{recibido_at: Carbon, slots: int}
+     * @return array{recibido_at: Carbon, slots: int, misiones: int, contrato: int}
      */
     public function guardar(array $datos)
     {
         $ahora    = AppTime::now();
         $ahora_db = $this->formato_db($ahora);
-        $slots    = isset($datos['slots']) && is_array($datos['slots']) ? $datos['slots'] : [];
+        $contrato = isset($datos['contrato']) && is_numeric($datos['contrato']) ? (int) $datos['contrato'] : 1;
+        $es_v2    = $contrato >= self::CONTRATO_MISIONES;
+
+        // En v2 el reporte no trae slots (y si trajera, no se guardan): el pool ya no existe.
+        $slots    = ! $es_v2 && isset($datos['slots']) && is_array($datos['slots']) ? $datos['slots'] : [];
 
         $filas = [];
         foreach ($slots as $slot) {
@@ -138,7 +170,22 @@ class OficinaIngestService
             ],
         ];
 
-        DB::transaction(function () use ($filas, $pulso) {
+        if ($es_v2) {
+            $pulso['contrato']   = $contrato;
+            $pulso['plataforma'] = $this->texto_o_null(isset($reporter['plataforma']) ? $reporter['plataforma'] : null);
+        }
+
+        // Misiones guardadas por el snapshot v2 (0 en v1).
+        $misiones_guardadas = 0;
+
+        DB::transaction(function () use ($filas, $pulso, $es_v2, $datos, $ahora, &$misiones_guardadas) {
+            if ($es_v2) {
+                /* Modo misiones: se vacía el espejo del pool (incluye las filas viejas de la ASUS) y se guarda
+                   el snapshot nuevo con su historial de fases. */
+                LocalOficinaSlot::query()->delete();
+                $misiones_guardadas = $this->snapshot->save($datos, $ahora);
+            }
+
             if (count($filas) > 0) {
                 /* Una sola consulta para todos los slots. `upsert` de Eloquent pone created_at/updated_at
                    solo; los casts NO se aplican, por eso `agentes` ya viene codificado en fila_de(). */
@@ -156,7 +203,12 @@ class OficinaIngestService
             AdminSetting::set(self::PULSO_KEY, json_encode($pulso));
         });
 
-        return ['recibido_at' => $ahora, 'slots' => count($filas)];
+        return [
+            'recibido_at' => $ahora,
+            'slots'       => count($filas),
+            'misiones'    => $misiones_guardadas,
+            'contrato'    => $es_v2 ? $contrato : 1,
+        ];
     }
 
     /**

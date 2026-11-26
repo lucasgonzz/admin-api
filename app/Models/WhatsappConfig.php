@@ -31,6 +31,15 @@ class WhatsappConfig extends Model
     const PROPOSITO_ASISTENTE = 'asistente';
 
     /**
+     * Propósito del número PERSONAL de Lucas (WhatsApp Business App en coexistencia con Kapso).
+     *
+     * 🔴 A diferencia del asistente, **este propósito JAMÁS se repliega al principal**: ni al enviar, ni al
+     * recibir, ni al medir la ventana. Lo que entra o sale por ahí vive en `whatsapp_personal_messages` y no
+     * toca leads, soporte ni el asistente (misión wa-personal-coexistencia, 25/11/2026).
+     */
+    const PROPOSITO_PERSONAL = 'personal';
+
+    /**
      * Nombre de la tabla en base de datos.
      *
      * @var string
@@ -156,6 +165,9 @@ class WhatsappConfig extends Model
      *     dónde mandarlo. Con la fila a medias —alta hecha en el panel, webhook sin registrar— todo
      *     sigue saliendo y entrando por el principal, como hasta hoy.
      *
+     *   - `personal`: fila activa con `phone_number_id`, `kapso_api_key` y `webhook_secret` (sin `display_phone`:
+     *     es informativo). 🔴 Quien recibe `null` NO puede caer al principal: el personal no tiene repliegue.
+     *
      * Todos los consumidores que tienen que decidir «¿mando por el número del asistente o por el
      * principal?» pasan por acá, y no por `porProposito()`, que solo mira que la fila exista.
      *
@@ -170,7 +182,8 @@ class WhatsappConfig extends Model
             return null;
         }
 
-        if ($proposito === self::PROPOSITO_ASISTENTE && ! $config->tieneLoNecesarioParaAtender()) {
+        /* El asistente y el personal exigen la fila completa; el principal sigue pidiendo sólo la fila activa. */
+        if ($proposito !== self::PROPOSITO_PRINCIPAL && ! $config->tieneLoNecesarioParaAtender()) {
             return null;
         }
 

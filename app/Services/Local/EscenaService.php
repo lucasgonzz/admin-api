@@ -111,6 +111,12 @@ class EscenaService
     /** Cuando el reporter nunca mandó nada, la oficina se dibuja con 35 slots. */
     const SLOTS_POR_DEFECTO = 35;
 
+    /** Tope de misiones que devuelve la escena en modo misiones. */
+    const TOPE_MISIONES = 40;
+
+    /** Tope de fases del historial que devuelve la escena por misión (las últimas). */
+    const TOPE_FASES = 15;
+
     /** Largo de la misión en el título de la bandeja (contrato B). */
     const LETRAS_DE_MISION = 70;
 
@@ -152,6 +158,9 @@ class EscenaService
     /** @var ClientScheduleResolver */
     private $horarios;
 
+    /** @var PcSnapshotService Lectura del snapshot v2 (misiones, OpenClaw, cola e historial de fases). */
+    private $snapshot;
+
     /** @var Carbon Momento del cálculo. */
     private $ahora;
 
@@ -160,10 +169,12 @@ class EscenaService
 
     /**
      * @param ClientScheduleResolver $horarios Resuelve abierto / cerrado / sin_configurar por cliente.
+     * @param PcSnapshotService|null $snapshot Lee el snapshot v2 de la PC (el contenedor lo inyecta).
      */
-    public function __construct(ClientScheduleResolver $horarios)
+    public function __construct(ClientScheduleResolver $horarios, PcSnapshotService $snapshot = null)
     {
         $this->horarios = $horarios;
+        $this->snapshot = $snapshot !== null ? $snapshot : new PcSnapshotService();
     }
 
     /**
@@ -194,7 +205,15 @@ class EscenaService
            corren: van en null y la SPA pinta «—». `slots_total` sí queda en 35, que es el pool de hoy. */
         $slots_libres      = null;
         $misiones_en_curso = null;
-        if (count($oficina['slots']) > 0) {
+        $slots_total       = count($oficina['slots']) > 0 ? count($oficina['slots']) : self::SLOTS_POR_DEFECTO;
+
+        if ($oficina['modo'] === 'misiones') {
+            /* Modo misiones (reporter v2): no hay pool, así que no hay «slots libres». Las misiones en curso son
+               las no terminadas (`por_origen` ya cuenta sólo esas, sobre TODAS las guardadas y no sobre el tope
+               de 40 de la lista) y «slots» pasa a ser la cantidad de carpetas de trabajo en uso. */
+            $misiones_en_curso = array_sum($oficina['por_origen']);
+            $slots_total       = (int) $oficina['slots_en_uso'];
+        } elseif (count($oficina['slots']) > 0) {
             $slots_libres      = 0;
             $misiones_en_curso = 0;
             foreach ($oficina['slots'] as $slot) {
@@ -217,7 +236,7 @@ class EscenaService
                 'para_lucas'           => $bandeja['total'],
                 'misiones_en_curso'    => $misiones_en_curso,
                 'slots_libres'         => $slots_libres,
-                'slots_total'          => count($oficina['slots']) > 0 ? count($oficina['slots']) : self::SLOTS_POR_DEFECTO,
+                'slots_total'          => $slots_total,
             ],
             'negocios'     => $negocios,
             'agentes'      => $agentes,
@@ -954,13 +973,17 @@ class EscenaService
     }
 
     /**
-     * `oficina`: el pulso del reporter local, el planificador y las mesas (una por slot).
+     * `oficina`: el pulso del reporter local, el planificador y las mesas.
      *
-     * - `reporter.ok`: hubo pulso en los últimos 5 minutos. Sin pulso no se manda nada: es un panel.
-     * - `planificador.estado`: `trabajando` si algún slot que está TRABAJANDO va en fase `tomado` o `plan`. Un
-     *   slot colgado o huérfano que quedó en esa fase no tiene a nadie planificando.
-     * - `slots`: las filas de `local_oficina_slots` ordenadas por slot, con los campos del contrato A más
-     *   `reportado_at`.
+     * Dos modos, según lo último que reportó la PC:
+     *   - `slots` (reporter v1 o sin reportes): una mesa por slot del pool. `planificador.estado` es
+     *     `trabajando` si algún slot que está TRABAJANDO va en fase `tomado` o `plan`.
+     *   - `misiones` (el pulso trae `contrato >= 2`, reporter de Linux): una mesa por misión, y el planificador
+     *     es OpenClaw. Ver {@see self::oficina_de_misiones()}.
+     *
+     * Las claves van SIEMPRE en el mismo orden (contrato B extendido): `reporter`, `planificador`, `slots`,
+     * `modo`, `misiones`, `misiones_recorte`, `por_origen`, `slots_en_uso`, `openclaw`, `cola`, `umbrales_demora`. En modo slots las
+     * cinco nuevas llevan sus valores vacíos.
      *
      * @return array<string, mixed>
      */
@@ -968,6 +991,19 @@ class EscenaService
     {
         $pulso = $this->json_de_setting(OficinaIngestService::PULSO_KEY);
         $visto = isset($pulso['last_seen_at']) ? $this->ts_de_pulso($pulso['last_seen_at']) : null;
+
+        $contrato = isset($pulso['contrato']) && is_numeric($pulso['contrato']) ? (int) $pulso['contrato'] : 1;
+        $modo     = $contrato >= OficinaIngestService::CONTRATO_MISIONES ? 'misiones' : 'slots';
+
+        $reporter = [
+            'ok'           => $visto !== null && $visto >= $this->ahora_ts - self::VENTANA_PULSO_MIN * 60,
+            'last_seen_at' => $this->iso($visto),
+            'version'      => isset($pulso['version']) && $pulso['version'] !== '' ? (string) $pulso['version'] : null,
+        ];
+
+        if ($modo === 'misiones') {
+            return array_merge(['reporter' => $reporter], $this->oficina_de_misiones());
+        }
 
         $slots        = [];
         $planificando = false;
@@ -993,14 +1029,284 @@ class EscenaService
         }
 
         return [
-            'reporter'     => [
-                'ok'           => $visto !== null && $visto >= $this->ahora_ts - self::VENTANA_PULSO_MIN * 60,
-                'last_seen_at' => $this->iso($visto),
-                'version'      => isset($pulso['version']) && $pulso['version'] !== '' ? (string) $pulso['version'] : null,
-            ],
-            'planificador' => ['estado' => $planificando ? 'trabajando' : 'libre'],
-            'slots'        => $slots,
+            'reporter'        => $reporter,
+            'planificador'    => ['estado' => $planificando ? 'trabajando' : 'libre'],
+            'slots'           => $slots,
+            'modo'            => 'slots',
+            'misiones'        => [],
+            'misiones_recorte' => ['recortado' => false, 'omitidas' => 0],
+            'por_origen'      => [],
+            'slots_en_uso'    => null,
+            'openclaw'        => null,
+            'cola'            => null,
+            'umbrales_demora' => $this->umbrales_demora(),
         ];
+    }
+
+    /**
+     * Las claves de `oficina` (menos `reporter`) para el modo misiones: mesas por misión, OpenClaw como
+     * planificador, Workboard, tareas programadas y cola.
+     *
+     * @return array<string, mixed>
+     */
+    private function oficina_de_misiones()
+    {
+        $lectura = $this->snapshot->read();
+
+        /* ---- Misiones: orden, conteos y tope ---- */
+        $guardadas = isset($lectura['misiones']['items']) && is_array($lectura['misiones']['items']) ? $lectura['misiones']['items'] : [];
+        $orden_estado = ['trabajando' => 0, 'trabada' => 1, 'esperando_lucas' => 2, 'terminada' => 3];
+        $con_indice   = [];
+        foreach ($guardadas as $i => $mision) {
+            $con_indice[] = ['i' => $i, 'mision' => $mision, 'ts' => (int) $this->ts(isset($mision['ultima_actividad_at']) ? $mision['ultima_actividad_at'] : null)];
+        }
+        usort($con_indice, function ($a, $b) use ($orden_estado) {
+            $ea = isset($orden_estado[$a['mision']['estado']]) ? $orden_estado[$a['mision']['estado']] : 9;
+            $eb = isset($orden_estado[$b['mision']['estado']]) ? $orden_estado[$b['mision']['estado']] : 9;
+            if ($ea !== $eb) {
+                return $ea - $eb;
+            }
+            if ($a['ts'] !== $b['ts']) {
+                return $a['ts'] > $b['ts'] ? -1 : 1;
+            }
+
+            return $a['i'] - $b['i'];
+        });
+
+        // Conteos sobre TODAS las guardadas no terminadas (no sobre el tope de la lista).
+        $por_origen = array_fill_keys(PcSnapshotService::ORIGENES, 0);
+        $carpetas   = [];
+        $hay_mision_de_openclaw_trabajando = false;
+        foreach ($guardadas as $mision) {
+            if ($mision['estado'] === 'terminada') {
+                continue;
+            }
+            if (isset($por_origen[$mision['origen']])) {
+                $por_origen[$mision['origen']]++;
+            }
+            foreach (isset($mision['worktrees']) && is_array($mision['worktrees']) ? $mision['worktrees'] : [] as $worktree) {
+                $carpetas[$worktree['carpeta']] = true;
+            }
+            if ($mision['origen'] === 'openclaw' && $mision['estado'] === 'trabajando') {
+                $hay_mision_de_openclaw_trabajando = true;
+            }
+        }
+
+        $sin_senal_misiones = $this->snapshot_viejo($lectura['misiones']);
+        $visibles           = array_slice($con_indice, 0, self::TOPE_MISIONES);
+
+        $claves = [];
+        foreach ($visibles as $fila) {
+            $claves[] = $fila['mision']['id'];
+        }
+        $fases_por_mision = $this->snapshot->phases_by_mission($claves);
+
+        $misiones = [];
+        foreach ($visibles as $fila) {
+            $misiones[] = $this->mision_de_la_escena($fila['mision'], $sin_senal_misiones, isset($fases_por_mision[$fila['mision']['id']]) ? $fases_por_mision[$fila['mision']['id']] : []);
+        }
+
+        /* Recorte visible (REVISION-1 R6): las que el reporter omitió, las que el admin descartó para entrar en
+           60 KB y las que no entran en el tope de la lista de la escena. */
+        $omitidas_guardado = isset($lectura['misiones']['omitidas']) ? (int) $lectura['misiones']['omitidas'] : 0;
+        $omitidas_escena   = $omitidas_guardado + max(0, count($guardadas) - count($visibles));
+        $misiones_recorte  = [
+            'recortado' => $omitidas_escena > 0 || ! empty($lectura['misiones']['recortado']),
+            'omitidas'  => $omitidas_escena,
+        ];
+
+        /* ---- OpenClaw: gateway, Workboard y tareas ---- */
+        $openclaw = null;
+        $gateway_estado = 'desconocido';
+        $hay_running    = false;
+        if ($lectura['openclaw'] !== null) {
+            $viejo   = $this->snapshot_viejo($lectura['openclaw']);
+            $gateway = isset($lectura['openclaw']['gateway']) && is_array($lectura['openclaw']['gateway']) ? $lectura['openclaw']['gateway'] : null;
+            // Un snapshot de más de 5 minutos no prueba nada: el gateway pasa a «desconocido».
+            $gateway_estado = $gateway === null || $viejo ? 'desconocido' : (string) $gateway['estado'];
+
+            $wb = $lectura['workboard'];
+            if ($wb !== null) {
+                $hay_running = (isset($wb['conteo']['running']) && (int) $wb['conteo']['running'] > 0);
+                foreach (isset($wb['tarjetas']) && is_array($wb['tarjetas']) ? $wb['tarjetas'] : [] as $tarjeta) {
+                    if ($tarjeta['estado'] === 'running') {
+                        $hay_running = true;
+                    }
+                }
+            }
+
+            $tareas = isset($lectura['openclaw']['tareas']) && is_array($lectura['openclaw']['tareas']) ? $lectura['openclaw']['tareas'] : ['ok' => false, 'items' => []];
+
+            $openclaw = [
+                'reportado_at' => isset($lectura['openclaw']['reportado_at']) ? $lectura['openclaw']['reportado_at'] : null,
+                'gateway'      => [
+                    'estado'        => $gateway_estado,
+                    'version'       => $gateway !== null && isset($gateway['version']) ? $gateway['version'] : null,
+                    'verificado_at' => $gateway !== null && isset($gateway['verificado_at']) ? $gateway['verificado_at'] : null,
+                ],
+                'workboard'    => [
+                    'ok'        => $wb !== null ? (bool) $wb['ok'] : false,
+                    'total'     => $wb !== null ? (int) $wb['total'] : 0,
+                    'conteo'    => $wb !== null && isset($wb['conteo']) ? $wb['conteo'] : [],
+                    'recortado' => $wb !== null && ! empty($wb['recortado']),
+                    'tarjetas'  => $wb !== null && isset($wb['tarjetas']) ? $wb['tarjetas'] : [],
+                ],
+                'tareas'       => [
+                    'ok'    => (bool) $tareas['ok'],
+                    'items' => isset($tareas['items']) ? $tareas['items'] : [],
+                ],
+            ];
+        }
+
+        /* El planificador ES OpenClaw: apagado si no se sabe de él o el gateway está caído; trabajando si hay
+           una tarjeta corriendo o una misión suya en curso; si no, libre. */
+        if ($openclaw === null || in_array($gateway_estado, ['caido', 'desconocido'], true)) {
+            $planificador = 'apagado';
+        } elseif ($hay_running || $hay_mision_de_openclaw_trabajando) {
+            $planificador = 'trabajando';
+        } else {
+            $planificador = 'libre';
+        }
+
+        /* ---- Cola de misiones por recursos (no son mesas ni cuentan como misiones en curso) ---- */
+        $cola = null;
+        if ($lectura['cola'] !== null) {
+            $cola = [
+                'reportado_at'   => isset($lectura['cola']['reportado_at']) ? $lectura['cola']['reportado_at'] : null,
+                'sin_senal'      => $this->snapshot_viejo($lectura['cola']),
+                'ok'             => (bool) $lectura['cola']['ok'],
+                'en_espera'      => isset($lectura['cola']['en_espera']) ? $lectura['cola']['en_espera'] : [],
+                'fallidas'       => isset($lectura['cola']['fallidas']) ? (int) $lectura['cola']['fallidas'] : 0,
+                'ultimo_chequeo' => isset($lectura['cola']['ultimo_chequeo']) ? $lectura['cola']['ultimo_chequeo'] : null,
+                'chequeos'       => isset($lectura['cola']['chequeos']) ? $lectura['cola']['chequeos'] : [],
+            ];
+        }
+
+        return [
+            'planificador'    => ['estado' => $planificador],
+            'slots'           => [],
+            'modo'            => 'misiones',
+            'misiones'        => $misiones,
+            'misiones_recorte' => $misiones_recorte,
+            'por_origen'      => $por_origen,
+            'slots_en_uso'    => count($carpetas),
+            'openclaw'        => $openclaw,
+            'cola'            => $cola,
+            'umbrales_demora' => $this->umbrales_demora(),
+        ];
+    }
+
+    /**
+     * Una misión guardada, lista para la SPA: suma la ruta del ticket, `sin_senal` y el tiempo en la etapa.
+     *
+     * - `etapa_desde`: el `desde` más viejo de la racha FINAL de fases de la misma etapa (revisión 1 y revisión 2
+     *   cuentan juntas). Sale del historial de la tabla (la mejor estimación) y, si no hay, de lo reportado.
+     * - `minutos_en_etapa`: desde `etapa_desde` hasta ahora.
+     * - `umbral_min`: el de su etapa en `config/el_local.php`.
+     * - `demorada`: sólo si está `trabajando` y lleva más minutos que el umbral. `esperando_lucas` y `trabada`
+     *   se ven con su propio estado, no como demora (REVISION-1 R5); la etapa `cierre` tampoco (REVISION-2 R14).
+     * - `fase_historial`: el historial completo de la tabla (el snapshot ya no lo guarda, REVISION-1 R6).
+     * - `fases`: las últimas {@see self::TOPE_FASES} fases de la tabla, por `desde`.
+     *
+     * @param array<string, mixed>             $mision      Misión guardada.
+     * @param bool                             $sin_senal   El snapshot de misiones tiene más de 5 minutos.
+     * @param array<int, array<string, mixed>> $filas_tabla Historial de la tabla (`desde` en formato de base).
+     *
+     * @return array<string, mixed>
+     */
+    private function mision_de_la_escena(array $mision, $sin_senal, array $filas_tabla)
+    {
+        // Historial: la tabla manda; sin filas se usa lo que reportó el reporter en esta misión.
+        $historial = [];
+        foreach ($filas_tabla as $fila) {
+            $historial[] = [
+                'fase'     => $fila['fase'],
+                'etapa'    => $fila['etapa'],
+                'desde'    => $this->iso($this->ts($fila['desde'])),
+                'hasta'    => $this->iso($this->ts($fila['hasta'])),
+                'segundos' => $fila['segundos'],
+                'inferida' => $fila['inferida'],
+            ];
+        }
+        if (count($historial) === 0) {
+            foreach (isset($mision['fase_historial']) && is_array($mision['fase_historial']) ? $mision['fase_historial'] : [] as $entrada) {
+                $historial[] = [
+                    'fase'     => $entrada['fase'],
+                    'etapa'    => $entrada['etapa'],
+                    'desde'    => $entrada['desde'],
+                    'hasta'    => $entrada['hasta'],
+                    'segundos' => $entrada['segundos'],
+                    'inferida' => (bool) $entrada['inferida'],
+                ];
+            }
+        }
+
+        // Racha final de la etapa actual: se camina de atrás para adelante mientras la etapa sea la misma.
+        $etapa       = isset($mision['etapa']) ? $mision['etapa'] : null;
+        $etapa_desde = null;
+        if ($etapa !== null) {
+            for ($i = count($historial) - 1; $i >= 0; $i--) {
+                if ($historial[$i]['etapa'] !== $etapa) {
+                    break;
+                }
+                $etapa_desde = $historial[$i]['desde'];
+            }
+            if ($etapa_desde === null && ! empty($mision['fase_desde'])) {
+                $etapa_desde = $mision['fase_desde'];
+            }
+        }
+
+        $minutos = null;
+        $desde_ts = $this->ts($etapa_desde);
+        if ($desde_ts !== null) {
+            $minutos = (int) floor(max(0, $this->ahora_ts - $desde_ts) / 60);
+        }
+
+        $umbrales = $this->umbrales_demora();
+        $umbral   = $etapa !== null && isset($umbrales[$etapa]) ? $umbrales[$etapa] : null;
+        // El cierre (informe/entregada) nunca se marca demorado (REVISION-2 R14).
+        $demorada = $mision['estado'] === 'trabajando' && $etapa !== 'cierre' && $minutos !== null && $umbral !== null && $minutos > $umbral;
+
+        $salida = $mision;
+        $salida['ruta']             = ! empty($mision['ticket']) ? $this->ruta_de_ticket($mision['ticket']) : null;
+        $salida['sin_senal']        = (bool) $sin_senal;
+        $salida['etapa_desde']      = $etapa_desde;
+        $salida['minutos_en_etapa'] = $minutos;
+        $salida['umbral_min']       = $umbral;
+        $salida['demorada']         = $demorada;
+        $salida['fases']            = array_slice($historial, -self::TOPE_FASES);
+        $salida['fase_historial']   = $historial;
+
+        return $salida;
+    }
+
+    /**
+     * Umbrales de demora por etapa, de `config/el_local.php` (enteros, minutos).
+     *
+     * @return array<string, int>
+     */
+    private function umbrales_demora()
+    {
+        $umbrales = [];
+        foreach ((array) config('el_local.umbrales_demora_min', []) as $etapa => $minutos) {
+            $umbrales[$etapa] = (int) $minutos;
+        }
+
+        return $umbrales;
+    }
+
+    /**
+     * Si un bloque del snapshot tiene más de 5 minutos (o no dice cuándo se reportó): ya no es una señal viva.
+     *
+     * @param array<string, mixed>|null $bloque Bloque guardado (con `reportado_at`).
+     *
+     * @return bool
+     */
+    private function snapshot_viejo($bloque)
+    {
+        $reportado = is_array($bloque) && isset($bloque['reportado_at']) ? $this->ts($bloque['reportado_at']) : null;
+
+        return $reportado === null || $reportado < $this->ahora_ts - self::VENTANA_PULSO_MIN * 60;
     }
 
     /**

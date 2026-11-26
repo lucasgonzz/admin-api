@@ -21,7 +21,7 @@ use Illuminate\Database\Eloquent\Model;
  * @property int              $client_id             Cliente dueño del número.
  * @property string           $status                in_progress | completed | cancelled.
  * @property string|null      $camino                nuevo | propio.
- * @property int              $current_stage         Primera etapa que no está completed ni skipped (8 si están todas).
+ * @property int              $current_stage         Etapa más alta iniciada (en curso o completa; la 7 no cuenta); ver compute_current_stage().
  * @property string|null      $kapso_customer_id     Cliente de Kapso.
  * @property string|null      $phone_number_id       Id del número en Meta (que exista = conectado).
  * @property string|null      $waba_id               Cuenta de WhatsApp Business.
@@ -54,6 +54,9 @@ class AgentImplementation extends Model
 
     /** Los caminos posibles. */
     const CAMINOS = [self::CAMINO_NUEVO, self::CAMINO_PROPIO];
+
+    /** Etapas que se pueden adelantar y por eso no cuentan para saber hasta dónde llegó la implementación (7 = Pago y verificación). */
+    const ADELANTABLES = [7];
 
     /** Primera etapa. */
     const FIRST_STAGE = 1;
@@ -236,10 +239,24 @@ class AgentImplementation extends Model
     }
 
     /**
-     * Recalcula `current_stage` a partir de las etapas cargadas: la primera que no está `completed` ni
-     * `skipped`; si están todas cerradas, la última (8). No guarda: devuelve el número.
+     * Recalcula `current_stage` a partir de las etapas cargadas, midiendo el AVANCE REAL. No guarda:
+     * devuelve el número.
      *
-     * 🔴 Se calcula y no se avanza «de a uno» a propósito: las etapas se pueden registrar fuera de orden
+     * La regla (misión agenda-openclaw-empuje, 25/11/2026):
+     *  1. `H` es la etapa MÁS ALTA que está `in_progress` o `completed`, sin contar las
+     *     {@see ADELANTABLES} (el pago de Meta se puede adelantar y no dice hasta dónde se llegó).
+     *  2. Sin `H` (nada iniciado) rige la regla vieja: la primera que no está `completed` ni `skipped`
+     *     (8 si están todas cerradas).
+     *  3. Si `H` está en curso, la actual es `H`.
+     *  4. Si `H` está completa, la actual es la primera etapa por encima de `H` que no está `completed`
+     *     ni `skipped` (la 7 incluida); si no hay ninguna, 8.
+     *
+     * 🔴 Antes era solo la regla 2 y daba mal en las altas históricas (`flujo_version = 1`): nadie
+     * cierra la Preparación (sus hitos v2 quedan abiertos), así que Pablo, que iba por la 6, figuraba en
+     * la 1. Clase del error: un estado derivado que mira el primer hueco y no el avance real. No lo
+     * «simplifiques» de vuelta a «la primera abierta».
+     *
+     * Se calcula y no se avanza «de a uno» a propósito: las etapas se pueden registrar fuera de orden
      * (el pago de Meta se puede adelantar, el entrenamiento se saltea en el camino `nuevo`), y un contador
      * que solo sube quedaría apuntando a una etapa que no es la que falta.
      *
@@ -249,16 +266,55 @@ class AgentImplementation extends Model
      */
     public static function compute_current_stage($stages)
     {
-        $closed = [];
+        // Estado de cada etapa por número.
+        $status_by_number = [];
 
         foreach ($stages as $stage) {
-            if (in_array((string) $stage->status, [AgentImplementationStage::STATUS_COMPLETED, AgentImplementationStage::STATUS_SKIPPED], true)) {
-                $closed[(int) $stage->stage_number] = true;
+            $status_by_number[(int) $stage->stage_number] = (string) $stage->status;
+        }
+
+        // Etapa más alta iniciada (en curso o completa), sin contar las adelantables.
+        $highest = null;
+
+        foreach ($status_by_number as $number => $status) {
+            if (in_array($number, self::ADELANTABLES, true)) {
+                continue;
+            }
+
+            if (in_array($status, [AgentImplementationStage::STATUS_IN_PROGRESS, AgentImplementationStage::STATUS_COMPLETED], true)
+                && ($highest === null || $number > $highest)) {
+                $highest = $number;
             }
         }
 
-        for ($number = self::FIRST_STAGE; $number <= self::LAST_STAGE; $number++) {
-            if (! isset($closed[$number])) {
+        // Nada iniciado: la primera que no está cerrada (regla de siempre).
+        if ($highest === null) {
+            return self::first_open_stage($status_by_number, self::FIRST_STAGE);
+        }
+
+        // La más alta está en curso: la implementación va por ahí.
+        if ($status_by_number[$highest] === AgentImplementationStage::STATUS_IN_PROGRESS) {
+            return $highest;
+        }
+
+        // La más alta está completa: sigue la primera abierta por encima de ella.
+        return self::first_open_stage($status_by_number, $highest + 1);
+    }
+
+    /**
+     * La primera etapa desde `$from` que no está `completed` ni `skipped`; 8 si no queda ninguna abierta.
+     *
+     * @param array<int, string> $status_by_number Estado de cada etapa por número.
+     * @param int                $from             Primera etapa a mirar.
+     *
+     * @return int
+     */
+    protected static function first_open_stage(array $status_by_number, $from)
+    {
+        for ($number = $from; $number <= self::LAST_STAGE; $number++) {
+            $status = isset($status_by_number[$number]) ? $status_by_number[$number] : AgentImplementationStage::STATUS_PENDING;
+
+            if (! in_array($status, [AgentImplementationStage::STATUS_COMPLETED, AgentImplementationStage::STATUS_SKIPPED], true)) {
                 return $number;
             }
         }

@@ -42,14 +42,16 @@ class ClaudeAgendaController extends Controller
     }
 
     /**
-     * `GET claude/agenda`: la agenda de un admin en un rango, y opcionalmente una búsqueda.
+     * `GET claude/agenda`: la agenda de un admin en un rango, y opcionalmente una búsqueda y las vencidas.
      *
      * Sin `desde`/`hasta` es hoy..hoy+7. Con `buscar` se suma `coincidencias` (tareas sin expandir
-     * cuyo título o notas contienen el texto, sin importar el rango, tope 50).
+     * cuyo título o notas contienen el texto, sin importar el rango, tope 50). Con `assignee`
+     * (owner|openclaw) filtra por responsable y con `vencidas=true` suma `vencidas` (las tareas no
+     * repetidas con fecha anterior a hoy y sin completar, tope 200). Un valor inválido es 422.
      *
-     * @param Request $request `desde?`, `hasta?`, `incluir_completadas?`, `admin_id?`, `admin_name?`, `buscar?`.
+     * @param Request $request `desde?`, `hasta?`, `incluir_completadas?`, `admin_id?`, `admin_name?`, `buscar?`, `assignee?`, `vencidas?`.
      *
-     * @return JsonResponse `200 {desde, hasta, hoy, ocurrencias, bandeja, admin, coincidencias?}`.
+     * @return JsonResponse `200 {desde, hasta, hoy, ocurrencias, bandeja, admin, coincidencias?, vencidas?}`.
      */
     public function index(Request $request): JsonResponse
     {
@@ -80,6 +82,10 @@ class ClaudeAgendaController extends Controller
 
     /**
      * `POST claude/agenda`: crea una tarea (con `created_via = 'claude'`).
+     *
+     * Además de los campos de siempre acepta, todos opcionales: `assignee` (owner|openclaw), `origin`
+     * (dots|conversacion|openclaw, default conversacion) y el vínculo `link_type` (workboard|mision) +
+     * `link_ref` (los dos o ninguno).
      *
      * @param Request $request Campos de la tarea; `subtasks` puede ser un array de strings.
      *

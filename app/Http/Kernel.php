@@ -92,5 +92,8 @@ class Kernel extends HttpKernel
         // Perfil «Sólo Leads» (misión embudo-whatsapp-precios, E5): lista blanca de rutas, estado y nota. Va DESPUÉS de
         // `auth` / `auth:sanctum` y cuelga de toda ruta autenticada (lo verifica un test que recorre las rutas).
         'admin.solo_leads' => \App\Http\Middleware\SoloLeadsAllowlist::class,
+        // Sólo un Admin con `es_agente` (Claude Code, OpenClaw por el MCP): el resto recibe 404. Lo usan las rutas del
+        // WhatsApp personal (misión wa-personal-coexistencia). Va ANTES de `admin.solo_leads`.
+        'admin.solo_agente' => \App\Http\Middleware\SoloAgenteDelPanel::class,
     ];
 }
