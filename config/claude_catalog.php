@@ -358,6 +358,18 @@ return [
                 ['nombre' => 'confirmation_message_id', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|integer|min:1', 'que_es' => 'Mensaje del cliente con confirmación clara, obligatorio al cerrar.'],
             ],
         ],
+        'POST api/claude/support-codex/tickets/{id}/no-reply' => [
+            'para_que' => 'Martín registra que el último mensaje del cliente no necesita respuesta (un acuse, un «Sí»): marca el entrante como atendido, guarda el motivo y libera la reserva. El ticket no se vuelve a disparar ni queda en rojo hasta un mensaje nuevo del cliente. Responde {registered, replayed, ticket}.',
+            'escribe' => true, 'peligrosidad' => 'baja',
+            'frenos' => ['Exige el token vigente y el mismo mensaje esperado (423 invalid_lease, 409 stale_message); no aplica a casos en revisión ni a motivos distintos de inbound (409 manual_review / not_pending). No toca la atención ni el estado del caso.'],
+            'parametros' => [
+                ['nombre' => 'lease_token', 'obligatorio' => true, 'validacion' => 'required|string|min:32|max:128', 'que_es' => 'Reserva actual.'],
+                ['nombre' => 'expected_message_id', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'Entrante que se da por atendido.'],
+                ['nombre' => 'reason', 'obligatorio' => true, 'validacion' => 'required|string|min:10|max:300', 'que_es' => 'Por qué no hace falta responder.'],
+                ['nombre' => 'execution_id', 'obligatorio' => false, 'validacion' => 'sometimes|string|max:64', 'que_es' => 'Ejecución de Martín.'],
+                ['nombre' => 'thread_id', 'obligatorio' => false, 'validacion' => 'sometimes|string|max:150', 'que_es' => 'Vincula la conversación.'],
+            ],
+        ],
         'POST api/claude/support-codex/tickets/{id}/release' => [
             'para_que' => 'Libera una reserva y opcionalmente pausa el caso para revisión humana.',
             'escribe' => true, 'peligrosidad' => 'baja',
@@ -749,7 +761,7 @@ return [
            reglas de validación de abajo son las de AgendaValidator::validar_campos(), copiadas el
            31/10/2026: si se toca una regla allá, se toca acá. */
         'GET api/claude/agenda' => [
-            'para_que'     => 'La agenda de un admin: las ocurrencias del rango (las repetidas ya expandidas, cada una con su occurrence_date y su hecha/no hecha), la bandeja (tareas sin fecha) y el admin dueño. Sin desde/hasta es hoy..hoy+7 (con uno solo, el otro a 7 días); el rango no puede pasar de 100 días. Con «buscar» suma «coincidencias»: tareas sin expandir del mismo admin cuyo título o notas contienen el texto, sin importar el rango, las más nuevas primero, tope 50. Sin admin_id ni admin_name es la agenda del admin por defecto de las tareas de Claude (CLAUDE_TASK_INGEST_CREATOR_ADMIN_ID → is_default_task_assignee → primer admin).',
+            'para_que'     => 'La agenda de un admin: las ocurrencias del rango (las repetidas ya expandidas, cada una con su occurrence_date y su hecha/no hecha), la bandeja (tareas sin fecha) y el admin dueño. Sin desde/hasta es hoy..hoy+7 (con uno solo, el otro a 7 días); el rango no puede pasar de 100 días. Con «buscar» suma «coincidencias»: tareas sin expandir del mismo admin cuyo título o notas contienen el texto, sin importar el rango, las más nuevas primero, tope 50. Sin admin_id ni admin_name es la agenda del admin por defecto de las tareas de Claude (CLAUDE_TASK_INGEST_CREATOR_ADMIN_ID → is_default_task_assignee → primer admin). Cada tarea trae, además de lo de siempre, assignee (owner|openclaw), origin (panel|dots|conversacion|openclaw), link_type (workboard|mision|null) y link_ref (id de la tarjeta o slug de la misión, o null). Con vencidas=true la respuesta suma «vencidas» (ver el parámetro) y con assignee solo trae las de ese responsable.',
             'escribe'      => false,
             'peligrosidad' => 'lectura',
             'frenos'       => [],
@@ -760,6 +772,8 @@ return [
                 ['nombre' => 'admin_id', 'obligatorio' => false, 'validacion' => 'id de un admin existente (si no, 422)', 'que_es' => 'De quién es la agenda. GET claude/admins los lista.'],
                 ['nombre' => 'admin_name', 'obligatorio' => false, 'validacion' => 'LIKE sin distinguir mayúsculas; 0 o más de 1 coincidencia es 422 con la lista', 'que_es' => 'De quién es la agenda, por nombre.'],
                 ['nombre' => 'buscar', 'obligatorio' => false, 'validacion' => 'texto (se usan hasta 200 caracteres)', 'que_es' => 'Busca en título y notas de TODAS las tareas del admin y devuelve «coincidencias».'],
+                ['nombre' => 'assignee', 'obligatorio' => false, 'validacion' => 'nullable|string|in:owner,openclaw (otro valor es 422)', 'que_es' => 'Filtra por quién hace la tarea (owner = el dueño de esa agenda, openclaw): ocurrencias, bandeja y vencidas. Sin esto vienen todas.'],
+                ['nombre' => 'vencidas', 'obligatorio' => false, 'validacion' => 'true/false o 1/0 (default false; otro valor es 422)', 'que_es' => 'Con true suma la clave «vencidas»: las tareas NO repetidas del admin con date anterior a hoy (hora argentina) y sin completar, sin límite de rango, de la más vieja a la más nueva, tope 200. Las repetidas no cuentan como vencidas. Sin true la clave no aparece. «De hoy» es desde=hoy&hasta=hoy.'],
             ],
         ],
         'GET api/claude/agenda/{id}' => [
@@ -793,6 +807,10 @@ return [
                 ['nombre' => 'sort_order', 'obligatorio' => false, 'validacion' => 'integer', 'que_es' => 'Orden en la bandeja. Por defecto, al final.'],
                 ['nombre' => 'admin_id', 'obligatorio' => false, 'validacion' => 'id de un admin existente (si no, 422)', 'que_es' => 'En la agenda de quién se crea. Sin esto ni admin_name, el admin por defecto de las tareas de Claude.'],
                 ['nombre' => 'admin_name', 'obligatorio' => false, 'validacion' => 'LIKE sin distinguir mayúsculas; 0 o más de 1 coincidencia es 422', 'que_es' => 'En la agenda de quién se crea, por nombre.'],
+                ['nombre' => 'assignee', 'obligatorio' => false, 'validacion' => 'string|in:owner,openclaw (default owner)', 'que_es' => 'Quién hace la tarea: owner (el dueño de esa agenda; en la de Lucas, Lucas) u openclaw.'],
+                ['nombre' => 'origin', 'obligatorio' => false, 'validacion' => 'in:dots,conversacion,openclaw (default conversacion); «panel» u otro valor es 422', 'que_es' => 'De dónde vino el pedido. Se fija en el alta y no se edita. El panel siempre guarda «panel».'],
+                ['nombre' => 'link_type', 'obligatorio' => false, 'validacion' => 'nullable|string|in:workboard,mision; sin link_ref es 422', 'que_es' => 'Tipo del vínculo opcional: una tarjeta del Workboard de OpenClaw o una misión.'],
+                ['nombre' => 'link_ref', 'obligatorio' => false, 'validacion' => 'nullable|string|max:120|regex:/^[A-Za-z0-9._:-]+$/; sin link_type es 422', 'que_es' => 'Referencia del vínculo: el id de la tarjeta o el slug de la misión.'],
             ],
         ],
         'PATCH api/claude/agenda/{id}' => [
@@ -820,6 +838,9 @@ return [
                 ['nombre' => 'repeat_until', 'obligatorio' => false, 'validacion' => 'nullable|date_format:Y-m-d', 'que_es' => 'Fin nuevo de la repetición. Si no viene y se mueve la serie, el fin se corre solo los mismos días que la base.'],
                 ['nombre' => 'subtasks[]', 'obligatorio' => false, 'validacion' => 'nullable|array|max:100; cada ítem un string o {id?, title, done?}', 'que_es' => 'REEMPLAZA el conjunto de subpasos.'],
                 ['nombre' => 'sort_order', 'obligatorio' => false, 'validacion' => 'integer', 'que_es' => 'Orden en la bandeja.'],
+                ['nombre' => 'assignee', 'obligatorio' => false, 'validacion' => 'string|in:owner,openclaw', 'que_es' => 'Cambia quién hace la tarea. («origin» no se edita: si viene en el body se ignora.)'],
+                ['nombre' => 'link_type', 'obligatorio' => false, 'validacion' => 'nullable|string|in:workboard,mision', 'que_es' => 'Tipo del vínculo. null saca el vínculo y limpia también link_ref. Con tipo hace falta que la tarea tenga o reciba link_ref (si no, 422).'],
+                ['nombre' => 'link_ref', 'obligatorio' => false, 'validacion' => 'nullable|string|max:120|regex:/^[A-Za-z0-9._:-]+$/', 'que_es' => 'Referencia del vínculo (id de tarjeta o slug de misión). Sin tipo en la tarea es 422.'],
             ],
         ],
         'DELETE api/claude/agenda/{id}' => [
@@ -2192,6 +2213,7 @@ return [
                 '🔴 EN EL LUGAR, resume_from_step POSTERIOR a la etapa que falló (la más reciente entre "Etapa que falló" y "Etapa en curso", contando solo las líneas posteriores al último artisan up exitoso; si hubo un up y nada después —timeout en un comando—, la etapa es run_commands), o posterior a upload_spa sin que el SPA nuevo se haya desplegado, es 422 sin encolar nada: saltearía lo que quedó sin hacer, o terminaría con el SPA viejo y la API nueva. Una etapa anterior siempre se acepta.',
                 'Destino = API activa pero NO el frente principal (el cliente atiende desde su frente 2): 422 salvo allow_deploy_to_active_api=true. Lo que corresponde es crear el upgrade hacia el frente principal: es la última rotación.',
                 'allow_deploy_to_active_api=true se sigue aceptando siempre (compatibilidad): con ella el start pasa sin gate, como antes, y deja una línea en el log diario.',
+                '🔴 Aviso de actualización (25/11/2026): si el force SALTÓ el gate de horario (el negocio está abierto), el interruptor AVISO_DE_ACTUALIZACION_HABILITADO está prendido, el cliente tiene la versión con el aviso (su GET admin-sync/actualizacion-del-sistema contesta 200) y el estado NO es actualizando (los usuarios todavía no dieron el OK), es 409 falta_ok_de_los_usuarios con el aviso, sin encolar nada y sin borrar los logs. Primero hay que pedir el OK con POST pedido-de-ok y esperar a que el estado pase a actualizando. Empresa-api que no contesta bien (404 versión vieja, 401, 500, corte) NO frena: sigue como hoy. Sin force no se consulta nada. Cuando el force pasa porque el estado YA es actualizando (los usuarios dieron el OK), deploy/start RENUEVA el aviso antes de encolar (PUT actualizando con vence_en_minutos=120) para que el vencimiento corto que deja el pedido (30 minutos) no se cumpla con el deploy esperando en la cola; si ese PUT falla el start sigue igual. La respuesta trae aviso_de_actualizacion {habilitado, soportado, estado, renovado}.',
                 'Si se respalda (en el lugar o última rotación al principal), resume_from_step desde una etapa posterior al respaldo exige que el upgrade tenga un respaldo completo EN EL DISCO del cliente; si no, el job falla sin tocar nada y hay que reanudar desde backup_in_place.',
                 'Encola con onConnection("database"): nunca corre el pipeline SSH adentro del request.',
                 '⚠️ BORRA los logs del intento anterior, igual que el botón del panel — SALVO que mandes resume_from_step, que justamente los conserva. Si querés el log de un intento fallido, leelo ANTES de reintentar sin resume_from_step.',
@@ -2295,6 +2317,60 @@ return [
                 ['nombre' => 'confirm_client_name', 'obligatorio' => true, 'validacion' => 'required|string|max:190', 'que_es' => 'El nombre exacto del cliente del upgrade.'],
                 ['nombre' => 'force', 'obligatorio' => false, 'validacion' => 'nullable|boolean', 'que_es' => '🔴 Saltea la comparación contra el umbral destructivo (45 min) y el caso "sin deployment_running_since, o sea sin medición posible". NO saltea el claim atómico.'],
                 ['nombre' => 'force_reason', 'obligatorio' => false, 'validacion' => 'nullable|string|max:500 — obligatorio con force=true, mínimo 10 caracteres', 'que_es' => 'Por qué se vence antes de tiempo. Queda como warning en el log diario.'],
+            ],
+        ],
+        /* ----------------------------------- Aviso "estamos actualizando el sistema" (25/11/2026) */
+
+        'POST api/claude/upgrades/{id}/pedido-de-ok' => [
+            'para_que'     => 'Le pide el OK a los usuarios conectados del cliente antes de actualizarlo con force: a cada computadora le aparece "Necesitamos actualizar el sistema, ¿nos das el OK?" con Aceptar y "Ahora no". El que acepta sigue trabajando y ve cuántas computadoras faltan; cuando aceptan todas, o pasa el plazo (10 minutos por defecto), se les cierra la sesión y el estado pasa a actualizando. Si alguien aprieta "Ahora no", el estado pasa a rechazado y se cancela con DELETE. Manda a empresa-api upgrade_id, la versión destino y el plazo. Es idempotente: si ya hay un pedido o el sistema ya está actualizando, devuelve el estado actual. Responde {ok, soportado, aviso}. NO arranca ningún deployment.',
+            'escribe'      => true,
+            'peligrosidad' => 'media',
+            'frenos'       => [
+                '🔴 Interruptor general AVISO_DE_ACTUALIZACION_HABILITADO (apagado por defecto): apagado contesta 409 aviso_apagado y no le habla a ningún cliente.',
+                'El cliente tiene que tener la versión de empresa con el aviso: si empresa-api contesta 404, 409 version_sin_aviso (soportado=false) y no se pidió nada. Esa primera actualización se hace como siempre, con el negocio cerrado.',
+                'Cualquier otra falla de empresa-api (401, 500, corte de red) es 502 cliente_no_responde con el HTTP que contestó; nunca un 500 del admin.',
+                'No escribe nada en el admin ni toca el sistema del cliente: sólo muestra un aviso y espera la confirmación de sus usuarios. Si no hay nadie conectado, pasa directo a actualizando.',
+                'Sin confirm_client_name a propósito: no arranca ni detiene ningún deployment. Lo que protege es el interruptor, la clave X-Claude-Task-Key y que el upgrade exista.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; acepta id numérico o uuid', 'que_es' => 'El upgrade que se va a desplegar (de él salen el cliente y la versión destino).'],
+                ['nombre' => 'minutos_para_responder', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:1|max:30', 'que_es' => 'Cuántos minutos tienen las computadoras para contestar. Default 10. Pasado el plazo, a las que no contestaron se les cierra la sesión sola y se sigue.'],
+            ],
+        ],
+        'GET api/claude/upgrades/{id}/pedido-de-ok' => [
+            'para_que'     => 'Lee el estado del aviso de actualización del cliente: libre, pidiendo_ok (con total de computadoras, cuántas aceptaron, cuántas faltan, quiénes y cuántos segundos quedan), rechazado (con el nombre de quien apretó "Ahora no") o actualizando (con hasta cuándo vale el bloqueo). Es lo que polea la skill, cada 20 segundos, después de pedir el OK. Responde {ok, soportado, aviso}.',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+        ],
+        'DELETE api/claude/upgrades/{id}/pedido-de-ok' => [
+            'para_que'     => 'Cancela el pedido de OK del cliente y lo deja en libre: la skill lo usa cuando alguien aprieta "Ahora no" (la actualización queda para la noche, sin forzar) o cuando se acaba el tiempo de espera sin resolución. Responde {ok, soportado, aviso} con estado libre.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                '🔴 Interruptor general AVISO_DE_ACTUALIZACION_HABILITADO (apagado por defecto): apagado contesta 409 aviso_apagado.',
+                'Si el pedido ya pasó a bloquear el sistema (estado actualizando), empresa-api contesta 409 ya_actualizando y no se cancela nada: para soltar ESE estado hay que usar POST aviso-de-actualizacion con accion=liberar.',
+                '404 de empresa-api ⇒ 409 version_sin_aviso; otras fallas ⇒ 502 cliente_no_responde.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; acepta id numérico o uuid', 'que_es' => 'El upgrade cuyo pedido de OK se cancela.'],
+            ],
+        ],
+        'POST api/claude/upgrades/{id}/aviso-de-actualizacion' => [
+            'para_que'     => 'Prende o suelta A MANO el aviso "estamos actualizando": con accion=prender el sistema del cliente cierra las sesiones, no deja ingresar y muestra "estamos actualizando" (también bloquea la tienda online) hasta que se libere o venza; con accion=liberar los usuarios vuelven a poder ingresar. El pipeline ya lo prende y lo suelta solo durante el despliegue en el lugar: este endpoint es para la vuelta atrás (liberar ANTES del php artisan up manual) y para destrabar un aviso que quedó prendido. Responde {ok, soportado, aviso}.',
+            'escribe'      => true,
+            'peligrosidad' => 'alta',
+            'frenos'       => [
+                '🔴 Interruptor general AVISO_DE_ACTUALIZACION_HABILITADO (apagado por defecto): apagado contesta 409 aviso_apagado y no le habla a ningún cliente.',
+                '🔴 prender BLOQUEA el ingreso al sistema de un negocio en funcionamiento (y a su tienda online). Por eso vence solo: vence_en_minutos (5..240, 120 por defecto) y pasado ese tiempo sin renovarse empresa-api lo suelta. Usarlo sólo con el release listo y probado.',
+                'accion se valida contra la lista prender|liberar y vence_en_minutos entre 5 y 240: fuera de eso 422 y no sale nada a empresa-api.',
+                '404 de empresa-api ⇒ 409 version_sin_aviso; otras fallas ⇒ 502 cliente_no_responde.',
+                'Sin confirm_client_name a propósito: no arranca ni detiene ningún deployment y es reversible con accion=liberar.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; acepta id numérico o uuid', 'que_es' => 'El upgrade (de él salen el cliente y la versión destino).'],
+                ['nombre' => 'accion', 'obligatorio' => true, 'validacion' => 'required|string|in:prender,liberar', 'que_es' => 'prender manda estado=actualizando a empresa-api; liberar manda estado=libre.'],
+                ['nombre' => 'vence_en_minutos', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:5|max:240', 'que_es' => 'Sólo con accion=prender: cuánto dura el bloqueo sin renovarse. Default 120.'],
             ],
         ],
         'POST api/claude/upgrades/{id}/deploy/configure-system' => [
@@ -2972,7 +3048,7 @@ return [
             ],
         ],
         'POST api/claude/agent-implementations/{id}/stages/{n}' => [
-            'para_que'     => 'Registra una etapa (1 a 8): su estado, lo que se suma a su data (se MEZCLA: las claves nuevas pisan las del mismo nombre, el resto queda) y una nota opcional (evento nota). Si el estado cambió deja un evento avance. Recalcula current_stage = la primera etapa que no está completed ni skipped (8 si todas). in_progress pone started_at; completed/skipped ponen completed_at; pending limpia las dos. 200 {model}.',
+            'para_que'     => 'Registra una etapa (1 a 8): su estado, lo que se suma a su data (se MEZCLA: las claves nuevas pisan las del mismo nombre, el resto queda) y una nota opcional (evento nota). Si el estado cambió deja un evento avance. Recalcula current_stage = la etapa MÁS ALTA iniciada (en curso o completa), sin contar la 7 (Pago y verificación, que se adelanta); si ya está completa, la primera abierta por encima (8 si todas); si nada está iniciado, la primera que no está completed ni skipped. Una Preparación sin cerrar no frena la actual. in_progress pone started_at; completed/skipped ponen completed_at; pending limpia las dos. 200 {model}.',
             'escribe'      => true,
             'peligrosidad' => 'baja',
             'frenos'       => [
@@ -2986,7 +3062,7 @@ return [
                 ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'La implementación.'],
                 ['nombre' => '{n} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; 1 a 8', 'que_es' => 'La etapa.'],
                 ['nombre' => 'status', 'obligatorio' => true, 'validacion' => 'required|string|in:pending,in_progress,completed,skipped', 'que_es' => 'El estado de la etapa.'],
-                ['nombre' => 'data', 'obligatorio' => false, 'validacion' => 'nullable|array (objeto JSON)', 'que_es' => 'Preparación flujo2 exige true booleano en version_ok, extension_ok, numero_personal_solicitado, numero_personal_cargado, asistente_whatsapp_activo, agente_personal_probado, app_link_enviado, acceso_sistema_verificado, onboarding_completado y pdf_agentes_enviado; además pdf_agentes_url HTTPS terminada en .pdf. El PDF se registra después de WhatsApp y onboarding. onboarding_completado lo marca solo el admin (agentes:sincronizar-onboarding, cada 30 minutos) cuando la empresa del cliente informa que el dueño ya contó su negocio, en «Conozcámonos» o con los 13 temas esenciales por WhatsApp (versión con el onboarding conversacional); registrarlo a mano sigue valiendo. Otras claves sugeridas en AgentImplementation::STAGES.'],
+                ['nombre' => 'data', 'obligatorio' => false, 'validacion' => 'nullable|array (objeto JSON)', 'que_es' => 'Preparación flujo2 exige true booleano en version_ok, extension_ok, numero_personal_solicitado, numero_personal_cargado, asistente_whatsapp_activo, agente_personal_probado, app_link_enviado, acceso_sistema_verificado, onboarding_completado y pdf_agentes_enviado; además pdf_agentes_url HTTPS terminada en .pdf. El PDF se registra después de WhatsApp y onboarding. onboarding_completado lo marca solo el admin (agentes:sincronizar-onboarding, cada 30 minutos) cuando la empresa del cliente informa que el dueño ya contó su negocio, en «Conozcámonos» o con los 13 temas esenciales por WhatsApp (versión con el onboarding conversacional); registrarlo a mano sigue valiendo. Convención de «quién frena» (la lee el despacho de OpenClaw; no cambia el contrato): data.frena = nosotros|cliente|tercero|lucas y data.frena_nota (texto de hasta 300 caracteres) en la etapa actual; para cargarlos sin crear evento mandá el mismo status que ya tiene la etapa y sin nota. Otras claves sugeridas en AgentImplementation::STAGES.'],
                 ['nombre' => 'nota', 'obligatorio' => false, 'validacion' => 'nullable|string|max:1000', 'que_es' => 'Una nota que queda como evento de la etapa.'],
             ],
         ],
@@ -3053,19 +3129,25 @@ return [
         /* «El local» (misión el-local, 3/11/2026, contrato A del plan). Lo llama el reporter local
            (herramientas/el-local/reporter.py) cada minuto; ver ClaudeLocalOficinaController y OficinaIngestService. */
         'POST api/claude/local/oficina' => [
-            'para_que'     => 'El reporter local de la PC de Lucas informa cómo está cada slot del pool para dibujar las oficinas de «El local» (/local del admin): upsert por `slot` en local_oficina_slots (y BORRA los slots que no vinieron en el reporte, salvo que `slots` llegue vacío: la tabla es un espejo del pool) y pulso del reporter en admin_settings (clave local_reporter_pulso = {last_seen_at, version, host, slots_total, sesiones}). Sin pulso por más de 5 minutos la escena muestra oficina.reporter.ok = false. Responde 200 {ok: true, recibido_at, slots}.',
+            'para_que'     => 'El reporter local de la PC de Lucas informa cómo está su trabajo para dibujar las oficinas de «El local» (/local del admin). Dos contratos conviven: v1 (reporter de Windows, sin `contrato`): upsert por `slot` en local_oficina_slots (y BORRA los slots que no vinieron, salvo que `slots` llegue vacío) y pulso en admin_settings (local_reporter_pulso). v2 (reporter de Linux, `contrato: 2`, desde el 25/11/2026): en lugar del pool de slots manda las MISIONES en curso de todos los orígenes (Claude Code, OpenClaw, Codex, soporte, Dots) con etapa, fase, worktrees, agentes y su historial de fases, el Workboard y las tareas programadas de OpenClaw, y la cola de misiones por recursos; se guarda en admin_settings (local_pc_misiones, local_pc_workboard, local_pc_openclaw, local_pc_cola; cada JSON recortado a 60 000 bytes: se descartan primero las terminadas/hechas y después las más viejas, con `recortado: true`), el historial de fases en la tabla local_mission_phases (una fila por misión, fase y vuelta; una fase `inferida` conserva el primer `desde` que se vio) y BORRA TODAS las filas de local_oficina_slots (el pool ya no existe). Sin pulso por más de 5 minutos la escena muestra oficina.reporter.ok = false. Responde 200 {ok, recibido_at, slots, misiones, contrato} (un v1 recibe misiones 0 y contrato 1).',
             'escribe'      => true,
             'peligrosidad' => 'baja',
             'frenos'       => [
                 'Solo escribe filas del admin (local_oficina_slots y una clave de admin_settings). No toca el sistema de ningún cliente ni le manda nada a nadie.',
                 'Se valida TODO antes de escribir (422 con `errors` por campo y `errores`, como el resto del bloque): un estado, una fase, un rol, un runtime o un estado de agente fuera de los enums, un slot repetido o más de 60 slots / 20 agentes por slot no guardan nada.',
                 'Privacidad: solo forma del trabajo (slot, proyecto, estado, rama, slug de misión, fase, roles y horarios). No hay campo para textos de planes, nombres de chats ni datos de tickets; las claves desconocidas se ignoran.',
-                'Idempotente: reenviar el mismo reporte deja las mismas filas (upsert por slot). Un slot que deja de venir se borra; un reporte con `slots` vacío no borra nada (solo actualiza el pulso).',
+                'Idempotente: reenviar el mismo reporte deja las mismas filas (upsert por slot). Un slot que deja de venir se borra; un reporte v1 con `slots` vacío no borra nada (solo actualiza el pulso).',
+                'Contrato v2: sólo forma del trabajo (misiones, fases, worktrees, roles, tarjetas y tareas con título recortado); nunca textos de pedidos, notas, comentarios ni mensajes. Un reporte v2 SÍ borra todas las filas de local_oficina_slots y es compatible hacia atrás: un v1 posterior vuelve la escena al modo slots.',
             ],
             'parametros'   => [
                 ['nombre' => 'slots', 'obligatorio' => true, 'validacion' => 'present|array|max:60; cada uno: slot (required|integer|min:1|max:999|distinct), estado (required|in:libre,trabajando,colgado,huerfano), y opcionales proyecto (string ≤ 20), rama (≤ 120), mision (≤ 120), fase (in:tomado,plan,construccion,revision,tests,merge,informe,novedad,cierre), claim_iniciado_at y ultima_actividad_at (date, ISO con zona), sucios (integer 0..65535), agentes (array ≤ 20; en cada agente rol, runtime y estado son OBLIGATORIOS: rol required|in:orquestador,planificador,constructor,revisor,verificador,redactor,otro; runtime required|in:claude,codex; estado required|in:busy,activo,idle; y opcionales desde_at (date) y nombre (≤ 120))', 'que_es' => 'Los slots del pool (los 35 siempre: los libres con estado libre y el resto en null/[]).'],
                 ['nombre' => 'reporter', 'obligatorio' => false, 'validacion' => 'nullable|array: version (≤ 40), host (≤ 120), enviado_at (date), slots_total (integer 0..60)', 'que_es' => 'Quién reporta. slots_total va al pulso (si falta, la cantidad de slots recibidos).'],
                 ['nombre' => 'sesiones', 'obligatorio' => false, 'validacion' => 'nullable|array: claude_busy, claude_idle, codex_activos (nullable|integer|min:0|max:10000)', 'que_es' => 'Conteo de sesiones de Claude y Codex en la PC, para el pulso.'],
+                ['nombre' => 'contrato', 'obligatorio' => false, 'validacion' => 'nullable|integer|in:1,2 (ausente = 1)', 'que_es' => 'Versión del contrato. Con 2 el reporte es del reporter de Linux: `slots` va como lista vacía y se usan misiones, openclaw y cola. `reporter.plataforma` (≤ 20) va al pulso.'],
+                ['nombre' => 'misiones', 'obligatorio' => false, 'validacion' => 'nullable|array|max:60; cada una con id (required|string|max:80|distinct), origen (required|in:openclaw,claude-code,soporte,codex,dots,desconocido), estado (required|in:trabajando,esperando_lucas,trabada,terminada), y opcionales titulo (≤ 160, se guarda a 120), etapa (in:plan,construccion,revision,tests,merge,cierre), fase (regex ^[a-z0-9-]{1,40}$), fase_inferida, slug, tarjeta_id, ticket (integer ≥ 1), repos (≤ 8), worktrees (≤ 8: repo, carpeta obligatorios; rama, sucios, ultima_actividad_at), agentes (≤ 20: rol in:coordinador,arquitecto,programador,revisor,operador,explorador,otro, runtime in:claude,codex,openclaw y estado in:activo,idle obligatorios), desde_at, ultima_actividad_at, fase_desde (date) y fase_historial (≤ 20: fase y desde obligatorios; etapa, hasta, segundos, inferida)', 'que_es' => 'Las misiones en curso de la PC. Lo que no está en el contrato (pedido, resumen, conversación…) no se guarda.'],
+                ['nombre' => 'misiones_omitidas', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:0|max:100000', 'que_es' => 'Cuántas misiones quedaron fuera del reporte por el tope del reporter.'],
+                ['nombre' => 'openclaw', 'obligatorio' => false, 'validacion' => 'nullable|array: gateway (estado in:ok,degradado,caido,desconocido, version, verificado_at), workboard (ok, total, conteo por estado, tarjetas ≤ 200: id, titulo, estado in:triage,backlog,todo,scheduled,ready,running,review,blocked,done obligatorios; prioridad, etiquetas, agente, actualizada_at, vence_at, mision_id) y tareas (ok, items ≤ 60: id, nombre, habilitada, tipo in:modelo,comando,otro obligatorios; agente, condicion, frecuencia, expresion, ultimo_resultado in:ok,error,omitida,otro, fechas y errores_seguidos)', 'que_es' => 'El gateway de OpenClaw, su Workboard y sus tareas programadas. Sin `openclaw` el bloque guardado se borra y la escena lo muestra en null.'],
+                ['nombre' => 'cola', 'obligatorio' => false, 'validacion' => 'nullable|array: ok, fallidas, en_espera (≤ 50: slug obligatorio; titulo, prioridad in:urgent,high,normal,low, origen, encolada_at, espera_min, motivos in:memoria,swap,cpu,cupo,pesados, intentos), ultimo_chequeo (at obligatorio; RAM, swap, carga, núcleos y umbrales numéricos ≥ 0, lanzadas ≤ 20) y chequeos (≤ 20, cada uno con at obligatorio)', 'que_es' => 'La cola de misiones esperando recursos (sólo lectura de lo que ya escribe cola_misiones.py). No son mesas ni cuentan como misiones en curso. Sin `cola` el bloque guardado se borra.'],
             ],
         ],
     ],

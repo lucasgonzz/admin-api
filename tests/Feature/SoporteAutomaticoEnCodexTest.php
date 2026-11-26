@@ -42,6 +42,8 @@ class SoporteAutomaticoEnCodexTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+        // La coordinación de horarios quedó apagada por defecto (martin-descripcion-y-actualizaciones, CA5); acá se prueba encendida.
+        config(['services.support_codex.upgrade_coordination' => true]);
         config(['services.claude_task_ingest.key' => 'soporte-codex-test']);
         Carbon::setTestNow(Carbon::parse('2026-10-24 13:00:00'));
         Http::fake(['https://api-cliente.test/*' => Http::response([

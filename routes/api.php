@@ -490,6 +490,8 @@ Route::middleware('claude.task.key')
         Route::post('support-codex/tickets/{id}/tour', 'Api\SupportTourController@ofrecer')->whereNumber('id');
         Route::post('support-codex/tickets/{id}/tour/prepare', 'Api\SupportTourController@preparar')->whereNumber('id');
         Route::post('support-codex/tickets/{id}/release', 'Api\ClaudeSupportCodexController@release');
+        // Carril «no necesita respuesta» de Martín (misión martin-descripcion-y-actualizaciones, contrato C1).
+        Route::post('support-codex/tickets/{id}/no-reply', 'Api\ClaudeSupportCodexController@no_reply')->whereNumber('id');
         Route::post('support-codex/tickets/{id}/resume', 'Api\ClaudeSupportCodexController@resume');
         Route::post('support-codex/tickets/{id}/mission-started', 'Api\ClaudeSupportCodexController@mission_started');
         Route::get('support-codex/tickets/{id}/scheduled-upgrade', 'Api\ClaudeSupportScheduledUpgradeController@show')
@@ -889,6 +891,24 @@ Route::middleware('claude.task.key')
         Route::post('upgrades/{id}/deploy/retry-commands', 'Api\ClaudeUpgradeOpsController@deploy_retry_commands_json');
         Route::post('upgrades/{id}/deploy/expire-stuck', 'Api\ClaudeUpgradeOpsController@deploy_expire_stuck_json');
 
+        /* ==========================================================================================
+         | Aviso "estamos actualizando el sistema" (misión aviso-actualizacion-sistema, 25/11/2026)
+         |
+         | Bloque propio y a propósito separado de las rutas de upgrades de arriba: otra misión
+         | (martin-descripcion-y-actualizaciones) también agrega rutas `claude/` en este archivo, y
+         | con cada cosa en su bloque el conflicto de merge es sólo de líneas contiguas.
+         |
+         | 🔴 Con AVISO_DE_ACTUALIZACION_HABILITADO apagado (el default) las cuatro contestan 409
+         | `aviso_apagado` y no le hablan a ningún cliente. No arrancan ningún deployment: pedir el OK
+         | a los usuarios conectados, leer cómo va, cancelarlo, y prender o soltar el aviso a mano.
+         | Los frenos están en ClaudeAvisoDeActualizacionController y están documentados en
+         | config/claude_catalog.php.
+         |========================================================================================= */
+        Route::post('upgrades/{id}/pedido-de-ok', 'Api\ClaudeAvisoDeActualizacionController@pedir_ok_json');
+        Route::get('upgrades/{id}/pedido-de-ok', 'Api\ClaudeAvisoDeActualizacionController@estado_json');
+        Route::delete('upgrades/{id}/pedido-de-ok', 'Api\ClaudeAvisoDeActualizacionController@cancelar_json');
+        Route::post('upgrades/{id}/aviso-de-actualizacion', 'Api\ClaudeAvisoDeActualizacionController@aviso_json');
+
         /* Tiendas (ecommerce) de los clientes: lectura y ACTUALIZACIÓN.
            🔴 Las dos rutas de escritura arrancan pipelines SSH reales contra el hosting de un
            negocio (compilan tienda-spa en el VPS de builds y suben SPA + API por SFTP). Los frenos
@@ -1139,6 +1159,21 @@ Route::prefix('admin')->group(function () {
         ->middleware('signed')
         ->middleware('throttle:adjuntos-firmados');
 
+    /* WhatsApp PERSONAL de Lucas (número en coexistencia con Kapso), sólo para agentes (misión wa-personal-coexistencia).
+     * `admin.solo_agente` va ANTES de `admin.solo_leads`: un humano o un `solo_leads` recibe 404 y no se entera de que existe.
+     * Ninguna de estas rutas está bajo `claude/*` ni en `whatsapp-config`. */
+    Route::middleware(['auth:sanctum', 'admin.solo_agente', 'admin.solo_leads'])
+        ->prefix('whatsapp-personal')
+        ->group(function () {
+            Route::get('estado', [\App\Http\Controllers\Api\WhatsappPersonalController::class, 'estado']);
+            Route::get('plantillas', [\App\Http\Controllers\Api\WhatsappPersonalController::class, 'plantillas']);
+            Route::get('chats', [\App\Http\Controllers\Api\WhatsappPersonalController::class, 'chats']);
+            Route::get('chats/{telefono}/mensajes', [\App\Http\Controllers\Api\WhatsappPersonalController::class, 'mensajes']);
+            Route::post('chats/{telefono}/leer', [\App\Http\Controllers\Api\WhatsappPersonalController::class, 'leer']);
+            Route::get('mensajes/{id}/media', [\App\Http\Controllers\Api\WhatsappPersonalController::class, 'media'])->whereNumber('id');
+            Route::post('enviar', [\App\Http\Controllers\Api\WhatsappPersonalController::class, 'enviar']);
+        });
+
     // `admin.solo_leads` (E5): perfil «Sólo Leads». Con el flag apagado vuelve en la primera línea; con él
     // encendido sólo deja pasar lo de AdminSoloLeadsPolicy. Toda ruta autenticada nueva debe pasar por acá.
     Route::middleware(['auth:sanctum', 'admin.solo_leads'])->group(function () {
@@ -1166,6 +1201,12 @@ Route::prefix('admin')->group(function () {
         Route::post('client', [ClientController::class, 'store_json']);
         Route::put('client/{id}', [ClientController::class, 'update_json']);
         Route::delete('client/{id}', [ClientController::class, 'destroy_json']);
+
+        /* Marcas «requiere actualización» (misión martin-descripcion-y-actualizaciones, contrato C6): listado por
+           cliente, alta idempotente por external_key y resolución manual. */
+        Route::get('client-upgrade-marks', [\App\Http\Controllers\ClientUpgradeMarkController::class, 'index']);
+        Route::post('client-upgrade-marks', [\App\Http\Controllers\ClientUpgradeMarkController::class, 'store']);
+        Route::patch('client-upgrade-marks/{id}/resolve', [\App\Http\Controllers\ClientUpgradeMarkController::class, 'resolve'])->whereNumber('id');
 
         // Configuración fiscal (AFIP) propia de ComercioCity: fila única, GET/PUT.
         Route::get('comerciocity-afip-config', [ComerciocityAfipConfigController::class, 'show_json']);
@@ -2048,6 +2089,23 @@ Route::prefix('admin')->group(function () {
         Route::get('client/{clientId}/reset-datos/registros', [\App\Http\Controllers\ClientResetDatosController::class, 'registros_json']);
     });
 });
+
+/* Conector MCP de sólo lectura (misión dots-openclaw, 25/11/2026): registro dinámico de clientes, token y el
+   endpoint JSON-RPC. Públicos a nivel de ruta: cada uno hace su propia validación (el registro sólo acepta los
+   redirects de ChatGPT, el token exige código + PKCE o refresh, el endpoint exige bearer). Con `mcp.enabled = false`
+   dan 404. Los metadatos y la pantalla de consentimiento están en web.php. */
+Route::post('/mcp/oauth/register', [\App\Http\Controllers\Api\McpOauthController::class, 'registrar_json'])->withoutMiddleware('throttle:api')->middleware('throttle:mcp-registro');
+Route::post('/mcp/oauth/token', [\App\Http\Controllers\Api\McpOauthController::class, 'token_json'])->withoutMiddleware('throttle:api')->middleware('throttle:mcp-token');
+Route::post('/mcp', [\App\Http\Controllers\Api\McpController::class, 'mensaje'])->withoutMiddleware('throttle:api')->middleware('throttle:mcp-endpoint');
+Route::match(['GET', 'DELETE'], '/mcp', [\App\Http\Controllers\Api\McpController::class, 'no_permitido']);
+/* WhatsApp directo desde Dotin/ChatGPT (misión dotin-whatsapp-admin, 26/11/2026): dos recursos OAuth separados, uno de
+   lectura (`whatsapp.read`) y otro de envío (`whatsapp.send`). Con `mcp.whatsapp_enabled = false` (el default) dan 404. */
+Route::post('/mcp/whatsapp', [\App\Http\Controllers\Api\McpController::class, 'mensaje_whatsapp'])->withoutMiddleware('throttle:api')->middleware('throttle:mcp-endpoint');
+Route::post('/mcp/whatsapp-envio', [\App\Http\Controllers\Api\McpController::class, 'mensaje_whatsapp_envio'])->withoutMiddleware('throttle:api')->middleware('throttle:mcp-endpoint');
+Route::get('/mcp/whatsapp', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_whatsapp']);
+Route::delete('/mcp/whatsapp', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_whatsapp']);
+Route::get('/mcp/whatsapp-envio', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_whatsapp']);
+Route::delete('/mcp/whatsapp-envio', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_whatsapp']);
 
 // Debug: control del tiempo virtual (solo accesible en local — el controller aborta 404 en producción)
 Route::get('/debug/virtual-time', [DebugVirtualTimeController::class, 'show']);

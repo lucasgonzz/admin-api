@@ -69,6 +69,24 @@ class RouteServiceProvider extends ServiceProvider
      */
     protected function configureRateLimiting()
     {
+        /* Conector MCP (misión dots-openclaw, D5): un limitador con nombre y clave propia por cada punto. Los
+           `throttle:N,M` numéricos comparten el contador por IP, y el registro (20 por hora) dejaba sin cupo al token
+           y a /api/mcp durante una hora. */
+        RateLimiter::for('mcp-registro', function (Request $request) {
+            return Limit::perMinutes(60, 20)->by('mcp-registro:' . $request->ip());
+        });
+        RateLimiter::for('mcp-token', function (Request $request) {
+            return Limit::perMinute(60)->by('mcp-token:' . $request->ip());
+        });
+        RateLimiter::for('mcp-consentimiento-ver', function (Request $request) {
+            return Limit::perMinute(30)->by('mcp-consentimiento-ver:' . $request->ip());
+        });
+        RateLimiter::for('mcp-consentimiento-enviar', function (Request $request) {
+            return Limit::perMinute(10)->by('mcp-consentimiento-enviar:' . $request->ip());
+        });
+        RateLimiter::for('mcp-endpoint', function (Request $request) {
+            return Limit::perMinute(120)->by('mcp-endpoint:' . $request->ip());
+        });
         RateLimiter::for('landing-whatsapp', function (Request $request) {
             return Limit::perMinute((int) config('atribucion.limite_por_minuto', 30))
                 ->by('landing-whatsapp:' . $request->ip());

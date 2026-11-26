@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Jobs\EnviarAvisoDeActualizacionJob;
+use App\Jobs\RefreshClientUpgradeMarksJob;
 use App\ModelProperties\ClientVersionUpgradeProperties;
 use App\Models\Concerns\HasUuid;
 use App\Services\AvisoDeActualizacionService;
@@ -73,7 +74,40 @@ class ClientVersionUpgrade extends Model
             $upgrade->alinear_version_del_cliente();
 
             $upgrade->despachar_aviso_de_actualizacion();
+
+            $upgrade->despachar_refresco_de_marcas();
         });
+    }
+
+    /**
+     * Encola la evaluación de las marcas «requiere actualización» del cliente (misión
+     * martin-descripcion-y-actualizaciones, 25/11/2026): si la versión que acaba de instalar contiene la
+     * corrección, la marca se resuelve y Martín verifica la entrega.
+     *
+     * 🔴 Mismo criterio que el aviso: después del commit, en la cola `database`, y nada de esto puede hacer fallar
+     * el `save()` que registró el upgrade. Si se pierde, el refresh horario lo cubre.
+     *
+     * @return bool true si quedó encolado.
+     */
+    public function despachar_refresco_de_marcas()
+    {
+        try {
+            if (is_null($this->client_id)) {
+                return false;
+            }
+            RefreshClientUpgradeMarksJob::dispatch((int) $this->client_id)
+                ->onConnection(RefreshClientUpgradeMarksJob::CONEXION_DE_COLA)
+                ->afterCommit();
+
+            return true;
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->error('ClientVersionUpgrade: no se pudo encolar el refresco de marcas de actualización.', [
+                'client_version_upgrade_id' => $this->id,
+                'error'                     => $exception->getMessage(),
+            ]);
+
+            return false;
+        }
     }
 
     /**

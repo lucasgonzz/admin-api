@@ -63,6 +63,51 @@ class WhatsappSendService
     private $config_destino = null;
 
     /**
+     * Si es true, send_text() y send_template() hacen UN solo POST (sin `retry()` de Laravel).
+     *
+     * Default false: el resto de los senders sigue reintentando como siempre. Lo pide el número
+     * personal, donde un reintento ante timeout de lectura o 5xx puede duplicar un mensaje que Kapso
+     * ya aceptó.
+     *
+     * @var bool
+     */
+    private $sin_reintentos = false;
+
+    /**
+     * Pide que send_text() y send_template() de esta instancia salgan con un único POST, sin reintento.
+     *
+     * @return self
+     */
+    public function sin_reintentos(): self
+    {
+        $this->sin_reintentos = true;
+
+        return $this;
+    }
+
+    /**
+     * Aplica al cliente HTTP la política de reintento de esta instancia.
+     *
+     * Con sin_reintentos(), `retry(2, 0, fn () => false)`: el pedido sale UNA vez y la falla se relanza
+     * enseguida. No se usa `retry(1)` porque con un solo intento Laravel no hace `throw()` ante un 4xx/5xx
+     * y se perdería el status HTTP que lee el llamador. Por defecto, el reintento de siempre.
+     *
+     * @param \Illuminate\Http\Client\PendingRequest $http Cliente de Kapso.
+     *
+     * @return \Illuminate\Http\Client\PendingRequest
+     */
+    private function con_politica_de_reintento($http)
+    {
+        if ($this->sin_reintentos) {
+            return $http->retry(2, 0, function () {
+                return false;
+            });
+        }
+
+        return $http->retry((int) config('services.client_api.retries', 2), 500);
+    }
+
+    /**
      * wamid del mensaje al que el próximo envío responde citándolo (cita nativa de WhatsApp), o null.
      *
      * Se fija con {@see self::con_cita()} y la leen los payloads de texto, imagen, audio y documento.
@@ -357,8 +402,7 @@ class WhatsappSendService
         try {
             $http = KapsoHttpClient::make($send_context['api_key'], (int) config('services.client_api.timeout', 15));
 
-            $response = $http
-                ->retry((int) config('services.client_api.retries', 2), 500)
+            $response = $this->con_politica_de_reintento($http)
                 ->post($endpoint, [
                     'messaging_product' => 'whatsapp',
                     'to'                => $to_digits,
@@ -516,8 +560,7 @@ class WhatsappSendService
         try {
             $http = KapsoHttpClient::make($send_context['api_key'], (int) config('services.client_api.timeout', 15));
 
-            $response = $http
-                ->retry((int) config('services.client_api.retries', 2), 500)
+            $response = $this->con_politica_de_reintento($http)
                 ->post($endpoint, $payload);
 
             $message_id = $this->extract_message_id_from_response($response, $normalized_to);

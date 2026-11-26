@@ -98,6 +98,13 @@ class WhatsappWebhookController extends Controller
         $payload  = is_array($payload) ? $payload : [];
 
         $config = $this->resolver_config($payload);
+
+        // 🔴 Número PERSONAL apagado o a medio cargar: se ignora con 200 y NO cae al principal (un lead por chat de la familia).
+        if ($config && $config->proposito === WhatsappConfig::PROPOSITO_PERSONAL
+            && (! $config->is_active || ! $config->tieneLoNecesarioParaAtender())) {
+            return response()->json(['ok' => true, 'ignorado' => true], 200);
+        }
+
         if (! $config || ! $config->is_active) {
             return response()->json(['message' => 'WhatsApp integration unavailable.'], 503);
         }
@@ -109,6 +116,14 @@ class WhatsappWebhookController extends Controller
             ]);
 
             return response()->json(['message' => 'Invalid signature.'], 401);
+        }
+
+        // Número PERSONAL: sólo se guarda en sus tablas, sin leads, tickets, asistente, jobs ni notificaciones. Nunca 5xx.
+        if ($config->proposito === WhatsappConfig::PROPOSITO_PERSONAL) {
+            app(\App\Services\WhatsappPersonal\WhatsappPersonalWebhookService::class)
+                ->procesar((string) $this->resolve_event_type($request, $payload), $payload, (string) $config->phone_number_id);
+
+            return response()->json(['ok' => true], 200);
         }
 
         // Un dedicado a medias no recibe ni contesta por el principal como alternativa.
@@ -818,6 +833,13 @@ class WhatsappWebhookController extends Controller
             $config = WhatsappConfig::porPhoneNumberId($phone_number_id);
             if ($config !== null) {
                 return $config;
+            }
+
+            // El personal apagado también se resuelve (para ignorarlo): su payload nunca cae al principal.
+            $personal = WhatsappConfig::where('proposito', WhatsappConfig::PROPOSITO_PERSONAL)
+                ->where('phone_number_id', $phone_number_id)->first();
+            if ($personal !== null) {
+                return $personal;
             }
         }
 

@@ -34,9 +34,11 @@ class ClaudeLocalOficinaController extends Controller
     /**
      * `POST claude/local/oficina`: upsert de los slots y pulso del reporter.
      *
-     * @param Request $request Body del contrato A: `{reporter, sesiones, slots: [...]}`.
+     * @param Request $request Body del contrato A: `{reporter, sesiones, slots: [...]}` (v1) o, desde el
+     *                         25/11/2026, `{contrato: 2, reporter, sesiones, slots: [], misiones, openclaw, cola}`.
      *
-     * @return JsonResponse `200 {ok: true, recibido_at, slots}` o `422 {error, errors, errores, ayuda}`.
+     * @return JsonResponse `200 {ok: true, recibido_at, slots, misiones, contrato}` (en v1 `misiones` es 0 y
+     *                      `contrato` 1) o `422 {error, errors, errores, ayuda}`.
      */
     public function store_json(Request $request): JsonResponse
     {
@@ -60,6 +62,8 @@ class ClaudeLocalOficinaController extends Controller
             'ok'          => true,
             'recibido_at' => $resultado['recibido_at']->toIso8601String(),
             'slots'       => (int) $resultado['slots'],
+            'misiones'    => (int) $resultado['misiones'],
+            'contrato'    => (int) $resultado['contrato'],
         ], 200);
     }
 
