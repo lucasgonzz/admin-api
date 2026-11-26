@@ -115,12 +115,22 @@ class RunDeploymentJob implements ShouldQueue
                     function (string $step) use ($scheduled, $row) { $scheduled->before_continuation($row->id, $step); }
                 );
             }
-            $service->connect();
+            try {
+                $service->connect();
+            } catch (\Throwable $e_conexion) {
+                /* Aviso de actualización: si ni siquiera se pudo conectar, el sistema del cliente no se tocó. */
+                $service->aviso_soltar_si_no_se_toco();
+                throw $e_conexion;
+            }
             $service->run($this->resume_from_step);
         } catch (\Throwable $e) {
             if ($e instanceof LockTimeoutException && ! ClientVersionUpgrade::where('client_id', $upgrade->client_id)
                 ->where('id', '!=', $upgrade->id)->where('deployment_status', 'running')->exists()) {
                 // La misma etapa ya puede estar ejecutándose. Este job no cambia su estado.
+                /* Aviso de actualización: acá NO se suelta (decisión del 25/11/2026). Si el candado lo tiene otro
+                   proceso, ése es el dueño de la corrida y sus G4/G5 lo sueltan; soltar desde acá, con el otro en
+                   migraciones o después del up, dejaría entrar a los usuarios en plena actualización. Si de verdad
+                   no hay nadie, lo suelta el vencimiento. */
                 Log::warning('Se omitió una ejecución simultánea del mismo upgrade.', ['upgrade_id' => $upgrade->id]);
                 return;
             }
@@ -198,6 +208,17 @@ class RunDeploymentJob implements ShouldQueue
         ]);
 
         event(new DeploymentLogCreated($deployment_log));
+
+        /* Aviso de actualización: el worker mató el job (timeout) o la cola lo dio por agotado, y run() no
+           llegó a su G5. Se suelta si el sistema vivo no se tocó. */
+        try {
+            /* Con LockTimeoutException este job nunca tuvo el candado: el aviso es de quien lo tiene. */
+            if (! ($e instanceof LockTimeoutException)) {
+                (new DeploymentService($upgrade))->aviso_soltar_si_no_se_toco();
+            }
+        } catch (\Throwable $ignorado) {
+            /* El aviso nunca puede romper el cierre de un job fallado. */
+        }
 
         Log::warning('RunDeploymentJob: el job falló', [
             'upgrade_id'       => (int) $upgrade->id,

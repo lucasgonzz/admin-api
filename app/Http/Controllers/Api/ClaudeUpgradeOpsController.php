@@ -683,6 +683,64 @@ class ClaudeUpgradeOpsController extends Controller
             ]);
         }
 
+        /*
+         * 🔴 Aviso de actualización (misión aviso-actualizacion-sistema, 25/11/2026): un `force` que
+         * pisa el sistema con el negocio abierto EXIGE que los usuarios ya hayan dado el OK.
+         *
+         * La regla completa (las cuatro tienen que cumplirse para frenar):
+         *   1. el `force` EFECTIVAMENTE saltó el gate de horario (`$gate['salteado']`): un start sin
+         *      force, con el negocio cerrado, no pisa a nadie y no pregunta nada;
+         *   2. el interruptor del admin está prendido (apagado, el comportamiento es el de siempre);
+         *   3. el cliente tiene la versión con el aviso: su `GET admin-sync/actualizacion-del-sistema`
+         *      contesta 200 con el estado;
+         *   4. el estado NO es `actualizando` (todavía falta el OK de alguien, nadie lo pidió, o
+         *      alguien dijo "Ahora no").
+         * Cualquier otra cosa —404 (versión vieja, la primera actualización a esta versión), 401,
+         * 500, un corte de red— NO frena: el aviso nunca puede ser la razón de que no se pueda
+         * desplegar. Se resuelve ANTES de borrar los logs y de marcar el upgrade `running`, para que
+         * el 409 no deje nada escrito.
+         */
+        $aviso_de_actualizacion = ['habilitado' => false, 'soportado' => null, 'estado' => null];
+        $servicio_del_aviso     = app(\App\Services\ClientAvisoDeActualizacionService::class);
+
+        if ($servicio_del_aviso->habilitado()) {
+            $aviso_de_actualizacion['habilitado'] = true;
+
+            if ($gate['salteado'] !== null) {
+                $lectura_del_aviso = $servicio_del_aviso->leer($client, $upgrade);
+
+                if ($lectura_del_aviso['aviso'] !== null) {
+                    $aviso_de_actualizacion['soportado'] = true;
+                    $aviso_de_actualizacion['estado']    = (string) $lectura_del_aviso['aviso']['estado'];
+
+                    if ($aviso_de_actualizacion['estado'] !== 'actualizando') {
+                        return response()->json([
+                            'error'   => 'falta_ok_de_los_usuarios',
+                            'message' => 'No se encoló nada: el force pisaría el sistema del cliente con el negocio abierto y sus '
+                                . 'usuarios todavía no dieron el OK (estado del aviso: ' . $aviso_de_actualizacion['estado'] . '). '
+                                . 'Pedí el OK con POST claude/upgrades/' . (int) $upgrade->id . '/pedido-de-ok, esperá a que '
+                                . 'GET pedido-de-ok diga actualizando y recién ahí repetí el deploy/start. Si alguien dijo "Ahora no", '
+                                . 'la actualización queda para la noche.',
+                            'aviso'   => $lectura_del_aviso['aviso'],
+                        ], 409);
+                    }
+
+                    /* 🔴 Los usuarios ya dieron el OK (estado `actualizando`, que el pedido deja con un
+                       vencimiento corto: 30 minutos). Se RENUEVA a 120 antes de encolar, para que el
+                       deploy no se quede esperando en la cola con el aviso vencido y los usuarios
+                       vuelvan a entrar. Si el PUT falla, el start sigue igual: el aviso no aborta nada. */
+                    if ($aviso_de_actualizacion['estado'] === 'actualizando') {
+                        $renovacion_del_aviso = $servicio_del_aviso->prender($client, $upgrade, 120);
+
+                        $aviso_de_actualizacion['renovado'] = $renovacion_del_aviso['aviso'] !== null;
+                    }
+                } elseif ($lectura_del_aviso['soportado'] === false) {
+                    /* 404: la versión instalada del cliente todavía no tiene el aviso. Sigue como hoy. */
+                    $aviso_de_actualizacion['soportado'] = false;
+                }
+            }
+        }
+
         if ($etapa_de_reanudacion === null) {
             /* Reinicio limpio, igual que el panel. */
             $upgrade->deployment_logs()->delete();
@@ -749,6 +807,9 @@ class ClaudeUpgradeOpsController extends Controller
         if ($gate['madrugada'] !== null) {
             $respuesta['gate_de_horario_madrugada'] = $gate['madrugada'];
         }
+
+        /* Campo nuevo y aditivo (25/11/2026): qué pasó con el aviso de actualización en este start. */
+        $respuesta['aviso_de_actualizacion'] = $aviso_de_actualizacion;
 
         if ($es_la_activa) {
             $respuesta['advertencia'] = $con_bandera

@@ -2164,6 +2164,7 @@ return [
                 '🔴 EN EL LUGAR, resume_from_step POSTERIOR a la etapa que falló (la más reciente entre "Etapa que falló" y "Etapa en curso", contando solo las líneas posteriores al último artisan up exitoso; si hubo un up y nada después —timeout en un comando—, la etapa es run_commands), o posterior a upload_spa sin que el SPA nuevo se haya desplegado, es 422 sin encolar nada: saltearía lo que quedó sin hacer, o terminaría con el SPA viejo y la API nueva. Una etapa anterior siempre se acepta.',
                 'Destino = API activa pero NO el frente principal (el cliente atiende desde su frente 2): 422 salvo allow_deploy_to_active_api=true. Lo que corresponde es crear el upgrade hacia el frente principal: es la última rotación.',
                 'allow_deploy_to_active_api=true se sigue aceptando siempre (compatibilidad): con ella el start pasa sin gate, como antes, y deja una línea en el log diario.',
+                '🔴 Aviso de actualización (25/11/2026): si el force SALTÓ el gate de horario (el negocio está abierto), el interruptor AVISO_DE_ACTUALIZACION_HABILITADO está prendido, el cliente tiene la versión con el aviso (su GET admin-sync/actualizacion-del-sistema contesta 200) y el estado NO es actualizando (los usuarios todavía no dieron el OK), es 409 falta_ok_de_los_usuarios con el aviso, sin encolar nada y sin borrar los logs. Primero hay que pedir el OK con POST pedido-de-ok y esperar a que el estado pase a actualizando. Empresa-api que no contesta bien (404 versión vieja, 401, 500, corte) NO frena: sigue como hoy. Sin force no se consulta nada. Cuando el force pasa porque el estado YA es actualizando (los usuarios dieron el OK), deploy/start RENUEVA el aviso antes de encolar (PUT actualizando con vence_en_minutos=120) para que el vencimiento corto que deja el pedido (30 minutos) no se cumpla con el deploy esperando en la cola; si ese PUT falla el start sigue igual. La respuesta trae aviso_de_actualizacion {habilitado, soportado, estado, renovado}.',
                 'Si se respalda (en el lugar o última rotación al principal), resume_from_step desde una etapa posterior al respaldo exige que el upgrade tenga un respaldo completo EN EL DISCO del cliente; si no, el job falla sin tocar nada y hay que reanudar desde backup_in_place.',
                 'Encola con onConnection("database"): nunca corre el pipeline SSH adentro del request.',
                 '⚠️ BORRA los logs del intento anterior, igual que el botón del panel — SALVO que mandes resume_from_step, que justamente los conserva. Si querés el log de un intento fallido, leelo ANTES de reintentar sin resume_from_step.',
@@ -2267,6 +2268,60 @@ return [
                 ['nombre' => 'confirm_client_name', 'obligatorio' => true, 'validacion' => 'required|string|max:190', 'que_es' => 'El nombre exacto del cliente del upgrade.'],
                 ['nombre' => 'force', 'obligatorio' => false, 'validacion' => 'nullable|boolean', 'que_es' => '🔴 Saltea la comparación contra el umbral destructivo (45 min) y el caso "sin deployment_running_since, o sea sin medición posible". NO saltea el claim atómico.'],
                 ['nombre' => 'force_reason', 'obligatorio' => false, 'validacion' => 'nullable|string|max:500 — obligatorio con force=true, mínimo 10 caracteres', 'que_es' => 'Por qué se vence antes de tiempo. Queda como warning en el log diario.'],
+            ],
+        ],
+        /* ----------------------------------- Aviso "estamos actualizando el sistema" (25/11/2026) */
+
+        'POST api/claude/upgrades/{id}/pedido-de-ok' => [
+            'para_que'     => 'Le pide el OK a los usuarios conectados del cliente antes de actualizarlo con force: a cada computadora le aparece "Necesitamos actualizar el sistema, ¿nos das el OK?" con Aceptar y "Ahora no". El que acepta sigue trabajando y ve cuántas computadoras faltan; cuando aceptan todas, o pasa el plazo (10 minutos por defecto), se les cierra la sesión y el estado pasa a actualizando. Si alguien aprieta "Ahora no", el estado pasa a rechazado y se cancela con DELETE. Manda a empresa-api upgrade_id, la versión destino y el plazo. Es idempotente: si ya hay un pedido o el sistema ya está actualizando, devuelve el estado actual. Responde {ok, soportado, aviso}. NO arranca ningún deployment.',
+            'escribe'      => true,
+            'peligrosidad' => 'media',
+            'frenos'       => [
+                '🔴 Interruptor general AVISO_DE_ACTUALIZACION_HABILITADO (apagado por defecto): apagado contesta 409 aviso_apagado y no le habla a ningún cliente.',
+                'El cliente tiene que tener la versión de empresa con el aviso: si empresa-api contesta 404, 409 version_sin_aviso (soportado=false) y no se pidió nada. Esa primera actualización se hace como siempre, con el negocio cerrado.',
+                'Cualquier otra falla de empresa-api (401, 500, corte de red) es 502 cliente_no_responde con el HTTP que contestó; nunca un 500 del admin.',
+                'No escribe nada en el admin ni toca el sistema del cliente: sólo muestra un aviso y espera la confirmación de sus usuarios. Si no hay nadie conectado, pasa directo a actualizando.',
+                'Sin confirm_client_name a propósito: no arranca ni detiene ningún deployment. Lo que protege es el interruptor, la clave X-Claude-Task-Key y que el upgrade exista.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; acepta id numérico o uuid', 'que_es' => 'El upgrade que se va a desplegar (de él salen el cliente y la versión destino).'],
+                ['nombre' => 'minutos_para_responder', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:1|max:30', 'que_es' => 'Cuántos minutos tienen las computadoras para contestar. Default 10. Pasado el plazo, a las que no contestaron se les cierra la sesión sola y se sigue.'],
+            ],
+        ],
+        'GET api/claude/upgrades/{id}/pedido-de-ok' => [
+            'para_que'     => 'Lee el estado del aviso de actualización del cliente: libre, pidiendo_ok (con total de computadoras, cuántas aceptaron, cuántas faltan, quiénes y cuántos segundos quedan), rechazado (con el nombre de quien apretó "Ahora no") o actualizando (con hasta cuándo vale el bloqueo). Es lo que polea la skill, cada 20 segundos, después de pedir el OK. Responde {ok, soportado, aviso}.',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+        ],
+        'DELETE api/claude/upgrades/{id}/pedido-de-ok' => [
+            'para_que'     => 'Cancela el pedido de OK del cliente y lo deja en libre: la skill lo usa cuando alguien aprieta "Ahora no" (la actualización queda para la noche, sin forzar) o cuando se acaba el tiempo de espera sin resolución. Responde {ok, soportado, aviso} con estado libre.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                '🔴 Interruptor general AVISO_DE_ACTUALIZACION_HABILITADO (apagado por defecto): apagado contesta 409 aviso_apagado.',
+                'Si el pedido ya pasó a bloquear el sistema (estado actualizando), empresa-api contesta 409 ya_actualizando y no se cancela nada: para soltar ESE estado hay que usar POST aviso-de-actualizacion con accion=liberar.',
+                '404 de empresa-api ⇒ 409 version_sin_aviso; otras fallas ⇒ 502 cliente_no_responde.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; acepta id numérico o uuid', 'que_es' => 'El upgrade cuyo pedido de OK se cancela.'],
+            ],
+        ],
+        'POST api/claude/upgrades/{id}/aviso-de-actualizacion' => [
+            'para_que'     => 'Prende o suelta A MANO el aviso "estamos actualizando": con accion=prender el sistema del cliente cierra las sesiones, no deja ingresar y muestra "estamos actualizando" (también bloquea la tienda online) hasta que se libere o venza; con accion=liberar los usuarios vuelven a poder ingresar. El pipeline ya lo prende y lo suelta solo durante el despliegue en el lugar: este endpoint es para la vuelta atrás (liberar ANTES del php artisan up manual) y para destrabar un aviso que quedó prendido. Responde {ok, soportado, aviso}.',
+            'escribe'      => true,
+            'peligrosidad' => 'alta',
+            'frenos'       => [
+                '🔴 Interruptor general AVISO_DE_ACTUALIZACION_HABILITADO (apagado por defecto): apagado contesta 409 aviso_apagado y no le habla a ningún cliente.',
+                '🔴 prender BLOQUEA el ingreso al sistema de un negocio en funcionamiento (y a su tienda online). Por eso vence solo: vence_en_minutos (5..240, 120 por defecto) y pasado ese tiempo sin renovarse empresa-api lo suelta. Usarlo sólo con el release listo y probado.',
+                'accion se valida contra la lista prender|liberar y vence_en_minutos entre 5 y 240: fuera de eso 422 y no sale nada a empresa-api.',
+                '404 de empresa-api ⇒ 409 version_sin_aviso; otras fallas ⇒ 502 cliente_no_responde.',
+                'Sin confirm_client_name a propósito: no arranca ni detiene ningún deployment y es reversible con accion=liberar.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; acepta id numérico o uuid', 'que_es' => 'El upgrade (de él salen el cliente y la versión destino).'],
+                ['nombre' => 'accion', 'obligatorio' => true, 'validacion' => 'required|string|in:prender,liberar', 'que_es' => 'prender manda estado=actualizando a empresa-api; liberar manda estado=libre.'],
+                ['nombre' => 'vence_en_minutos', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:5|max:240', 'que_es' => 'Sólo con accion=prender: cuánto dura el bloqueo sin renovarse. Default 120.'],
             ],
         ],
         'POST api/claude/upgrades/{id}/deploy/configure-system' => [

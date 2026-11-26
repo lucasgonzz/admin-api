@@ -563,6 +563,8 @@ class DeploymentService
         } catch (\Throwable $e) {
             $this->log('deployment', $e->getMessage(), 'error');
             $this->avisar_lo_que_quedo_tocado_en_el_lugar($e);
+            /* G5 del aviso de actualización: una falla temprana (nada vivo tocado) suelta el aviso. */
+            $this->aviso_liberar_si_fallo_temprano();
             $this->upgrade->deployment_status = 'failed';
             $this->upgrade->save();
             throw $e;
@@ -805,6 +807,11 @@ class DeploymentService
             $this->spa_nuevo_con_api_vieja = true;
         }
 
+        /* True hasta que arranca la primera etapa de ESTA corrida: el aviso de actualización la necesita
+           para saber si la corrida empezó después de upload_spa (una reanudación) o es la primera del
+           post-cierre. */
+        $aviso_primera_etapa = true;
+
         foreach ($secuencia as $step) {
             if (! $started) {
                 if ($step === $desde) {
@@ -819,6 +826,10 @@ class DeploymentService
             if ($this->es_en_el_lugar() && $this->mantenimiento_posible) {
                 $this->log($step, self::MARCA_ETAPA_EN_CURSO . $step . ' (con el sistema del cliente en mantenimiento).');
             }
+
+            /* G1 y G3 del aviso de actualización: prende o renueva el aviso ANTES de la etapa (nunca aborta). */
+            $this->aviso_antes_de_la_etapa($step, $en_ventana, $aviso_primera_etapa);
+            $aviso_primera_etapa = false;
 
             switch ($step) {
                 case 'compile_spa':
@@ -849,6 +860,8 @@ class DeploymentService
                     $this->step_run_migrations();
                     // Marca el paso "Migraciones corridas" automáticamente.
                     $this->mark_upgrade_step_timestamp('migraciones_corridas_at');
+                    // G2 del aviso de actualización: con el código nuevo y la tabla creada, se (re)prende.
+                    $this->aviso_despues_de_migrar();
                     break;
                 case 'restart_queue_workers':
                     $this->step_restart_queue_workers();
@@ -900,6 +913,8 @@ class DeploymentService
                 case 'complete':
                     $this->assert_sistema_arriba_antes_de_cerrar();
                     $this->step_complete();
+                    // G4 del aviso de actualización: recién con el upgrade cerrado se deja entrar de nuevo.
+                    $this->aviso_liberar_al_completar();
                     break;
             }
         }
@@ -5921,6 +5936,462 @@ class DeploymentService
         }
 
         $this->log('restart_queue_workers', self::MARCA_FUERA_DE_MANTENIMIENTO . ' (php artisan up).', 'success');
+    }
+
+    /* ==========================================================================================
+     | Aviso "estamos actualizando el sistema" (misión aviso-actualizacion-sistema, 25/11/2026)
+     |
+     | Cinco ganchos que prenden, renuevan y sueltan el aviso del sistema del cliente por HTTP
+     | (admin-sync de empresa-api) alrededor del despliegue EN EL LUGAR:
+     |
+     |   G1  PRENDE justo antes de escribir el sistema vivo: dentro de step_upload_spa(), después de los
+     |       frenos de soporte y antes de marcar_sistema_tocado() (ver aviso_enganchar_antes_de_escribir_lo_vivo());
+     |       una corrida que arranca después de upload_spa (una reanudación) lo prende antes de su primera etapa;
+     |   G2  después de run_migrations (código nuevo + tabla creada): vuelve a PRENDER;
+     |   G3  al empezar la secuencia post-cierre (start-post-closure y configure-system): RENUEVA;
+     |   G4  después de step_complete(): SUELTA (recién ahí los usuarios vuelven a entrar), con reintentos;
+     |   G5  en el catch de run(): SUELTA si el sistema vivo NO se tocó (ni en esta corrida ni en una
+     |       anterior), en cualquier etapa, con reintentos.
+     |
+     | 🔴 NINGUNO ABORTA EL DEPLOY, y es la regla que gobierna todo este bloque: cada gancho corre
+     | dentro de un try/catch que se traga cualquier \Throwable, y el servicio HTTP ya devuelve datos
+     | en vez de lanzar. Un cliente con una versión sin el endpoint (404), con otra clave o caído deja
+     | UNA línea en deployment_logs y el pipeline sigue como si el aviso no existiera.
+     |
+     | 🔴 Con AVISO_DE_ACTUALIZACION_HABILITADO apagado (el default) ninguno hace nada: ni una request,
+     | ni una línea de log. Y en una rotación tampoco: el sistema viejo sigue atendiendo hasta
+     | configure-system y no hay nada que bloquear.
+     |
+     | Las líneas de log llevan SIEMPRE nivel info o success, nunca warning: hay lógica que lee los
+     | warning de una etapa (p. ej. restart_queue_workers) para decidir si se puede seguir, y el aviso
+     | no puede ensuciar esa lectura.
+     |========================================================================================= */
+
+    /**
+     * ¿Los ganchos del aviso tienen que hacer algo en esta corrida? Sólo en el lugar y con el
+     * interruptor del admin prendido.
+     *
+     * @return bool
+     */
+    private function aviso_activo(): bool
+    {
+        return $this->es_en_el_lugar() && app(ClientAvisoDeActualizacionService::class)->habilitado();
+    }
+
+    /**
+     * G1 y G3: prende o renueva el aviso alrededor de una etapa.
+     *
+     *  - En el pre-cierre en el lugar (`$en_ventana`), al llegar a `upload_spa` NO se prende todavía: se
+     *    engancha el aviso justo antes de escribir el sistema vivo (ver
+     *    aviso_enganchar_antes_de_escribir_lo_vivo()). Prenderlo antes de `step_upload_spa()` ponía
+     *    `users.last_activity` en NULL ANTES de los frenos de soporte (que la miden para saber si hay
+     *    gente trabajando) y los dejaba ciegos; y si un freno abortaba, el aviso quedaba prendido con el
+     *    sistema intacto.
+     *  - Si la corrida del pre-cierre arranca DESPUÉS de `upload_spa` (una reanudación), el aviso se
+     *    prende antes de su primera etapa: ahí ya no hay frenos de soporte de por medio.
+     *  - En el post-cierre en el lugar (start-post-closure, configure-system): antes de la primera
+     *    etapa de la corrida, para renovar el vencimiento.
+     *
+     * 🔴 Nunca lanza.
+     *
+     * @param  string  $step            Etapa que está por ejecutarse.
+     * @param  bool    $en_ventana      True en la secuencia pre-cierre del en el lugar.
+     * @param  bool    $primera_etapa   True si es la primera etapa que ejecuta esta corrida.
+     * @return void
+     */
+    private function aviso_antes_de_la_etapa(string $step, bool $en_ventana, bool $primera_etapa): void
+    {
+        try {
+            if (! $this->aviso_activo()) {
+                return;
+            }
+
+            if (! $en_ventana) {
+                if ($primera_etapa) {
+                    $this->aviso_llamar('prender', $step);
+                }
+
+                return;
+            }
+
+            if ($step === 'upload_spa') {
+                $this->aviso_enganchar_antes_de_escribir_lo_vivo();
+
+                return;
+            }
+
+            $posicion = array_search($step, self::SECUENCIA_EN_EL_LUGAR, true);
+            $limite   = array_search('upload_spa', self::SECUENCIA_EN_EL_LUGAR, true);
+
+            if ($posicion !== false && $limite !== false && $primera_etapa && $posicion > $limite) {
+                $this->aviso_llamar('prender', $step);
+            }
+        } catch (\Throwable $e) {
+            $this->aviso_registrar_falla_inesperada($step, $e);
+        }
+    }
+
+    /**
+     * G1 en `upload_spa`: enchufa el aviso en `support_before_live_write`, el gancho que
+     * `step_upload_spa()` invoca justo antes de `marcar_sistema_tocado()` (el primer comando que modifica
+     * el sistema vivo). Si no había gancho de soporte, lo crea: `step_upload_spa()` sólo lo invoca cuando
+     * no es null, así que con uno propio el aviso se prende siempre en ese punto.
+     *
+     * El orden importa y es éste:
+     *   1. los frenos de soporte (`support_before_staging`, al principio de la etapa, y el original de
+     *      `support_before_live_write`) miden la actividad con `last_activity` INTACTO;
+     *   2. si alguno aborta, la excepción sale y el aviso NO se prende;
+     *   3. recién entonces se prende (cierra las sesiones y pone `last_activity` en NULL).
+     *
+     * El gancho se devuelve a su valor original apenas se invoca, así una segunda corrida sobre la misma
+     * instancia no lo envuelve dos veces. 🔴 Nunca lanza por el aviso (sí deja pasar la del original).
+     *
+     * @return void
+     */
+    private function aviso_enganchar_antes_de_escribir_lo_vivo(): void
+    {
+        $original = $this->support_before_live_write;
+
+        $this->support_before_live_write = function () use ($original) {
+            $this->support_before_live_write = $original;
+
+            if ($original !== null) {
+                $original();
+            }
+
+            try {
+                $this->aviso_llamar('prender', 'upload_spa');
+            } catch (\Throwable $e) {
+                $this->aviso_registrar_falla_inesperada('upload_spa', $e);
+            }
+        };
+    }
+
+    /**
+     * G2: después de las migraciones vuelve a prender el aviso. Cubre el primer update (G1 dio 404
+     * porque el código viejo no tiene el endpoint; recién ahora hay código nuevo y la tabla creada) y
+     * renueva el vencimiento en el resto. 🔴 Nunca lanza.
+     *
+     * @return void
+     */
+    private function aviso_despues_de_migrar(): void
+    {
+        try {
+            if ($this->aviso_activo()) {
+                $this->aviso_llamar('prender', 'run_migrations');
+            }
+        } catch (\Throwable $e) {
+            $this->aviso_registrar_falla_inesperada('run_migrations', $e);
+        }
+    }
+
+    /**
+     * G4: después de `step_complete()` suelta el aviso. Es "cuando se completó, recién ahí los deja
+     * ingresar": el humo y `configure-system` ya pasaron. 🔴 Nunca lanza.
+     *
+     * @return void
+     */
+    private function aviso_liberar_al_completar(): void
+    {
+        try {
+            if ($this->aviso_activo()) {
+                $this->aviso_liberar_con_reintentos('complete');
+            }
+        } catch (\Throwable $e) {
+            $this->aviso_registrar_falla_inesperada('complete', $e);
+        }
+    }
+
+    /**
+     * G5: suelta el aviso cuando el pipeline falló y el sistema vivo del cliente NO se tocó, ni en esta
+     * corrida ni en una anterior, en CUALQUIER etapa: `compile_spa`, `backup_in_place`, una falla de
+     * `upload_spa` antes de escribir (la API no se pudo preparar, un freno de soporte abortó), o
+     * `runtime_preflight` (que falla antes de la primera etapa, con `etapa_en_curso` en null).
+     * Típicamente el aviso quedó prendido por el pedido de OK previo al `deploy/start`: el cliente
+     * sigue con su sistema de siempre y no hay motivo para dejarlo afuera.
+     *
+     * Si el sistema ya se tocó NO se suelta: queda en mantenimiento por diseño o a medio actualizar, y
+     * lo suelta el vencimiento, la reanudación, o la skill al volver atrás.
+     *
+     * 🔴 Nunca lanza: corre adentro del catch de run(), y una excepción acá taparía la original.
+     *
+     * @return void
+     */
+    private function aviso_liberar_si_fallo_temprano(): void
+    {
+        try {
+            if (! $this->aviso_activo() || $this->aviso_sistema_vivo_tocado()) {
+                return;
+            }
+
+            $this->aviso_liberar_con_reintentos($this->etapa_en_curso === null ? 'deployment' : (string) $this->etapa_en_curso);
+        } catch (\Throwable $e) {
+            /* Sin log: este camino corre en el catch de run() y no puede sumar un segundo fallo. */
+        }
+    }
+
+    /**
+     * ¿El sistema vivo del cliente ya fue tocado por este upgrade? Junta todas las señales que existen:
+     *
+     *  - `tocado_marcado`: esta corrida ya llamó a marcar_sistema_tocado() (upload_spa, upload_api,
+     *    run_migrations);
+     *  - `tocado_heredado_registrado`: esta corrida descubrió que un intento anterior lo había tocado
+     *    (un respaldo con la marca TOCADO, o el `down` en el disco);
+     *  - `mantenimiento_posible`: el sistema está (o estuvo en esta corrida) en mantenimiento;
+     *  - `spa_vaciandose` y `spa_nuevo_con_api_vieja`: el SPA vivo se está reemplazando o ya se reemplazó;
+     *  - una "Etapa en curso" de la ventana de mantenimiento sin `up` posterior en los logs (el `down` sigue puesto);
+     *  - la línea MARCA_SISTEMA_TOCADO en los logs del upgrade (la de un intento anterior que una
+     *    reanudación conserva). Un `deploy/start` limpio BORRA los logs: si el intento anterior tocó lo
+     *    vivo y se arrancó de cero, el archivo TOCADO del respaldo (que sólo se lee en backup_in_place)
+     *    es lo único que lo recuerda; una falla ANTES de esa etapa suelta el aviso igual, que es lo que
+     *    pasaba sin el aviso (el sistema ya estaba a medio actualizar y nadie estaba bloqueado).
+     *
+     * @return bool
+     */
+    private function aviso_sistema_vivo_tocado(): bool
+    {
+        return $this->tocado_marcado
+            || $this->tocado_heredado_registrado
+            || $this->mantenimiento_posible
+            || $this->spa_vaciandose
+            || $this->spa_nuevo_con_api_vieja
+            || self::sistema_vivo_tocado_segun_los_logs((int) $this->upgrade->id)
+            || self::ultima_etapa_en_curso_en_los_logs((int) $this->upgrade->id) !== null;
+    }
+
+    /**
+     * Suelta el aviso si el sistema vivo del cliente NO se tocó, para las fallas del arranque que pasan
+     * FUERA de run() y por lo tanto no llegan a G5 (ronda 3): `RunDeploymentJob` lo llama cuando
+     * `connect()` lanza y desde `failed()` cuando el worker mata el job (timeout) o la cola lo da por agotado.
+     *
+     * Es público porque lo usa el job; es el único método público del bloque `aviso_*`. Reusa la lógica
+     * de G5 (`aviso_activo()` + `aviso_sistema_vivo_tocado()` + `aviso_liberar_con_reintentos()`), pero
+     * en una instancia que quizá nunca corrió `run()`: sólo cuentan las señales que se PERSISTEN (la
+     * marca MARCA_SISTEMA_TOCADO en los logs, una etapa de la ventana de mantenimiento sin `up`).
+     * 🔴 Si no se puede saber con certeza, NO suelta: es preferible que lo suelte el vencimiento antes
+     * que soltarlo con el sistema tocado. Por eso:
+     *
+     *  - 🔴 no suelta si hay OTRO upgrade del mismo cliente en curso: esa guarda vive en el punto común por
+     *    el que pasan TODOS los caminos que sueltan (aviso_liberar_con_reintentos()), no acá;
+     *  - no suelta si, en la CORRIDA ACTUAL, ya hay una línea "liberado" como último movimiento del aviso
+     *    (G5 ya lo hizo: sin esto, `failed()` repetiría el PUT después de un fallo de `run()` ya manejado).
+     *    Se mira sólo desde el inicio de esta corrida —`deployment_running_since`, el ancla que estampan
+     *    TODOS los caminos que arrancan un deployment (panel, `claude/upgrades` y soporte)—: una
+     *    reanudación conserva los logs, y el "liberado" de un intento anterior no puede impedir soltar el
+     *    aviso renovado. Sin ancla (no ocurre en producción) se miran todos los logs. Las señales de
+     *    "sistema tocado" NO se acotan a la corrida: lo que el sistema vivo ya sufrió sigue siendo verdad.
+     *
+     * El camino del candado tomado por otro proceso NO lo llama: ese proceso es el dueño de la corrida.
+     *
+     * 🔴 Nunca lanza.
+     *
+     * @return void
+     */
+    public function aviso_soltar_si_no_se_toco(): void
+    {
+        try {
+            if (! $this->aviso_activo() || $this->aviso_sistema_vivo_tocado()) {
+                return;
+            }
+
+            $movimientos = DeploymentLog::where('client_version_upgrade_id', $this->upgrade->id)
+                ->where('line', 'like', 'Aviso de actualización:%');
+
+            $inicio_de_la_corrida = $this->upgrade->deployment_running_since !== null
+                ? $this->upgrade->deployment_running_since
+                : $this->upgrade->deployment_started_at;
+            if ($inicio_de_la_corrida !== null) {
+                $movimientos->where('created_at', '>=', $inicio_de_la_corrida);
+            }
+
+            $ultimo_movimiento = $movimientos->orderByDesc('id')->value('line');
+            if ($ultimo_movimiento !== null && strpos((string) $ultimo_movimiento, 'Aviso de actualización: liberado') === 0) {
+                return;
+            }
+
+            $this->aviso_liberar_con_reintentos('deployment');
+        } catch (\Throwable $e) {
+            /* Sin log: corre en caminos de falla y no puede sumar un segundo fallo. */
+        }
+    }
+
+    /**
+     * Id de OTRO upgrade del mismo cliente que sigue en curso (`running`, `paused` o `paused_post_tasks`,
+     * los estados de ACTIVE_DEPLOYMENT_STATUSES), o null si no hay ninguno.
+     *
+     * El aviso es UNO por dueño y `PUT libre` ignora `upgrade_id`: soltarlo desde este upgrade se lo
+     * soltaría al otro, que puede estar en migraciones o esperando el post-cierre con el sistema
+     * bloqueado a propósito. Si no se puede consultar, se asume que sí hay otro (ante la duda no se suelta).
+     *
+     * @return int|null
+     */
+    private function aviso_otro_upgrade_activo_del_cliente()
+    {
+        try {
+            $otro = ClientVersionUpgrade::where('client_id', $this->upgrade->client_id)
+                ->where('id', '!=', $this->upgrade->id)
+                ->whereIn('deployment_status', ['running', 'paused', 'paused_post_tasks'])
+                ->orderBy('id')
+                ->value('id');
+
+            return $otro === null ? null : (int) $otro;
+        } catch (\Throwable $e) {
+            return 0;
+        }
+    }
+
+    /**
+     * Suelta el aviso con reintentos reales: 3 intentos con espera creciente entre uno y otro (1 s y
+     * 3 s por defecto: `aviso_de_actualizacion.esperas_de_reintento`). Un solo intento fallido dejaba a
+     * los usuarios afuera hasta 120 minutos después de terminar, sin que nadie se enterara.
+     *
+     *  - Si algún intento sale bien: línea "liberado".
+     *  - Un 404 (la versión del cliente no tiene el aviso) no se reintenta: no hay nada que esperar.
+     *  - Si fallan todos: una línea de nivel `error` con "Aviso de actualización: NO se pudo liberar…".
+     *    Nivel `error` y no `warning` a propósito (verificado): nadie lee un `error` como freno. Las
+     *    lecturas de "el deploy falló" usan la línea con MARCA_ETAPA_QUE_FALLO; `ready_for_post_closure`
+     *    sólo mira los `warning` de restart_queue_workers; `ultimo_error` es informativo (y acá es
+     *    justo lo que hay que ver); y ni el status ni `finished_at` del upgrade dependen del nivel de un
+     *    log. El deploy sigue `completed`.
+     *
+     * 🔴 Nunca lanza (el servicio HTTP no lo hace y el log va en un try/catch del llamador).
+     *
+     * @param  string  $etapa  Etapa a la que se le atribuye la línea de log.
+     * @return void
+     */
+    private function aviso_liberar_con_reintentos(string $etapa): void
+    {
+        /* 🔴 La guarda de TODOS los caminos que sueltan (G4, G5 y los del job): si otro upgrade del cliente
+           sigue en curso, el aviso es suyo. */
+        $otro_upgrade = $this->aviso_otro_upgrade_activo_del_cliente();
+        if ($otro_upgrade !== null) {
+            $this->log(
+                $etapa,
+                'Aviso de actualización: no se suelta: el upgrade ' . ($otro_upgrade > 0 ? '#' . $otro_upgrade : '(no se pudo consultar)') . ' del cliente sigue en curso '
+                . '(el aviso es uno por dueño y lo suelta ese upgrade al terminar, o el vencimiento).',
+                'info'
+            );
+
+            return;
+        }
+
+        $servicio = app(ClientAvisoDeActualizacionService::class);
+        $client   = $this->upgrade->client;
+        $esperas  = array_values((array) config('aviso_de_actualizacion.esperas_de_reintento', [1, 3]));
+        $intentos = count($esperas) + 1;
+        $ultimo   = null;
+
+        for ($intento = 0; $intento < $intentos; $intento++) {
+            $ultimo = $servicio->liberar($client, $this->upgrade);
+
+            if ($ultimo['aviso'] !== null || $ultimo['soportado'] === false) {
+                $this->aviso_registrar($etapa, 'liberar', $ultimo);
+
+                return;
+            }
+
+            if ($intento < $intentos - 1 && (int) $esperas[$intento] > 0) {
+                sleep((int) $esperas[$intento]);
+            }
+        }
+
+        $this->log(
+            $etapa,
+            'Aviso de actualización: NO se pudo liberar tras ' . $intentos . ' intentos ('
+            . ($ultimo['http'] === null ? 'sin respuesta' : 'HTTP ' . $ultimo['http']) . '). Los usuarios del cliente pueden '
+            . 'seguir afuera hasta que el aviso venza (hasta ' . (int) config('aviso_de_actualizacion.vence_en_minutos', 120)
+            . ' minutos). Soltarlo a mano: POST claude/upgrades/' . (int) $this->upgrade->id . '/aviso-de-actualizacion con accion=liberar.',
+            'error'
+        );
+    }
+
+    /**
+     * Le pide al cliente prender o soltar el aviso y deja la línea de log con el desenlace. Los dos
+     * desenlaces malos (404 y cualquier otro) NO cortan nada: el pipeline sigue.
+     *
+     * @param  string  $accion  'prender' | 'liberar'.
+     * @param  string  $etapa   Etapa a la que se le atribuye la línea de log.
+     * @return void
+     */
+    private function aviso_llamar(string $accion, string $etapa): void
+    {
+        $servicio = app(ClientAvisoDeActualizacionService::class);
+        $client   = $this->upgrade->client;
+
+        $resultado = $accion === 'liberar'
+            ? $servicio->liberar($client, $this->upgrade)
+            : $servicio->prender($client, $this->upgrade);
+
+        $this->aviso_registrar($etapa, $accion, $resultado);
+    }
+
+    /**
+     * Escribe en `deployment_logs` lo que pasó con el aviso: prendido (con hasta cuándo), liberado, o
+     * por qué no se pudo y que el deploy sigue.
+     *
+     * @param  string  $etapa      Etapa a la que se le atribuye la línea.
+     * @param  string  $accion     'prender' | 'liberar'.
+     * @param  array   $resultado  Resultado de ClientAvisoDeActualizacionService (soportado, http, aviso, error).
+     * @return void
+     */
+    private function aviso_registrar(string $etapa, string $accion, array $resultado): void
+    {
+        $prefijo = 'Aviso de actualización: ';
+
+        if ($resultado['aviso'] !== null) {
+            if ($accion === 'liberar') {
+                $this->log($etapa, $prefijo . 'liberado', 'success');
+
+                return;
+            }
+
+            $hasta = null;
+            if (! empty($resultado['aviso']['vence_at'])) {
+                try {
+                    $hasta = \Carbon\Carbon::parse($resultado['aviso']['vence_at'])
+                        ->setTimezone((string) config('app.timezone'))
+                        ->format('H:i');
+                } catch (\Throwable $e) {
+                    $hasta = null;
+                }
+            }
+            if ($hasta === null) {
+                $hasta = now()->addMinutes((int) config('aviso_de_actualizacion.vence_en_minutos', 120))->format('H:i');
+            }
+
+            $this->log($etapa, $prefijo . 'prendido hasta ' . $hasta, 'success');
+
+            return;
+        }
+
+        if ($resultado['soportado'] === false) {
+            $this->log($etapa, $prefijo . 'la versión del cliente no lo tiene (404), se sigue como hoy', 'info');
+
+            return;
+        }
+
+        $this->log(
+            $etapa,
+            $prefijo . 'no respondió (' . ($resultado['http'] === null ? 'sin respuesta' : 'HTTP ' . $resultado['http']) . '), se sigue',
+            'info'
+        );
+    }
+
+    /**
+     * Deja constancia de una falla inesperada de un gancho del aviso (algo que el servicio HTTP, que
+     * no lanza, no debería dejar pasar). Si ni siquiera el log funciona, se calla: el deploy sigue.
+     *
+     * @param  string      $etapa  Etapa a la que se le atribuye la línea.
+     * @param  \Throwable  $e      Lo que se atrapó.
+     * @return void
+     */
+    private function aviso_registrar_falla_inesperada(string $etapa, \Throwable $e): void
+    {
+        try {
+            $this->log($etapa, 'Aviso de actualización: no se pudo (' . $this->truncate_for_log($e->getMessage(), 200) . '), se sigue', 'info');
+        } catch (\Throwable $ignorado) {
+            /* Nada más que hacer: el aviso nunca aborta el deploy. */
+        }
     }
 
     /**

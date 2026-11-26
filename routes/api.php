@@ -883,6 +883,24 @@ Route::middleware('claude.task.key')
         Route::post('upgrades/{id}/deploy/retry-commands', 'Api\ClaudeUpgradeOpsController@deploy_retry_commands_json');
         Route::post('upgrades/{id}/deploy/expire-stuck', 'Api\ClaudeUpgradeOpsController@deploy_expire_stuck_json');
 
+        /* ==========================================================================================
+         | Aviso "estamos actualizando el sistema" (misión aviso-actualizacion-sistema, 25/11/2026)
+         |
+         | Bloque propio y a propósito separado de las rutas de upgrades de arriba: otra misión
+         | (martin-descripcion-y-actualizaciones) también agrega rutas `claude/` en este archivo, y
+         | con cada cosa en su bloque el conflicto de merge es sólo de líneas contiguas.
+         |
+         | 🔴 Con AVISO_DE_ACTUALIZACION_HABILITADO apagado (el default) las cuatro contestan 409
+         | `aviso_apagado` y no le hablan a ningún cliente. No arrancan ningún deployment: pedir el OK
+         | a los usuarios conectados, leer cómo va, cancelarlo, y prender o soltar el aviso a mano.
+         | Los frenos están en ClaudeAvisoDeActualizacionController y están documentados en
+         | config/claude_catalog.php.
+         |========================================================================================= */
+        Route::post('upgrades/{id}/pedido-de-ok', 'Api\ClaudeAvisoDeActualizacionController@pedir_ok_json');
+        Route::get('upgrades/{id}/pedido-de-ok', 'Api\ClaudeAvisoDeActualizacionController@estado_json');
+        Route::delete('upgrades/{id}/pedido-de-ok', 'Api\ClaudeAvisoDeActualizacionController@cancelar_json');
+        Route::post('upgrades/{id}/aviso-de-actualizacion', 'Api\ClaudeAvisoDeActualizacionController@aviso_json');
+
         /* Tiendas (ecommerce) de los clientes: lectura y ACTUALIZACIÓN.
            🔴 Las dos rutas de escritura arrancan pipelines SSH reales contra el hosting de un
            negocio (compilan tienda-spa en el VPS de builds y suben SPA + API por SFTP). Los frenos
