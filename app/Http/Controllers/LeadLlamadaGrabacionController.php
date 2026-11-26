@@ -16,10 +16,11 @@ use Illuminate\Http\Request;
  *
  *  - `POST admin/lead/{id}/llamadas/{llamada_id}/grabacion` `{nombre, bytes, mime}`: 201 `{grabacion}` en `subiendo`; 409 con la
  *    grabación si la llamada ya tiene una en cola, transcribiéndose o lista.
- *  - `POST …/grabacion/partes` multipart `{indice, parte}`: 200 `{grabacion}`; repetir una parte no duplica nada.
- *  - `POST …/grabacion/completar` `{sha256?}`: 200 `{grabacion}` en `pendiente`; 422 con `faltantes`; 409 si el mismo archivo ya está
+ *  - `POST …/grabacion/partes` multipart `{indice, parte, grabacion_id?}`: 200 `{grabacion}`; repetir una parte no duplica nada.
+ *  - `POST …/grabacion/completar` `{sha256?, grabacion_id?}`: 200 `{grabacion}` en `pendiente`; 422 con `faltantes`; 409 si el mismo archivo ya está
  *    en otra llamada del lead.
  *  - `GET …/grabacion`: 200 `{grabacion}` con la transcripción completa; 404 si la llamada no tiene.
+ *  - `POST …/grabacion/resumir`: 200 `{grabacion}`; vuelve a resumir una grabación transcripta sin resumen (422 si no corresponde).
  *  - `POST …/grabacion/reintentar`: 200 `{grabacion}` en `pendiente`; 422 si no se puede desde su estado.
  *
  * 🔴 Ninguna de estas rutas le escribe al lead (sólo sube un audio y lo transcribe), así que las puede usar el perfil «Sólo Leads».
@@ -67,7 +68,7 @@ class LeadLlamadaGrabacionController extends Controller
     public function parte_json(Request $request, $id, $llamada_id, LeadLlamadaGrabacionService $servicio)
     {
         $lead      = Lead::query()->findOrFail((int) $id);
-        $grabacion = $servicio->de_la_llamada($servicio->llamada_del_lead($lead, $llamada_id));
+        $grabacion = $servicio->de_la_llamada($servicio->llamada_del_lead($lead, $llamada_id), $request->input('grabacion_id'));
 
         $grabacion = $servicio->recibir_parte($grabacion, $request->input('indice'), $request->file('parte'));
 
@@ -87,7 +88,7 @@ class LeadLlamadaGrabacionController extends Controller
     public function completar_json(Request $request, $id, $llamada_id, LeadLlamadaGrabacionService $servicio)
     {
         $lead      = Lead::query()->findOrFail((int) $id);
-        $grabacion = $servicio->de_la_llamada($servicio->llamada_del_lead($lead, $llamada_id));
+        $grabacion = $servicio->de_la_llamada($servicio->llamada_del_lead($lead, $llamada_id), $request->input('grabacion_id'));
 
         $resultado = $servicio->completar($grabacion, $request->input('sha256'));
 
@@ -109,6 +110,23 @@ class LeadLlamadaGrabacionController extends Controller
         $grabacion = $servicio->de_la_llamada($servicio->llamada_del_lead($lead, $llamada_id));
 
         return response()->json(['grabacion' => $servicio->a_json($grabacion)], 200);
+    }
+
+    /**
+     * Vuelve a resumir una grabación transcripta cuya IA de resumen había fallado.
+     *
+     * @param int|string                 $id         Id del lead.
+     * @param int|string                 $llamada_id Id de la llamada.
+     * @param LeadLlamadaGrabacionService $servicio
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function resumir_json($id, $llamada_id, LeadLlamadaGrabacionService $servicio)
+    {
+        $lead      = Lead::query()->findOrFail((int) $id);
+        $grabacion = $servicio->de_la_llamada($servicio->llamada_del_lead($lead, $llamada_id));
+
+        return response()->json(['grabacion' => $servicio->a_json($servicio->volver_a_resumir($grabacion))], 200);
     }
 
     /**

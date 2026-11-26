@@ -2067,6 +2067,7 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/llamadas/{llamada_id}/grabacion/partes', [\App\Http\Controllers\LeadLlamadaGrabacionController::class, 'parte_json'])->whereNumber('id')->whereNumber('llamada_id');
         Route::post('lead/{id}/llamadas/{llamada_id}/grabacion/completar', [\App\Http\Controllers\LeadLlamadaGrabacionController::class, 'completar_json'])->whereNumber('id')->whereNumber('llamada_id');
         Route::post('lead/{id}/llamadas/{llamada_id}/grabacion/reintentar', [\App\Http\Controllers\LeadLlamadaGrabacionController::class, 'reintentar_json'])->whereNumber('id')->whereNumber('llamada_id');
+        Route::post('lead/{id}/llamadas/{llamada_id}/grabacion/resumir', [\App\Http\Controllers\LeadLlamadaGrabacionController::class, 'resumir_json'])->whereNumber('id')->whereNumber('llamada_id');
         Route::get('lead/{id}/llamadas/{llamada_id}/grabacion', [\App\Http\Controllers\LeadLlamadaGrabacionController::class, 'mostrar_json'])->whereNumber('id')->whereNumber('llamada_id');
         Route::get('lead-tablero/mis-tareas', [LeadTableroController::class, 'mis_tareas_json']);
         Route::get('lead-tablero/candidatos', [LeadTableroController::class, 'candidatos_json']);

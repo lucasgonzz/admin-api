@@ -68,15 +68,25 @@ class LeadLlamadaGrabacionService
     /**
      * La grabación de una llamada, o 404 si todavía no tiene.
      *
-     * @param LeadLlamada $llamada
+     * Con `$grabacion_id` se busca ESA grabación (tiene que ser de esta llamada): las partes y «completar» de una subida siguen a su
+     * grabación aunque otra subida de la misma llamada haya empezado después (y haya reemplazado a la primera, que da 404). Sin id se
+     * usa la última de la llamada (el estado, «Reintentar» y las subidas de clientes viejos).
+     *
+     * @param LeadLlamada     $llamada
+     * @param int|string|null $grabacion_id
      *
      * @return LeadLlamadaGrabacion
      *
      * @throws PipelineRuleException 404.
      */
-    public function de_la_llamada(LeadLlamada $llamada): LeadLlamadaGrabacion
+    public function de_la_llamada(LeadLlamada $llamada, $grabacion_id = null): LeadLlamadaGrabacion
     {
-        $grabacion = LeadLlamadaGrabacion::query()->where('lead_llamada_id', (int) $llamada->id)->orderByDesc('id')->first();
+        $consulta = LeadLlamadaGrabacion::query()->where('lead_llamada_id', (int) $llamada->id);
+        if ($grabacion_id !== null && $grabacion_id !== '') {
+            $consulta->whereKey((int) $grabacion_id);
+        }
+
+        $grabacion = $consulta->orderByDesc('id')->first();
         if ($grabacion === null) {
             throw PipelineRuleException::no_existe('La grabación');
         }
@@ -114,6 +124,7 @@ class LeadLlamadaGrabacionService
             'compromiso_id'        => $grabacion->compromiso_id === null ? null : (int) $grabacion->compromiso_id,
             'tiene_transcripcion'  => (string) $grabacion->transcripcion !== '',
             'puede_reintentar'     => $this->puede_reintentar($grabacion),
+            'puede_resumir'        => $this->puede_resumir($grabacion),
             'started_at'           => $grabacion->started_at ? $grabacion->started_at->format('Y-m-d H:i:s') : null,
             'finished_at'          => $grabacion->finished_at ? $grabacion->finished_at->format('Y-m-d H:i:s') : null,
             'created_at'           => $grabacion->created_at ? $grabacion->created_at->format('Y-m-d H:i:s') : null,
@@ -128,7 +139,7 @@ class LeadLlamadaGrabacionService
 
     /**
      * ¿Se puede pedir «Reintentar»? Desde `error`, o desde `transcribiendo` si lleva más de 30 minutos (el worker se cayó). Desde
-     * `pendiente` no: ya está en la cola y esperar es lo correcto.
+     * `pendiente` sólo si lleva más de 30 minutos sin avanzar (el encolado se perdió).
      *
      * @param LeadLlamadaGrabacion $grabacion
      *
@@ -138,6 +149,12 @@ class LeadLlamadaGrabacionService
     {
         if ((string) $grabacion->status === LeadLlamadaGrabacion::STATUS_ERROR) {
             return true;
+        }
+
+        // `pendiente` hace mucho: el encolado se perdió (la cola se vació o el job se perdió). Esperar ya no tiene sentido.
+        if ((string) $grabacion->status === LeadLlamadaGrabacion::STATUS_PENDIENTE) {
+            return $grabacion->updated_at === null
+                || $grabacion->updated_at->lt(AppTime::now()->subMinutes(self::MINUTOS_PARA_DAR_POR_COLGADA));
         }
 
         if ((string) $grabacion->status !== LeadLlamadaGrabacion::STATUS_TRANSCRIBIENDO) {
@@ -432,14 +449,15 @@ class LeadLlamadaGrabacionService
             $actual->bytes_recibidos = (int) filesize($ruta_absoluta);
             $actual->status          = LeadLlamadaGrabacion::STATUS_PENDIENTE;
             $actual->error_text      = null;
+            $actual->intento         = (int) $actual->intento + 1;
             $actual->save();
 
-            return ['http' => 200, 'cuerpo' => ['grabacion' => $this->a_json($actual)], 'encolar' => (int) $actual->id];
+            return ['http' => 200, 'cuerpo' => ['grabacion' => $this->a_json($actual)], 'encolar' => $actual];
         });
 
         // Se encola fuera de la transacción: el worker no puede ver la grabación antes de que esté confirmada.
         if ($resultado['encolar'] !== null) {
-            TranscribirGrabacionDeLlamadaJob::dispatch($resultado['encolar']);
+            $resultado['cuerpo'] = ['grabacion' => $this->a_json($this->encolar($resultado['encolar']))];
         }
 
         return ['http' => $resultado['http'], 'cuerpo' => $resultado['cuerpo']];
@@ -515,14 +533,74 @@ class LeadLlamadaGrabacionService
             $actual->status      = LeadLlamadaGrabacion::STATUS_PENDIENTE;
             $actual->error_text  = null;
             $actual->finished_at = null;
+            // Intento nuevo: el job anterior (si sigue en la cola o lo reofrece el worker) queda viejo y no toca nada.
+            $actual->intento     = (int) $actual->intento + 1;
             $actual->save();
 
             return $actual;
         });
 
-        TranscribirGrabacionDeLlamadaJob::dispatch((int) $actualizada->id);
+        return $this->encolar($actualizada);
+    }
 
-        return $actualizada;
+    /**
+     * Vuelve a resumir una grabación ya transcripta cuya IA de resumen había fallado (no se vuelve a transcribir ni a pagar OpenAI).
+     * El resumen y lo que depende de él (nota en la tarjeta y compromiso propuesto) los hace el mismo job, en la cola.
+     *
+     * @param LeadLlamadaGrabacion $grabacion
+     *
+     * @return LeadLlamadaGrabacion
+     *
+     * @throws PipelineRuleException 422 si no está lista, no tiene transcripción o ya tiene resumen.
+     */
+    public function volver_a_resumir(LeadLlamadaGrabacion $grabacion): LeadLlamadaGrabacion
+    {
+        $actual = LeadLlamadaGrabacion::query()->whereKey((int) $grabacion->id)->first();
+        if ($actual === null) {
+            throw PipelineRuleException::no_existe('La grabación');
+        }
+        if (! $this->puede_resumir($actual)) {
+            throw new PipelineRuleException('Esta grabación no necesita volver a resumirse.', [], 422);
+        }
+
+        TranscribirGrabacionDeLlamadaJob::dispatch((int) $actual->id, (int) $actual->intento, true);
+
+        return $actual;
+    }
+
+    /**
+     * ¿Se puede pedir «Volver a resumir»? Transcripta, con texto y sin resumen (la IA no contestó la primera vez).
+     *
+     * @param LeadLlamadaGrabacion $grabacion
+     *
+     * @return bool
+     */
+    public function puede_resumir(LeadLlamadaGrabacion $grabacion): bool
+    {
+        return (string) $grabacion->status === LeadLlamadaGrabacion::STATUS_LISTA
+            && trim((string) $grabacion->transcripcion) !== ''
+            && trim((string) $grabacion->resumen) === '';
+    }
+
+    /**
+     * Encola la transcripción con el intento actual de la grabación. Si la cola no responde, la grabación queda en `error` (con el
+     * motivo) en vez de esperando para siempre en `pendiente`: «Reintentar» la vuelve a intentar.
+     *
+     * @param LeadLlamadaGrabacion $grabacion Ya en `pendiente`, con su intento nuevo guardado.
+     *
+     * @return LeadLlamadaGrabacion
+     */
+    private function encolar(LeadLlamadaGrabacion $grabacion): LeadLlamadaGrabacion
+    {
+        try {
+            TranscribirGrabacionDeLlamadaJob::dispatch((int) $grabacion->id, (int) $grabacion->intento);
+        } catch (\Throwable $e) {
+            $grabacion->status     = LeadLlamadaGrabacion::STATUS_ERROR;
+            $grabacion->error_text = 'No se pudo poner la transcripción en la cola del servidor. Tocá «Reintentar».';
+            $grabacion->save();
+        }
+
+        return $grabacion;
     }
 
     /**

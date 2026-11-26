@@ -71,6 +71,10 @@ class CreateLeadLlamadaGrabacionesTable extends Migration
             $table->text('compromiso_propuesto')->nullable();
             $table->unsignedBigInteger('compromiso_id')->nullable();
 
+            // Número de intento de transcripción: sube cada vez que la grabación vuelve a `pendiente` (completar o «Reintentar»). El job
+            // lleva el número con el que se encoló y sólo toca la grabación si coincide: un job viejo reofrecido no pisa a uno nuevo.
+            $table->unsignedSmallInteger('intento')->default(0);
+
             // Cuándo empezó y terminó el procesamiento (el «reintentar» de una grabación colgada mira `started_at`).
             $table->dateTime('started_at')->nullable();
             $table->dateTime('finished_at')->nullable();

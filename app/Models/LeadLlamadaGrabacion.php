@@ -27,6 +27,7 @@ use Illuminate\Database\Eloquent\Model;
  * @property string|null         $error_text
  * @property int|null            $duracion_segundos
  * @property int|null            $tramos
+ * @property int                 $intento             Número de intento de transcripción (sube con cada «pendiente»).
  * @property string|null         $modelo
  * @property string|null         $transcripcion
  * @property string|null         $resumen
@@ -81,6 +82,7 @@ class LeadLlamadaGrabacion extends Model
         'bytes_recibidos'     => 'integer',
         'duracion_segundos'   => 'integer',
         'tramos'              => 'integer',
+        'intento'             => 'integer',
         'compromiso_id'       => 'integer',
         'started_at'          => 'datetime',
         'finished_at'         => 'datetime',

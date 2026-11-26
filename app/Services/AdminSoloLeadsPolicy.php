@@ -160,6 +160,7 @@ class AdminSoloLeadsPolicy
         'POST api/admin/lead/{id}/llamadas/{llamada_id}/grabacion/partes',
         'POST api/admin/lead/{id}/llamadas/{llamada_id}/grabacion/completar',
         'POST api/admin/lead/{id}/llamadas/{llamada_id}/grabacion/reintentar',
+        'POST api/admin/lead/{id}/llamadas/{llamada_id}/grabacion/resumir',
         'GET api/admin/lead/{id}/llamadas/{llamada_id}/grabacion',
     ];
 

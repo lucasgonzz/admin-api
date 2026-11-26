@@ -41,11 +41,26 @@ class TranscribirGrabacionDeLlamadaJob implements ShouldQueue
     private $grabacion_id;
 
     /**
-     * @param int $grabacion_id
+     * @var int Número de intento de la grabación con el que se encoló (`lead_llamada_grabaciones.intento`). Si la grabación ya va por
+     *          otro intento (alguien tocó «Reintentar»), este job es viejo y no toca nada: ni transcribe ni la pasa a `error`.
      */
-    public function __construct(int $grabacion_id)
+    private $intento;
+
+    /**
+     * @var bool true = sólo volver a resumir una grabación ya transcripta (no se vuelve a pagar la transcripción).
+     */
+    private $solo_resumen;
+
+    /**
+     * @param int  $grabacion_id
+     * @param int  $intento      Intento de la grabación al encolar.
+     * @param bool $solo_resumen Sólo el resumen y lo que depende de él.
+     */
+    public function __construct(int $grabacion_id, int $intento = 0, bool $solo_resumen = false)
     {
         $this->grabacion_id = $grabacion_id;
+        $this->intento      = $intento;
+        $this->solo_resumen = $solo_resumen;
 
         // Cola propia y conexión `database` explícita: con la conexión por defecto en `sync` correría adentro del pedido del usuario.
         $this->onConnection('database');
@@ -61,7 +76,7 @@ class TranscribirGrabacionDeLlamadaJob implements ShouldQueue
      */
     public function handle(TranscripcionDeLlamadaService $servicio): void
     {
-        $servicio->transcribir($this->grabacion_id);
+        $servicio->transcribir($this->grabacion_id, $this->intento, $this->solo_resumen);
     }
 
     /**
@@ -81,8 +96,15 @@ class TranscribirGrabacionDeLlamadaJob implements ShouldQueue
             'error'        => get_class($excepcion),
         ]);
 
+        // Un resumen que se cortó no cambia el estado de la grabación (sigue «lista», sólo sin resumen).
+        if ($this->solo_resumen) {
+            return;
+        }
+
+        // Sólo si el intento coincide: un job viejo reofrecido no pisa a uno nuevo.
         LeadLlamadaGrabacion::query()
             ->whereKey($this->grabacion_id)
+            ->where('intento', $this->intento)
             ->whereIn('status', [LeadLlamadaGrabacion::STATUS_PENDIENTE, LeadLlamadaGrabacion::STATUS_TRANSCRIBIENDO])
             ->update([
                 'status'      => LeadLlamadaGrabacion::STATUS_ERROR,

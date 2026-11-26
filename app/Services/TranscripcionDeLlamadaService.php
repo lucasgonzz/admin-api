@@ -60,15 +60,33 @@ class TranscripcionDeLlamadaService
     const ESPERA_POR_429_SEGUNDOS = 5;
 
     /**
-     * Transcribe una grabación `pendiente`. Si ya no está pendiente (la tomó otro worker, se borró), no hace nada.
+     * Transcribe una grabación `pendiente`. Si ya no está pendiente (la tomó otro worker, se borró) o ya va por otro intento (alguien
+     * tocó «Reintentar» y este job es el viejo), no hace nada.
      *
-     * @param int $grabacion_id
+     * Con `$solo_resumen` no transcribe: vuelve a resumir una grabación `lista` que se había quedado sin resumen (la IA no contestó).
+     *
+     * @param int      $grabacion_id
+     * @param int|null $intento      Intento con el que se encoló el job (null = sin control, para quien lo llama a mano).
+     * @param bool     $solo_resumen
      *
      * @return void
      */
-    public function transcribir(int $grabacion_id): void
+    public function transcribir(int $grabacion_id, $intento = null, bool $solo_resumen = false): void
     {
-        $grabacion = $this->tomar($grabacion_id);
+        // Temporales de tramos que dejó un job que el worker mató por tiempo (datos personales): se barren los de más de dos horas.
+        try {
+            app(CortadorDeAudioEnTramos::class)->barrer_los_viejos();
+        } catch (\Throwable $e) {
+            // Limpiar no puede impedir una transcripción.
+        }
+
+        if ($solo_resumen) {
+            $this->volver_a_resumir($grabacion_id, $intento);
+
+            return;
+        }
+
+        $grabacion = $this->tomar($grabacion_id, $intento);
         if ($grabacion === null) {
             return;
         }
@@ -83,10 +101,34 @@ class TranscripcionDeLlamadaService
             $this->resumir_y_cerrar($grabacion->fresh(), $texto);
         } catch (\DomainException $e) {
             // Un problema esperado de la grabación, con el texto que se le muestra a Juan.
-            $this->dejar_en_error($grabacion->id, $e->getMessage());
+            $this->dejar_en_error($grabacion, $e->getMessage());
         } catch (\Throwable $e) {
             Log::channel('daily')->warning('TranscripcionDeLlamadaService: falló una transcripción.', ['grabacion_id' => $grabacion->id, 'error' => get_class($e)]);
-            $this->dejar_en_error($grabacion->id, 'La transcripción falló por un error del servidor. Tocá «Reintentar»; si se repite, avisá al equipo técnico.');
+            $this->dejar_en_error($grabacion, 'La transcripción falló por un error del servidor. Tocá «Reintentar»; si se repite, avisá al equipo técnico.');
+        }
+    }
+
+    /**
+     * Vuelve a resumir una grabación `lista` con transcripción y sin resumen. Nunca lanza.
+     *
+     * @param int      $grabacion_id
+     * @param int|null $intento
+     *
+     * @return void
+     */
+    private function volver_a_resumir(int $grabacion_id, $intento): void
+    {
+        $grabacion = LeadLlamadaGrabacion::query()->whereKey($grabacion_id)->first();
+        if ($grabacion === null || (string) $grabacion->status !== LeadLlamadaGrabacion::STATUS_LISTA
+            || trim((string) $grabacion->transcripcion) === '' || trim((string) $grabacion->resumen) !== ''
+            || ($intento !== null && (int) $grabacion->intento !== (int) $intento)) {
+            return;
+        }
+
+        try {
+            $this->resumir_y_cerrar($grabacion, (string) $grabacion->transcripcion);
+        } catch (\Throwable $e) {
+            Log::channel('daily')->warning('TranscripcionDeLlamadaService: falló volver a resumir.', ['grabacion_id' => $grabacion->id, 'error' => get_class($e)]);
         }
     }
 
@@ -97,15 +139,17 @@ class TranscripcionDeLlamadaService
     /**
      * Pasa la grabación de `pendiente` a `transcribiendo` (con candado, así dos workers no la toman a la vez).
      *
-     * @param int $grabacion_id
+     * @param int      $grabacion_id
+     * @param int|null $intento      Intento del job: si la grabación ya va por otro, este job es viejo.
      *
-     * @return LeadLlamadaGrabacion|null Null si no existe o no estaba pendiente.
+     * @return LeadLlamadaGrabacion|null Null si no existe, no estaba pendiente o el job es de un intento anterior.
      */
-    private function tomar(int $grabacion_id)
+    private function tomar(int $grabacion_id, $intento = null)
     {
-        return DB::transaction(function () use ($grabacion_id) {
+        return DB::transaction(function () use ($grabacion_id, $intento) {
             $grabacion = LeadLlamadaGrabacion::query()->whereKey($grabacion_id)->lockForUpdate()->first();
-            if ($grabacion === null || (string) $grabacion->status !== LeadLlamadaGrabacion::STATUS_PENDIENTE) {
+            if ($grabacion === null || (string) $grabacion->status !== LeadLlamadaGrabacion::STATUS_PENDIENTE
+                || ($intento !== null && (int) $grabacion->intento !== (int) $intento)) {
                 return null;
             }
 
@@ -125,6 +169,8 @@ class TranscripcionDeLlamadaService
 
     /**
      * Manda el audio a OpenAI (entero o en tramos) y guarda la transcripción completa.
+     *
+     * Nunca se guarda una transcripción CORTADA: ver {@see transcribir_un_tramo()}.
      *
      * @param LeadLlamadaGrabacion $grabacion
      *
@@ -149,6 +195,8 @@ class TranscripcionDeLlamadaService
         $localizador = app(FfmpegLocator::class);
         $cortador    = null;
         $duracion    = null;
+        // Modelo que transcribe: con ffmpeg el de la configuración (tramos cortos); sin ffmpeg el que no tiene tope de salida.
+        $modelo = $this->modelo();
         if ($localizador->path() !== null) {
             $cortador = app(CortadorDeAudioEnTramos::class);
             try {
@@ -164,7 +212,11 @@ class TranscripcionDeLlamadaService
         } else {
             $this->exigir_que_entre_sin_ffmpeg($grabacion);
             $tramos = [$ruta_absoluta];
+            $modelo = $this->modelo_sin_ffmpeg();
         }
+
+        // Archivos temporales que hay que borrar al terminar (los tramos y las mitades que arme la guardia de corte).
+        $temporales = $cortador !== null ? $tramos : [];
 
         try {
             $textos = [];
@@ -172,11 +224,11 @@ class TranscripcionDeLlamadaService
             foreach ($tramos as $posicion => $ruta_del_tramo) {
                 // Sin ffmpeg se manda el original: su nombre de envío conserva la extensión real (OpenAI detecta el formato por ahí).
                 $nombre   = $cortador !== null ? basename($ruta_del_tramo) : 'audio.' . $grabacion->extension;
-                $textos[] = $this->transcribir_un_tramo($clave, $ruta_del_tramo, $nombre, $posicion + 1, $total);
+                $textos[] = $this->texto_del_tramo($clave, $modelo, $cortador, $ruta_del_tramo, $nombre, $posicion + 1, $total, $temporales);
             }
         } finally {
             if ($cortador !== null) {
-                $cortador->limpiar($tramos);
+                $cortador->limpiar($temporales);
             }
         }
 
@@ -188,12 +240,13 @@ class TranscripcionDeLlamadaService
             throw new \DomainException('OpenAI no devolvió texto: el audio parece no tener voz. Revisá el archivo.');
         }
 
-        // Se guarda YA, antes de resumir: si el resumen se corta, lo pagado no se pierde.
-        $grabacion->transcripcion      = $texto;
-        $grabacion->tramos             = count($tramos);
-        $grabacion->modelo             = $this->modelo();
-        $grabacion->duracion_segundos  = $duracion;
-        $grabacion->save();
+        // Se guarda YA, antes de resumir: si el resumen se corta, lo pagado no se pierde. Sólo si este job sigue siendo el vigente.
+        $this->actualizar_si_es_mi_intento($grabacion, [
+            'transcripcion'     => $texto,
+            'tramos'            => count($tramos),
+            'modelo'            => $modelo,
+            'duracion_segundos' => $duracion,
+        ]);
 
         return $texto;
     }
@@ -219,27 +272,98 @@ class TranscripcionDeLlamadaService
     }
 
     /**
-     * Transcribe UN tramo con OpenAI, con un reintento.
+     * El texto de UN tramo, sin recortes. Si OpenAI lo devolvió cortado por su tope de salida (guardia de corte) y hay ffmpeg, el tramo
+     * se parte en dos mitades y cada una se transcribe por separado; si una mitad también sale cortada, o no hay ffmpeg, es un error:
+     * NUNCA se sigue con un texto al que le falta el final.
+     *
+     * @param string                          $clave
+     * @param string                          $modelo
+     * @param CortadorDeAudioEnTramos|null    $cortador   Null sin ffmpeg.
+     * @param string                          $ruta       Archivo del tramo.
+     * @param string                          $nombre     Nombre con el que viaja.
+     * @param int                             $numero     Número del tramo (desde 1).
+     * @param int                             $total      Cuántos tramos hay.
+     * @param array<int, string>              $temporales Salida: se suman las mitades que se creen, para borrarlas al final.
+     *
+     * @return string
+     *
+     * @throws \DomainException
+     */
+    private function texto_del_tramo(string $clave, string $modelo, $cortador, string $ruta, string $nombre, int $numero, int $total, array &$temporales): string
+    {
+        $resultado = $this->transcribir_un_tramo($clave, $modelo, $ruta, $nombre, $numero, $total);
+        if (! $resultado['cortado']) {
+            return $resultado['texto'];
+        }
+
+        // Cortado por el tope de salida: con ffmpeg se prueba con las dos mitades; sin él no hay nada más que hacer.
+        $mitades = [];
+        if ($cortador !== null) {
+            try {
+                $mitades = $cortador->partir_en_dos($ruta);
+            } catch (\RuntimeException $e) {
+                $mitades = [];
+            }
+            foreach ($mitades as $mitad) {
+                $temporales[] = $mitad;
+            }
+        }
+        if (count($mitades) !== 2) {
+            throw new \DomainException($this->texto_de_corte($numero, $total));
+        }
+
+        $partes = [];
+        foreach ($mitades as $mitad) {
+            $parte = $this->transcribir_un_tramo($clave, $modelo, $mitad, basename($mitad), $numero, $total);
+            if ($parte['cortado']) {
+                throw new \DomainException($this->texto_de_corte($numero, $total));
+            }
+            $partes[] = $parte['texto'];
+        }
+
+        return implode("\n\n", array_values(array_filter($partes, function ($parte) {
+            return $parte !== '';
+        })));
+    }
+
+    /**
+     * El aviso de una transcripción que salió cortada.
+     *
+     * @param int $numero
+     * @param int $total
+     *
+     * @return string
+     */
+    private function texto_de_corte(int $numero, int $total): string
+    {
+        return ($total > 1 ? 'En el tramo ' . $numero . ' de ' . $total . ', ' : 'En este audio, ') . 'la transcripción salió cortada porque OpenAI llegó a su tope de salida: no se guardó '
+            . 'para no dejar una llamada con el final perdido. Se arregla con tramos más cortos (OPENAI_CALL_TRANSCRIPTION_TRAMO_CORTO_SEGUNDOS, hace falta ffmpeg) '
+            . 'o con otro modelo (OPENAI_CALL_TRANSCRIPTION_MODEL / OPENAI_CALL_TRANSCRIPTION_MODEL_SIN_FFMPEG). Después tocá «Reintentar».';
+    }
+
+    /**
+     * Transcribe UN archivo con OpenAI, con un reintento si el pedido falla.
      *
      * @param string $clave   Clave de OpenAI.
+     * @param string $modelo  Modelo de transcripción.
      * @param string $ruta    Archivo del tramo.
      * @param string $nombre  Nombre con el que viaja (la extensión le dice el formato a OpenAI).
      * @param int    $numero  Número del tramo (desde 1).
      * @param int    $total   Cuántos tramos hay.
      *
-     * @return string El texto del tramo (vacío si no había voz).
+     * @return array{texto: string, cortado: bool} `texto` vacío si no había voz; `cortado` si la salida llegó al tope de tokens.
      *
      * @throws \DomainException Si el segundo intento también falla.
      */
-    private function transcribir_un_tramo(string $clave, string $ruta, string $nombre, int $numero, int $total): string
+    private function transcribir_un_tramo(string $clave, string $modelo, string $ruta, string $nombre, int $numero, int $total): array
     {
         // Último código HTTP visto (0 = ni llegó respuesta): sólo para el mensaje.
         $codigo = 0;
 
         for ($intento = 1; $intento <= 2; $intento++) {
-            $resultado = $this->pedir_la_transcripcion($clave, $ruta, $nombre);
+            $resultado = $this->pedir_la_transcripcion($clave, $modelo, $ruta, $nombre);
             if ($resultado['texto'] !== null) {
-                return $resultado['texto'];
+                return ['texto' => $resultado['texto'], 'cortado' => $resultado['cortado']];
             }
             $codigo = $resultado['http'];
 
@@ -266,16 +390,18 @@ class TranscripcionDeLlamadaService
      * Un pedido a `/v1/audio/transcriptions`. Nunca lanza.
      *
      * @param string $clave
+     * @param string $modelo
      * @param string $ruta
      * @param string $nombre
      *
-     * @return array{texto: string|null, http: int} `texto` es null si el pedido falló; `http` es el código (0 si no llegó respuesta).
+     * @return array{texto: string|null, http: int, cortado: bool} `texto` es null si el pedido falló; `http` es el código (0 si no
+     *         llegó respuesta); `cortado` es true si `usage.output_tokens` llegó al tope de la guardia (`max_output_tokens`).
      */
-    private function pedir_la_transcripcion(string $clave, string $ruta, string $nombre): array
+    private function pedir_la_transcripcion(string $clave, string $modelo, string $ruta, string $nombre): array
     {
         $recurso = @fopen($ruta, 'rb');
         if ($recurso === false) {
-            return ['texto' => null, 'http' => 0];
+            return ['texto' => null, 'http' => 0, 'cortado' => false];
         }
 
         try {
@@ -284,21 +410,29 @@ class TranscripcionDeLlamadaService
                 ->withOptions(['connect_timeout' => 10])
                 ->attach('file', $recurso, $nombre)
                 ->post(self::URL_DE_OPENAI, [
-                    'model'           => $this->modelo(),
+                    'model'           => $modelo,
                     'language'        => 'es',
                     'response_format' => 'json',
                 ]);
 
             if (! $respuesta->successful()) {
-                return ['texto' => null, 'http' => (int) $respuesta->status()];
+                return ['texto' => null, 'http' => (int) $respuesta->status(), 'cortado' => false];
             }
 
             $texto = $respuesta->json('text');
+            if (! is_string($texto)) {
+                return ['texto' => null, 'http' => (int) $respuesta->status(), 'cortado' => false];
+            }
 
-            return is_string($texto) ? ['texto' => trim($texto), 'http' => (int) $respuesta->status()] : ['texto' => null, 'http' => (int) $respuesta->status()];
+            // Guardia de corte: los modelos gpt-4o devuelven `usage.output_tokens`; con un tope de 2.000, una salida cerca del tope es
+            // una transcripción recortada en silencio. whisper-1 no trae `usage` de tokens: no se puede medir y no tiene ese tope.
+            $salida = $respuesta->json('usage.output_tokens');
+            $tope   = (int) config('services.openai_call_transcription.max_output_tokens', 1800);
+
+            return ['texto' => trim($texto), 'http' => (int) $respuesta->status(), 'cortado' => is_numeric($salida) && $tope > 0 && (int) $salida >= $tope];
         } catch (\Throwable $e) {
             // Sin conexión, timeout o respuesta rota: el llamador lo reintenta una vez. Nada de esto se loguea (puede traer rutas).
-            return ['texto' => null, 'http' => 0];
+            return ['texto' => null, 'http' => 0, 'cortado' => false];
         } finally {
             if (is_resource($recurso)) {
                 fclose($recurso);
@@ -307,13 +441,40 @@ class TranscripcionDeLlamadaService
     }
 
     /**
-     * Modelo de transcripción de la configuración.
+     * Modelo de transcripción de la configuración (con ffmpeg, tramos cortos).
      *
      * @return string
      */
     private function modelo(): string
     {
         return (string) config('services.openai_call_transcription.model', 'gpt-4o-transcribe');
+    }
+
+    /**
+     * Modelo para el archivo entero cuando el servidor no tiene ffmpeg (por defecto `whisper-1`, sin tope de salida).
+     *
+     * @return string
+     */
+    private function modelo_sin_ffmpeg(): string
+    {
+        return (string) config('services.openai_call_transcription.model_sin_ffmpeg', 'whisper-1');
+    }
+
+    /**
+     * Actualiza columnas de la grabación SÓLO si sigue en el intento de este job: una grabación reintentada mientras un job viejo seguía
+     * vivo no recibe sus resultados.
+     *
+     * @param LeadLlamadaGrabacion $grabacion
+     * @param array<string, mixed> $columnas
+     *
+     * @return bool true si se actualizó.
+     */
+    private function actualizar_si_es_mi_intento(LeadLlamadaGrabacion $grabacion, array $columnas): bool
+    {
+        return LeadLlamadaGrabacion::query()
+            ->whereKey((int) $grabacion->id)
+            ->where('intento', (int) $grabacion->intento)
+            ->update(array_merge($columnas, ['updated_at' => AppTime::now()])) > 0;
     }
 
     // ------------------------------------------------------------------------------------------
@@ -369,35 +530,34 @@ class TranscripcionDeLlamadaService
                     }
                 }
 
-                $this->cerrar($grabacion->id, $resumen['ok'] ? $resumen['resumen'] : null, $propuesto, $compromiso_id);
+                $this->cerrar($grabacion, $resumen['ok'] ? $resumen['resumen'] : null, $propuesto, $compromiso_id);
             });
         } catch (\Throwable $e) {
             // Lo que depende del resumen se deshizo; la transcripción (lo valioso) queda y la grabación se cierra sin resumen.
             Log::channel('daily')->warning('TranscripcionDeLlamadaService: no se pudo guardar el resumen.', ['grabacion_id' => $grabacion->id, 'error' => get_class($e)]);
-            $this->cerrar($grabacion->id, null, null, null);
+            $this->cerrar($grabacion, null, null, null);
         }
     }
 
     /**
-     * Marca la grabación `lista` con lo que salió del resumen.
+     * Marca la grabación `lista` con lo que salió del resumen (sólo si este job sigue siendo el vigente).
      *
-     * @param int         $grabacion_id
-     * @param string|null $resumen
-     * @param string|null $propuesto
-     * @param int|null    $compromiso_id
+     * @param LeadLlamadaGrabacion $grabacion
+     * @param string|null          $resumen
+     * @param string|null          $propuesto
+     * @param int|null             $compromiso_id
      *
      * @return void
      */
-    private function cerrar(int $grabacion_id, $resumen, $propuesto, $compromiso_id): void
+    private function cerrar(LeadLlamadaGrabacion $grabacion, $resumen, $propuesto, $compromiso_id): void
     {
-        LeadLlamadaGrabacion::query()->whereKey($grabacion_id)->update([
+        $this->actualizar_si_es_mi_intento($grabacion, [
             'status'               => LeadLlamadaGrabacion::STATUS_LISTA,
             'error_text'           => null,
             'resumen'              => $resumen,
             'compromiso_propuesto' => $propuesto,
             'compromiso_id'        => $compromiso_id,
             'finished_at'          => AppTime::now(),
-            'updated_at'           => AppTime::now(),
         ]);
     }
 
@@ -459,9 +619,22 @@ class TranscripcionDeLlamadaService
         $servicio = app(LeadCompromisoService::class);
 
         // La propuesta en palabras para la ficha («Llamarlo el martes 01/12 a las 11:30 — «llamame el martes»»).
-        $limpios   = $servicio->limpiar_datos(['vence_at' => $propuesta['vence_at'], 'accion' => $propuesta['accion']]);
-        $propuesto = $this->verbo_de_la_accion((string) $propuesta['accion']) . ' ' . $servicio->dia_en_palabras($limpios['vence_at'])
+        if (! empty($propuesta['pasada'])) {
+            // La fecha ya pasó cuando se transcribió (la llamada fue días antes): no se puede validar como compromiso futuro; se arma el
+            // día en palabras directo (con la hora por defecto de la acción si sólo vino el día).
+            $momento = \App\Services\Pipelines\PipelineFieldsService::parsear_fecha_de_la_spa((string) $propuesta['vence_at']);
+            if (strlen((string) $propuesta['vence_at']) === 10) {
+                $momento = $momento->setTime($propuesta['accion'] === LeadCompromiso::ACCION_ESPERAR ? 18 : 10, 0, 0);
+            }
+        } else {
+            $momento = $servicio->limpiar_datos(['vence_at' => $propuesta['vence_at'], 'accion' => $propuesta['accion']])['vence_at'];
+        }
+        $propuesto = $this->verbo_de_la_accion((string) $propuesta['accion']) . ' ' . $servicio->dia_en_palabras($momento)
             . ($propuesta['cita'] !== null && $propuesta['cita'] !== '' ? ' — «' . $propuesta['cita'] . '»' : '');
+        if (! empty($propuesta['pasada'])) {
+            // El compromiso se calcula contra el día de la llamada: si ese día ya pasó, agendarlo sería inventar un contacto.
+            return ['propuesto' => mb_substr($propuesto, 0, 570) . ' (la fecha ya pasó: no se agendó)', 'compromiso_id' => null];
+        }
         $propuesto = mb_substr($propuesto, 0, 600);
 
         if (! $this->corresponde_crear_el_compromiso($servicio, $lead, $llamada)) {
@@ -567,21 +740,23 @@ class TranscripcionDeLlamadaService
     // ------------------------------------------------------------------------------------------
 
     /**
-     * Deja la grabación en `error` con un texto claro. Sólo si seguía en `transcribiendo` (una que ya terminó no se pisa).
+     * Deja la grabación en `error` con un texto claro. Sólo si seguía en `transcribiendo` y en el intento de este job (una que ya terminó,
+     * o que se reintentó, no se pisa).
      *
-     * @param int    $grabacion_id
-     * @param string $texto
+     * @param LeadLlamadaGrabacion $grabacion
+     * @param string               $texto
      *
      * @return void
      */
-    private function dejar_en_error(int $grabacion_id, string $texto): void
+    private function dejar_en_error(LeadLlamadaGrabacion $grabacion, string $texto): void
     {
         LeadLlamadaGrabacion::query()
-            ->whereKey($grabacion_id)
+            ->whereKey((int) $grabacion->id)
+            ->where('intento', (int) $grabacion->intento)
             ->where('status', LeadLlamadaGrabacion::STATUS_TRANSCRIBIENDO)
             ->update([
                 'status'      => LeadLlamadaGrabacion::STATUS_ERROR,
-                'error_text'  => mb_substr($texto, 0, 500),
+                'error_text'  => mb_substr($texto, 0, 900),
                 'finished_at' => AppTime::now(),
                 'updated_at'  => AppTime::now(),
             ]);
