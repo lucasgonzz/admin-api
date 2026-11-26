@@ -19,6 +19,15 @@ use Illuminate\Database\Eloquent\Model;
  */
 class AgendaTask extends Model
 {
+    /** Quién hace la tarea: el dueño de esa agenda (en la de Lucas, Lucas) u OpenClaw. */
+    const ASSIGNEES = ['owner', 'openclaw'];
+
+    /** De dónde vino el pedido: el panel, Dots, una conversación con Claude u OpenClaw. */
+    const ORIGINS = ['panel', 'dots', 'conversacion', 'openclaw'];
+
+    /** Tipos de vínculo posibles: una tarjeta del Workboard de OpenClaw o una misión. */
+    const LINK_TYPES = ['workboard', 'mision'];
+
     protected $table = 'agenda_tasks';
 
     protected $guarded = [];
@@ -62,6 +71,21 @@ class AgendaTask extends Model
     public function completions()
     {
         return $this->hasMany(AgendaTaskCompletion::class, 'agenda_task_id');
+    }
+
+    /**
+     * Carga lo que la tarea expone además de sus columnas: los subpasos (el checklist).
+     *
+     * Nadie lo llama todavía (el servicio de la Agenda usa `with('subtasks')`); está por la regla de los
+     * modelos del repo, que todos tienen `scopeWithAll`.
+     *
+     * @param \Illuminate\Database\Eloquent\Builder $query Consulta a completar.
+     *
+     * @return void
+     */
+    public function scopeWithAll($query)
+    {
+        $query->with('subtasks');
     }
 
     /**
