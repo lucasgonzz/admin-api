@@ -45,6 +45,21 @@ class McpOauthService
     /** Largo máximo del `state` que se acepta (y se devuelve completo) en la autorización. */
     const MAX_STATE = 2048;
 
+    /** Scope del conector de LECTURA de WhatsApp (misión dotin-whatsapp-admin). */
+    const SCOPE_WHATSAPP_LECTURA = 'whatsapp.read';
+
+    /** Scope del conector de ENVÍO de WhatsApp (misión dotin-whatsapp-admin). */
+    const SCOPE_WHATSAPP_ENVIO = 'whatsapp.send';
+
+    /** Perfil (recurso) del conector de consulta original: `/api/mcp`. */
+    const PERFIL_CONSULTA = 'consulta';
+
+    /** Perfil del conector de lectura de WhatsApp: `/api/mcp/whatsapp`. */
+    const PERFIL_WHATSAPP_LECTURA = 'whatsapp_lectura';
+
+    /** Perfil del conector de envío de WhatsApp: `/api/mcp/whatsapp-envio`. */
+    const PERFIL_WHATSAPP_ENVIO = 'whatsapp_envio';
+
     /** Scope que pide ChatGPT para recibir refresh tokens. */
     const SCOPE_OFFLINE = 'offline_access';
 
@@ -89,15 +104,112 @@ class McpOauthService
     }
 
     /**
+     * Si los conectores de WhatsApp están prendidos (`config('mcp.whatsapp_enabled')`, apagado por defecto).
+     *
+     * @return bool
+     */
+    public function whatsapp_habilitado()
+    {
+        return (bool) config('mcp.whatsapp_enabled', false);
+    }
+
+    /**
+     * Los recursos protegidos que hoy existen: URL => perfil y scope propio. El de consulta siempre; los dos de
+     * WhatsApp sólo con el interruptor prendido (apagado, un token de WhatsApp ya emitido deja de servir).
+     *
+     * @return array<string, array{perfil: string, scope: string}>
+     */
+    public function recursos()
+    {
+        $recursos = [$this->recurso() => ['perfil' => self::PERFIL_CONSULTA, 'scope' => self::SCOPE_LECTURA]];
+
+        if ($this->whatsapp_habilitado()) {
+            $recursos[$this->url_de_perfil(self::PERFIL_WHATSAPP_LECTURA)] = ['perfil' => self::PERFIL_WHATSAPP_LECTURA, 'scope' => self::SCOPE_WHATSAPP_LECTURA];
+            $recursos[$this->url_de_perfil(self::PERFIL_WHATSAPP_ENVIO)]   = ['perfil' => self::PERFIL_WHATSAPP_ENVIO, 'scope' => self::SCOPE_WHATSAPP_ENVIO];
+        }
+
+        return $recursos;
+    }
+
+    /**
+     * La URL (audiencia) de un perfil, sin barra final, esté o no prendido el interruptor.
+     *
+     * @param string $perfil Uno de los PERFIL_* de esta clase.
+     *
+     * @return string
+     */
+    public function url_de_perfil($perfil)
+    {
+        if ($perfil === self::PERFIL_WHATSAPP_LECTURA) {
+            return rtrim((string) config('mcp.whatsapp_read_resource'), '/');
+        }
+        if ($perfil === self::PERFIL_WHATSAPP_ENVIO) {
+            return rtrim((string) config('mcp.whatsapp_send_resource'), '/');
+        }
+
+        return $this->recurso();
+    }
+
+    /**
+     * El scope propio de un perfil.
+     *
+     * @param string $perfil Uno de los PERFIL_* de esta clase.
+     *
+     * @return string
+     */
+    public function scope_de_perfil($perfil)
+    {
+        if ($perfil === self::PERFIL_WHATSAPP_LECTURA) {
+            return self::SCOPE_WHATSAPP_LECTURA;
+        }
+
+        return $perfil === self::PERFIL_WHATSAPP_ENVIO ? self::SCOPE_WHATSAPP_ENVIO : self::SCOPE_LECTURA;
+    }
+
+    /**
+     * El perfil al que pertenece una audiencia guardada en un código o token. Una URL que no es de WhatsApp es de
+     * consulta (como hasta ahora).
+     *
+     * @param string $url Audiencia (`resource`).
+     *
+     * @return string Uno de los PERFIL_* de esta clase.
+     */
+    public function perfil_de_audiencia($url)
+    {
+        $url = rtrim((string) $url, '/');
+        foreach ([self::PERFIL_WHATSAPP_LECTURA, self::PERFIL_WHATSAPP_ENVIO] as $perfil) {
+            if (hash_equals($this->url_de_perfil($perfil), $url)) {
+                return $perfil;
+            }
+        }
+
+        return self::PERFIL_CONSULTA;
+    }
+
+    /**
+     * Si el perfil está disponible hoy: consulta siempre; los de WhatsApp sólo con el interruptor prendido.
+     *
+     * @param string $perfil Uno de los PERFIL_* de esta clase.
+     *
+     * @return bool
+     */
+    public function perfil_habilitado($perfil)
+    {
+        return $perfil === self::PERFIL_CONSULTA || $this->whatsapp_habilitado();
+    }
+
+    /**
      * La URL del documento de metadatos del recurso protegido, la que se anuncia en `WWW-Authenticate`.
      *
      * Se arma con el origen y el path del recurso: `<origen>/.well-known/oauth-protected-resource<path>`.
      *
+     * @param string $perfil Perfil del recurso (por defecto el de consulta).
+     *
      * @return string
      */
-    public function url_metadatos_del_recurso()
+    public function url_metadatos_del_recurso($perfil = self::PERFIL_CONSULTA)
     {
-        $partes = parse_url($this->recurso());
+        $partes = parse_url($this->url_de_perfil($perfil));
         $origen = (isset($partes['scheme']) ? $partes['scheme'] : 'https') . '://' . (isset($partes['host']) ? $partes['host'] : '')
             . (isset($partes['port']) ? ':' . $partes['port'] : '');
         $path = isset($partes['path']) ? $partes['path'] : '';
@@ -108,16 +220,24 @@ class McpOauthService
     /**
      * Metadatos del recurso protegido (RFC 9728).
      *
+     * @param string $perfil Perfil del recurso (por defecto el de consulta).
+     *
      * @return array<string, mixed>
      */
-    public function metadatos_del_recurso()
+    public function metadatos_del_recurso($perfil = self::PERFIL_CONSULTA)
     {
+        $nombres = [
+            self::PERFIL_CONSULTA         => 'ComercioCity (sólo lectura)',
+            self::PERFIL_WHATSAPP_LECTURA => 'ComercioCity WhatsApp (lectura)',
+            self::PERFIL_WHATSAPP_ENVIO   => 'ComercioCity WhatsApp (envío con confirmación)',
+        ];
+
         return [
-            'resource'                 => $this->recurso(),
+            'resource'                 => $this->url_de_perfil($perfil),
             'authorization_servers'    => [$this->issuer()],
-            'scopes_supported'         => [self::SCOPE_LECTURA],
+            'scopes_supported'         => [$this->scope_de_perfil($perfil)],
             'bearer_methods_supported' => ['header'],
-            'resource_name'            => 'ComercioCity (sólo lectura)',
+            'resource_name'            => $nombres[$perfil],
         ];
     }
 
@@ -139,7 +259,7 @@ class McpOauthService
             'grant_types_supported'                           => ['authorization_code', 'refresh_token'],
             'code_challenge_methods_supported'                => ['S256'],
             'token_endpoint_auth_methods_supported'           => ['none'],
-            'scopes_supported'                                => [self::SCOPE_LECTURA, self::SCOPE_OFFLINE],
+            'scopes_supported'                                => $this->scopes_anunciados(),
             'authorization_response_iss_parameter_supported'  => true,
         ];
     }
@@ -277,7 +397,7 @@ class McpOauthService
             'scope'                 => $this->texto($entrada, 'scope'),
             'resource'              => $this->texto($entrada, 'resource', 500),
         ];
-        $resultado = ['fatal' => null, 'error' => null, 'cliente' => null, 'parametros' => $parametros];
+        $resultado = ['fatal' => null, 'error' => null, 'cliente' => null, 'parametros' => $parametros, 'perfil' => self::PERFIL_CONSULTA];
 
         if ($parametros['response_type'] !== 'code') {
             $resultado['fatal'] = 'El pedido no es válido: response_type tiene que ser "code".';
@@ -319,16 +439,23 @@ class McpOauthService
             return $resultado;
         }
 
-        if (! $this->resource_valido($entrada)) {
+        $recurso = $this->resolver_recurso($entrada);
+        if ($recurso === null) {
             $resultado['error'] = ['error' => 'invalid_target', 'descripcion' => 'El parámetro resource no es el de este servidor.'];
 
             return $resultado;
         }
+        $resultado['perfil'] = $recurso['perfil'];
 
-        if ($this->normalizar_scope($parametros['scope']) === null) {
+        if ($this->normalizar_scope($parametros['scope'], $recurso['perfil']) === null) {
             $resultado['error'] = ['error' => 'invalid_scope', 'descripcion' => 'Scope no soportado.'];
 
             return $resultado;
+        }
+
+        // Los recursos de WhatsApp viajan resueltos en el formulario: el POST revalida contra la misma audiencia.
+        if ($recurso['perfil'] !== self::PERFIL_CONSULTA) {
+            $resultado['parametros']['resource'] = $recurso['url'];
         }
 
         return $resultado;
@@ -353,25 +480,32 @@ class McpOauthService
      * Si un admin puede conectar el conector: no `solo_leads`, no `es_agente`, y dentro de `MCP_ADMIN_EMAILS`
      * cuando esa lista tiene valor.
      *
-     * @param Admin $admin Admin a evaluar.
+     * Para los perfiles de WhatsApp además tiene que figurar en `mcp.whatsapp_admin_emails`, y 🔴 con esa lista
+     * vacía NADIE puede (son los chats personales de Lucas).
+     *
+     * @param Admin  $admin  Admin a evaluar.
+     * @param string $perfil Perfil que quiere conectar (por defecto el de consulta).
      *
      * @return bool
      */
-    public function admin_autorizado(Admin $admin)
+    public function admin_autorizado(Admin $admin, $perfil = self::PERFIL_CONSULTA)
     {
         if ((bool) $admin->solo_leads || (bool) $admin->es_agente) {
             return false;
         }
 
-        $permitidos = [];
-        foreach (explode(',', (string) config('mcp.admin_emails', '')) as $email) {
-            $email = strtolower(trim($email));
-            if ($email !== '') {
-                $permitidos[] = $email;
-            }
+        $permitidos = $this->lista_de_emails('mcp.admin_emails');
+        if (count($permitidos) > 0 && ! in_array(strtolower((string) $admin->email), $permitidos, true)) {
+            return false;
         }
 
-        return count($permitidos) === 0 || in_array(strtolower((string) $admin->email), $permitidos, true);
+        if ($perfil === self::PERFIL_CONSULTA) {
+            return true;
+        }
+
+        $de_whatsapp = $this->lista_de_emails('mcp.whatsapp_admin_emails');
+
+        return count($de_whatsapp) > 0 && in_array(strtolower((string) $admin->email), $de_whatsapp, true);
     }
 
     /**
@@ -388,14 +522,20 @@ class McpOauthService
     {
         $codigo = bin2hex(random_bytes(32));
 
+        // La audiencia sale del pedido ya validado (si el recurso no existe hoy, no se emite nada).
+        $recurso = $this->resolver_recurso($parametros);
+        if ($recurso === null) {
+            throw new \InvalidArgumentException('Recurso inexistente.');
+        }
+
         McpOauthCode::create([
             'code_hash'      => hash('sha256', $codigo),
             'client_id'      => $cliente->client_id,
             'admin_id'       => $admin->id,
             'redirect_uri'   => $parametros['redirect_uri'],
             'code_challenge' => $parametros['code_challenge'],
-            'scope'          => $this->normalizar_scope($parametros['scope']),
-            'resource'       => $this->recurso(),
+            'scope'          => $this->normalizar_scope($parametros['scope'], $recurso['perfil']),
+            'resource'       => $recurso['url'],
             'expires_at'     => Carbon::now()->addSeconds((int) config('mcp.ttl_code_seg', 300)),
         ]);
 
@@ -493,12 +633,13 @@ class McpOauthService
             return $this->error_de_token('invalid_grant', 'code_verifier no coincide con el desafío PKCE.');
         }
 
-        if (! $this->resource_valido($entrada)) {
+        $perfil = $this->perfil_de_audiencia((string) $fila->resource);
+        if (! $this->resource_coincide($entrada, (string) $fila->resource) || ! $this->perfil_habilitado($perfil)) {
             return $this->error_de_token('invalid_target', 'El parámetro resource no es el de este servidor.');
         }
 
         $admin = Admin::find($fila->admin_id);
-        if ($admin === null || ! $this->admin_autorizado($admin)) {
+        if ($admin === null || ! $this->admin_autorizado($admin, $perfil)) {
             return $this->error_de_token('invalid_grant', 'El usuario ya no puede usar el conector.');
         }
 
@@ -561,12 +702,13 @@ class McpOauthService
         if ($fila->refresh_expires_at === null || Carbon::now()->greaterThan($fila->refresh_expires_at)) {
             return $this->error_de_token('invalid_grant', 'El refresh token venció.');
         }
-        if (! $this->resource_valido($entrada)) {
+        $perfil = $this->perfil_de_audiencia((string) $fila->resource);
+        if (! $this->resource_coincide($entrada, (string) $fila->resource) || ! $this->perfil_habilitado($perfil)) {
             return $this->error_de_token('invalid_target', 'El parámetro resource no es el de este servidor.');
         }
 
         $admin = Admin::find($fila->admin_id);
-        if ($admin === null || ! $this->admin_autorizado($admin)) {
+        if ($admin === null || ! $this->admin_autorizado($admin, $perfil)) {
             McpOauthToken::where('family', $fila->family)->whereNull('revoked_at')->update(['revoked_at' => Carbon::now()]);
 
             return $this->error_de_token('invalid_grant', 'El usuario ya no puede usar el conector.');
@@ -643,12 +785,25 @@ class McpOauthService
      * admin sigue existiendo y pasando la política (un admin pasado a `solo_leads` después de emitir el token lo
      * pierde). Actualiza `last_used_at` a lo sumo una vez por minuto.
      *
-     * @param string $bearer El token en claro que llegó en `Authorization: Bearer`.
+     * 🔴 La audiencia del token tiene que ser la del endpoint que se está llamando (`$recurso_esperado`): un token
+     * de consulta no entra a WhatsApp, el de lectura no entra al envío y el de envío no entra a la lectura. Si el
+     * recurso esperado no existe hoy (interruptor de WhatsApp apagado), nada autentica. Los de WhatsApp además
+     * exigen el scope del recurso.
+     *
+     * @param string      $bearer           El token en claro que llegó en `Authorization: Bearer`.
+     * @param string|null $recurso_esperado Audiencia del endpoint llamado (null = el canónico de consulta).
      *
      * @return array{token: McpOauthToken, admin: Admin}|null
      */
-    public function autenticar($bearer)
+    public function autenticar($bearer, $recurso_esperado = null)
     {
+        $esperado = $recurso_esperado === null ? $this->recurso() : rtrim((string) $recurso_esperado, '/');
+        $recursos = $this->recursos();
+        if (! isset($recursos[$esperado])) {
+            return null;
+        }
+        $perfil = $recursos[$esperado]['perfil'];
+
         if (strpos($bearer, self::PREFIJO_ACCESS) !== 0 || strlen($bearer) > 200) {
             return null;
         }
@@ -661,12 +816,15 @@ class McpOauthService
         if ($token->revoked_at !== null || Carbon::now()->greaterThan($token->access_expires_at)) {
             return null;
         }
-        if (! hash_equals($this->recurso(), rtrim((string) $token->resource, '/'))) {
+        if (! hash_equals($esperado, rtrim((string) $token->resource, '/'))) {
+            return null;
+        }
+        if ($perfil !== self::PERFIL_CONSULTA && ! in_array($recursos[$esperado]['scope'], preg_split('/\s+/', trim((string) $token->scope), -1, PREG_SPLIT_NO_EMPTY), true)) {
             return null;
         }
 
         $admin = Admin::find($token->admin_id);
-        if ($admin === null || ! $this->admin_autorizado($admin)) {
+        if ($admin === null || ! $this->admin_autorizado($admin, $perfil)) {
             return null;
         }
 
@@ -753,38 +911,119 @@ class McpOauthService
     }
 
     /**
-     * Si el `resource` del pedido (cuando viene) es el canónico. Ausente o vacío vale (se usa el canónico).
+     * Resuelve a qué recurso apunta un pedido de autorización.
      *
-     * @param array<string, mixed> $entrada Parámetros del pedido.
+     * Con `resource` presente tiene que ser uno de {@see recursos()} (si no, null = `invalid_target`). Sin
+     * `resource` se infiere del scope pedido: `whatsapp.send` = envío, `whatsapp.read` = lectura (sólo con el
+     * interruptor prendido) y cualquier otra cosa = consulta, que es el comportamiento de siempre.
+     *
+     * @param array<string, mixed> $entrada Parámetros del pedido (con `resource` y `scope`).
+     *
+     * @return array{url: string, perfil: string}|null
+     */
+    private function resolver_recurso(array $entrada)
+    {
+        $recursos = $this->recursos();
+
+        if (array_key_exists('resource', $entrada) && $entrada['resource'] !== null && $entrada['resource'] !== '') {
+            if (! is_string($entrada['resource'])) {
+                return null;
+            }
+            $pedido = rtrim($entrada['resource'], '/');
+            foreach ($recursos as $url => $datos) {
+                if (hash_equals($url, $pedido)) {
+                    return ['url' => $url, 'perfil' => $datos['perfil']];
+                }
+            }
+
+            return null;
+        }
+
+        $scopes = isset($entrada['scope']) && is_string($entrada['scope']) ? preg_split('/\s+/', trim($entrada['scope']), -1, PREG_SPLIT_NO_EMPTY) : [];
+        $perfil = self::PERFIL_CONSULTA;
+        if ($this->whatsapp_habilitado() && in_array(self::SCOPE_WHATSAPP_ENVIO, $scopes, true)) {
+            $perfil = self::PERFIL_WHATSAPP_ENVIO;
+        } elseif ($this->whatsapp_habilitado() && in_array(self::SCOPE_WHATSAPP_LECTURA, $scopes, true)) {
+            $perfil = self::PERFIL_WHATSAPP_LECTURA;
+        }
+
+        return ['url' => $this->url_de_perfil($perfil), 'perfil' => $perfil];
+    }
+
+    /**
+     * Si el `resource` que trae el canje (cuando viene) es la audiencia con la que se emitió el código o token.
+     * Ausente o vacío vale.
+     *
+     * @param array<string, mixed> $entrada   Cuerpo del pedido de token.
+     * @param string               $audiencia `resource` guardado en la fila.
      *
      * @return bool
      */
-    private function resource_valido(array $entrada)
+    private function resource_coincide(array $entrada, $audiencia)
     {
         if (! array_key_exists('resource', $entrada) || $entrada['resource'] === null || $entrada['resource'] === '') {
             return true;
         }
 
-        return is_string($entrada['resource']) && hash_equals($this->recurso(), rtrim($entrada['resource'], '/'));
+        return is_string($entrada['resource']) && hash_equals(rtrim($audiencia, '/'), rtrim($entrada['resource'], '/'));
     }
 
     /**
-     * Normaliza el scope pedido: siempre incluye el de lectura; devuelve null si pide algo que no existe.
+     * Normaliza el scope pedido para un perfil: siempre incluye el propio del perfil; devuelve null si pide algo
+     * que no le corresponde (un scope de otro recurso o uno inexistente).
      *
-     * @param string $pedido Scope del pedido (separado por espacios; vacío = sólo lectura).
+     * @param string $pedido Scope del pedido (separado por espacios; vacío = sólo el del perfil).
+     * @param string $perfil Perfil resuelto del pedido.
      *
-     * @return string|null `comerciocity.read` o `comerciocity.read offline_access`.
+     * @return string|null El scope del perfil, con `offline_access` si lo pidió.
      */
-    private function normalizar_scope($pedido)
+    private function normalizar_scope($pedido, $perfil = self::PERFIL_CONSULTA)
     {
+        $propio  = $this->scope_de_perfil($perfil);
         $pedidos = preg_split('/\s+/', trim($pedido), -1, PREG_SPLIT_NO_EMPTY);
         foreach ($pedidos as $scope) {
-            if (! in_array($scope, [self::SCOPE_LECTURA, self::SCOPE_OFFLINE], true)) {
+            if (! in_array($scope, [$propio, self::SCOPE_OFFLINE], true)) {
                 return null;
             }
         }
 
-        return in_array(self::SCOPE_OFFLINE, $pedidos, true) ? self::SCOPE_LECTURA . ' ' . self::SCOPE_OFFLINE : self::SCOPE_LECTURA;
+        return in_array(self::SCOPE_OFFLINE, $pedidos, true) ? $propio . ' ' . self::SCOPE_OFFLINE : $propio;
+    }
+
+    /**
+     * Los scopes que anuncia el servidor de autorización (los de WhatsApp sólo con el interruptor prendido).
+     *
+     * @return array<int, string>
+     */
+    private function scopes_anunciados()
+    {
+        $scopes = [self::SCOPE_LECTURA, self::SCOPE_OFFLINE];
+        if ($this->whatsapp_habilitado()) {
+            $scopes[] = self::SCOPE_WHATSAPP_LECTURA;
+            $scopes[] = self::SCOPE_WHATSAPP_ENVIO;
+        }
+
+        return $scopes;
+    }
+
+    /**
+     * Una lista de emails (separados por coma) de la config, en minúsculas y sin vacíos.
+     *
+     * @param string $clave Clave de configuración.
+     *
+     * @return array<int, string>
+     */
+    private function lista_de_emails($clave)
+    {
+        $lista = [];
+        foreach (explode(',', (string) config($clave, '')) as $email) {
+            $email = strtolower(trim($email));
+            if ($email !== '') {
+                $lista[] = $email;
+            }
+        }
+
+        return $lista;
     }
 
     /**

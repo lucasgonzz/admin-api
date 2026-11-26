@@ -36,7 +36,7 @@ class McpController extends Controller
     }
 
     /**
-     * `POST /api/mcp`: un mensaje JSON-RPC.
+     * `POST /api/mcp`: un mensaje JSON-RPC del conector de consulta.
      *
      * @param Request $request Pedido.
      *
@@ -44,7 +44,44 @@ class McpController extends Controller
      */
     public function mensaje(Request $request)
     {
-        if (! $this->oauth->habilitado()) {
+        return $this->atender($request, McpOauthService::PERFIL_CONSULTA);
+    }
+
+    /**
+     * `POST /api/mcp/whatsapp`: un mensaje JSON-RPC del conector de LECTURA de WhatsApp (scope `whatsapp.read`).
+     *
+     * @param Request $request Pedido.
+     *
+     * @return JsonResponse|Response
+     */
+    public function mensaje_whatsapp(Request $request)
+    {
+        return $this->atender($request, McpOauthService::PERFIL_WHATSAPP_LECTURA);
+    }
+
+    /**
+     * `POST /api/mcp/whatsapp-envio`: un mensaje JSON-RPC del conector de ENVÍO de WhatsApp (scope `whatsapp.send`).
+     *
+     * @param Request $request Pedido.
+     *
+     * @return JsonResponse|Response
+     */
+    public function mensaje_whatsapp_envio(Request $request)
+    {
+        return $this->atender($request, McpOauthService::PERFIL_WHATSAPP_ENVIO);
+    }
+
+    /**
+     * Atiende un mensaje JSON-RPC de un perfil. Los de WhatsApp dan 404 con el interruptor apagado.
+     *
+     * @param Request $request Pedido.
+     * @param string  $perfil  Perfil del endpoint (uno de los PERFIL_* de {@see McpOauthService}).
+     *
+     * @return JsonResponse|Response
+     */
+    private function atender(Request $request, $perfil)
+    {
+        if (! $this->oauth->habilitado() || ! $this->oauth->perfil_habilitado($perfil)) {
             return response()->json(['message' => 'No encontrado.'], 404);
         }
 
@@ -59,9 +96,9 @@ class McpController extends Controller
             return response()->json(['message' => 'El pedido es demasiado grande.'], 413);
         }
 
-        $autenticado = $this->autenticar($request);
+        $autenticado = $this->autenticar($request, $perfil);
         if ($autenticado === null) {
-            return $this->no_autorizado($request->bearerToken() !== null);
+            return $this->no_autorizado($request->bearerToken() !== null, $perfil);
         }
 
         $version = $request->headers->get('MCP-Protocol-Version');
@@ -69,7 +106,7 @@ class McpController extends Controller
             return response()->json(['message' => 'Versión de protocolo no soportada.'], 400);
         }
 
-        $respuesta = $this->servidor->manejar(json_decode($cuerpo, true), $autenticado['admin']);
+        $respuesta = $this->servidor->manejar(json_decode($cuerpo, true), $autenticado['admin'], $perfil, $autenticado['token']);
 
         if ($respuesta['body'] === null) {
             return response('', $respuesta['status']);
@@ -93,30 +130,46 @@ class McpController extends Controller
     }
 
     /**
-     * Resuelve el bearer del pedido.
+     * `GET` y `DELETE` de los endpoints de WhatsApp: no hay stream ni sesión (404 con el interruptor apagado).
+     *
+     * @return JsonResponse
+     */
+    public function no_permitido_whatsapp(): JsonResponse
+    {
+        if (! $this->oauth->habilitado() || ! $this->oauth->whatsapp_habilitado()) {
+            return response()->json(['message' => 'No encontrado.'], 404);
+        }
+
+        return response()->json(['message' => 'Método no permitido: usá POST.'], 405, ['Allow' => 'POST']);
+    }
+
+    /**
+     * Resuelve el bearer del pedido contra la audiencia del endpoint llamado.
      *
      * @param Request $request Pedido.
+     * @param string  $perfil  Perfil del endpoint.
      *
      * @return array{token: \App\Models\McpOauthToken, admin: \App\Models\Admin}|null
      */
-    private function autenticar(Request $request)
+    private function autenticar(Request $request, $perfil)
     {
         $bearer = $request->bearerToken();
 
-        return $bearer === null || $bearer === '' ? null : $this->oauth->autenticar($bearer);
+        return $bearer === null || $bearer === '' ? null : $this->oauth->autenticar($bearer, $this->oauth->url_de_perfil($perfil));
     }
 
     /**
      * 401 con `WWW-Authenticate`: apunta a los metadatos del recurso y pide el scope de lectura (más
      * `error="invalid_token"` si vino un token que no sirve).
      *
-     * @param bool $vino_token Si el pedido traía un bearer (inválido).
+     * @param bool   $vino_token Si el pedido traía un bearer (inválido).
+     * @param string $perfil     Perfil del endpoint: fija los metadatos y el scope que se anuncian.
      *
      * @return JsonResponse
      */
-    private function no_autorizado($vino_token): JsonResponse
+    private function no_autorizado($vino_token, $perfil): JsonResponse
     {
-        $encabezado = 'Bearer resource_metadata="' . $this->oauth->url_metadatos_del_recurso() . '", scope="' . McpOauthService::SCOPE_LECTURA . '"';
+        $encabezado = 'Bearer resource_metadata="' . $this->oauth->url_metadatos_del_recurso($perfil) . '", scope="' . $this->oauth->scope_de_perfil($perfil) . '"';
         if ($vino_token) {
             $encabezado .= ', error="invalid_token"';
         }

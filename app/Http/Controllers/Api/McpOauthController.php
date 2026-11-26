@@ -151,8 +151,12 @@ class McpOauthController extends Controller
         }
         RateLimiter::clear($clave);
 
-        if (! $this->oauth->admin_autorizado($admin)) {
-            return $this->vista($pedido, 403, 'Tu usuario no puede conectar el conector.', $email);
+        if (! $this->oauth->admin_autorizado($admin, $pedido['perfil'])) {
+            $mensaje = $pedido['perfil'] === McpOauthService::PERFIL_CONSULTA
+                ? 'Tu usuario no puede conectar el conector.'
+                : 'Tu usuario no puede conectar WhatsApp.';
+
+            return $this->vista($pedido, 403, $mensaje, $email);
         }
 
         $codigo   = $this->oauth->emitir_codigo($pedido['cliente'], $admin, $parametros);
@@ -190,7 +194,7 @@ class McpOauthController extends Controller
     {
         if ($pedido['fatal'] !== null) {
             return $this->cabeceras_de_pantalla(response()->view('mcp.authorize', [
-                'fatal' => $pedido['fatal'], 'cliente' => null, 'parametros' => [], 'host' => '', 'error' => null, 'email' => '',
+                'fatal' => $pedido['fatal'], 'cliente' => null, 'parametros' => [], 'host' => '', 'error' => null, 'email' => '', 'perfil' => McpOauthService::PERFIL_CONSULTA,
             ], 400));
         }
         if ($pedido['error'] !== null) {
@@ -240,6 +244,7 @@ class McpOauthController extends Controller
             'host'       => $host,
             'error'      => $error,
             'email'      => $email,
+            'perfil'     => $pedido['perfil'],
         ], $status));
     }
 
