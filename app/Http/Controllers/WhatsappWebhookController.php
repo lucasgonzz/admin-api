@@ -2240,6 +2240,7 @@ class WhatsappWebhookController extends Controller
         try {
             if (\App\Services\LeadCompromisoService::deteccion_ia_activa()) {
                 \App\Jobs\DetectarCompromisoEnMensajeJob::dispatch((int) $lead->id, (int) $inbound_lead_message->id)
+                    ->onConnection('database')
                     ->delay(\App\Jobs\DetectarCompromisoEnMensajeJob::DEMORA_SEGUNDOS);
             }
         } catch (\Throwable $e) {

@@ -199,24 +199,29 @@ class LeadLlamadaService
             $cierra   = in_array((string) $limpios['resultado'], [LeadLlamada::RESULTADO_NO_LE_INTERESA, LeadLlamada::RESULTADO_YA_CONTRATO, LeadLlamada::RESULTADO_PAGO_LA_MITAD], true);
 
             if ($cierra) {
-                $vigente = $servicio->abierto_de($lead);
-                if ($vigente !== null) {
-                    $servicio->cancelar($vigente, 'La llamada cerró el caso.', $hecha_por);
-                }
+                $servicio->cancelar_los_abiertos($lead, 'La llamada cerró el caso.', $hecha_por);
 
                 return;
             }
 
             if ($limpios['proxima_llamada_at'] !== null) {
-                $servicio->crear($lead, [
-                    'vence_at'  => $limpios['proxima_llamada_at'],
-                    'accion'    => \App\Models\LeadCompromiso::ACCION_LLAMAR,
-                    'resumen'   => (string) $limpios['notas'],
-                    'origen'    => \App\Models\LeadCompromiso::ORIGEN_LLAMADA,
-                    'origen_id' => (int) $llamada->id,
-                ], $hecha_por, ['tarjeta' => false]);
+                try {
+                    $servicio->crear($lead, [
+                        'vence_at'  => $limpios['proxima_llamada_at'],
+                        'accion'    => \App\Models\LeadCompromiso::ACCION_LLAMAR,
+                        'resumen'   => (string) $limpios['notas'],
+                        'origen'    => \App\Models\LeadCompromiso::ORIGEN_LLAMADA,
+                        'origen_id' => (int) $llamada->id,
+                    ], $hecha_por, ['tarjeta' => false]);
 
-                return;
+                    return;
+                } catch (PipelineRuleException $e) {
+                    /* El motor rechazó la fecha (a más de 90 días): no se traga en silencio. Igual hubo contacto, así que el
+                       compromiso anterior se cumple abajo. */
+                    \Illuminate\Support\Facades\Log::channel('daily')->warning('LeadLlamadaService: el motor de compromisos rechazó la fecha de la llamada; no se creó compromiso.', [
+                        'lead_id' => $lead->id, 'llamada_id' => $llamada->id, 'errores' => $e->errors(),
+                    ]);
+                }
             }
 
             $servicio->cumplir_el_vigente($lead, 'Hubo una llamada sin fecha nueva.', $hecha_por);

@@ -14,7 +14,7 @@ use Illuminate\Http\Request;
  * Sin lógica de negocio: crear, mover, cancelar y validar viven en {@see LeadCompromisoService}, que responde el 422 con
  * `errors.<campo>` (por eso no hay `$request->validate()`, igual que en {@see LeadLlamadaController}).
  *
- *  - `GET admin/lead/{id}/compromisos`: 200 `{compromisos: [...]}` con el abierto primero y después el historial.
+ *  - `GET admin/lead/{id}/compromisos`: 200 `{compromisos: [...], motor_activo}` con el abierto primero y después el historial.
  *  - `POST admin/lead/{id}/compromisos`: 201 `{model}`; reemplaza al vigente. Con el motor apagado, 409 y no se guarda nada.
  *  - `PUT admin/lead-compromisos/{id}`: 200 `{model}`; cambia fecha, acción o resumen de un compromiso vigente.
  *  - `POST admin/lead-compromisos/{id}/cancelar`: 200 `{model}`.
@@ -41,7 +41,8 @@ class LeadCompromisoController extends Controller
             $modelos[] = $servicio->a_json($compromiso);
         }
 
-        return response()->json(['compromisos' => $modelos], 200);
+        /* `motor_activo`: con el motor apagado el compromiso no se va a ejecutar; la pantalla no tiene que mostrarlo como si sí. */
+        return response()->json(['compromisos' => $modelos, 'motor_activo' => LeadCompromisoService::activo()], 200);
     }
 
     /**

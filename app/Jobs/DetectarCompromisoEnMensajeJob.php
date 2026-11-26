@@ -152,7 +152,8 @@ class DetectarCompromisoEnMensajeJob implements ShouldQueue
     public static function el_texto_sugiere_un_compromiso(string $texto): bool
     {
         $limpio = mb_strtolower($texto);
-        $limpio = strtr($limpio, ['á' => 'a', 'é' => 'e', 'í' => 'i', 'ó' => 'o', 'ú' => 'u', 'ü' => 'u']);
+        /* La ñ también: «mañana» y «pasado mañana» son los disparadores más comunes y los patrones de abajo los buscan con «n». */
+        $limpio = strtr($limpio, ['á' => 'a', 'é' => 'e', 'í' => 'i', 'ó' => 'o', 'ú' => 'u', 'ü' => 'u', 'ñ' => 'n']);
 
         $patrones = [
             /* Días de la semana. */
