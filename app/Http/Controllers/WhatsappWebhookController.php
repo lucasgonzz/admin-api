@@ -2233,6 +2233,19 @@ class WhatsappWebhookController extends Controller
         //     paso 2 (literal o IA) porque el cambio de estado ya ocurrió y no depende de ese camino.
         \App\Services\LeadEmbudoSeguimientosService::al_llegar_un_mensaje($lead);
 
+        // 2b-ter) Compromisos de contacto (misión leads-referidos-compromisos, E2): sólo con el motor y la detección con IA prendidos,
+        //     se encola (con 90 s de demora, para que lleguen los mensajes que vienen pegados) el job que mira si el lead acaba de
+        //     pactar un próximo contacto («el martes te escribo»). Va antes del camino literal del paso 2, que corta con `return`.
+        //     Nunca rompe el webhook: un fallo al encolar se loguea y sigue.
+        try {
+            if (\App\Services\LeadCompromisoService::deteccion_ia_activa()) {
+                \App\Jobs\DetectarCompromisoEnMensajeJob::dispatch((int) $lead->id, (int) $inbound_lead_message->id)
+                    ->delay(\App\Jobs\DetectarCompromisoEnMensajeJob::DEMORA_SEGUNDOS);
+            }
+        } catch (\Throwable $e) {
+            Log::channel('daily')->warning('WhatsApp webhook: no se pudo encolar la detección de compromisos.', ['lead_id' => $lead->id, 'error' => $e->getMessage()]);
+        }
+
         // Detectar confirmaciones de la demo (ingreso / fin) ANTES de pedir sugerencia IA.
         // Si se detecta una confirmación de fin, la IA no debe generar sugerencias sobre ese mensaje.
         $this->handle_demo_confirmation_if_needed($lead, (string) $content);
