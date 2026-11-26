@@ -37,8 +37,8 @@ Route::get('/.well-known/oauth-protected-resource', [\App\Http\Controllers\Api\M
 Route::get('/.well-known/oauth-protected-resource/api/mcp', [\App\Http\Controllers\Api\McpMetadataController::class, 'recurso_json']);
 Route::get('/.well-known/oauth-authorization-server', [\App\Http\Controllers\Api\McpMetadataController::class, 'servidor_json']);
 Route::get('/.well-known/openid-configuration', [\App\Http\Controllers\Api\McpMetadataController::class, 'servidor_json']);
-Route::get('/mcp/oauth/authorize', [\App\Http\Controllers\Api\McpOauthController::class, 'pantalla'])->middleware('throttle:30,1');
-Route::post('/mcp/oauth/authorize', [\App\Http\Controllers\Api\McpOauthController::class, 'decidir'])->middleware('throttle:10,1');
+Route::get('/mcp/oauth/authorize', [\App\Http\Controllers\Api\McpOauthController::class, 'pantalla'])->middleware('throttle:mcp-consentimiento-ver');
+Route::post('/mcp/oauth/authorize', [\App\Http\Controllers\Api\McpOauthController::class, 'decidir'])->middleware('throttle:mcp-consentimiento-enviar');
 
 Route::get('/recall', function () {
     $lead = \App\Models\Lead::find(254);

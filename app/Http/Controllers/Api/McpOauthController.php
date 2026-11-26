@@ -19,6 +19,9 @@ use Illuminate\Support\Facades\RateLimiter;
  */
 class McpOauthController extends Controller
 {
+    /** Hash bcrypt (costo 10) de una clave descartada: relleno del login cuando el email no existe. */
+    const HASH_DE_RELLENO = '$2y$10$sPCFs.MRIypc2hu2bcCG3.ufxNwwWRBRvsu1jL/ycZNG7uhUO6JGu';
+
     /** @var McpOauthService */
     private $oauth;
 
@@ -133,9 +136,11 @@ class McpOauthController extends Controller
 
         $admin = $email === '' ? null : Admin::where('email', $email)->first();
         $clave_ingresada = $this->campo($request, 'password');
-        // Se compara siempre contra un hash (el del admin o uno de relleno) para no revelar si el email existe por el tiempo.
-        $hash = $admin !== null ? (string) $admin->password : bcrypt('relleno-sin-usuario');
-        $coincide = $clave_ingresada !== '' && Hash::check($clave_ingresada, $hash);
+        // Siempre exactamente un Hash::check, con el hash del admin o con uno de relleno del mismo costo (si el email
+        // no existe, o si la clave viene vacía), para que el tiempo no revele si el email existe ni si hubo clave.
+        $hash = $admin !== null ? (string) $admin->password : self::HASH_DE_RELLENO;
+        $verificada = Hash::check($clave_ingresada, $hash);
+        $coincide = $clave_ingresada !== '' && $verificada;
 
         if ($admin === null || ! $coincide) {
             RateLimiter::hit($clave, max(1, (int) config('mcp.login_bloqueo_min', 15)) * 60);

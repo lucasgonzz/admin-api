@@ -278,7 +278,7 @@ class McpLecturaService
                 $pedidos[$p]['en_cola']++;
             }
 
-            return array_merge($this->senal($oficina), ['pedidos' => array_values($pedidos)]);
+            return array_merge($this->senal($oficina), $this->recorte_de_misiones($oficina), ['pedidos' => array_values($pedidos)]);
         }
 
         // Con id: las piezas (misiones, cola y tareas de Agenda con `pedido:<id>` en las notas) y el progreso.
@@ -324,7 +324,7 @@ class McpLecturaService
             $progreso[$tarea['completed'] ? 'agenda_hechas' : 'agenda_pendientes']++;
         }
 
-        return array_merge($this->senal($oficina), [
+        return array_merge($this->senal($oficina), $this->recorte_de_misiones($oficina), [
             'pedido_id' => $pedido_id,
             'progreso'  => $progreso,
             'misiones'  => $de_misiones,
@@ -537,6 +537,30 @@ class McpLecturaService
             'snapshot_at' => isset($reporter['last_seen_at']) ? $reporter['last_seen_at'] : null,
             'sin_senal'   => ! $en_modo || empty($reporter['ok']),
         ];
+    }
+
+    /**
+     * El recorte de misiones de la escena (`misiones_recorte`) y, si hubo, una `advertencia` clara: la escena sólo
+     * trae las misiones más recientes, así que un avance armado con ellas puede estar incompleto y no tiene que
+     * pasar por completo.
+     *
+     * @param array<string, mixed> $oficina Oficina de la escena.
+     *
+     * @return array<string, mixed> `misiones_recorte` y, sólo con recorte, `advertencia`.
+     */
+    private function recorte_de_misiones(array $oficina)
+    {
+        $recorte = isset($oficina['misiones_recorte']) && is_array($oficina['misiones_recorte'])
+            ? $oficina['misiones_recorte']
+            : ['recortado' => false, 'omitidas' => 0];
+        $salida = ['misiones_recorte' => $recorte];
+
+        if (! empty($recorte['recortado'])) {
+            $salida['advertencia'] = 'El avance puede estar incompleto: la escena recortó misiones (omitidas: '
+                . (int) (isset($recorte['omitidas']) ? $recorte['omitidas'] : 0) . ') y no se cuentan acá. No lo des por completo.';
+        }
+
+        return $salida;
     }
 
     /**

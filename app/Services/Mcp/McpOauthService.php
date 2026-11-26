@@ -42,6 +42,9 @@ class McpOauthService
     /** Scope de lectura (siempre presente en lo que se otorga). */
     const SCOPE_LECTURA = 'comerciocity.read';
 
+    /** Largo máximo del `state` que se acepta (y se devuelve completo) en la autorización. */
+    const MAX_STATE = 2048;
+
     /** Scope que pide ChatGPT para recibir refresh tokens. */
     const SCOPE_OFFLINE = 'offline_access';
 
@@ -186,6 +189,7 @@ class McpOauthService
             'client_id'     => self::PREFIJO_CLIENTE . bin2hex(random_bytes(16)),
             'client_name'   => $nombre,
             'redirect_uris' => $limpias,
+            'grant_types'   => $grants,
         ]);
 
         return [
@@ -267,7 +271,7 @@ class McpOauthService
             'response_type'         => $this->texto($entrada, 'response_type'),
             'client_id'             => $this->texto($entrada, 'client_id'),
             'redirect_uri'          => $this->texto($entrada, 'redirect_uri'),
-            'state'                 => $this->texto($entrada, 'state', 500),
+            'state'                 => $this->state_del_pedido($entrada),
             'code_challenge'        => $this->texto($entrada, 'code_challenge'),
             'code_challenge_method' => $this->texto($entrada, 'code_challenge_method'),
             'scope'                 => $this->texto($entrada, 'scope'),
@@ -302,6 +306,12 @@ class McpOauthService
         $resultado['parametros'] = $parametros;
 
         // A partir de acá los errores vuelven al redirect (con state e iss).
+        // `state` demasiado largo: se rechaza (nunca se recorta, el cliente lo compara con el suyo) y no se devuelve.
+        if ($this->state_excede($entrada)) {
+            $resultado['error'] = ['error' => 'invalid_request', 'descripcion' => 'El parámetro state supera los ' . self::MAX_STATE . ' caracteres.'];
+
+            return $resultado;
+        }
         $desafio = $parametros['code_challenge'];
         if ($desafio === '' || $parametros['code_challenge_method'] !== 'S256' || preg_match('/^[A-Za-z0-9_-]{43,128}$/', $desafio) !== 1) {
             $resultado['error'] = ['error' => 'invalid_request', 'descripcion' => 'Se requiere PKCE con code_challenge_method=S256.'];
@@ -409,6 +419,14 @@ class McpOauthService
     {
         $grant = $this->texto($entrada, 'grant_type');
 
+        // Un cliente sólo puede usar los grants con los que se registró (D7).
+        if ($grant === 'authorization_code' || $grant === 'refresh_token') {
+            $cliente = McpOauthClient::where('client_id', $this->texto($entrada, 'client_id'))->first();
+            if ($cliente !== null && ! in_array($grant, $cliente->grants_permitidos(), true)) {
+                return $this->error_de_token('unauthorized_client', 'El cliente no está registrado para el grant ' . $grant . '.');
+            }
+        }
+
         if ($grant === 'authorization_code') {
             return $this->canjear_codigo($entrada);
         }
@@ -489,7 +507,7 @@ class McpOauthService
             $cliente->forceFill(['last_used_at' => Carbon::now()])->save();
         }
 
-        $par = $this->emitir_par($fila->client_id, (int) $fila->admin_id, (string) $fila->scope, (string) $fila->resource, bin2hex(random_bytes(16)), (int) $fila->id);
+        $par = $this->emitir_par($fila->client_id, (int) $fila->admin_id, (string) $fila->scope, (string) $fila->resource, bin2hex(random_bytes(16)), (int) $fila->id, $cliente === null || in_array('refresh_token', $cliente->grants_permitidos(), true));
 
         return ['status' => 200, 'body' => $par];
     }
@@ -577,19 +595,20 @@ class McpOauthService
      * @param string   $resource  Audiencia.
      * @param string   $familia   Familia de refresh.
      * @param int|null $code_id   Código con el que nació la familia.
+     * @param bool     $con_refresh Si el cliente se registró con el grant `refresh_token` (si no, no se emite refresh).
      *
      * @return array<string, mixed>
      */
-    private function emitir_par($client_id, $admin_id, $scope, $resource, $familia, $code_id)
+    private function emitir_par($client_id, $admin_id, $scope, $resource, $familia, $code_id, $con_refresh = true)
     {
         $access  = self::PREFIJO_ACCESS . $this->aleatorio_url();
-        $refresh = self::PREFIJO_REFRESH . $this->aleatorio_url();
+        $refresh = $con_refresh ? self::PREFIJO_REFRESH . $this->aleatorio_url() : null;
         $ttl     = (int) config('mcp.ttl_access_seg', 3600);
         $ahora   = Carbon::now();
 
         McpOauthToken::create([
             'access_hash'        => hash('sha256', $access),
-            'refresh_hash'       => hash('sha256', $refresh),
+            'refresh_hash'       => $refresh === null ? null : hash('sha256', $refresh),
             'family'             => $familia,
             'code_id'            => $code_id,
             'client_id'          => $client_id,
@@ -597,16 +616,20 @@ class McpOauthService
             'scope'              => $scope,
             'resource'           => $resource,
             'access_expires_at'  => $ahora->copy()->addSeconds($ttl),
-            'refresh_expires_at' => $ahora->copy()->addDays((int) config('mcp.ttl_refresh_dias', 30)),
+            'refresh_expires_at' => $refresh === null ? null : $ahora->copy()->addDays((int) config('mcp.ttl_refresh_dias', 30)),
         ]);
 
-        return [
-            'access_token'  => $access,
-            'token_type'    => 'Bearer',
-            'expires_in'    => $ttl,
-            'refresh_token' => $refresh,
-            'scope'         => $scope,
+        $respuesta = [
+            'access_token' => $access,
+            'token_type'   => 'Bearer',
+            'expires_in'   => $ttl,
+            'scope'        => $scope,
         ];
+        if ($refresh !== null) {
+            $respuesta['refresh_token'] = $refresh;
+        }
+
+        return $respuesta;
     }
 
     /* ------------------------------------------------------------------------------------------
@@ -698,6 +721,35 @@ class McpOauthService
         }
 
         return substr((string) $entrada[$clave], 0, $largo);
+    }
+
+    /**
+     * El `state` del pedido, completo: vacío si falta, no es texto o supera {@see MAX_STATE} (en ese caso
+     * `validar_pedido_autorizacion()` rechaza el pedido; jamás se devuelve recortado).
+     *
+     * @param array<string, mixed> $entrada Parámetros del pedido.
+     *
+     * @return string
+     */
+    private function state_del_pedido(array $entrada)
+    {
+        if (! isset($entrada['state']) || ! is_string($entrada['state']) || strlen($entrada['state']) > self::MAX_STATE) {
+            return '';
+        }
+
+        return $entrada['state'];
+    }
+
+    /**
+     * Si el pedido trae un `state` de texto más largo que {@see MAX_STATE}.
+     *
+     * @param array<string, mixed> $entrada Parámetros del pedido.
+     *
+     * @return bool
+     */
+    private function state_excede(array $entrada)
+    {
+        return isset($entrada['state']) && is_string($entrada['state']) && strlen($entrada['state']) > self::MAX_STATE;
     }
 
     /**

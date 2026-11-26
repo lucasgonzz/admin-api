@@ -166,7 +166,7 @@ class McpRevisionDosTest extends TestCase
 
     /**
      * D8: con recorte de misiones, `get_request_status` (con y sin pedido) trae `misiones_recorte` y una
-     * `advertencia`; sin recorte, `recortado` es false y no hay advertencia.
+     * `advertencia`.
      *
      * @return void
      */
@@ -175,21 +175,14 @@ class McpRevisionDosTest extends TestCase
         $admin = $this->admin_de_mcp();
         Carbon::setTestNow(Carbon::parse('2026-11-26 12:00:00', 'America/Argentina/Buenos_Aires'));
 
-        // Sin recorte: la escena normal del CA6.
-        $this->enviar_v2($this->reporte_del_ca6())->assertStatus(200);
-        $token = $this->token_para($admin)['access_token'];
-        $normal = $this->datos_de_herramienta($token, 'get_request_status', ['pedido_id' => self::$pedido_de_prueba]);
-        $this->assertArrayHasKey('misiones_recorte', $normal);
-        $this->assertSame(['recortado' => false, 'omitidas' => 0], $normal['misiones_recorte']);
-        $this->assertArrayNotHasKey('advertencia', $normal);
-
-        // Con recorte: 60 misiones, la escena muestra sólo las más recientes.
+        // 60 misiones: la escena muestra sólo las más recientes.
         $misiones = [];
         for ($i = 1; $i <= 60; $i++) {
             $misiones[] = $this->mision_con_etapa('m' . $i, 'trabajando', 'construccion', '2026-11-26 11:00:00');
         }
-        $this->enviar_v2($this->reporte_v2(['misiones' => $misiones]))->assertStatus(200);
-        \Illuminate\Support\Facades\Cache::flush();
+        $reporter = ['version' => '2.0.0', 'host' => 'lucas-pc', 'plataforma' => 'linux', 'enviado_at' => $this->iso_ar('2026-11-26 11:59:00'), 'slots_total' => 0];
+        $this->enviar_v2($this->reporte_v2(['misiones' => $misiones, 'reporter' => $reporter]))->assertStatus(200);
+        $token = $this->token_para($admin)['access_token'];
 
         foreach ([['pedido_id' => self::$pedido_de_prueba], []] as $argumentos) {
             $datos = $this->datos_de_herramienta($token, 'get_request_status', $argumentos);
@@ -199,5 +192,22 @@ class McpRevisionDosTest extends TestCase
             $this->assertIsString($datos['advertencia']);
             $this->assertNotSame('', trim($datos['advertencia']));
         }
+    }
+
+    /**
+     * D8: sin recorte, `get_request_status` dice `recortado` false y no trae `advertencia`.
+     *
+     * @return void
+     */
+    public function test_d8_sin_recorte_no_hay_advertencia(): void
+    {
+        $admin = $this->admin_de_mcp();
+        Carbon::setTestNow(Carbon::parse('2026-11-26 12:00:00', 'America/Argentina/Buenos_Aires'));
+        $this->enviar_v2($this->reporte_del_ca6())->assertStatus(200);
+        $token = $this->token_para($admin)['access_token'];
+        $normal = $this->datos_de_herramienta($token, 'get_request_status', ['pedido_id' => self::$pedido_de_prueba]);
+        $this->assertArrayHasKey('misiones_recorte', $normal);
+        $this->assertSame(['recortado' => false, 'omitidas' => 0], $normal['misiones_recorte']);
+        $this->assertArrayNotHasKey('advertencia', $normal);
     }
 }

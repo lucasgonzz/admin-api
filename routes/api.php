@@ -2080,9 +2080,9 @@ Route::prefix('admin')->group(function () {
    endpoint JSON-RPC. Públicos a nivel de ruta: cada uno hace su propia validación (el registro sólo acepta los
    redirects de ChatGPT, el token exige código + PKCE o refresh, el endpoint exige bearer). Con `mcp.enabled = false`
    dan 404. Los metadatos y la pantalla de consentimiento están en web.php. */
-Route::post('/mcp/oauth/register', [\App\Http\Controllers\Api\McpOauthController::class, 'registrar_json'])->middleware('throttle:20,60');
-Route::post('/mcp/oauth/token', [\App\Http\Controllers\Api\McpOauthController::class, 'token_json'])->middleware('throttle:60,1');
-Route::post('/mcp', [\App\Http\Controllers\Api\McpController::class, 'mensaje'])->middleware('throttle:120,1');
+Route::post('/mcp/oauth/register', [\App\Http\Controllers\Api\McpOauthController::class, 'registrar_json'])->withoutMiddleware('throttle:api')->middleware('throttle:mcp-registro');
+Route::post('/mcp/oauth/token', [\App\Http\Controllers\Api\McpOauthController::class, 'token_json'])->withoutMiddleware('throttle:api')->middleware('throttle:mcp-token');
+Route::post('/mcp', [\App\Http\Controllers\Api\McpController::class, 'mensaje'])->withoutMiddleware('throttle:api')->middleware('throttle:mcp-endpoint');
 Route::match(['GET', 'DELETE'], '/mcp', [\App\Http\Controllers\Api\McpController::class, 'no_permitido']);
 
 // Debug: control del tiempo virtual (solo accesible en local — el controller aborta 404 en producción)
