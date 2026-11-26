@@ -689,6 +689,12 @@ class LeadScheduledMessageService
             return $this->marcar_cancelado($programado, LeadScheduledMessage::CANCELED_FLUJO_APAGADO);
         }
 
+        /* Freno 0 (misión leads-referidos-compromisos, E2): hay un compromiso de contacto vigente, el seguimiento genérico se
+           suspende. Con el motor apagado no frena nada. */
+        if (LeadCompromisoService::suspende_los_seguimientos($lead)) {
+            return $this->marcar_cancelado($programado, LeadScheduledMessage::CANCELED_COMPROMISO_VIGENTE);
+        }
+
         if ((string) $lead->status !== (string) $programado->estado_lead_al_programar) {
             return $this->marcar_cancelado($programado, LeadScheduledMessage::CANCELED_CAMBIO_DE_ESTADO);
         }

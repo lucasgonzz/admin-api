@@ -121,6 +121,21 @@ class LeadEmbudoSeguimientosService
             return;
         }
 
+        /* Compromiso de contacto vigente (misión leads-referidos-compromisos, E2): el próximo contacto ya está acordado para una
+           fecha, así que no se programa ningún paso genérico y los pendientes se cancelan. Con el motor apagado no mira nada. */
+        if (LeadCompromisoService::suspende_los_seguimientos($lead)) {
+            $pendientes_por_compromiso = LeadScheduledMessage::query()
+                ->where('lead_id', (int) $lead->id)
+                ->whereNotNull('paso_embudo')
+                ->where('status', LeadScheduledMessage::STATUS_PENDIENTE)
+                ->get();
+            foreach ($pendientes_por_compromiso as $paso_pendiente) {
+                self::cancelar($paso_pendiente, LeadScheduledMessage::CANCELED_COMPROMISO_VIGENTE);
+            }
+
+            return;
+        }
+
         /* 🔴 Un candado por lead (ronda 1 de revisión): dos mensajes del lead casi a la vez corren este método en paralelo, los
            dos ven «no hay pendiente» y crean cada uno su fila, y el lead recibe el seguimiento dos veces. Es un `Cache::lock` y
            no una transacción con `lockForUpdate` sobre la fila del lead: el webhook ya guarda y emite eventos dentro de su

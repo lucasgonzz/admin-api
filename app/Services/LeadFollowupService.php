@@ -54,13 +54,13 @@ class LeadFollowupService
      * `process_lead()` a propósito: `process_single_lead()` (el comando de prueba local) y el botón
      * manual no son la cadencia automática.
      *
-     * @return array{processed:int,suggestions:int,paused:int,errors:int,embudo:int,fuera_de_franja:bool}
+     * @return array{processed:int,suggestions:int,paused:int,errors:int,embudo:int,compromiso:int,fuera_de_franja:bool}
      *   `fuera_de_franja` en true: la corrida no procesó nada porque era de noche. `embudo` cuenta los leads que no se
      *   tocaron porque los lleva el embudo nuevo (pasos programados, E3).
      */
     public function process_all_active_leads(): array
     {
-        $stats = ['processed' => 0, 'suggestions' => 0, 'paused' => 0, 'errors' => 0, 'embudo' => 0, 'fuera_de_franja' => false];
+        $stats = ['processed' => 0, 'suggestions' => 0, 'paused' => 0, 'errors' => 0, 'embudo' => 0, 'compromiso' => 0, 'fuera_de_franja' => false];
 
         if (! FranjaHorariaDeSeguimientos::ahora_esta_dentro()) {
             $stats['fuera_de_franja'] = true;
@@ -94,6 +94,9 @@ class LeadFollowupService
                 }
                 if ($result === 'embudo') {
                     $stats['embudo']++;
+                }
+                if ($result === 'compromiso') {
+                    $stats['compromiso']++;
                 }
             } catch (\Throwable $e) {
                 $stats['errors']++;
@@ -297,7 +300,7 @@ class LeadFollowupService
      *                                                               armado). Null: se crea uno para este
      *                                                               lead (camino de process_single_lead()).
      *
-     * @return string|null suggestion|paused|embudo|null
+     * @return string|null suggestion|paused|embudo|compromiso|null
      */
     protected function process_lead(Lead $lead, $rules_by_estado, ?ClientPhoneDirectory $directorio = null): ?string
     {
@@ -306,6 +309,14 @@ class LeadFollowupService
         }
         if (! $rules_by_estado->has($lead->status)) {
             return null;
+        }
+
+        /*
+         * Compromiso de contacto vigente (misión leads-referidos-compromisos, E2): el próximo contacto ya está acordado, este cron no
+         * genera nada. Resultado propio, `compromiso`, para el log. Con el motor apagado no mira nada.
+         */
+        if (LeadCompromisoService::suspende_los_seguimientos($lead)) {
+            return 'compromiso';
         }
 
         /*

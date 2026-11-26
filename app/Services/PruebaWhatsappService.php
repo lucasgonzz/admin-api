@@ -568,6 +568,12 @@ class PruebaWhatsappService
             return ['estado' => 'bienvenida_' . $bienvenida['estado'], 'detalle' => $bienvenida['detalle']];
         }
 
+        /* Compromiso de contacto vigente (misión leads-referidos-compromisos, E2; decisión P2 de Lucas): el empujón de la prueba se
+           suspende, salvo la bienvenida (que ya salió arriba). Con el motor apagado no mira nada. */
+        if ($lead !== null && LeadCompromisoService::suspende_los_seguimientos($lead)) {
+            return ['estado' => 'compromiso_vigente', 'detalle' => 'El lead tiene un contacto acordado: no se empuja hasta esa fecha.'];
+        }
+
         /* Desde el día 5, el mensaje del día es el aviso de que la prueba está por terminar (una sola vez). */
         $por_terminar = $this->avisar_al_negocio_que_esta_por_terminar($client, $lead, $datos);
         if ($por_terminar !== null) {
