@@ -91,7 +91,6 @@ class VozDeLucasEnPromptDeSoporteTest extends TestCase
             'muletilla Dale'         => 'Dale',
             'muletilla Listo'        => 'Listo',
             'muletilla De nada!'     => 'De nada!',
-            'acción concreta 1'      => 'Ahora reviso',
             'acción concreta 2'      => 'Probá ahora',
             'una sola pregunta'      => 'una sola pregunta',
             'sin signo de apertura'  => '¿',
@@ -99,8 +98,6 @@ class VozDeLucasEnPromptDeSoporteTest extends TestCase
             'prohibido Estimado'     => 'Estimado',
             'prohibido Le informamos' => 'Le informamos',
             'prohibido No dudes'     => 'No dudes en contactarnos',
-            'deriva a Lucas'         => 'Eso lo ve Lucas',
-            'no inventar'            => 'Ahora lo reviso',
         ];
 
         foreach ($esperados as $regla => $texto) {
@@ -159,5 +156,77 @@ class VozDeLucasEnPromptDeSoporteTest extends TestCase
 
         // El bloque no habilita el cierre genérico.
         $this->assertStringNotContainsString('hay algo más en lo que te pueda ayudar', $bloque);
+    }
+
+    /**
+     * Ronda 2: Martín no vuelve después ni arregla en el medio, así que el bloque no puede
+     * prometer eso ni afirmar estados que no conoce, y no puede derivar con frases propias.
+     *
+     * @return void
+     */
+    public function test_ronda2_no_promete_volver_ni_arreglar_ni_deriva_con_frase_propia(): void
+    {
+        $bloque = $this->bloque_voz($this->armar_system_prompt());
+
+        $this->assertNotSame('', $bloque, 'Falta el bloque "VOZ DE LUCAS:" en el system prompt.');
+
+        $prohibidas = [
+            'Dame 5',
+            'Te aviso ni bien termine',
+            'Ya quedó',
+            'Ya podés volver a ingresar',
+            'Ahora reviso',
+            'Ahora lo reviso',
+            'Eso lo ve Lucas',
+            'seguimos configurando',
+            'Me lo podés solucionar?',
+        ];
+
+        foreach ($prohibidas as $texto) {
+            $this->assertStringNotContainsString($texto, $bloque, "El bloque no debe contener: {$texto}");
+        }
+
+        // Las promesas que sí cumple en el mismo mensaje siguen.
+        $this->assertStringContainsString('Probá ahora y contame', $bloque);
+        $this->assertStringContainsString('Mandame foto de la pantalla completa', $bloque);
+    }
+
+    /**
+     * Ronda 2: la voz está subordinada al protocolo de escalado y deriva con su texto fijo.
+     *
+     * @return void
+     */
+    public function test_ronda2_el_protocolo_de_escalado_manda_y_se_usa_su_texto_fijo(): void
+    {
+        $bloque = $this->bloque_voz($this->armar_system_prompt());
+
+        $this->assertStringContainsString('manda el protocolo de escalado', $bloque);
+        $this->assertStringContainsString('texto fijo exacto del protocolo de escalado', $bloque);
+        $this->assertStringContainsString('conserva su emoji', $bloque);
+        $this->assertStringContainsString('no puede entrar', $bloque);
+    }
+
+    /**
+     * Ronda 2: el separador --- es solo de WhatsApp, Robotito (un solo mensaje) manda y el
+     * nombre se usa sólo en el primer mensaje.
+     *
+     * @return void
+     */
+    public function test_ronda2_separador_solo_whatsapp_robotito_manda_y_nombre_solo_al_abrir(): void
+    {
+        $bloque = $this->bloque_voz($this->armar_system_prompt());
+
+        $this->assertStringContainsString('aplica SOLO a WhatsApp', $bloque);
+        $this->assertStringContainsString('Robotito', $bloque);
+        $this->assertStringContainsString('un solo mensaje', $bloque);
+        $this->assertStringContainsString('esa indicación manda', $bloque);
+        $this->assertStringContainsString('primer mensaje del ticket', $bloque);
+        $this->assertStringContainsString('no repitas el nombre', $bloque);
+
+        // Todo --- de los ejemplos tiene que estar en el ejemplo marcado como WhatsApp.
+        $ejemplos = substr($bloque, (int) strpos($bloque, 'Ejemplos (cliente, respuesta):'));
+        $antes_de_whatsapp = substr($ejemplos, 0, (int) strpos($ejemplos, 'Ejemplo de WhatsApp'));
+        $this->assertStringNotContainsString('---', $antes_de_whatsapp);
+        $this->assertStringContainsString('---', $ejemplos);
     }
 }
