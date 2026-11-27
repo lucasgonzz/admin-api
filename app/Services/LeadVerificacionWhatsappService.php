@@ -82,41 +82,51 @@ class LeadVerificacionWhatsappService
         /* Acumula los nombres de los admins avisados, por el canal que sea. */
         $notified = [];
 
-        /* --- Canal 1: push a los setters (misma audiencia que el aviso de agendamiento) --- */
-        $admin_ids  = LeadNotificationAudienceResolver::for_verificacion($lead);
-        $con_device = LeadNotificationAudienceResolver::ids_con_device_de_push($admin_ids);
-        $nombres    = Admin::whereIn('id', $admin_ids)->pluck('name', 'id');
+        /* --- Canal 1: push a los setters (misma audiencia que el aviso de agendamiento) ---
+         *
+         * Misión push-mensajes-por-aprobar (26/11/2026): antes de mandar, se RECLAMA el aviso único del mensaje. Si ya
+         * se avisó (o lo está atendiendo otro proceso, o se agrupó en un aviso reciente de la misma conversación) el
+         * claim devuelve null y no se manda push; el WhatsApp de respaldo de abajo no depende de esto. El contenido
+         * (título, texto del mensaje, link a la conversación con el mensaje a la vista) es el único de toda la app.
+         * Sin la tabla del registro el claim falla abierto y el push sale igual, con `notification_id = null`. */
+        $aviso            = app(PendingApprovalPushService::class)->claim_direct($message);
+        $ids_pusheados    = [];
 
-        foreach ($admin_ids as $admin_id) {
-            if (! in_array($admin_id, $con_device, true)) {
-                /* Sin device no hay push. Si además tiene el flag y teléfono, lo alcanza el respaldo de abajo. */
-                continue;
+        if ($aviso !== null) {
+            $admin_ids  = LeadNotificationAudienceResolver::for_verificacion($lead);
+            $con_device = LeadNotificationAudienceResolver::ids_con_device_de_push($admin_ids);
+            $nombres    = Admin::whereIn('id', $admin_ids)->pluck('name', 'id');
+
+            foreach ($admin_ids as $admin_id) {
+                if (! in_array($admin_id, $con_device, true)) {
+                    /* Sin device no hay push. Si además tiene el flag y teléfono, lo alcanza el respaldo de abajo. */
+                    continue;
+                }
+
+                try {
+                    $this->send_push($admin_id, $aviso['title'], $aviso['body'], $aviso['data']);
+
+                    $ids_pusheados[] = (int) $admin_id;
+                    $notified[]      = (string) ($nombres[$admin_id] ?? ('Admin #' . $admin_id));
+
+                    /* "Despachado", no "entregado": send_to_admin() es void y el resultado real de cada
+                     * device lo loguea AdminPushNotificationService. */
+                    Log::info('LeadVerificacionWhatsappService: push despachado.', [
+                        'lead_id'    => $lead->id,
+                        'message_id' => $message->id,
+                        'admin_id'   => $admin_id,
+                    ]);
+                } catch (\Throwable $e) {
+                    Log::error('LeadVerificacionWhatsappService: error al enviar push.', [
+                        'lead_id'  => $lead->id,
+                        'admin_id' => $admin_id,
+                        'error'    => $e->getMessage(),
+                    ]);
+                }
             }
 
-            try {
-                $this->send_push(
-                    $admin_id,
-                    'Mensaje esperando tu aprobación',
-                    "{$nombre_lead}: el agente dejó un mensaje que necesita tu ok antes de salir.",
-                    ['url' => '/leads?lead_id=' . $lead->id]
-                );
-
-                $notified[] = (string) ($nombres[$admin_id] ?? ('Admin #' . $admin_id));
-
-                /* "Despachado", no "entregado": send_to_admin() es void y el resultado real de cada
-                 * device lo loguea AdminPushNotificationService. */
-                Log::info('LeadVerificacionWhatsappService: push despachado.', [
-                    'lead_id'    => $lead->id,
-                    'message_id' => $message->id,
-                    'admin_id'   => $admin_id,
-                ]);
-            } catch (\Throwable $e) {
-                Log::error('LeadVerificacionWhatsappService: error al enviar push.', [
-                    'lead_id'  => $lead->id,
-                    'admin_id' => $admin_id,
-                    'error'    => $e->getMessage(),
-                ]);
-            }
+            /* Deja asentado a quién se le mandó (no hace nada si el claim vino sin registro). */
+            app(PendingApprovalPushService::class)->confirm_direct($aviso['notification_id'], $ids_pusheados);
         }
 
         /* --- Canal 2: WhatsApp de respaldo, solo para quien no tiene device ---
