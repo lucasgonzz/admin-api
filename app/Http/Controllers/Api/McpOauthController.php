@@ -152,9 +152,13 @@ class McpOauthController extends Controller
         RateLimiter::clear($clave);
 
         if (! $this->oauth->admin_autorizado($admin, $pedido['perfil'])) {
-            $mensaje = $pedido['perfil'] === McpOauthService::PERFIL_CONSULTA
-                ? 'Tu usuario no puede conectar el conector.'
-                : 'Tu usuario no puede conectar WhatsApp.';
+            if ($pedido['perfil'] === McpOauthService::PERFIL_CONSULTA) {
+                $mensaje = 'Tu usuario no puede conectar el conector.';
+            } elseif ($pedido['perfil'] === McpOauthService::PERFIL_DECISIONES) {
+                $mensaje = 'Tu usuario no puede responder decisiones de misiones.';
+            } else {
+                $mensaje = 'Tu usuario no puede conectar WhatsApp.';
+            }
 
             return $this->vista($pedido, 403, $mensaje, $email);
         }

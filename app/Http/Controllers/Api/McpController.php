@@ -72,7 +72,19 @@ class McpController extends Controller
     }
 
     /**
-     * Atiende un mensaje JSON-RPC de un perfil. Los de WhatsApp dan 404 con el interruptor apagado.
+     * `POST /api/mcp/decisiones`: un mensaje JSON-RPC del conector de DECISIONES de misiones (scope `missions.answer`).
+     *
+     * @param Request $request Pedido.
+     *
+     * @return JsonResponse|Response
+     */
+    public function mensaje_decisiones(Request $request)
+    {
+        return $this->atender($request, McpOauthService::PERFIL_DECISIONES);
+    }
+
+    /**
+     * Atiende un mensaje JSON-RPC de un perfil. Los de WhatsApp y el de decisiones dan 404 con su interruptor apagado.
      *
      * @param Request $request Pedido.
      * @param string  $perfil  Perfil del endpoint (uno de los PERFIL_* de {@see McpOauthService}).
@@ -137,6 +149,20 @@ class McpController extends Controller
     public function no_permitido_whatsapp(): JsonResponse
     {
         if (! $this->oauth->habilitado() || ! $this->oauth->whatsapp_habilitado()) {
+            return response()->json(['message' => 'No encontrado.'], 404);
+        }
+
+        return response()->json(['message' => 'Método no permitido: usá POST.'], 405, ['Allow' => 'POST']);
+    }
+
+    /**
+     * `GET` y `DELETE` del endpoint de decisiones: no hay stream ni sesión (404 con el interruptor apagado).
+     *
+     * @return JsonResponse
+     */
+    public function no_permitido_decisiones(): JsonResponse
+    {
+        if (! $this->oauth->habilitado() || ! $this->oauth->decisiones_habilitado()) {
             return response()->json(['message' => 'No encontrado.'], 404);
         }
 

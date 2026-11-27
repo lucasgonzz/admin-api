@@ -63,7 +63,18 @@ class McpMetadataController extends Controller
     }
 
     /**
-     * Metadatos del recurso de un perfil de WhatsApp, o 404 si el conector o el interruptor de WhatsApp están apagados.
+     * `GET /.well-known/oauth-protected-resource/api/mcp/decisiones`: metadatos del recurso de decisiones de misiones
+     * (404 con el interruptor apagado).
+     *
+     * @return JsonResponse
+     */
+    public function recurso_decisiones_json(): JsonResponse
+    {
+        return $this->recurso_de_perfil(McpOauthService::PERFIL_DECISIONES);
+    }
+
+    /**
+     * Metadatos del recurso de un perfil con interruptor (WhatsApp o decisiones), o 404 si el conector o el interruptor de WhatsApp están apagados.
      *
      * @param string $perfil Perfil (uno de los PERFIL_* de {@see McpOauthService}).
      *

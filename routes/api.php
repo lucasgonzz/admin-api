@@ -2131,6 +2131,11 @@ Route::get('/mcp/whatsapp', [\App\Http\Controllers\Api\McpController::class, 'no
 Route::delete('/mcp/whatsapp', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_whatsapp']);
 Route::get('/mcp/whatsapp-envio', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_whatsapp']);
 Route::delete('/mcp/whatsapp-envio', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_whatsapp']);
+/* Decisiones de misiones desde Dotin/ChatGPT (misión dotin-misiones-admin, 26/11/2026): un recurso OAuth propio
+   (`missions.answer`) que sólo registra respuestas a preguntas ORDINARIAS. Con `mcp.decisiones_enabled = false` (el default) da 404. */
+Route::post('/mcp/decisiones', [\App\Http\Controllers\Api\McpController::class, 'mensaje_decisiones'])->withoutMiddleware('throttle:api')->middleware('throttle:mcp-endpoint');
+Route::get('/mcp/decisiones', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_decisiones']);
+Route::delete('/mcp/decisiones', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_decisiones']);
 
 // Debug: control del tiempo virtual (solo accesible en local — el controller aborta 404 en producción)
 Route::get('/debug/virtual-time', [DebugVirtualTimeController::class, 'show']);

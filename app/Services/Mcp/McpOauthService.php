@@ -51,6 +51,9 @@ class McpOauthService
     /** Scope del conector de ENVÍO de WhatsApp (misión dotin-whatsapp-admin). */
     const SCOPE_WHATSAPP_ENVIO = 'whatsapp.send';
 
+    /** Scope del conector de DECISIONES de misiones (misión dotin-misiones-admin). */
+    const SCOPE_DECISIONES = 'missions.answer';
+
     /** Perfil (recurso) del conector de consulta original: `/api/mcp`. */
     const PERFIL_CONSULTA = 'consulta';
 
@@ -59,6 +62,9 @@ class McpOauthService
 
     /** Perfil del conector de envío de WhatsApp: `/api/mcp/whatsapp-envio`. */
     const PERFIL_WHATSAPP_ENVIO = 'whatsapp_envio';
+
+    /** Perfil del conector de decisiones de misiones: `/api/mcp/decisiones`. */
+    const PERFIL_DECISIONES = 'decisiones';
 
     /** Scope que pide ChatGPT para recibir refresh tokens. */
     const SCOPE_OFFLINE = 'offline_access';
@@ -114,8 +120,18 @@ class McpOauthService
     }
 
     /**
+     * Si el conector de decisiones de misiones está prendido (`config('mcp.decisiones_enabled')`, apagado por defecto).
+     *
+     * @return bool
+     */
+    public function decisiones_habilitado()
+    {
+        return (bool) config('mcp.decisiones_enabled', false);
+    }
+
+    /**
      * Los recursos protegidos que hoy existen: URL => perfil y scope propio. El de consulta siempre; los dos de
-     * WhatsApp sólo con el interruptor prendido (apagado, un token de WhatsApp ya emitido deja de servir).
+     * WhatsApp y el de decisiones sólo con su interruptor prendido (apagado, un token ya emitido deja de servir).
      *
      * @return array<string, array{perfil: string, scope: string}>
      */
@@ -126,6 +142,10 @@ class McpOauthService
         if ($this->whatsapp_habilitado()) {
             $recursos[$this->url_de_perfil(self::PERFIL_WHATSAPP_LECTURA)] = ['perfil' => self::PERFIL_WHATSAPP_LECTURA, 'scope' => self::SCOPE_WHATSAPP_LECTURA];
             $recursos[$this->url_de_perfil(self::PERFIL_WHATSAPP_ENVIO)]   = ['perfil' => self::PERFIL_WHATSAPP_ENVIO, 'scope' => self::SCOPE_WHATSAPP_ENVIO];
+        }
+
+        if ($this->decisiones_habilitado()) {
+            $recursos[$this->url_de_perfil(self::PERFIL_DECISIONES)] = ['perfil' => self::PERFIL_DECISIONES, 'scope' => self::SCOPE_DECISIONES];
         }
 
         return $recursos;
@@ -146,6 +166,9 @@ class McpOauthService
         if ($perfil === self::PERFIL_WHATSAPP_ENVIO) {
             return rtrim((string) config('mcp.whatsapp_send_resource'), '/');
         }
+        if ($perfil === self::PERFIL_DECISIONES) {
+            return rtrim((string) config('mcp.decisiones_resource'), '/');
+        }
 
         return $this->recurso();
     }
@@ -163,6 +186,10 @@ class McpOauthService
             return self::SCOPE_WHATSAPP_LECTURA;
         }
 
+        if ($perfil === self::PERFIL_DECISIONES) {
+            return self::SCOPE_DECISIONES;
+        }
+
         return $perfil === self::PERFIL_WHATSAPP_ENVIO ? self::SCOPE_WHATSAPP_ENVIO : self::SCOPE_LECTURA;
     }
 
@@ -177,7 +204,7 @@ class McpOauthService
     public function perfil_de_audiencia($url)
     {
         $url = rtrim((string) $url, '/');
-        foreach ([self::PERFIL_WHATSAPP_LECTURA, self::PERFIL_WHATSAPP_ENVIO] as $perfil) {
+        foreach ([self::PERFIL_WHATSAPP_LECTURA, self::PERFIL_WHATSAPP_ENVIO, self::PERFIL_DECISIONES] as $perfil) {
             if (hash_equals($this->url_de_perfil($perfil), $url)) {
                 return $perfil;
             }
@@ -187,7 +214,7 @@ class McpOauthService
     }
 
     /**
-     * Si el perfil está disponible hoy: consulta siempre; los de WhatsApp sólo con el interruptor prendido.
+     * Si el perfil está disponible hoy: consulta siempre; los de WhatsApp y el de decisiones sólo con su interruptor prendido.
      *
      * @param string $perfil Uno de los PERFIL_* de esta clase.
      *
@@ -195,7 +222,11 @@ class McpOauthService
      */
     public function perfil_habilitado($perfil)
     {
-        return $perfil === self::PERFIL_CONSULTA || $this->whatsapp_habilitado();
+        if ($perfil === self::PERFIL_CONSULTA) {
+            return true;
+        }
+
+        return $perfil === self::PERFIL_DECISIONES ? $this->decisiones_habilitado() : $this->whatsapp_habilitado();
     }
 
     /**
@@ -230,6 +261,7 @@ class McpOauthService
             self::PERFIL_CONSULTA         => 'ComercioCity (sólo lectura)',
             self::PERFIL_WHATSAPP_LECTURA => 'ComercioCity WhatsApp (lectura)',
             self::PERFIL_WHATSAPP_ENVIO   => 'ComercioCity WhatsApp (envío con confirmación)',
+            self::PERFIL_DECISIONES       => 'ComercioCity decisiones de misiones',
         ];
 
         return [
@@ -503,9 +535,10 @@ class McpOauthService
             return true;
         }
 
-        $de_whatsapp = $this->lista_de_emails('mcp.whatsapp_admin_emails');
+        // WhatsApp y decisiones: cada uno con su propia lista, y vacía = NADIE.
+        $lista_propia = $this->lista_de_emails($perfil === self::PERFIL_DECISIONES ? 'mcp.decisiones_admin_emails' : 'mcp.whatsapp_admin_emails');
 
-        return count($de_whatsapp) > 0 && in_array(strtolower((string) $admin->email), $de_whatsapp, true);
+        return count($lista_propia) > 0 && in_array(strtolower((string) $admin->email), $lista_propia, true);
     }
 
     /**
@@ -945,6 +978,8 @@ class McpOauthService
             $perfil = self::PERFIL_WHATSAPP_ENVIO;
         } elseif ($this->whatsapp_habilitado() && in_array(self::SCOPE_WHATSAPP_LECTURA, $scopes, true)) {
             $perfil = self::PERFIL_WHATSAPP_LECTURA;
+        } elseif ($this->decisiones_habilitado() && in_array(self::SCOPE_DECISIONES, $scopes, true)) {
+            $perfil = self::PERFIL_DECISIONES;
         }
 
         return ['url' => $this->url_de_perfil($perfil), 'perfil' => $perfil];
@@ -1001,6 +1036,9 @@ class McpOauthService
         if ($this->whatsapp_habilitado()) {
             $scopes[] = self::SCOPE_WHATSAPP_LECTURA;
             $scopes[] = self::SCOPE_WHATSAPP_ENVIO;
+        }
+        if ($this->decisiones_habilitado()) {
+            $scopes[] = self::SCOPE_DECISIONES;
         }
 
         return $scopes;

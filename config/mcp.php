@@ -82,6 +82,22 @@ return [
     /* Cuentas desde las que se puede ENVIAR por el conector (el principal queda fuera: es de clientes y leads). */
     'whatsapp_cuentas_envio' => ['personal'],
 
+    /*
+     | Decisiones de misiones desde Dotin/ChatGPT (misión dotin-misiones-admin, 26/11/2026).
+     |
+     | 🔴 Nace APAGADO: con `decisiones_enabled = false` el endpoint `/api/mcp/decisiones`, sus metadatos y el scope
+     | `missions.answer` no existen y los tokens de decisiones ya emitidos dejan de servir. Sólo registra respuestas a
+     | preguntas ORDINARIAS de misiones; nunca da un OK de producción, terceros, gastos ni borrados. Se prende en el
+     | `.env` de producción (`MCP_DECISIONES_ENABLED=true`) con el OK de Lucas.
+     */
+    'decisiones_enabled' => (bool) env('MCP_DECISIONES_ENABLED', false),
+
+    /* Recurso (audiencia de los tokens) del endpoint de decisiones: scope `missions.answer`. */
+    'decisiones_resource' => rtrim((string) env('MCP_DECISIONES_RESOURCE', 'https://api-admin.comerciocity.com/api/mcp/decisiones'), '/'),
+
+    /* Usuarios del admin (separados por coma) que pueden conectar el conector de decisiones. 🔴 Vacío = NADIE (falla cerrada). */
+    'decisiones_admin_emails' => (string) env('MCP_DECISIONES_ADMIN_EMAILS', ''),
+
     /* Scope de lectura que otorga el conector. */
     'scope' => 'comerciocity.read',
 
