@@ -6098,6 +6098,26 @@ TXT;
         ?array $calendar_snapshot = null,
         ?RespaldoDeepSeek $respaldo_deepseek = null
     ): LeadMessage {
+        /* Misión martin-mensaje-puntos, ronda 2: por acá pasan TODAS las sugerencias que genera el agente (la primera
+         * llamada, el fallback de la segunda y la segunda misma). Si el mensaje es un marcador de lugar o está vacío,
+         * se retiene para una persona con el mensaje de espera, antes de cualquier política de envío o de agenda. */
+        $mensaje_inutilizable = false;
+        $parsed               = $this->retener_el_mensaje_inutilizable($parsed, $mensaje_inutilizable);
+
+        if ($mensaje_inutilizable) {
+            /* 🔴 El lead queda marcado para intervención humana YA (no recién al aprobar): es lo que le dice al respaldo
+             * automático (LeadAiSuggestionAutoSendScheduler) que este mensaje de espera NO se auto-envía nunca, y la tarea
+             * le avisa a una persona con el motivo. Update acotado y sin tocar claude_auto_reply, igual que
+             * frenar_por_horario_no_disponible(): apagar el agente deja al lead mudo y no se revierte desde el panel. */
+            Lead::query()->whereKey($lead->id)->update(['requiere_intervencion_humana' => true]);
+            $lead->requiere_intervencion_humana = true;
+
+            $this->crear_tarea_de_intervencion_humana($lead, (string) $parsed['motivo_intervencion']);
+
+            /* Marca para el paquete retenido: al aprobarse, apply_parsed_response() no crea otra tarea ni vuelve a escalar. */
+            $parsed['tarea_de_intervencion_ya_creada'] = true;
+        }
+
         // Antes de cambiar el estado o encolar: nunca confirmar una liberación sin su acción.
         if (app(AgendaDemoAutomaticaPolicy::class)->cancelacion_sin_accion($lead->fresh() ?: $lead, $parsed)) {
             $parsed['requiere_verificacion'] = true;
@@ -8486,34 +8506,43 @@ TXT;
             $lead->requiere_intervencion_humana = true;
             $lead->claude_auto_reply            = false;
 
-            /* La tarea vive en su propio método porque este mismo bloque lo necesita también el
-             * freno por horario ya no disponible (frenar_por_horario_no_disponible()): ese camino
-             * marca el lead igual que este, y sin tarea el único aviso sería un toast en el
-             * navegador del admin que apretó aprobar. Extraído sin cambiarle el comportamiento. */
-            $this->crear_tarea_de_intervencion_humana($lead, $motivo_intervencion);
+            /* 🔴 Misión martin-mensaje-puntos, ronda 3: el paquete retenido por no tener un mensaje utilizable ya creó su
+             * tarea y avisó a las personas (notificaciones de la tarea) al GENERARSE, en
+             * create_message_and_update_lead(), y dejó esta marca en pending_actions. Al aprobar el mensaje de espera NO se
+             * crea otra tarea idéntica ni se vuelve a escalar: una sola tarea por mensaje retenido. Sin la marca
+             * (derivaciones comunes) todo sigue como siempre. */
+            $aviso_ya_dado = ! empty($parsed['tarea_de_intervencion_ya_creada']);
 
-            /* Notificar por WhatsApp a los admins suscritos a escalaciones de lead.
-             * Se ejecuta en bloque separado para que un fallo en WhatsApp no afecte
-             * el AdminTask ya creado ni el flujo principal del mensaje. */
-            try {
-                /* Web Push primero: llega al teléfono con el admin cerrado y no gasta plantilla.
-                 * El WhatsApp queda como red de seguridad, solo para los admins que no tienen
-                 * ningún device registrado. Ver EscalationPushNotificationService. */
-                $reparto_escalado = app(\App\Services\EscalationPushNotificationService::class)
-                    ->notificar_lead($lead, $motivo_intervencion);
+            if (! $aviso_ya_dado) {
+                /* La tarea vive en su propio método porque este mismo bloque lo necesita también el
+                 * freno por horario ya no disponible (frenar_por_horario_no_disponible()): ese camino
+                 * marca el lead igual que este, y sin tarea el único aviso sería un toast en el
+                 * navegador del admin que apretó aprobar. Extraído sin cambiarle el comportamiento. */
+                $this->crear_tarea_de_intervencion_humana($lead, $motivo_intervencion);
 
-                $escalation_service = new \App\Services\LeadEscalationWhatsappService(
-                    new \App\Services\WhatsappSendService()
-                );
-                $escalation_notified = $escalation_service->notify($lead, $motivo_intervencion, $reparto_escalado['sin_device']);
-                if (! empty($escalation_notified)) {
-                    $admin_notifications_log[] = ['evento' => 'Escalación a humano requerida', 'admins' => $escalation_notified];
+                /* Notificar por WhatsApp a los admins suscritos a escalaciones de lead.
+                 * Se ejecuta en bloque separado para que un fallo en WhatsApp no afecte
+                 * el AdminTask ya creado ni el flujo principal del mensaje. */
+                try {
+                    /* Web Push primero: llega al teléfono con el admin cerrado y no gasta plantilla.
+                     * El WhatsApp queda como red de seguridad, solo para los admins que no tienen
+                     * ningún device registrado. Ver EscalationPushNotificationService. */
+                    $reparto_escalado = app(\App\Services\EscalationPushNotificationService::class)
+                        ->notificar_lead($lead, $motivo_intervencion);
+
+                    $escalation_service = new \App\Services\LeadEscalationWhatsappService(
+                        new \App\Services\WhatsappSendService()
+                    );
+                    $escalation_notified = $escalation_service->notify($lead, $motivo_intervencion, $reparto_escalado['sin_device']);
+                    if (! empty($escalation_notified)) {
+                        $admin_notifications_log[] = ['evento' => 'Escalación a humano requerida', 'admins' => $escalation_notified];
+                    }
+                } catch (\Throwable $e) {
+                    Log::error('LeadAiService: error al notificar escalación por WhatsApp.', [
+                        'lead_id' => $lead->id,
+                        'error'   => $e->getMessage(),
+                    ]);
                 }
-            } catch (\Throwable $e) {
-                Log::error('LeadAiService: error al notificar escalación por WhatsApp.', [
-                    'lead_id' => $lead->id,
-                    'error'   => $e->getMessage(),
-                ]);
             }
         }
 
@@ -11716,7 +11745,224 @@ TXT;
 
         $elegido = ! empty($candidates_with_mensaje) ? end($candidates_with_mensaje) : end($candidates);
 
+        /* Misión martin-mensaje-puntos (27/11/2026, lead 718): si `mensaje_sugerido` es un marcador de lugar («...»), se
+         * recupera el texto real del bloque de código o se deriva a una persona; nunca sale «...» al lead. */
+        $elegido = $this->reparar_el_mensaje_marcador_de_lugar($elegido, $raw);
+
         return $this->separar_la_verificacion_pedida_por_claude($elegido);
+    }
+
+    /**
+     * Evita que un marcador de lugar («...», «…», «<mensaje>», vacío) salga como mensaje al lead.
+     *
+     * Por qué existe (lead 718 «Rubén (ENSAYO)», 27/11/2026, lead_messages 17448): el modelo escribió el texto real en
+     * un bloque de código FUERA del JSON y dejó `"mensaje_sugerido": "..."`; el JSON se tomó tal cual y los tres puntos
+     * salieron por WhatsApp. No se confía en que el prompt lo evite: es una defensa determinista sobre lo que ya llegó.
+     *
+     * Qué hace, en orden:
+     *   1. Si `mensaje_sugerido` NO es un marcador de lugar, no toca nada (un texto con «...» adentro es un texto).
+     *   2. Si es un marcador y el mensaje vacío es intencional (`solicita_disponibilidad`: el sistema hace la segunda
+     *      llamada con los horarios), tampoco toca nada.
+     *   3. Si la respuesta trae un bloque ``` sin JSON y con texto real, ese texto pasa a ser el mensaje.
+     *   4. Si no hay bloque utilizable, deriva a una persona: `requiere_intervencion_humana`, mensaje '' (no queda
+     *      nada que pueda salir) y la nota en `razonamiento` y `motivo_intervencion`.
+     *
+     * 🔴 No «simplificar» quitando el paso 2: sin él, el flujo normal de la agenda (mensaje vacío a propósito) se
+     * derivaría a una persona en cada pedido de horarios.
+     *
+     * @param array<string, mixed> $paquete Paquete ya decodificado (el objeto raíz elegido).
+     * @param string               $raw     Respuesta cruda del modelo, de donde se saca el bloque de código.
+     *
+     * @return array<string, mixed> El paquete, con el mensaje recuperado, derivado a una persona o intacto.
+     */
+    protected function reparar_el_mensaje_marcador_de_lugar(array $paquete, string $raw): array
+    {
+        if (! array_key_exists('mensaje_sugerido', $paquete)) {
+            return $paquete;
+        }
+
+        $mensaje = $paquete['mensaje_sugerido'];
+
+        /* Sólo se analiza un texto (o null, que el resto del código lee como vacío): cualquier otro tipo queda como vino. */
+        if ($mensaje !== null && ! is_string($mensaje)) {
+            return $paquete;
+        }
+
+        if (! $this->es_marcador_de_lugar((string) $mensaje)) {
+            return $paquete;
+        }
+
+        /* El vacío que acompaña a un pedido de disponibilidad es intencional (ver el docblock). */
+        $pide_disponibilidad = ! empty($paquete['solicita_disponibilidad']);
+        if ($pide_disponibilidad && trim((string) $mensaje) === '') {
+            return $paquete;
+        }
+
+        $texto_del_bloque = $this->primer_bloque_de_codigo_con_texto_real($raw);
+
+        if ($texto_del_bloque !== '') {
+            Log::channel('daily')->warning('LeadAiService: mensaje_sugerido era un marcador de lugar; se tomó el texto del bloque de código.', [
+                'mensaje_original' => $mensaje,
+            ]);
+
+            $paquete['mensaje_sugerido'] = $texto_del_bloque;
+
+            return $paquete;
+        }
+
+        /* Con un pedido de disponibilidad y un marcador («...»), el mensaje de esta llamada no es el que sale: lo reemplaza
+         * el de la segunda llamada. No se deriva a nadie por eso. */
+        if ($pide_disponibilidad) {
+            return $paquete;
+        }
+
+        Log::channel('daily')->warning('LeadAiService: mensaje_sugerido era un marcador de lugar y no hay texto utilizable; se deriva a una persona.', [
+            'mensaje_original' => $mensaje,
+        ]);
+
+        $nota = 'La IA no devolvió un mensaje utilizable (llegó «' . trim((string) $mensaje) . '» y no había texto real en la respuesta): no se envía nada al lead.';
+
+        $paquete['mensaje_sugerido']             = '';
+        $paquete['requiere_intervencion_humana'] = true;
+        /* El motivo que trajo el paquete (si ya pedía intervención) se conserva a continuación de la nota. */
+        $motivo_previo                           = isset($paquete['motivo_intervencion']) && is_string($paquete['motivo_intervencion']) ? trim($paquete['motivo_intervencion']) : '';
+        $paquete['motivo_intervencion']          = trim($nota . ' Revisá la conversación y contestale a mano. ' . $motivo_previo);
+        $paquete['razonamiento']                 = trim((isset($paquete['razonamiento']) && is_string($paquete['razonamiento']) ? $paquete['razonamiento'] : '') . ' ⚠️ ' . $nota);
+
+        return $paquete;
+    }
+
+    /**
+     * Última red: una sugerencia nunca se guarda con un marcador de lugar («...») ni vacía como mensaje.
+     *
+     * `reparar_el_mensaje_marcador_de_lugar()` (al leer la respuesta) recupera el texto del bloque de código o deriva a
+     * una persona, pero deja pasar a propósito el marcador cuando hay `solicita_disponibilidad` (el mensaje de esa
+     * llamada lo reemplaza el de la segunda). Ese reemplazo no siempre ocurre: con la demo directa no hay segunda
+     * llamada, `guardar_email` sin `agendar_demo` la anula y si la segunda llamada falla se conserva el mensaje de la
+     * primera. Y la derivación de la lectura deja el mensaje en '' (el contrato de parse_json_response()), que en
+     * validate_parsed_response() es una excepción y no deja nada guardado para que la persona lo vea.
+     *
+     * Se resuelve con el mismo mecanismo que aplicar_gate_de_respaldo(): el mensaje neutro
+     * MENSAJE_DE_ESPERA_SIN_RESPALDO, `requiere_verificacion` (el paquete queda retenido y no se auto-envía),
+     * `requiere_intervencion_humana` con el motivo a la vista («La IA no devolvió un mensaje utilizable») y el
+     * agendamiento neutralizado: si no se confía en el texto, tampoco en la acción que viene con él.
+     *
+     * Se llama desde create_message_and_update_lead(): es el único lugar donde terminan las sugerencias del agente
+     * (primera llamada, fallback y segunda llamada). Un mensaje con texto real pasa intacto.
+     *
+     * @param array<string, mixed> $parsed     Paquete que está por convertirse en sugerencia.
+     * @param bool                 $retenido   Queda en true si el mensaje era inutilizable y el paquete se retuvo.
+     *
+     * @return array<string, mixed> El paquete retenido, o el mismo si el mensaje es utilizable.
+     */
+    protected function retener_el_mensaje_inutilizable(array $parsed, bool &$retenido = false): array
+    {
+        $retenido = false;
+
+        $mensaje = isset($parsed['mensaje_sugerido']) ? $parsed['mensaje_sugerido'] : null;
+
+        /* Sólo se juzga un texto (o su ausencia): cualquier otro tipo lo trata validate_parsed_response() como siempre. */
+        if ($mensaje !== null && ! is_string($mensaje)) {
+            return $parsed;
+        }
+
+        if (! $this->es_marcador_de_lugar((string) $mensaje)) {
+            return $parsed;
+        }
+
+        Log::channel('daily')->warning('LeadAiService: la sugerencia no tiene un mensaje utilizable; queda retenida para una persona.', [
+            'mensaje_original' => $mensaje,
+        ]);
+
+        /* La nota del motivo: la misma que escribe la lectura de la respuesta; no se repite si ya está. */
+        $nota = 'La IA no devolvió un mensaje utilizable (llegó «' . trim((string) $mensaje) . '» y no había texto real en la respuesta): no se envía nada al lead.';
+
+        $razonamiento = isset($parsed['razonamiento']) && is_string($parsed['razonamiento']) ? $parsed['razonamiento'] : '';
+        if (strpos($razonamiento, 'La IA no devolvió un mensaje utilizable') === false) {
+            $parsed['razonamiento'] = trim($razonamiento . ' ⚠️ ' . $nota);
+        }
+
+        $motivo_previo = isset($parsed['motivo_intervencion']) && is_string($parsed['motivo_intervencion']) ? trim($parsed['motivo_intervencion']) : '';
+        if (strpos($motivo_previo, 'La IA no devolvió un mensaje utilizable') === false) {
+            $parsed['motivo_intervencion'] = trim($nota . ' Revisá la conversación y contestale a mano. ' . $motivo_previo);
+        }
+
+        $parsed['requiere_intervencion_humana'] = true;
+        $parsed['requiere_verificacion']        = true;
+        $parsed['mensaje_sugerido']             = self::MENSAJE_DE_ESPERA_SIN_RESPALDO;
+        $parsed['agendar_demo']                 = null;
+
+        $retenido = true;
+
+        return $parsed;
+    }
+
+    /**
+     * ¿El texto es un marcador de lugar y no un mensaje?
+     *
+     * Lo es si está vacío, o si sacando espacios y puntuación (incluidos «…», «.» y los signos < > [ ]) no queda ninguna
+     * letra ni número («...», «. . .», «—»), o si es un rótulo corto envuelto entero en < > o [ ] («<mensaje>», «[mensaje]»).
+     * Un texto con puntos suspensivos entre palabras («Un almacén... bárbaro») NO lo es. Un emoji solo tampoco: los
+     * símbolos no se cuentan como puntuación.
+     *
+     * @param string $texto Valor de `mensaje_sugerido` o contenido de un bloque de código.
+     *
+     * @return bool
+     */
+    private function es_marcador_de_lugar(string $texto): bool
+    {
+        $recortado = trim($texto);
+
+        if ($recortado === '') {
+            return true;
+        }
+
+        /* Sin espacios, puntuación ni los signos < > (que son símbolos y no puntuación), ¿queda algo? */
+        $sin_signos = preg_replace('/[\s\p{P}\p{Z}<>]+/u', '', $recortado);
+        if ($sin_signos === null || $sin_signos === '') {
+            return true;
+        }
+
+        /* «<mensaje>» y «[mensaje]»: el rótulo de la plantilla que el modelo copió sin reemplazar. Sólo si ENVUELVE todo el
+         * texto y es corto; «[Hola] ¿cómo andás?» no entra. */
+        return preg_match('/^[<\[][^<>\[\]\r\n]{0,40}[>\]]$/u', $recortado) === 1;
+    }
+
+    /**
+     * Texto del primer bloque de código (``` ... ```) que no contiene JSON y tiene texto real.
+     *
+     * Se saltea el bloque vacío, el que es otro marcador de lugar y el que trae JSON adentro (el del propio paquete,
+     * con o sin la etiqueta ```json). Devuelve el contenido sin las vallas y recortado. No importa si el bloque viene
+     * antes o después del JSON: lo que descarta un bloque es lo que tiene adentro, no dónde está.
+     *
+     * @param string $raw Respuesta cruda del modelo.
+     *
+     * @return string El texto, o '' si no hay ningún bloque utilizable.
+     */
+    private function primer_bloque_de_codigo_con_texto_real(string $raw): string
+    {
+        /* Las vallas, con una etiqueta de lenguaje opcional pegada a la apertura (```json, ```text). */
+        if (preg_match_all('/```[A-Za-z0-9_+-]*[ \t]*\R(.*?)```/su', $raw, $bloques) === 0) {
+            return '';
+        }
+
+        foreach ($bloques[1] as $bloque) {
+            /* Contenido del bloque, sin las vallas ni espacios de los bordes. */
+            $contenido = trim($bloque);
+
+            if ($this->es_marcador_de_lugar($contenido)) {
+                continue;
+            }
+
+            /* Un bloque con un objeto JSON adentro es el paquete, no el mensaje. */
+            if (strpos($contenido, '{') !== false && strrpos($contenido, '}') !== false) {
+                continue;
+            }
+
+            return $contenido;
+        }
+
+        return '';
     }
 
     /**
