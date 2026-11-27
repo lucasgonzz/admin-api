@@ -16,8 +16,9 @@ use Illuminate\Console\Command;
  * («An option named "version" already exists») y el comando ni siquiera cargaba, ni con `--help`
  * (medido en producción el 4/11/2026).
  *
- * Se corre a mano después de cada release de empresa o de tienda, antes de que
- * `pruebas:mantener-pool` arme instancias nuevas.
+ * Herramienta manual (emergencias): ya NO hace falta correrla después de cada release, porque
+ * `CrearInstanciaDePoolJob` arma la plantilla de la versión publicada antes de crear cada instancia
+ * (misión prueba-ultima-version, 27/11/2026).
  */
 class PruebasPlantillaCommand extends Command
 {

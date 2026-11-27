@@ -20,6 +20,9 @@ use Illuminate\Support\Facades\Log;
  *
  *   dns (10 %)        → los 4 A records de `prueba-NN` (para el certificado del pool, que es el que usa el
  *                       demo setup antes de que el alias tenga el suyo).
+ *   plantilla (15 %)  → `pool-plantilla.sh`: la plantilla pre-extraída de la versión (idempotente: si ya está,
+ *                       no hace nada; la primera instancia tras un release paga el composer). Misión
+ *                       prueba-ultima-version (27/11/2026): ya no se arma a mano después de cada release.
  *   crear (20 %)      → `pool-crear.sh`: 4 sitios de CloudPanel PHP 8.4, base, copia de las plantillas,
  *                       marcador `vps-php84-v1`, vhosts de una capa, pool de FPM, supervisor. Devuelve la
  *                       contraseña de la base UNA vez.
@@ -39,9 +42,9 @@ class CrearInstanciaDePoolJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    const ETAPAS = ['dns', 'crear', 'env', 'configurar', 'libre'];
+    const ETAPAS = ['dns', 'plantilla', 'crear', 'env', 'configurar', 'libre'];
 
-    const PROGRESO = ['dns' => 10, 'crear' => 20, 'env' => 50, 'configurar' => 70, 'libre' => 100];
+    const PROGRESO = ['dns' => 10, 'plantilla' => 15, 'crear' => 20, 'env' => 50, 'configurar' => 70, 'libre' => 100];
 
     public $tries = 1;
 
@@ -104,6 +107,18 @@ class CrearInstanciaDePoolJob implements ShouldQueue
             return;
         }
 
+        /* Una fila que nunca tocó nada (`encolada`) se arma con las versiones publicadas AHORA: si salió un release
+           entre que se encoló y que corre, nace ya al día. */
+        if ((string) $instancia->etapa === 'encolada') {
+            $pool            = app(PruebaPoolService::class);
+            $version_actual  = $pool->version_publicada_de_empresa();
+            $tienda_actual   = $pool->version_publicada_de_tienda();
+            if ($version_actual !== '' && $tienda_actual !== '') {
+                $instancia->version           = $version_actual;
+                $instancia->ecommerce_version = $tienda_actual;
+            }
+        }
+
         $instancia->estado = TrialInstance::ESTADO_CREANDO;
         $instancia->error  = null;
         $instancia->save();
@@ -114,6 +129,10 @@ class CrearInstanciaDePoolJob implements ShouldQueue
         try {
             $this->marcar($instancia, 'dns');
             app(PruebaDnsService::class)->crear_registros($instancia->nombre, $instancia);
+
+            /* La plantilla de esta versión, antes de copiarla: si falla, la fila queda fallida en `plantilla`. */
+            $this->marcar($instancia, 'plantilla');
+            app(PruebaVpsService::class)->pool_plantilla((string) $instancia->version, (string) $instancia->ecommerce_version);
 
             $this->marcar($instancia, 'crear');
             $resultado = app(PruebaVpsService::class)->pool_crear(
