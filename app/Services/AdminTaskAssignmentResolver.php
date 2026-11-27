@@ -43,14 +43,21 @@ class AdminTaskAssignmentResolver
      * instalación sin ese perfil sigue como estaba. Con los datos de hoy (nadie vendedor) y Juan dado de alta con
      * «Sólo Leads», la tarea le llega sólo a él.
      *
+     * Orden (ensayo del 26/11/2026): primero los `solo_leads` y después los `es_vendedor`, cada grupo por id. Los
+     * consumidores toman `$ids[0]` como responsable principal de la tarea, y con el orden sólo por id Thomas (vendedor,
+     * id 3) quedaba antes que Juan (Sólo Leads, id 7). Un admin con las dos marcas cuenta como `solo_leads`. El
+     * conjunto devuelto no cambia, sólo el orden.
+     *
      * @return array<int> Ids de admins; vacío si no hay ninguno de ninguna de las tres clases (la tarea queda sin
      *                    asignar, que significa "la puede tomar cualquiera").
      */
     public static function for_embudo_task(): array
     {
+        /* `solo_leads` desc: los de Sólo Leads (1) antes que los que sólo son vendedores (0); dentro de cada grupo, por id. */
         $ids = Admin::where(function ($query) {
             $query->where('solo_leads', true)->orWhere('es_vendedor', true);
         })
+            ->orderBy('solo_leads', 'desc')
             ->orderBy('id')
             ->pluck('id')
             ->map(function ($id) {

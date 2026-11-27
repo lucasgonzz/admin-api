@@ -1037,6 +1037,39 @@ class LeadFlujoEntradaService
                 . "    Decile: Juan te escribe para darte el acceso. Y devolvé requiere_intervencion_humana: true con el motivo.\n";
         }
 
+        /* «Cómo arranco» (ensayo del 26/11/2026): Martín le mandó comerciocity.com a un lead que preguntó cómo arrancar,
+           en vez del link de la prueba. Es un punto aparte del de arriba (que habla de «probar») para que las frases
+           concretas del lead queden nombradas. Sin lugar en el pool sigue la regla vigente: ningún link. */
+        if ($hay_lugar) {
+            $txt .= "  - Si dice «cómo arranco», «cómo empiezo», «me interesa», «quiero empezar» o «cómo hago» (o algo parecido): mandale el link de\n"
+                . "    la prueba textual, en un mensaje corto, con estado_sugerido: \"link_enviado\". NO le mandes comerciocity.com como respuesta a\n"
+                . "    eso: la página no es el camino para arrancar. Link (copiar textual, sin cambiarle nada): " . $link . "\n";
+        } else {
+            $txt .= "  - Si dice «cómo arranco», «cómo empiezo», «me interesa», «quiero empezar» o «cómo hago» (o algo parecido): hoy NO hay lugar,\n"
+                . "    NO le pases ningún link. Decile: Juan te escribe para darte el acceso. Y devolvé requiere_intervencion_humana: true con el\n"
+                . "    motivo (es lo único que le avisa a Juan). NO le mandes comerciocity.com como respuesta a eso.\n";
+        }
+
+        /* La carga (ensayo del 26/11/2026): Martín le ofreció «te doy una mano para subirlo» a quien pidió la carga gratis.
+           Con el flujo nuevo la carga la hace el lead solo (video dentro de la prueba) o la hacemos nosotros como
+           implementación paga: nunca una ayuda informal por WhatsApp. La prohibición va con o sin lugar en el pool. */
+        $txt .= "  - NO le ofrezcas ayuda con la carga: nada de «te doy una mano para subirlo», «pasame tu Excel», «te lo subo» ni «te lo cargo».\n"
+            . "    NO le pidas ni recibas su Excel, listas ni PDF por WhatsApp: la carga hecha por nosotros es la implementación paga, y la\n"
+            . "    coordina Juan, no vos.\n";
+
+        if ($hay_lugar) {
+            $txt .= "  - Si pide que se lo carguen GRATIS (o si le podés cargar vos los productos): mandale el link de la prueba textual y decile que\n"
+                . "    adentro de la prueba hay un video corto que lo guía para subir su Excel él mismo. Aclará que si prefiere que lo carguemos\n"
+                . "    nosotros, eso es la implementación paga (pago único de " . $precio . ") y la coordina Juan.\n"
+                . "    Link (copiar textual, sin cambiarle nada): " . $link . "\n";
+        } else {
+            /* Sin lugar no hay prueba ni video a donde mandarlo: la prohibición de ayudar con la carga sigue y, como se le
+               promete que Juan escribe, se pide la intervención humana (la regla vigente de arriba para «probar»). */
+            $txt .= "  - Si pide que se lo carguen GRATIS (o si le podés cargar vos los productos): hoy NO hay lugar, NO le pases ningún link ni\n"
+                . "    le ofrezcas ayuda con la carga. Decile: Juan te escribe para darte el acceso; si prefiere que lo carguemos nosotros, eso es la\n"
+                . "    implementación paga (pago único de " . $precio . "). Y devolvé requiere_intervencion_humana: true con el motivo.\n";
+        }
+
         $txt .= "  - Si quiere que se lo carguen nosotros o pide la implementación: decile que lo llama Juan, del equipo, hoy, para contarle cómo es\n"
             . "    la implementación (la llamada no tiene costo; la implementación es un pago único de PRECIOS VIGENTES), sin pedirle hora, y\n"
             . "    devolvé estado_sugerido: \"implementacion_pedida\".\n"

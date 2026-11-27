@@ -374,6 +374,25 @@ class PreciosVigentesSettings
             $lineas[] = $linea;
         }
 
+        /* Los únicos topes de operaciones (ensayo del 26/11/2026: Martín dijo «hasta 100 operaciones», un tope de la
+           política anterior que recordaba de un recurso viejo). La línea sale de los planes guardados —nunca de
+           números escritos a mano— y no nombra ningún tope viejo: nombrarlo sería sembrarlo en el prompt. Un plan sin
+           `hasta` es ilimitado y no aporta tope. */
+        $topes = [];
+        foreach ($gestion['planes'] as $plan) {
+            if ($plan['hasta'] !== null) {
+                $topes[] = (string) (int) $plan['hasta'];
+            }
+        }
+
+        if (! empty($topes)) {
+            $ultimo_tope  = array_pop($topes);
+            $topes_dichos = empty($topes) ? $ultimo_tope : implode(', ', $topes) . ' y ' . $ultimo_tope;
+
+            $lineas[] = '  - Los únicos topes de operaciones por mes son los de los planes de arriba (' . $topes_dichos
+                . '): cualquier otro tope que recordés es de la política anterior y no rige.';
+        }
+
         $lineas[] = '  - Usuario extra: ' . self::formato_pesos((float) $gestion['usuario_extra']) . ' por mes, en cualquier plan.';
         $lineas[] = '- Tienda online: ' . self::formato_pesos((float) $contrato['tienda']['mensualidad']) . ' por mes.';
 
