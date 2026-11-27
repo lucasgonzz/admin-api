@@ -39,6 +39,9 @@ class PruebaPoolService
      */
     const ARMADOS_MAXIMOS_POR_NOMBRE = 4;
 
+    /** Certificados que emite cada instancia: uno por host en el armado y otros cuatro (alias como SAN) en el alta. */
+    const CERTIFICADOS_POR_INSTANCIA = 4;
+
     /** La ventana del cupo de Let's Encrypt: 7 días (el cupo se va devolviendo de a uno cada ~34 horas). */
     const VENTANA_ARMADOS_DIAS = 7;
 
@@ -46,6 +49,23 @@ class PruebaPoolService
     public static function libres_o_creando(): int
     {
         return TrialInstance::whereIn('estado', [TrialInstance::ESTADO_LIBRE, TrialInstance::ESTADO_CREANDO])->count();
+    }
+
+    /**
+     * Cuántas instancias libres o en armado están AL DÍA: con la versión de empresa y la de tienda indicadas
+     * (misión prueba-ultima-version, D3).
+     *
+     * @param string $version        Última versión publicada de empresa.
+     * @param string $version_tienda Última versión publicada de tienda.
+     *
+     * @return int
+     */
+    public static function libres_o_creando_al_dia(string $version, string $version_tienda): int
+    {
+        return TrialInstance::whereIn('estado', [TrialInstance::ESTADO_LIBRE, TrialInstance::ESTADO_CREANDO])
+            ->where('version', $version)
+            ->where('ecommerce_version', $version_tienda)
+            ->count();
     }
 
     /** Cuántas instancias ocupadas y despiertas hay (las que cuentan para el tope). */
@@ -63,15 +83,29 @@ class PruebaPoolService
     }
 
     /**
-     * Encola el armado de las instancias que falten para llegar al mínimo.
+     * Encola el armado de las instancias que falten para llegar al mínimo de libres AL DÍA.
+     *
+     * «Al día» = con la última versión publicada de empresa y de tienda (misión prueba-ultima-version, D3). Lo que
+     * falta se separa en dos: el faltante real (no hay ni una vieja que lo cubra: se arma siempre) y el reemplazo
+     * de libres viejas, que se limita por el presupuesto semanal de certificados de Let's Encrypt.
+     *
+     * @param int|null $minimo Mínimo a sostener (default: `prueba_pool_minimo`).
      *
      * @return array<int, string> Nombres encolados.
      */
     public function mantener(?int $minimo = null): array
     {
         $minimo  = $minimo === null ? PruebaSettings::pool_minimo() : max(0, $minimo);
-        $faltan  = $minimo - self::libres_o_creando();
         $nombres = [];
+
+        /* Las versiones publicadas: contra ellas se mide qué instancia está al día. */
+        $version        = $this->version_publicada_de_empresa();
+        $version_tienda = $this->version_publicada_de_tienda();
+
+        /* Sin versión publicada no hay forma de saber qué es «al día»: se cuenta como siempre. */
+        $hay_versiones = $version !== '' && $version_tienda !== '';
+        $al_dia        = $hay_versiones ? self::libres_o_creando_al_dia($version, $version_tienda) : self::libres_o_creando();
+        $faltan        = $minimo - $al_dia;
 
         if ($faltan <= 0) {
             return [];
@@ -95,22 +129,126 @@ class PruebaPoolService
             return [];
         }
 
-        $version        = $this->version_publicada_de_empresa();
-        $version_tienda = $this->version_publicada_de_tienda();
-
-        if ($version === '' || $version_tienda === '') {
+        if (! $hay_versiones) {
             throw new \RuntimeException('No hay una versión publicada de empresa y de tienda para armar el pool.');
         }
 
-        for ($i = 0; $i < $faltan; $i++) {
+        /* Libres o en armado que NO están al día: cubren el mínimo «de respaldo», pero hay que reemplazarlas. */
+        $viejas = self::libres_o_creando() - $al_dia;
+
+        /* Faltante real: ni sumando las viejas se llega al mínimo. Se arma siempre, sin tope. */
+        $sin_cubrir = max(0, $minimo - ($al_dia + $viejas));
+
+        /* Reemplazos de viejas, acotados por el presupuesto de certificados de la semana. */
+        $renovar = $faltan - $sin_cubrir;
+        if ($renovar > 0) {
+            $cupo = $this->cupo_de_renovaciones();
+            if ($renovar > $cupo) {
+                if (Cache::add('prueba-pool:sin-cupo-certificados', 1, now()->addMinutes(self::ventana_carrera_minutos()))) {
+                    Log::warning('PruebaPoolService: se renovarían ' . $renovar . ' libres viejas pero el presupuesto de certificados de la semana alcanza para ' . $cupo . '.', ['tope' => PruebaSettings::tope_certificados_semana()]);
+                }
+                $renovar = $cupo;
+            }
+        }
+
+        $a_armar = $sin_cubrir + max(0, $renovar);
+        for ($i = 0; $i < $a_armar; $i++) {
             $instancia = $this->crear_fila($version, $version_tienda);
             CrearInstanciaDePoolJob::dispatch($instancia->id);
             $nombres[] = $instancia->nombre;
         }
 
-        Log::info('PruebaPoolService: armado encolado.', ['nombres' => $nombres, 'version' => $version, 'tienda' => $version_tienda]);
+        if ($nombres !== []) {
+            Log::info('PruebaPoolService: armado encolado.', ['nombres' => $nombres, 'version' => $version, 'tienda' => $version_tienda, 'renovaciones' => max(0, $renovar)]);
+        }
 
         return $nombres;
+    }
+
+    /**
+     * Cuántas instancias más se pueden armar para RENOVAR libres viejas sin pasarse del presupuesto semanal de
+     * certificados. Gasto de la ventana de 7 días: 4 por cada fila creada (el armado del pool) y 4 por cada
+     * instancia asignada (el alias del alta, como SAN).
+     *
+     * @return int Cantidad de renovaciones que entran (0 si no queda presupuesto).
+     */
+    private function cupo_de_renovaciones(): int
+    {
+        /* Desde cuándo se cuenta el gasto. */
+        $desde = now()->subDays(self::VENTANA_ARMADOS_DIAS);
+
+        $armados  = TrialInstance::where('created_at', '>=', $desde)->count();
+        $asignadas = TrialInstance::whereNotNull('asignada_at')->where('asignada_at', '>=', $desde)->count();
+        $usados   = self::CERTIFICADOS_POR_INSTANCIA * ($armados + $asignadas);
+
+        return max(0, (int) floor((PruebaSettings::tope_certificados_semana() - $usados) / self::CERTIFICADOS_POR_INSTANCIA));
+    }
+
+    /**
+     * Retira UNA libre desactualizada (misión prueba-ultima-version, D4), sólo si es seguro: sin motivo para no
+     * armar, sin alta ni creación en curso (G1/G2) y con al menos `max(1, mínimo)` libres al día de respaldo. La
+     * reclama pasándola a `borrando` bajo lock (así `tomar_libre` ya no la ve) y la borra con el ciclo. Las
+     * asignadas, `cliente` y en armado nunca se tocan.
+     *
+     * @param PruebaCicloService $ciclo Servicio que hace el borrado real (respaldo, sitios, DNS).
+     *
+     * @return string|null Nombre de la instancia retirada, o null si no se retiró ninguna.
+     */
+    public function retirar_una_desactualizada(PruebaCicloService $ciclo): ?string
+    {
+        $version        = $this->version_publicada_de_empresa();
+        $version_tienda = $this->version_publicada_de_tienda();
+        if ($version === '' || $version_tienda === '') {
+            return null;
+        }
+
+        if ($this->motivo_para_no_encolar() !== null || self::armado_en_curso() !== null || self::creacion_en_curso() !== null) {
+            return null;
+        }
+
+        /* Libres al día YA listas (no cuentan las que se están creando): el pool nunca queda sin respaldo. */
+        $libres_al_dia = TrialInstance::where('estado', TrialInstance::ESTADO_LIBRE)
+            ->where('version', $version)
+            ->where('ecommerce_version', $version_tienda)
+            ->count();
+        if ($libres_al_dia < max(1, PruebaSettings::pool_minimo())) {
+            return null;
+        }
+
+        /* Se reclama la más vieja desactualizada, sin dueño, bajo lock. */
+        $instancia = DB::transaction(function () use ($version, $version_tienda) {
+            $candidata = TrialInstance::where('estado', TrialInstance::ESTADO_LIBRE)
+                ->whereNull('client_id')
+                ->whereNull('lead_id')
+                ->whereNull('alias_slug')
+                ->where(function ($query) use ($version, $version_tienda) {
+                    $query->where('version', '!=', $version)->orWhere('ecommerce_version', '!=', $version_tienda);
+                })
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->first();
+
+            if ($candidata === null) {
+                return null;
+            }
+
+            $candidata->estado = TrialInstance::ESTADO_BORRANDO;
+            $candidata->etapa  = 'borrando';
+            $candidata->save();
+
+            return $candidata;
+        });
+
+        if ($instancia === null) {
+            return null;
+        }
+
+        /* Si el borrado falla, el ciclo la deja `fallida` en `borrando` y la excepción sube al comando. */
+        $ciclo->borrar($instancia, 'renovación por versión nueva');
+
+        Log::info('PruebaPoolService: libre desactualizada retirada.', ['instancia' => $instancia->nombre, 'version' => $instancia->version]);
+
+        return (string) $instancia->nombre;
     }
 
     /** Minutos en los que un armado o una creación movidos por última vez cuentan como «en curso». */
@@ -139,8 +277,14 @@ class PruebaPoolService
      */
     public static function creacion_en_curso(): ?TrialInstance
     {
-        return TrialInstance::where('estado', TrialInstance::ESTADO_CREANDO)
-            ->whereIn('etapa', ['dns', 'crear', 'env', 'configurar'])
+        return TrialInstance::where(function ($query) {
+                $query->where(function ($creando) {
+                    $creando->where('estado', TrialInstance::ESTADO_CREANDO)->whereIn('etapa', ['dns', 'crear', 'env', 'configurar']);
+                })->orWhere(function ($retiro) {
+                    /* El retiro de una libre vieja (sin cliente) también recarga nginx/fpm. */
+                    $retiro->where('estado', TrialInstance::ESTADO_BORRANDO)->whereNull('client_id');
+                });
+            })
             ->where('updated_at', '>=', now()->subMinutes(self::ventana_carrera_minutos()))
             ->orderBy('id')
             ->first();
@@ -227,10 +371,37 @@ class PruebaPoolService
     public function tomar_libre(int $lead_id, string $slug): ?TrialInstance
     {
         return DB::transaction(function () use ($lead_id, $slug) {
-            $instancia = TrialInstance::where('estado', TrialInstance::ESTADO_LIBRE)
-                ->orderBy('id')
-                ->lockForUpdate()
-                ->first();
+            /* Las versiones publicadas: la instancia «al día» las tiene las dos (empresa y tienda). */
+            $version        = $this->version_publicada_de_empresa();
+            $version_tienda = $this->version_publicada_de_tienda();
+            $hay_versiones  = $version !== '' && $version_tienda !== '';
+
+            $instancia = null;
+            if ($hay_versiones) {
+                /* Primero la libre al día (la de id menor entre ellas). */
+                $instancia = TrialInstance::where('estado', TrialInstance::ESTADO_LIBRE)
+                    ->where('version', $version)
+                    ->where('ecommerce_version', $version_tienda)
+                    ->orderBy('id')
+                    ->lockForUpdate()
+                    ->first();
+            }
+
+            if ($instancia === null) {
+                /* Respaldo: no se pierde al lead. Con versiones publicadas, la desactualizada más nueva; sin ellas, la más vieja de siempre. */
+                $respaldo = TrialInstance::where('estado', TrialInstance::ESTADO_LIBRE);
+                $instancia = $hay_versiones
+                    ? $respaldo->orderByDesc('id')->lockForUpdate()->first()
+                    : $respaldo->orderBy('id')->lockForUpdate()->first();
+
+                if ($instancia !== null && $hay_versiones) {
+                    Log::warning('PruebaPoolService: alta con versión atrasada (no había libre al día).', [
+                        'instancia' => $instancia->nombre,
+                        'version'   => $instancia->version,
+                        'publicada' => $version,
+                    ]);
+                }
+            }
 
             if ($instancia === null) {
                 return null;

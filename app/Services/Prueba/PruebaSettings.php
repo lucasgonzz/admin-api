@@ -60,6 +60,17 @@ class PruebaSettings
      */
     const KEY_ENSAYO_CORREOS = 'prueba_ensayo_correos';
 
+    /**
+     * Presupuesto de certificados de Let's Encrypt por semana que el pool puede gastar renovando libres viejas
+     * (misión prueba-ultima-version, 27/11/2026). Let's Encrypt admite 50 certificados por dominio registrado por
+     * semana; cada armado de pool emite 4 (uno por host) y cada alta otros 4 (el alias como SAN). Se bajan o suben
+     * desde `admin_settings` sin deploy.
+     */
+    const KEY_TOPE_CERTIFICADOS_SEMANA = 'prueba_tope_certificados_semana';
+
+    /** 40 de los 50 que admite Let's Encrypt: deja 10 de margen para el resto de los hosts del dominio. */
+    const DEFAULT_TOPE_CERTIFICADOS_SEMANA = 40;
+
     /** 0 hasta que Lucas prenda el pool desde admin_settings: sin DNS ni plantilla, un mínimo > 0 solo fabrica fallidas. */
     const DEFAULT_POOL_MINIMO         = 0;
     const DEFAULT_MAX_ACTIVAS         = 25;
@@ -72,6 +83,16 @@ class PruebaSettings
     public static function pool_minimo(): int
     {
         return max(0, (int) AdminSetting::get(self::KEY_POOL_MINIMO, self::DEFAULT_POOL_MINIMO));
+    }
+
+    /**
+     * Cuántos certificados por semana puede gastar el pool (armados + altas); nunca negativo.
+     *
+     * @return int
+     */
+    public static function tope_certificados_semana(): int
+    {
+        return max(0, (int) AdminSetting::get(self::KEY_TOPE_CERTIFICADOS_SEMANA, self::DEFAULT_TOPE_CERTIFICADOS_SEMANA));
     }
 
     public static function max_activas(): int
