@@ -573,8 +573,7 @@ class LeadFlujoEntradaService
      * («Hola, vi el video de los presupuestos y quiero probar ComercioCity») no contiene la frase contigua de la web
      * y por eso no cuenta como lead de la web ({@see es_lead_de_la_web()}), aunque pida exactamente lo mismo.
      *
-     * Sí si el primer mensaje, normalizado, contiene «quiero probar» como palabras enteras o es igual a uno de los
-     * textos precargados ({@see textos_precargados()}). No se lee del origen (atribución de Meta) a propósito: acá
+     * Sí si el primer mensaje, normalizado, contiene «quiero probar» como palabras enteras. No se lee del origen (atribución de Meta) a propósito: acá
      * se mide la intención del lead.
      *
      * @param Lead $lead
@@ -588,11 +587,9 @@ class LeadFlujoEntradaService
             return false;
         }
 
-        if (LeadOrigenService::contiene_frase($primero, 'quiero probar')) {
-            return true;
-        }
-
-        return in_array(LeadOrigenService::normalizar($primero), self::textos_precargados(), true);
+        /* Sólo la intención explícita. Ser igual a un texto precargado NO alcanza: esa perilla guarda lo que «no cuenta
+           como pregunta» (p. ej. «Hola, vi el video» o «Quiero más información»), que no pide probar nada. */
+        return LeadOrigenService::contiene_frase($primero, 'quiero probar');
     }
 
     /**
