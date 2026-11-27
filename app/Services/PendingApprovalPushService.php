@@ -687,7 +687,8 @@ class PendingApprovalPushService
 
     /**
      * Busca el aviso reciente de la misma conversación al que se puede agrupar esta fila: una fila `sent` de los últimos
-     * 10 minutos cuyo mensaje sigue esperando o ya no existe (lo reemplazó el sistema). Si ese mensaje ya lo resolvió
+     * 10 minutos cuyo mensaje sigue esperando o ya no existe (lo reemplazó el sistema; en soporte un ancla borrada NO sirve porque también
+     * la borra una persona). Si ese mensaje ya lo resolvió
      * alguien (aprobado, enviado, rechazado, publicado) NO sirve: hay algo nuevo que Lucas no vio.
      *
      * @param PendingApprovalNotification $row Fila a decidir.
@@ -714,8 +715,15 @@ class PendingApprovalPushService
         foreach ($candidates as $candidate) {
             $class = self::model_class((string) $candidate->source_type);
 
-            /* El mensaje del aviso anterior ya no existe: lo reemplazó el sistema, el aviso nuevo se agrupa. */
+            /* El mensaje del aviso anterior ya no existe. En leads y chat de la demo sólo lo borra el sistema al reemplazar
+             * la sugerencia (descartar marca 'rechazado'/'descartado', no borra), así que el aviso nuevo se agrupa. En
+             * soporte también lo borra una persona (descartar el borrador o contestar a mano): un ancla borrada no sirve,
+             * el aviso nuevo es algo que Lucas no vio y avisa. */
             if (! $class::query()->whereKey((int) $candidate->source_id)->exists()) {
+                if ((string) $candidate->source_type === self::TYPE_SUPPORT) {
+                    continue;
+                }
+
                 return $candidate;
             }
 
