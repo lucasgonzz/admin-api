@@ -241,14 +241,29 @@ class LeadFlujoEntradaService
      * pide la demo con sus palabras, sin ningún link de su página ni calificación.
      *
      * El lead que pide la demo pasa por `solicita_disponibilidad` (con el mail primero) y recién en el turno
-     * siguiente el sistema le da el bloque completo de la demo.
+     * siguiente el sistema le da el bloque completo de la demo. Excepción: el lead en `implementacion_pedida` NO puede
+     * pasar a `solicita_disponibilidad` (la guarda de «no retroceder de tramo» de `LeadAiService` compara `sort_order`
+     * y ese estado va después), así que el sistema nunca le da el bloque de la demo: a ese lead no se le promete nada
+     * automático, la demo se la muestra Juan en la llamada de la implementación.
+     *
+     * @param string $estado_del_lead Estado actual del lead ('' si no se conoce).
      *
      * @return string Bloque listo para concatenar al contexto de usuario.
      */
-    public static function bloque_de_la_demo_a_pedido(): string
+    public static function bloque_de_la_demo_a_pedido(string $estado_del_lead = ''): string
     {
-        return "\n\nDEMO SÓLO A PEDIDO (el camino de este lead es la prueba gratis; no hay demo asignada ni se la ofrezcas):\n"
-            . "  - NO le pases la página de su demo ni ningún link de demo, y no lo califiques con preguntas de la demo.\n"
+        $encabezado = "\n\nDEMO SÓLO A PEDIDO (el camino de este lead es la prueba gratis; no hay demo asignada ni se la ofrezcas):\n"
+            . "  - NO le pases la página de su demo ni ningún link de demo, y no lo califiques con preguntas de la demo.\n";
+
+        /* Lead que ya pidió la implementación: la demo no se agenda por acá, se la muestra Juan en la llamada. */
+        if ($estado_del_lead === 'implementacion_pedida') {
+            return $encabezado
+                . "  - Este lead ya pidió la implementación: si pide una DEMO con sus palabras, decile que Juan se la muestra\n"
+                . "    en la llamada de la implementación. NO la agendes, NO pidas mail ni horario para una demo, NO prometas una demo automática ni un bloque de\n"
+                . "    demo en el turno siguiente, y NO devuelvas estado_sugerido \"solicita_disponibilidad\".\n";
+        }
+
+        return $encabezado
             . "  - Si el lead pide una DEMO con sus palabras (un mensaje suyo, no el texto de un botón): confirmale que sí. Si todavía no\n"
             . "    tenemos su mail, pedíselo con una sola pregunta; si ya lo tenemos, preguntale si la hace ahora o cuándo.\n"
             . "    Devolvé estado_sugerido: \"solicita_disponibilidad\", SIN agendar_demo y SIN links en este turno: en el turno\n"
@@ -1009,6 +1024,44 @@ class LeadFlujoEntradaService
     // ------------------------------------------------------------------------------------------
 
     /**
+     * Separa la última oración interrogativa de un segmento que termina en «?» de lo que la precede.
+     *
+     * La pregunta empieza en el último «¿» del texto y sólo se la aísla si lo anterior termina en un fin de oración
+     * (`.`, `!`, `…`, `?`) o en un salto de línea: así no se corta una oración por la mitad («Hola, ¿qué tal?» no se
+     * separa). Sin «¿» o sin nada antes, no hay nada que aislar.
+     *
+     * @param string $segmento Último segmento de la IA, ya recortado y terminado en «?».
+     *
+     * @return array{respuesta: string, pregunta: string} `respuesta` queda '' cuando no se pudo aislar con seguridad
+     *                                                    (y `pregunta` es entonces el segmento completo).
+     */
+    private static function separar_la_pregunta_final(string $segmento): array
+    {
+        $sin_separar = ['respuesta' => '', 'pregunta' => $segmento];
+
+        /* Posición (en caracteres) del último «¿»: ahí empieza la pregunta final. */
+        $inicio = mb_strrpos($segmento, '¿');
+        if ($inicio === false || $inicio === 0) {
+            return $sin_separar;
+        }
+
+        $antes    = mb_substr($segmento, 0, $inicio);
+        $respuesta = rtrim($antes);
+        if ($respuesta === '') {
+            return $sin_separar;
+        }
+
+        /* Lo anterior tiene que cerrar una oración: fin de oración, o un salto de línea entre medio. */
+        $hay_salto = preg_match('/\R\s*$/u', $antes) === 1;
+        $cierra    = preg_match('/[.!…?]$/u', $respuesta) === 1;
+        if (! $hay_salto && ! $cierra) {
+            return $sin_separar;
+        }
+
+        return ['respuesta' => $respuesta, 'pregunta' => trim(mb_substr($segmento, $inicio))];
+    }
+
+    /**
      * Completa el paquete del agente con lo que todavía se le debe al lead del flujo de entrada.
      *
      * Se llama DESPUÉS del gate de respaldo documental, y no lo destraba nunca: si el gate frenó
@@ -1047,6 +1100,15 @@ class LeadFlujoEntradaService
         $texto_base     = $mensaje;
         if (substr($pregunta_final, -1) === '?') {
             array_pop($segmentos);
+
+            /* Si la pregunta viene pegada al final de una respuesta del mismo segmento («…todo en un solo lugar. ¿A qué se
+               dedica tu negocio?»), se separa: la respuesta se queda donde estaba y sólo la pregunta pasa detrás de los
+               puntos. Si no se puede aislar con seguridad, el segmento entero sigue siendo «la pregunta» (orden de antes). */
+            $partes_de_la_pregunta = self::separar_la_pregunta_final($pregunta_final);
+            if ($partes_de_la_pregunta['respuesta'] !== '') {
+                $segmentos[]    = $partes_de_la_pregunta['respuesta'];
+                $pregunta_final = $partes_de_la_pregunta['pregunta'];
+            }
             $texto_base = trim(implode("\n---\n", array_map('trim', $segmentos)));
         } else {
             $pregunta_final = '';

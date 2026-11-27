@@ -11518,7 +11518,7 @@ TXT;
              * página de acceso ni la demo directa; sólo el bloque corto de qué hacer si la pide con sus palabras.
              * La segunda llamada (con disponibilidad) no necesita esto: sin demo oculta es la única que llega con un
              * `solicita_disponibilidad` válido, y ahí `oculta_la_demo()` ya da false. */
-            $txt .= LeadFlujoEntradaService::bloque_de_la_demo_a_pedido();
+            $txt .= LeadFlujoEntradaService::bloque_de_la_demo_a_pedido((string) $lead->status);
         } elseif ($demo_directa) {
             /* Demo directa (misión demo-agendado-directo): el bloque trae los dos links, el email,
              * el estado de la demo y si hay instancia libre. Reemplaza al de la página inmersiva. */
