@@ -28,6 +28,8 @@ class DatabaseSeeder extends Seeder
             LeadPipelineStatusSeeder::class,
             // Estados simplificados del lead (embudo de Juan): en_implementacion y etiquetas nuevas.
             LeadPipelineStatusJuanSeeder::class,
+            // Charla antes de la demo: estado `acepto_probar` («Aceptó probar») detrás de `calificado`.
+            LeadPipelineStatusCharlaSeeder::class,
             LeadSeeder::class,
             FollowupRulesSeeder::class,
             // Plantillas Meta aprobadas para seguimientos automáticos directos.
