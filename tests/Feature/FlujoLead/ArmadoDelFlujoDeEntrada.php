@@ -74,10 +74,13 @@ trait ArmadoDelFlujoDeEntrada
      * @param bool $prendido true = `lead_whatsapp_flujo_entrada_activo` en '1'; false = en '0'.
      * @param bool $con_http_generico true registra además un stub que atiende cualquier otra URL (los tests que
      *                                extienden BaseDePruebaGratuita ya traen los suyos y pasan false).
+     * @param bool $charla true = «charla antes de la demo» prendida (`lead_whatsapp_charla_antes_de_la_demo_activa` en
+     *                     '1'); false (default) = apagada ('0'), que es el comportamiento de antes de la misión
+     *                     leads-charla-antes-de-la-demo: los tests que ya usaban este armado siguen probando ese camino.
      *
      * @return void
      */
-    protected function preparar_flujo_de_entrada(bool $prendido = true, bool $con_http_generico = true): void
+    protected function preparar_flujo_de_entrada(bool $prendido = true, bool $con_http_generico = true, bool $charla = false): void
     {
         Carbon::setTestNow(Carbon::parse(self::$AHORA_DEL_FLUJO, 'America/Argentina/Buenos_Aires'));
         Queue::fake();
@@ -102,6 +105,12 @@ trait ArmadoDelFlujoDeEntrada
         }
         AdminSetting::set('lead_whatsapp_flujo_textos_precargados', '');
         AdminSetting::set('lead_whatsapp_flujo_entrada_activo', $prendido ? '1' : '0');
+
+        /* Interruptor de la «charla antes de la demo» (misión leads-charla-antes-de-la-demo). Va como literal y no como
+           constante de `LeadFlujoEntradaService` porque la constante todavía no existe en este commit (y un `setUp`
+           que muere por una constante faltante rompe todo por el motivo equivocado). Default de producción: '1';
+           default de este armado: '0', para no cambiar lo que afirman los 24 archivos que lo usan. */
+        AdminSetting::set('lead_whatsapp_charla_antes_de_la_demo_activa', $charla ? '1' : '0');
 
         /* La fuente de precios: sin valor guardado rige el default del pedido (PreciosVigentesSettings). */
         AdminSetting::query()->where('key', 'precios_vigentes')->delete();
