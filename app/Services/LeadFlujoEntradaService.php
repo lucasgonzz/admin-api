@@ -968,7 +968,11 @@ class LeadFlujoEntradaService
             . "    la implementación (la llamada no tiene costo; la implementación es un pago único de PRECIOS VIGENTES), sin pedirle hora, y\n"
             . "    devolvé estado_sugerido: \"implementacion_pedida\".\n"
             . "  - No le pidas hora. No le pidas datos para calificarlo más allá de lo que ya pide el flujo.\n"
-            . "  - Si pregunta precios, dale los de PRECIOS VIGENTES (citá \"" . PreciosVigentesSettings::FUENTE_PARA_EL_GATE . "\" en fuentes_kb).\n"
+            . "  - No pidas el nombre, ni cuántos trabajan, ni qué sistema usa: con el rubro alcanza.\n"
+            . "  - Si pregunta precios: contestá con PRECIOS VIGENTES (citá \"" . PreciosVigentesSettings::FUENTE_PARA_EL_GATE . "\" en fuentes_kb)"
+            . ($hay_lugar
+                ? " y cerrá con el link de la prueba textual (estado_sugerido link_enviado).\n"
+                : ".\n")
             . "  - NO le ofrezcas la demo ni una llamada, NO devuelvas agendar_demo y NO le pidas disponibilidad.\n"
             . "    SALVO que el lead pida EXPLICITAMENTE una DEMO con sus palabras (un mensaje suyo, no el texto de un botón): ahí seguí el\n"
             . "    flujo de la demo de arriba.\n"
