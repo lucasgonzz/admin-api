@@ -287,6 +287,50 @@ class CorrerComandosEnUnaDemoPorClaudeTest extends TestCase
         );
     }
 
+    /* ------------------------------------------------------------------------------------------
+     | 1 ter. Binario de PHP de la línea de comando
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * 🔴 Una demo en VPS corre con `/usr/bin/php8.4`: el `php` por defecto del CLI es 7.4 y el
+     * vendor de la demo exige >=8.4.27, así que con `php` muere en platform_check (medido el
+     * 27/11/2026).
+     *
+     * @return void
+     */
+    public function test_la_linea_de_una_demo_vps_usa_php_8_4(): void
+    {
+        $demo = $this->demo();
+
+        $linea = (new DemoCommandRunner())->armar_linea(
+            $demo,
+            'db:seed',
+            '--class=VenderLayoutAgilSeeder --force'
+        );
+
+        $this->assertStringContainsString(
+            '/usr/bin/php8.4 artisan db:seed --class=VenderLayoutAgilSeeder --force --no-ansi',
+            $linea
+        );
+        $this->assertStringStartsWith('cd ', $linea);
+    }
+
+    /**
+     * En hosting compartido el binario sigue siendo `php`.
+     *
+     * @return void
+     */
+    public function test_la_linea_de_una_demo_en_hosting_compartido_usa_php(): void
+    {
+        $demo = $this->demo();
+        $demo->erp_hosting_type = 'shared_hosting';
+
+        $linea = (new DemoCommandRunner())->armar_linea($demo, 'queue:restart', '');
+
+        $this->assertStringContainsString(' && php artisan queue:restart --no-ansi', $linea);
+        $this->assertStringNotContainsString('php8.4', $linea);
+    }
+
     /**
      * Un comando sin argumentos no acepta ninguno: `queue:restart --force` no pasa.
      *
