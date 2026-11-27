@@ -1035,17 +1035,41 @@ class LeadFlujoEntradaService
             return $parsed;
         }
 
+        /* Si el último mensaje (segmento separado por `---`) de la IA termina en pregunta, esa pregunta tiene que seguir
+           siendo lo último que lee el lead: los puntos que agrega el flujo van ANTES de ella y no detrás («pregunta →
+           dos formas → página», ensayo 707). Sin pregunta final, los puntos van al final como siempre. */
+        $segmentos      = preg_split('/\R---\R/u', $mensaje) ?: [$mensaje];
+        $pregunta_final = trim((string) end($segmentos));
+        $texto_base     = $mensaje;
+        if (substr($pregunta_final, -1) === '?') {
+            array_pop($segmentos);
+            $texto_base = trim(implode("\n---\n", array_map('trim', $segmentos)));
+        } else {
+            $pregunta_final = '';
+        }
+
+        /* Los textos de los puntos que faltan, cada uno con su separador por delante. */
         $agregados = [];
+        $nuevos    = '';
         foreach (self::puntos_debidos($lead) as $punto) {
             if (self::cumple_el_ancla($punto, $mensaje)) {
                 continue;
             }
-            $mensaje    .= "\n---\n" . self::texto_del_punto($punto);
+            $nuevos     .= "\n---\n" . self::texto_del_punto($punto);
             $agregados[] = $punto;
         }
 
         if (empty($agregados)) {
             return $parsed;
+        }
+
+        /* Sin texto antes de la pregunta (la IA sólo preguntó) se saca el primer separador para no empezar con `---`. */
+        $mensaje = $texto_base . $nuevos;
+        if ($texto_base === '') {
+            $mensaje = ltrim($nuevos, "\n-");
+        }
+        if ($pregunta_final !== '') {
+            $mensaje .= "\n---\n" . $pregunta_final;
         }
 
         $parsed['mensaje_sugerido'] = $mensaje;
