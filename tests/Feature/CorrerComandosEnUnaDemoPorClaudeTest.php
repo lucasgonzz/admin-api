@@ -178,6 +178,115 @@ class CorrerComandosEnUnaDemoPorClaudeTest extends TestCase
         }
     }
 
+    /* ------------------------------------------------------------------------------------------
+     | 1 bis. db:seed acotado al seeder del Diseño ágil de Vender
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * CA1: `db:seed` está en la lista blanca y su patrón acepta SOLO el seeder del Diseño ágil,
+     * con `--force` opcional (en producción `db:seed` pide confirmación y sin `--force` se cuelga).
+     *
+     * @return void
+     */
+    public function test_db_seed_acepta_solo_el_seeder_del_diseno_agil(): void
+    {
+        $this->assertArrayHasKey('db:seed', DemoCommandRunner::COMANDOS_PERMITIDOS);
+
+        $patron = DemoCommandRunner::COMANDOS_PERMITIDOS['db:seed'];
+
+        $validos = [
+            '--class=VenderLayoutAgilSeeder',
+            '--class=VenderLayoutAgilSeeder --force',
+        ];
+
+        foreach ($validos as $argumentos) {
+            $this->assertSame(
+                1,
+                preg_match($patron, $argumentos),
+                'El patrón rechaza un argumento legítimo: "' . $argumentos . '"'
+            );
+        }
+    }
+
+    /**
+     * CA2: cualquier otra clase, inyección, flags extra o argumentos vacíos se rechazan.
+     *
+     * @return void
+     */
+    public function test_db_seed_rechaza_otras_clases_e_inyeccion(): void
+    {
+        $this->assertArrayHasKey('db:seed', DemoCommandRunner::COMANDOS_PERMITIDOS);
+
+        $patron = DemoCommandRunner::COMANDOS_PERMITIDOS['db:seed'];
+
+        $invalidos = [
+            '',
+            '--force',
+            '--class=OtraClase',
+            '--class=Database\\Seeders\\X',
+            '--class=VenderLayoutAgilSeeder; ls',
+            '--class=VenderLayoutAgilSeeder && id',
+            '--class=VenderLayoutAgilSeeder --database=x',
+            '--class=VenderLayoutAgilSeeder --force --force',
+            '--force --class=VenderLayoutAgilSeeder',
+            '--class=VenderLayoutAgilSeederX',
+            '--class=VenderLayoutAgilSeeder  --force',
+            "--class=VenderLayoutAgilSeeder\n",
+            "--class=VenderLayoutAgilSeeder\nrm -rf /",
+        ];
+
+        foreach ($invalidos as $argumentos) {
+            $this->assertSame(
+                0,
+                preg_match($patron, $argumentos),
+                'El patrón deja pasar un argumento que debía rechazar: "' . $argumentos . '"'
+            );
+        }
+    }
+
+    /**
+     * CA3: el 422 de un comando no permitido lista `db:seed` entre los permitidos, y un
+     * `db:seed` con otra clase se rechaza con 422 antes de abrir el SSH.
+     *
+     * @return void
+     */
+    public function test_el_422_lista_db_seed_y_rechaza_otra_clase(): void
+    {
+        $demo = $this->demo();
+
+        $respuesta = $this->postJson('/api/claude/demo-commands', [
+            'demo_id'           => $demo->id,
+            'comando'           => 'migrate:fresh',
+            'confirm_demo_name' => self::URL_DEMO,
+            'dry_run'           => false,
+        ], $this->headers());
+
+        $respuesta->assertStatus(422);
+        $this->assertContains('db:seed', $respuesta->json('comandos_permitidos'));
+
+        $otra = $this->postJson('/api/claude/demo-commands', [
+            'demo_id'           => $demo->id,
+            'comando'           => 'db:seed',
+            'argumentos'        => '--class=OtraClase',
+            'confirm_demo_name' => self::URL_DEMO,
+            // 🔴 dry_run=false A PROPÓSITO: el simulacro (dry_run=true) NO valida los argumentos,
+            // solo la lista blanca; es un comportamiento preexistente para todos los comandos. El
+            // patrón de argumentos lo aplica el runner, que solo corre con dry_run=false, y lo hace
+            // ANTES de buscar credencial y de abrir el SSH.
+            'dry_run'           => false,
+        ], $this->headers());
+
+        $otra->assertStatus(422);
+
+        // Se afirma el MOTIVO del 422 y no solo el código: el controlador convierte cualquier
+        // Throwable (por ejemplo un SSH caído) en 422, así que sin esto el test pasaría igual
+        // aunque el patrón dejara pasar la clase. El runner lanza este texto antes de tocar el SSH.
+        $this->assertStringContainsString(
+            'no tienen la forma permitida',
+            (string) $otra->json('message') . (string) $otra->getContent()
+        );
+    }
+
     /**
      * Un comando sin argumentos no acepta ninguno: `queue:restart --force` no pasa.
      *
