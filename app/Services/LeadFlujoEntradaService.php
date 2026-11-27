@@ -988,7 +988,8 @@ class LeadFlujoEntradaService
                 . "    eso: la página no es el camino para arrancar. Link (copiar textual, sin cambiarle nada): " . $link . "\n";
         } else {
             $txt .= "  - Si dice «cómo arranco», «cómo empiezo», «me interesa», «quiero empezar» o «cómo hago» (o algo parecido): hoy NO hay lugar,\n"
-                . "    NO le pases ningún link. Decile: Juan te escribe para darte el acceso. NO le mandes comerciocity.com como respuesta a eso.\n";
+                . "    NO le pases ningún link. Decile: Juan te escribe para darte el acceso. Y devolvé requiere_intervencion_humana: true con el\n"
+                . "    motivo (es lo único que le avisa a Juan). NO le mandes comerciocity.com como respuesta a eso.\n";
         }
 
         /* La carga (ensayo del 26/11/2026): Martín le ofreció «te doy una mano para subirlo» a quien pidió la carga gratis.
@@ -1003,6 +1004,12 @@ class LeadFlujoEntradaService
                 . "    adentro de la prueba hay un video corto que lo guía para subir su Excel él mismo. Aclará que si prefiere que lo carguemos\n"
                 . "    nosotros, eso es la implementación paga (pago único de " . $precio . ") y la coordina Juan.\n"
                 . "    Link (copiar textual, sin cambiarle nada): " . $link . "\n";
+        } else {
+            /* Sin lugar no hay prueba ni video a donde mandarlo: la prohibición de ayudar con la carga sigue y, como se le
+               promete que Juan escribe, se pide la intervención humana (la regla vigente de arriba para «probar»). */
+            $txt .= "  - Si pide que se lo carguen GRATIS (o si le podés cargar vos los productos): hoy NO hay lugar, NO le pases ningún link ni\n"
+                . "    le ofrezcas ayuda con la carga. Decile: Juan te escribe para darte el acceso; si prefiere que lo carguemos nosotros, eso es la\n"
+                . "    implementación paga (pago único de " . $precio . "). Y devolvé requiere_intervencion_humana: true con el motivo.\n";
         }
 
         $txt .= "  - Si quiere que se lo carguen nosotros o pide la implementación: decile que lo llama Juan, del equipo, hoy, para contarle cómo es\n"
