@@ -91,36 +91,45 @@ class LeadVerificacionAgendamientoNotificationService
          * suscritos por campanita se suman (lo resuelve el resolver).
          *
          * send_to_admin() ya es no-op silencioso para el que no tiene device registrado. */
-        $admin_ids  = LeadNotificationAudienceResolver::for_verificacion($lead);
-        $con_device = LeadNotificationAudienceResolver::ids_con_device_de_push($admin_ids);
-        $nombres    = Admin::whereIn('id', $admin_ids)->pluck('name', 'id');
-
-        /* Acumula los nombres de los admins avisados, por el canal que sea. */
         $notified = [];
 
-        foreach ($admin_ids as $admin_id) {
-            if (! in_array($admin_id, $con_device, true)) {
-                /* Sin device no hay a dónde mandar el push (send_to_admin() sería no-op igual). Si
-                   además tiene el flag y teléfono, lo alcanza el respaldo de abajo. */
-                continue;
+        /* Misión push-mensajes-por-aprobar (26/11/2026): antes de mandar se RECLAMA el aviso único del mensaje. Si ya
+         * se avisó (el Caso A vuelve a llamar sobre el mismo mensaje), lo atiende otro proceso o quedó agrupado en un
+         * aviso reciente de la misma conversación, el claim devuelve null y no sale un segundo push. El contenido es el
+         * único de toda la app. El WhatsApp de respaldo de abajo no cambia. */
+        $aviso = app(PendingApprovalPushService::class)->claim_direct($message);
+
+        if ($aviso !== null) {
+            $admin_ids  = LeadNotificationAudienceResolver::for_verificacion($lead);
+            $con_device = LeadNotificationAudienceResolver::ids_con_device_de_push($admin_ids);
+            $nombres    = Admin::whereIn('id', $admin_ids)->pluck('name', 'id');
+
+            /* Admins a los que efectivamente se les despachó el push. */
+            $ids_pusheados = [];
+
+            foreach ($admin_ids as $admin_id) {
+                if (! in_array($admin_id, $con_device, true)) {
+                    /* Sin device no hay a dónde mandar el push (send_to_admin() sería no-op igual). Si
+                       además tiene el flag y teléfono, lo alcanza el respaldo de abajo. */
+                    continue;
+                }
+
+                try {
+                    $this->send_push($admin_id, $aviso['title'], $aviso['body'], $aviso['data']);
+
+                    $ids_pusheados[] = (int) $admin_id;
+                    $notified[]      = (string) ($nombres[$admin_id] ?? ('Admin #' . $admin_id));
+                } catch (\Throwable $e) {
+                    Log::error('LeadVerificacionAgendamientoNotificationService: error al enviar push.', [
+                        'lead_id'  => $lead->id,
+                        'admin_id' => $admin_id,
+                        'error'    => $e->getMessage(),
+                    ]);
+                }
             }
 
-            try {
-                $this->send_push(
-                    $admin_id,
-                    'Lead coordinando agenda — revisar mensaje',
-                    "{$nombre_lead} está coordinando la demo. Hay un mensaje esperando tu aprobación.",
-                    ['url' => '/leads?lead_id=' . $lead->id]
-                );
-
-                $notified[] = (string) ($nombres[$admin_id] ?? ('Admin #' . $admin_id));
-            } catch (\Throwable $e) {
-                Log::error('LeadVerificacionAgendamientoNotificationService: error al enviar push.', [
-                    'lead_id'  => $lead->id,
-                    'admin_id' => $admin_id,
-                    'error'    => $e->getMessage(),
-                ]);
-            }
+            /* Deja asentado a quién se le mandó (no hace nada si el claim vino sin registro). */
+            app(PendingApprovalPushService::class)->confirm_direct($aviso['notification_id'], $ids_pusheados);
         }
 
         /* --- Canal 2: WhatsApp de respaldo, solo a admins con el flag, teléfono cargado y SIN device ---
