@@ -237,6 +237,98 @@ class CharlaAceptaProbarTest extends BaseDelTableroDeJuan
     }
 
     // ------------------------------------------------------------------------------------------
+    // Ronda 2 — toda forma de pedir o agendar la demo es el sí (hallazgo 2 del Revisor)
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * Cuántos pedidos REALES se hicieron a Anthropic (`Http::recorded()`; `$this->pedidos_a_la_ia` cuenta el doble en esta clase
+     * por el doble `Http::fake` del setUp).
+     *
+     * @return int
+     */
+    private function pedidos_reales_a_la_ia(): int
+    {
+        $total = 0;
+        foreach (\Illuminate\Support\Facades\Http::recorded() as $par) {
+            if (strpos((string) $par[0]->url(), 'api.anthropic.com') !== false) {
+                $total++;
+            }
+        }
+
+        return $total;
+    }
+
+    /**
+     * Ronda 2, hallazgo 2. Con la charla prendida, el booleano `solicita_disponibilidad: true` junto a `estado_sugerido:
+     * acepto_probar` no dispara la segunda llamada de horarios: un solo pedido a la IA, el lead queda en `acepto_probar` y no hay demo.
+     *
+     * @return void
+     */
+    public function test_el_booleano_de_disponibilidad_con_acepto_no_hace_la_segunda_llamada(): void
+    {
+        $lead = $this->lead_en_charla('contactado');
+
+        $this->turno($lead, $this->paquete_ia('¡Dale! Te muestro la plataforma.', 'acepto_probar', 'conversacional', [], ['solicita_disponibilidad' => true]));
+
+        $this->assertSame('acepto_probar', (string) $lead->fresh()->status);
+        $this->assertSame(1, $this->pedidos_reales_a_la_ia(), 'Una sola llamada a la IA: sin pedido de horarios.');
+        $this->assertNull($lead->fresh()->demo_id, 'No se agenda ninguna demo.');
+    }
+
+    /**
+     * Ronda 2, hallazgo 2. `estado_sugerido: demo_agendada` (la IA confirma una demo) en la charla es el sí: `acepto_probar`, un solo pedido
+     * a la IA y ninguna demo asignada.
+     *
+     * @return void
+     */
+    public function test_demo_agendada_en_la_charla_es_el_si(): void
+    {
+        $lead = $this->lead_en_charla('contactado');
+
+        $this->turno($lead, $this->paquete_ia('¡Listo! Quedamos para la demo.', 'demo_agendada'));
+
+        $this->assertSame('acepto_probar', (string) $lead->fresh()->status, 'Confirmar una demo en la charla es el sí, no una demo agendada.');
+        $this->assertSame(1, $this->pedidos_reales_a_la_ia(), 'Una sola llamada a la IA.');
+        $this->assertNull($lead->fresh()->demo_id, 'No se agenda ninguna demo.');
+        $this->assertCount(1, $this->tarjetas_del_lead($lead), 'Entra a Interesados como cualquier sí.');
+    }
+
+    /**
+     * Ronda 2, hallazgo 2. Un `agendar_demo` en el paquete (aunque el estado sugerido sea otro) no agenda nada en la charla: el lead pasa a
+     * `acepto_probar`, un solo pedido a la IA y sin demo.
+     *
+     * @return void
+     */
+    public function test_agendar_demo_en_la_charla_no_agenda_y_es_el_si(): void
+    {
+        $lead = $this->lead_en_charla('contactado');
+
+        $this->turno($lead, $this->paquete_ia('¡Dale! Te muestro la plataforma.', 'demo_agendada', 'conversacional', [], ['agendar_demo' => ['ahora' => true]]));
+
+        $this->assertSame('acepto_probar', (string) $lead->fresh()->status);
+        $this->assertSame(1, $this->pedidos_reales_a_la_ia(), 'Una sola llamada a la IA.');
+        $this->assertNull($lead->fresh()->demo_id, 'agendar_demo no asigna ninguna demo en la charla.');
+    }
+
+    /**
+     * Ronda 2, nota del Revisor. Un `acepto_probar` sugerido a un lead que NO está en la charla (interruptor apagado) no se aplica: el
+     * estado sigue y la sugerencia no ofrece el cambio (el camino genérico no validaba los 2 mensajes).
+     *
+     * @return void
+     */
+    public function test_acepto_probar_sin_la_charla_no_se_aplica(): void
+    {
+        AdminSetting::set(self::KEY_CHARLA, '0');
+        $lead = $this->lead_en_charla('contactado');
+
+        $mensaje = $this->turno($lead, $this->paquete_ia('¡Genial! Te llama Juan.', 'acepto_probar'));
+
+        $this->assertSame('contactado', (string) $lead->fresh()->status, 'Sin la charla el sí no existe.');
+        $this->assertEmpty((string) $mensaje->fresh()->suggested_lead_status, 'Y no se ofrece el cambio de estado.');
+        $this->assertSame(0, AdminTask::query()->where('lead_id', $lead->id)->where('created_via', 'embudo_acepto_probar')->count());
+    }
+
+    // ------------------------------------------------------------------------------------------
     // El bloque en acepto_probar
     // ------------------------------------------------------------------------------------------
 

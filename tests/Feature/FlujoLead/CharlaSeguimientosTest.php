@@ -215,6 +215,126 @@ class CharlaSeguimientosTest extends TestCase
     }
 
     // ------------------------------------------------------------------------------------------
+    // Ronda 2 — filas programadas ANTES de prender la charla (hallazgo 1 del Revisor)
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * Ronda 2, hallazgo 1. Un `nuevo_22h` programado con la charla apagada (guarda las dos formas de arrancar) y despachado con la charla
+     * prendida (el deploy) sale con el texto de charla, no con el viejo.
+     *
+     * @return void
+     */
+    public function test_nuevo_22h_viejo_sale_con_el_texto_de_charla(): void
+    {
+        AdminSetting::set(self::KEY_CHARLA, '0');
+        [$lead] = $this->llegar_y_recibir_el_paso_1(self::PRIMER_MENSAJE_SIN_PROBAR);
+        $viejo = (string) $this->unico_pendiente($lead, 'nuevo_22h')->content;
+        $this->assertSame($this->texto_respuesta_1(), $viejo, 'Precondición: la fila guarda las dos formas de arrancar.');
+
+        AdminSetting::set(self::KEY_CHARLA, '1');
+        $espia = $this->espiar_envios();
+        $this->despachar_cuando_vence($this->unico_pendiente($lead, 'nuevo_22h'));
+
+        $textos = array_column($espia->textos, 'body');
+        $this->assertContains(self::TEXTO_NUEVO_22H, $textos, 'Sale el texto de charla.');
+        $this->assertNotContains($viejo, $textos, 'No sale el texto viejo con las dos formas de arrancar.');
+    }
+
+    /**
+     * Ronda 2, hallazgo 1. Un `conversando_22h` viejo («prueba gratis…») y la plantilla `conversando_dia_3` («¿Querés que te pase el
+     * link?») programados con la charla apagada no salen con el texto viejo ni la plantilla al despacharlos con la charla prendida.
+     *
+     * @return void
+     */
+    public function test_conversando_viejo_no_sale_con_texto_viejo_ni_dia_3(): void
+    {
+        AdminSetting::set(self::KEY_CHARLA, '0');
+        AdminSetting::set('lead_embudo_plantilla_conversando_dia_3', self::PLANTILLA_CONVERSANDO_DIA_3);
+        $this->plantilla_aprobada(self::PLANTILLA_CONVERSANDO_DIA_3);
+
+        [$lead, $telefono] = $this->llegar_y_recibir_el_paso_1(self::PRIMER_MENSAJE_SIN_PROBAR);
+        $this->avanzar(300);
+        $this->postear_kapso($telefono, 'Ferretería, unos 4000 productos')->assertStatus(200);
+        $jobs = $this->jobs_encolados(SendLeadDosFormasJob::class);
+        $this->avanzar(3);
+        $this->correr_job($jobs->first());
+        $this->assertSame(['conversando_22h', 'conversando_dia_3'], $this->claves_pendientes($lead), 'Precondición: filas viejas programadas.');
+        $viejo = (string) $this->unico_pendiente($lead, 'conversando_22h')->content;
+
+        AdminSetting::set(self::KEY_CHARLA, '1');
+        $espia = $this->espiar_envios();
+        $this->despachar_cuando_vence($this->unico_pendiente($lead, 'conversando_22h'));
+        $this->despachar_cuando_vence($this->unico_pendiente($lead, 'conversando_dia_3'));
+
+        $this->assertCount(0, $espia->plantillas, 'La plantilla del día 3 (ofrece el link) no sale en la charla.');
+        $this->assertNotContains($viejo, array_column($espia->textos, 'body'), 'El texto viejo de conversando_22h no sale.');
+        $dia_3 = $this->pasos_de($lead)->where('paso_embudo', 'conversando_dia_3')->first();
+        $this->assertSame(LeadScheduledMessage::STATUS_CANCELADO, (string) $dia_3->status, 'El día 3 queda cancelado.');
+    }
+
+    /**
+     * Ronda 2, hallazgo 1 (no-regresión). Con la charla apagada el paso viejo sale tal cual, como hoy. Pasa ya.
+     *
+     * @return void
+     */
+    public function test_nuevo_22h_con_la_charla_apagada_sale_como_hoy(): void
+    {
+        AdminSetting::set(self::KEY_CHARLA, '0');
+        [$lead] = $this->llegar_y_recibir_el_paso_1(self::PRIMER_MENSAJE_SIN_PROBAR);
+        $espia = $this->espiar_envios();
+
+        $this->despachar_cuando_vence($this->unico_pendiente($lead, 'nuevo_22h'));
+
+        $this->assertContains($this->texto_respuesta_1(), array_column($espia->textos, 'body'), 'Apagada: salen las dos formas, como hoy.');
+    }
+
+    /**
+     * Espía de `WhatsappSendService` que guarda textos y plantillas pedidos, registrado en el contenedor.
+     *
+     * @return WhatsappSendService
+     */
+    private function espiar_envios(): \App\Services\WhatsappSendService
+    {
+        $espia = new class extends \App\Services\WhatsappSendService {
+            /** @var array<int, array<string, mixed>> Plantillas pedidas. */
+            public $plantillas = [];
+
+            /** @var array<int, array<string, string>> Textos pedidos. */
+            public $textos = [];
+
+            public function send_template(string $to, string $template_name, array $variables = [], string $language_code = 'es_AR', ?string $context = null): ?string
+            {
+                $this->plantillas[] = ['to' => $to, 'template_name' => $template_name];
+
+                return 'wamid.ESPIA.' . uniqid('', true);
+            }
+
+            public function send_text(string $to, string $body, ?string $context = null, bool $skip_failure_notification = false): ?string
+            {
+                $this->textos[] = ['to' => $to, 'body' => $body];
+
+                return 'wamid.ESPIA.' . uniqid('', true);
+            }
+        };
+        $this->app->instance(\App\Services\WhatsappSendService::class, $espia);
+
+        return $espia;
+    }
+
+    /**
+     * Corre el reloj un minuto pasada la hora de la fila y despacha lo vencido, como el comando de cada minuto.
+     *
+     * @param LeadScheduledMessage $paso
+     *
+     * @return void
+     */
+    private function despachar_cuando_vence(LeadScheduledMessage $paso): void
+    {
+        \Carbon\Carbon::setTestNow(\Carbon\Carbon::instance($paso->scheduled_send_at)->addMinute());
+        \Illuminate\Support\Facades\Artisan::call('leads:send-scheduled-messages');
+    }
+
+    // ------------------------------------------------------------------------------------------
     // Armado
     // ------------------------------------------------------------------------------------------
 
