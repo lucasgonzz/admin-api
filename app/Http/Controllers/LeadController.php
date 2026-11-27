@@ -3345,14 +3345,16 @@ class LeadController extends Controller
         LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
 
         // Bienvenida inmediata + job de presentación (igual que webhook real).
+        // Se le pasa el texto simulado, igual que el webhook real (WhatsappWebhookController): sin él el onboarding no ve el
+        // primer mensaje, no entra al flujo de entrada nuevo y cae en la bienvenida vieja (ensayo del lead 711).
         if ($run_onboarding) {
-            $onboarding_service->send_welcome_and_schedule_presentation($lead, $display_name);
+            $onboarding_service->send_welcome_and_schedule_presentation($lead, $display_name, $content);
         } elseif (
             (string) $lead->status === 'nuevo'
             && ! $onboarding_service->has_auto_message_been_sent($lead)
         ) {
-            // Recuperación: inbound previo sin auto (p. ej. simulación anterior sin onboarding).
-            $onboarding_service->send_welcome_and_schedule_presentation($lead, $display_name);
+            // Recuperación: inbound previo sin auto (p. ej. simulación anterior sin onboarding). También lleva el texto.
+            $onboarding_service->send_welcome_and_schedule_presentation($lead, $display_name, $content);
         }
 
         // Disparar el mismo flujo de sugerencia IA con debounce que usa el webhook real.
