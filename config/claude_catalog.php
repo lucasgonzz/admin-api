@@ -3150,6 +3150,118 @@ return [
                 ['nombre' => 'cola', 'obligatorio' => false, 'validacion' => 'nullable|array: ok, fallidas, en_espera (≤ 50: slug obligatorio; titulo, prioridad in:urgent,high,normal,low, origen, encolada_at, espera_min, motivos in:memoria,swap,cpu,cupo,pesados, intentos), ultimo_chequeo (at obligatorio; RAM, swap, carga, núcleos y umbrales numéricos ≥ 0, lanzadas ≤ 20) y chequeos (≤ 20, cada uno con at obligatorio)', 'que_es' => 'La cola de misiones esperando recursos (sólo lectura de lo que ya escribe cola_misiones.py). No son mesas ni cuentan como misiones en curso. Sin `cola` el bloque guardado se borra.'],
             ],
         ],
+        /* Seguimiento de misiones en el Admin (misión dotin-misiones-admin, 26/11/2026). La Gamer publica estado, eventos y
+           preguntas y consume las respuestas que Lucas (Admin) o Dotin (MCP decisiones) registraron; ver ClaudeMissionsController. */
+        'PUT api/claude/missions/{slug}' => [
+            'para_que'     => 'La Gamer publica el estado COMPLETO de una misión (upsert por `seq`): estado (en_cola, activa, pausada_tecnica, esperando_decision, terminada, detenida), fase, último avance, qué falta, motivo, ejecución, actividad real y pregunta abierta. Un `seq` menor o igual al guardado no se aplica (200 aplicado=false, motivo seq_viejo). `fase_desde` sólo cambia si cambia la fase y `estado_desde` sólo si cambia el estado. `terminada` exige evidencia (merges repo@rama=sha o archivos con sha256), si no es 422 terminada_sin_evidencia. La frescura se mide con la hora del Admin (`reportado_at`). Con `pregunta_abierta` distinta (o null) cierra las otras preguntas abiertas y rechaza sus respuestas pendientes.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Sólo escribe filas del admin (mission_*). No toca el sistema de ningún cliente ni manda mensajes.',
+                'Idempotente por `seq`: reenviar lo mismo no cambia nada.',
+                'Se valida todo antes de escribir (422 con `errors`); los textos largos se recortan.',
+                'Sin ninguna ruta que registre respuestas: esta clave sólo publica.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'seq', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'Orden de la publicación.'],
+                ['nombre' => 'host', 'obligatorio' => true, 'validacion' => 'required|string|max:60', 'que_es' => 'PC que reporta.'],
+                ['nombre' => 'estado', 'obligatorio' => true, 'validacion' => 'required|in:en_cola,activa,pausada_tecnica,esperando_decision,terminada,detenida', 'que_es' => 'Estado del seguimiento.'],
+                ['nombre' => 'evidencia', 'obligatorio' => false, 'validacion' => 'nullable|array: merges (≥1, ^[a-z-]+@[a-z0-9._/-]+=[0-9a-f]{7,40}$) o archivos (≥1: ruta ≤ 200, sha256 64 hex)', 'que_es' => 'Obligatoria si estado=terminada.'],
+                ['nombre' => 'pregunta_abierta', 'obligatorio' => false, 'validacion' => 'nullable|array: question_uid, revision', 'que_es' => 'La pregunta que sigue abierta (null = ninguna).'],
+                ['nombre' => 'titulo, origen, pedido_id, hilo, repos, fase, fase_desde, estado_desde, ultimo_avance, pendiente, motivo, proximo_paso, ejecucion_n, intentos_tecnicos, arranque_confirmado_at, ultima_actividad_real_at', 'obligatorio' => false, 'validacion' => 'nullable; formatos en ClaudeMissionsController / plan §2.2.2', 'que_es' => 'El resto del estado.'],
+            ],
+        ],
+        'POST api/claude/missions/{slug}/events' => [
+            'para_que'     => 'Un hito del historial de la misión (arranque_confirmado, corte_tecnico, reanudacion, pregunta, respuesta_aplicada, detenida, terminada, fase). Idempotente por `event_uid`: repetido da 200 duplicado=true. Misión inexistente: 404 mision_inexistente.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Sólo escribe filas del admin (mission_*). No toca el sistema de ningún cliente ni manda mensajes.',
+                'Idempotente por event_uid.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'event_uid', 'obligatorio' => true, 'validacion' => 'required|regex ^[A-Za-z0-9-]{8,64}$', 'que_es' => 'Clave de idempotencia.'],
+                ['nombre' => 'tipo', 'obligatorio' => true, 'validacion' => 'required|in:arranque_confirmado,corte_tecnico,reanudacion,pregunta,respuesta_aplicada,detenida,terminada,fase', 'que_es' => 'Tipo de hito.'],
+                ['nombre' => 'ocurrido_at', 'obligatorio' => true, 'validacion' => 'required|date', 'que_es' => 'Cuándo pasó.'],
+                ['nombre' => 'estado, fase, texto', 'obligatorio' => false, 'validacion' => 'nullable (texto se recorta a 300)', 'que_es' => 'Detalle.'],
+            ],
+        ],
+        'POST api/claude/missions/{slug}/questions' => [
+            'para_que'     => 'La Gamer publica una pregunta de decisión para Lucas (2 a 6 opciones con su impacto, una recomendada, tipo ordinaria o sensible) o una revisión nueva de la misma. Uid nuevo: 201 y reemplaza a la abierta; misma revisión: 200 duplicada; revisión mayor: actualiza y rechaza la respuesta de la revisión vieja; revisión menor 409 revision_vieja; uid ya resuelto 409 pregunta_cerrada; de otra misión 409 pregunta_ajena.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Sólo escribe filas del admin (mission_*). No toca el sistema de ningún cliente ni manda mensajes.',
+                'Idempotente por question_uid y revisión.',
+                'Una pregunta sensible nunca se responde por el Admin ni por MCP.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'question_uid', 'obligatorio' => true, 'validacion' => 'required|uuid', 'que_es' => 'Identificador de la pregunta.'],
+                ['nombre' => 'revision', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'Revisión.'],
+                ['nombre' => 'tipo', 'obligatorio' => true, 'validacion' => 'required|in:ordinaria,sensible', 'que_es' => 'Sensible = OK personal de Lucas.'],
+                ['nombre' => 'pregunta', 'obligatorio' => true, 'validacion' => 'required|string|max:500', 'que_es' => 'Texto.'],
+                ['nombre' => 'opciones', 'obligatorio' => true, 'validacion' => 'required|array|min:2|max:6: clave (^[A-Za-z0-9_-]{1,20}$, distinta), texto ≤ 200, impacto ≤ 300', 'que_es' => 'Opciones.'],
+                ['nombre' => 'recomendada', 'obligatorio' => false, 'validacion' => 'nullable|una de las claves', 'que_es' => 'Opción recomendada.'],
+            ],
+        ],
+        'GET api/claude/missions/answers/pending' => [
+            'para_que'     => 'Las respuestas registradas por Lucas o Dotin que la Gamer todavía tiene que tomar (estado registrada o reclamada), por id ascendente, SIN `opcion` ni `texto`: el aviso no es la respuesta. Con `host` sólo las misiones de esa PC.',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [
+            ],
+            'parametros'   => [
+                ['nombre' => 'host', 'obligatorio' => false, 'validacion' => 'nullable|string', 'que_es' => 'Sólo las misiones de esa PC.'],
+                ['nombre' => 'limit', 'obligatorio' => false, 'validacion' => 'nullable|integer (por defecto 20, tope 100)', 'que_es' => 'Cantidad máxima.'],
+            ],
+        ],
+        'POST api/claude/missions/answers/{id}/claim' => [
+            'para_que'     => 'La Gamer reclama una respuesta con su claim_token: registrada pasa a reclamada. Mismo token otra vez: 200; otro token: 409 reclamada_por_otro; aplicada 409 ya_aplicada; rechazada 409 rechazada. No devuelve el contenido.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Sólo escribe filas del admin (mission_*). No toca el sistema de ningún cliente ni manda mensajes.',
+                'Idempotente por claim_token.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'claim_token', 'obligatorio' => true, 'validacion' => 'required|uuid', 'que_es' => 'Token que la Gamer genera y guarda ANTES de reclamar; identifica a quien la reclamó.'],
+            ],
+        ],
+        'GET api/claude/missions/{slug}/questions/{uid}/answer' => [
+            'para_que'     => 'La pregunta y su respuesta vigente (registrada, reclamada o aplicada) CON opción y texto, para que la misión la lea. Pregunta de otra misión: 409 pregunta_ajena; sin respuesta: 404 sin_respuesta.',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [
+            ],
+            'parametros'   => [
+            ],
+        ],
+        'POST api/claude/missions/answers/{id}/applied' => [
+            'para_que'     => 'La Gamer confirma que aplicó la respuesta: reclamada pasa a aplicada y la pregunta también. Repetido con el mismo token: 200 ya_aplicada=true sin mover applied_at; token distinto 409 token_distinto; sin reclamar 409 sin_reclamar; rechazada 409.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Sólo escribe filas del admin (mission_*). No toca el sistema de ningún cliente ni manda mensajes.',
+                'Idempotente: una sola aplicación.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'claim_token', 'obligatorio' => true, 'validacion' => 'required|uuid', 'que_es' => 'Token que la Gamer genera y guarda ANTES de reclamar; identifica a quien la reclamó.'],
+                ['nombre' => 'ejecucion_n', 'obligatorio' => true, 'validacion' => 'required|integer|min:0', 'que_es' => 'Ejecución que la aplicó.'],
+            ],
+        ],
+        'POST api/claude/missions/answers/{id}/reject' => [
+            'para_que'     => 'La Gamer descarta una respuesta (ajena, obsoleta, cerrada, mision_inexistente, sensible u otro): queda rechazada y la pregunta cerrada con ese motivo (con `otro` vuelve a abierta). Una aplicada es 409 ya_aplicada; repetir sobre una rechazada es 200.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Sólo escribe filas del admin (mission_*). No toca el sistema de ningún cliente ni manda mensajes.',
+                'Idempotente.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'motivo', 'obligatorio' => true, 'validacion' => 'required|in:ajena,obsoleta,cerrada,mision_inexistente,sensible,otro', 'que_es' => 'Por qué se descarta.'],
+                ['nombre' => 'detalle', 'obligatorio' => false, 'validacion' => 'nullable|string (se recorta a 300)', 'que_es' => 'Detalle.'],
+            ],
+        ],
     ],
 
     /*

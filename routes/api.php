@@ -959,6 +959,19 @@ Route::middleware('claude.task.key')
            minuto cómo está cada slot del pool. Upsert por slot + pulso en admin_settings; no toca nada más. */
         Route::post('local/oficina', 'Api\ClaudeLocalOficinaController@store_json');
 
+        /* Seguimiento de misiones en el Admin (misión dotin-misiones-admin, 26/11/2026): la Gamer publica el estado, los
+           eventos y las preguntas de cada misión y consume las respuestas que Lucas dio en el Admin (pending, claim,
+           respuesta, applied, reject). `{slug}` es el de la misión (`cc:<slug>` en los datos). Esta clave NO registra
+           respuestas: las registra Lucas (Admin) o Dotin (conector MCP de decisiones). */
+        Route::put('missions/{slug}', [\App\Http\Controllers\Api\ClaudeMissionsController::class, 'publicar_estado'])->where('slug', '[a-z0-9][a-z0-9._-]{0,76}');
+        Route::post('missions/{slug}/events', [\App\Http\Controllers\Api\ClaudeMissionsController::class, 'publicar_evento'])->where('slug', '[a-z0-9][a-z0-9._-]{0,76}');
+        Route::post('missions/{slug}/questions', [\App\Http\Controllers\Api\ClaudeMissionsController::class, 'publicar_pregunta'])->where('slug', '[a-z0-9][a-z0-9._-]{0,76}');
+        Route::get('missions/answers/pending', [\App\Http\Controllers\Api\ClaudeMissionsController::class, 'respuestas_pendientes']);
+        Route::post('missions/answers/{id}/claim', [\App\Http\Controllers\Api\ClaudeMissionsController::class, 'reclamar_respuesta'])->whereNumber('id');
+        Route::post('missions/answers/{id}/applied', [\App\Http\Controllers\Api\ClaudeMissionsController::class, 'aplicar_respuesta'])->whereNumber('id');
+        Route::post('missions/answers/{id}/reject', [\App\Http\Controllers\Api\ClaudeMissionsController::class, 'rechazar_respuesta'])->whereNumber('id');
+        Route::get('missions/{slug}/questions/{uid}/answer', [\App\Http\Controllers\Api\ClaudeMissionsController::class, 'ver_respuesta'])->where('slug', '[a-z0-9][a-z0-9._-]{0,76}');
+
         /* Plantillas de CLIENTE (soporte). Idempotentes por `template_name`: reenviar la misma
            plantilla actualiza la fila, nunca crea una segunda, y nunca borra las que no vinieron
            en el payload. No tienen nada que ver con las de lead (`followup_templates`), que las
@@ -1726,6 +1739,9 @@ Route::prefix('admin')->group(function () {
            agentes del mostrador, bandeja «Para Lucas», oficinas y eventos—, con cache de 20 s. */
         Route::get('local/escena', [\App\Http\Controllers\Api\LocalEscenaController::class, 'escena_json']);
         Route::post('local/misiones/{id}/iniciar', [\App\Http\Controllers\Api\LocalMisionesController::class, 'iniciar'])->whereNumber('id');
+        /* Respuesta de Lucas a una decisión ORDINARIA de una misión (misión dotin-misiones-admin, 26/11/2026). Las preguntas
+           sensibles nunca se registran por acá (403 `requiere_ok_personal`). */
+        Route::post('local/missions/{slug}/questions/{uid}/answer', [\App\Http\Controllers\Api\AdminMissionsController::class, 'responder'])->where('slug', '[a-z0-9][a-z0-9._-]{0,76}');
 
         /* Agenda personal tipo Structured (misión agenda-admin, 31/10/2026): la vista de abajo de
            las tarjetas del Inicio y la pantalla /agenda. Cada admin ve y opera SOLO sus tareas: una
@@ -2115,6 +2131,11 @@ Route::get('/mcp/whatsapp', [\App\Http\Controllers\Api\McpController::class, 'no
 Route::delete('/mcp/whatsapp', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_whatsapp']);
 Route::get('/mcp/whatsapp-envio', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_whatsapp']);
 Route::delete('/mcp/whatsapp-envio', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_whatsapp']);
+/* Decisiones de misiones desde Dotin/ChatGPT (misión dotin-misiones-admin, 26/11/2026): un recurso OAuth propio
+   (`missions.answer`) que sólo registra respuestas a preguntas ORDINARIAS. Con `mcp.decisiones_enabled = false` (el default) da 404. */
+Route::post('/mcp/decisiones', [\App\Http\Controllers\Api\McpController::class, 'mensaje_decisiones'])->withoutMiddleware('throttle:api')->middleware('throttle:mcp-endpoint');
+Route::get('/mcp/decisiones', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_decisiones']);
+Route::delete('/mcp/decisiones', [\App\Http\Controllers\Api\McpController::class, 'no_permitido_decisiones']);
 
 // Debug: control del tiempo virtual (solo accesible en local — el controller aborta 404 en producción)
 Route::get('/debug/virtual-time', [DebugVirtualTimeController::class, 'show']);

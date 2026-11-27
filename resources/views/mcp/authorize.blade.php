@@ -58,6 +58,10 @@
             <span class="envio">Enviar mensajes de WhatsApp</span>
             <p><strong>{{ $cliente->client_name ?: 'Una aplicación' }}</strong> quiere enviar mensajes de WhatsApp desde tu número
                personal. Cada envío te pide confirmación y respeta los topes del número.</p>
+        @elseif(($perfil ?? 'consulta') === 'decisiones')
+            <span class="envio">Responder decisiones de misiones</span>
+            <p><strong>{{ $cliente->client_name ?: 'Una aplicación' }}</strong> quiere registrar tus respuestas a preguntas
+               ORDINARIAS de misiones. Nunca da un OK de producción, terceros, gastos ni borrados.</p>
         @else
             <span class="solo-lectura">Sólo lectura</span>
             <p><strong>{{ $cliente->client_name ?: 'Una aplicación' }}</strong> quiere leer el estado de tus misiones, del Workboard,

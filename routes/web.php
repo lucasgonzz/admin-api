@@ -37,6 +37,7 @@ Route::get('/.well-known/oauth-protected-resource', [\App\Http\Controllers\Api\M
 Route::get('/.well-known/oauth-protected-resource/api/mcp', [\App\Http\Controllers\Api\McpMetadataController::class, 'recurso_json']);
 Route::get('/.well-known/oauth-protected-resource/api/mcp/whatsapp', [\App\Http\Controllers\Api\McpMetadataController::class, 'recurso_whatsapp_json']);
 Route::get('/.well-known/oauth-protected-resource/api/mcp/whatsapp-envio', [\App\Http\Controllers\Api\McpMetadataController::class, 'recurso_whatsapp_envio_json']);
+Route::get('/.well-known/oauth-protected-resource/api/mcp/decisiones', [\App\Http\Controllers\Api\McpMetadataController::class, 'recurso_decisiones_json']);
 Route::get('/.well-known/oauth-authorization-server', [\App\Http\Controllers\Api\McpMetadataController::class, 'servidor_json']);
 Route::get('/.well-known/openid-configuration', [\App\Http\Controllers\Api\McpMetadataController::class, 'servidor_json']);
 Route::get('/mcp/oauth/authorize', [\App\Http\Controllers\Api\McpOauthController::class, 'pantalla'])->middleware('throttle:mcp-consentimiento-ver');

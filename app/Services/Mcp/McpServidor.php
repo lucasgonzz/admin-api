@@ -35,16 +35,21 @@ class McpServidor
     /** @var McpWhatsappEnvioService Herramientas de envío de WhatsApp (perfil `whatsapp_envio`). */
     private $whatsapp_envio;
 
+    /** @var McpDecisionesService Herramienta de decisiones de misiones (perfil `decisiones`). */
+    private $decisiones;
+
     /**
      * @param McpLecturaService          $lectura          Ejecuta las herramientas de consulta.
      * @param McpWhatsappLecturaService  $whatsapp_lectura Ejecuta las de lectura de WhatsApp.
      * @param McpWhatsappEnvioService    $whatsapp_envio   Ejecuta las de envío de WhatsApp.
+     * @param McpDecisionesService       $decisiones       Ejecuta la de decisiones de misiones.
      */
-    public function __construct(McpLecturaService $lectura, McpWhatsappLecturaService $whatsapp_lectura, McpWhatsappEnvioService $whatsapp_envio)
+    public function __construct(McpLecturaService $lectura, McpWhatsappLecturaService $whatsapp_lectura, McpWhatsappEnvioService $whatsapp_envio, McpDecisionesService $decisiones)
     {
         $this->lectura          = $lectura;
         $this->whatsapp_lectura = $whatsapp_lectura;
         $this->whatsapp_envio   = $whatsapp_envio;
+        $this->decisiones       = $decisiones;
     }
 
     /**
@@ -134,9 +139,12 @@ class McpServidor
             'protocolVersion' => $version,
             'capabilities'    => ['tools' => ['listChanged' => false]],
             'serverInfo'      => ['name' => self::NOMBRE, 'version' => self::VERSION],
-            'instructions'    => $perfil !== McpOauthService::PERFIL_CONSULTA ? $this->instrucciones_de_whatsapp($perfil) : 'Conector de SÓLO LECTURA de ComercioCity: muestra el estado de las misiones de desarrollo, del Workboard, '
+            'instructions'    => $perfil === McpOauthService::PERFIL_DECISIONES ? $this->instrucciones_de_decisiones() : ($perfil !== McpOauthService::PERFIL_CONSULTA ? $this->instrucciones_de_whatsapp($perfil) : 'Conector de SÓLO LECTURA de ComercioCity: muestra el estado de las misiones de desarrollo, del Workboard, '
                 . 'de las tareas programadas de OpenClaw, de la cola y de la Agenda de quien lo autorizó. No puede cambiar nada. '
-                . 'Empezá por get_overview; para el avance de un pedido usá get_request_status con su pedido_id.',
+                . 'Empezá por get_overview; para el avance de un pedido usá get_request_status con su pedido_id. '
+                . 'Cada misión puede traer `seguimiento` (estado real, vigencia de la información y, si espera una decisión, la pregunta con sus opciones); '
+                . 'si la vigencia es desactualizada o sin_senal, la PC dejó de reportar y el estado puede no ser el de ahora. '
+                . 'Las respuestas a esas preguntas se registran por el conector de decisiones, no por éste.'),
         ];
     }
 
@@ -166,6 +174,9 @@ class McpServidor
         // Una línea por herramienta, sin argumentos ni resultados (podrían llevar datos del negocio: teléfonos y textos).
         Log::info('mcp tool=' . $nombre . ' admin=' . $admin->id . ($perfil === McpOauthService::PERFIL_CONSULTA ? '' : ' perfil=' . $perfil));
 
+        if ($perfil === McpOauthService::PERFIL_DECISIONES) {
+            return $this->respuesta_de_resultado($id, $this->decisiones->ejecutar($nombre, $argumentos, $admin));
+        }
         if ($perfil === McpOauthService::PERFIL_WHATSAPP_LECTURA) {
             return $this->respuesta_de_resultado($id, $this->whatsapp_lectura->ejecutar($nombre, $argumentos, $admin));
         }
@@ -185,6 +196,9 @@ class McpServidor
      */
     private function nombres_de($perfil)
     {
+        if ($perfil === McpOauthService::PERFIL_DECISIONES) {
+            return $this->decisiones->nombres();
+        }
         if ($perfil === McpOauthService::PERFIL_WHATSAPP_LECTURA) {
             return $this->whatsapp_lectura->nombres();
         }
@@ -201,11 +215,27 @@ class McpServidor
      */
     private function catalogo_de($perfil)
     {
+        if ($perfil === McpOauthService::PERFIL_DECISIONES) {
+            return $this->decisiones->catalogo();
+        }
         if ($perfil === McpOauthService::PERFIL_WHATSAPP_LECTURA) {
             return $this->whatsapp_lectura->catalogo();
         }
 
         return $perfil === McpOauthService::PERFIL_WHATSAPP_ENVIO ? $this->whatsapp_envio->catalogo() : $this->catalogo();
+    }
+
+    /**
+     * Las instrucciones con las que se presenta el endpoint de decisiones de misiones.
+     *
+     * @return string
+     */
+    private function instrucciones_de_decisiones()
+    {
+        return 'Conector de DECISIONES de misiones de ComercioCity: una sola herramienta, answer_mission_question, que registra la respuesta de Lucas '
+            . 'a una pregunta ORDINARIA de una misión (la ves con get_mission o get_request_status en el conector de consulta, en seguimiento.pregunta). '
+            . 'Registrá sólo lo que Lucas te dijo: nunca elijas por él. No sirve para decisiones sensibles (producción, clientes o terceros, gastos, borrados): '
+            . 'esas las responde Lucas en persona por Slack o Telegram. La misión se retoma sola cuando la PC la levante.';
     }
 
     /**
@@ -249,12 +279,13 @@ class McpServidor
             $this->herramienta(
                 'list_missions',
                 'Listar misiones',
-                'Lista las misiones de desarrollo que muestra El local (las 40 más recientes), con su etapa, cuánto llevan en ella y si están demoradas. Por defecto no incluye las terminadas. Sólo lectura.',
+                'Lista las misiones de desarrollo que muestra El local (las 40 más recientes) y las que sólo están en el Admin, con su etapa, cuánto llevan en ella y si están demoradas. Cada una puede traer `seguimiento` (estado real, vigencia, pregunta pendiente). Por defecto no incluye las terminadas. Sólo lectura.',
                 [
                     'estado'             => ['type' => 'string', 'enum' => ['trabajando', 'esperando_lucas', 'trabada', 'terminada'], 'description' => 'Filtra por estado.'],
                     'origen'             => ['type' => 'string', 'enum' => PcSnapshotService::ORIGENES, 'description' => 'Filtra por quién pidió la misión.'],
                     'pedido_id'          => $pedido,
                     'solo_demoradas'     => ['type' => 'boolean', 'description' => 'Sólo las que llevan más tiempo del esperable en su etapa.'],
+                    'seguimiento'        => ['type' => 'string', 'enum' => McpLecturaService::FILTROS_DE_SEGUIMIENTO, 'description' => 'Filtra por el estado del seguimiento (desactualizada = la PC dejó de reportar).'],
                     'incluir_terminadas' => ['type' => 'boolean', 'description' => 'Incluye las terminadas (por defecto no).'],
                     'limite'             => ['type' => 'integer', 'minimum' => 1, 'maximum' => 60, 'description' => 'Cantidad máxima (1 a 60, por defecto 20).'],
                 ],
@@ -263,7 +294,7 @@ class McpServidor
             $this->herramienta(
                 'get_mission',
                 'Detalle de una misión',
-                'Devuelve una misión completa: estado, etapa, minutos en la etapa, umbral de demora, historial de fases, carpetas de trabajo y agentes. Sólo lectura.',
+                'Devuelve una misión completa: estado, etapa, minutos en la etapa, umbral de demora, historial de fases, carpetas de trabajo y agentes, más su seguimiento (estado real, vigencia de la información, último avance, qué falta y la pregunta con sus opciones e impacto si espera una decisión). Sólo lectura.',
                 ['id' => ['type' => 'string', 'description' => 'Id de la misión (cc:<slug>) o su slug.']],
                 $lectura,
                 ['id']
@@ -271,7 +302,7 @@ class McpServidor
             $this->herramienta(
                 'get_request_status',
                 'Avance de un pedido',
-                'Avance de un pedido de Dots: sus misiones, lo que está en cola y las tareas de la Agenda con "pedido:<id>" en las notas, con el progreso. Sin pedido_id lista los pedidos vistos. Sólo lectura.',
+                'Avance de un pedido de Dots: sus misiones, lo que está en cola y las tareas de la Agenda con "pedido:<id>" en las notas, con el progreso, el progreso del seguimiento y las preguntas abiertas que esperan una decisión. Sin pedido_id lista los pedidos vistos. Sólo lectura.',
                 ['pedido_id' => $pedido],
                 $lectura
             ),

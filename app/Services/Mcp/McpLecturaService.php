@@ -3,10 +3,13 @@
 namespace App\Services\Mcp;
 
 use App\Models\Admin;
+use App\Models\MissionTracking;
 use App\Services\Agenda\AgendaService;
 use App\Services\Local\EscenaService;
 use App\Services\Local\PcSnapshotService;
+use App\Services\Missions\MissionTrackingService;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Las ocho herramientas de LECTURA del conector MCP (misión dots-openclaw, 25/11/2026).
@@ -27,23 +30,31 @@ class McpLecturaService
     /** Tope de caracteres de las notas de una tarea de Agenda que salen por el conector. */
     const TOPE_NOTAS = 300;
 
+    /** Valores del filtro `seguimiento` de `list_missions` (`desactualizada` = la vigencia no está al día). */
+    const FILTROS_DE_SEGUIMIENTO = ['en_cola', 'activa', 'activa_sin_senal', 'pausada_tecnica', 'esperando_decision', 'terminada', 'detenida', 'desactualizada'];
+
     /** @var EscenaService */
     private $escena;
 
     /** @var AgendaService */
     private $agenda;
 
+    /** @var MissionTrackingService Seguimiento que publica la Gamer en el Admin (misiones sólo-Admin y bloque `seguimiento`). */
+    private $seguimiento;
+
     /** @var array<string, mixed>|null Oficina de la escena ya armada en este pedido (se arma una sola vez). */
     private $oficina_en_memoria = null;
 
     /**
-     * @param EscenaService $escena Escena de El local (fuente única de misiones, cola, Workboard y tareas).
-     * @param AgendaService $agenda Agenda del admin.
+     * @param EscenaService          $escena      Escena de El local (fuente única de misiones, cola, Workboard y tareas).
+     * @param AgendaService          $agenda      Agenda del admin.
+     * @param MissionTrackingService $seguimiento Seguimiento de misiones publicado en el Admin.
      */
-    public function __construct(EscenaService $escena, AgendaService $agenda)
+    public function __construct(EscenaService $escena, AgendaService $agenda, MissionTrackingService $seguimiento)
     {
-        $this->escena = $escena;
-        $this->agenda = $agenda;
+        $this->escena      = $escena;
+        $this->agenda      = $agenda;
+        $this->seguimiento = $seguimiento;
     }
 
     /**
@@ -172,13 +183,14 @@ class McpLecturaService
     /**
      * `list_missions`: las misiones de la escena con filtros.
      *
-     * @param array<string, mixed> $args `estado?`, `origen?`, `pedido_id?`, `solo_demoradas?`, `incluir_terminadas?`, `limite?`.
+     * @param array<string, mixed> $args `estado?`, `origen?`, `pedido_id?`, `solo_demoradas?`, `incluir_terminadas?`, `seguimiento?`, `limite?`.
      *
      * @return array<string, mixed>
      */
     private function list_missions(array $args)
     {
         $estado     = $this->arg_opcion($args, 'estado', ['trabajando', 'esperando_lucas', 'trabada', 'terminada']);
+        $filtro_seg = $this->arg_opcion($args, 'seguimiento', self::FILTROS_DE_SEGUIMIENTO);
         $origen     = $this->arg_opcion($args, 'origen', PcSnapshotService::ORIGENES);
         $pedido_id  = $this->arg_pedido($args);
         $demoradas  = $this->arg_bool($args, 'solo_demoradas', false);
@@ -187,9 +199,13 @@ class McpLecturaService
 
         $oficina = $this->oficina();
         $salida  = [];
-        foreach ($this->misiones($oficina) as $m) {
+        // Las de la escena primero (como siempre) y, al final, las que sólo existen en el seguimiento del Admin.
+        foreach (array_merge($this->misiones($oficina), $this->misiones_solo_admin($oficina, null)) as $m) {
             // Sin pedirlas (por estado o con el flag) las terminadas no salen.
-            if ($m['estado'] === 'terminada' && ! $terminadas && $estado !== 'terminada') {
+            if ($m['estado'] === 'terminada' && ! $terminadas && $estado !== 'terminada' && $filtro_seg !== 'terminada') {
+                continue;
+            }
+            if ($filtro_seg !== null && ! $this->coincide_seguimiento($m, $filtro_seg)) {
                 continue;
             }
             if ($estado !== null && $m['estado'] !== $estado) {
@@ -233,8 +249,25 @@ class McpLecturaService
             if ($m['id'] === $buscada || $m['id'] === 'cc:' . $buscada || ($slug !== null && $slug === $buscada)) {
                 unset($m['fases']);
 
+                // Con seguimiento: el bloque completo del detalle (con pregunta y últimos eventos).
+                if (isset($m['seguimiento'])) {
+                    $fila = MissionTracking::where('mission_key', $m['id'])->first();
+                    if ($fila !== null) {
+                        $m['seguimiento'] = $this->seguimiento->serializar($fila, $this->seguimiento->ahora(), true);
+                    }
+                }
+
                 return array_merge($this->senal($oficina), $m);
             }
+        }
+
+        // Una misión que sólo existe en el seguimiento del Admin.
+        $clave_buscada = strpos($buscada, 'cc:') === 0 ? $buscada : 'cc:' . $buscada;
+        $solo_admin = $this->consultar_seguimiento(function () use ($clave_buscada) {
+            return MissionTracking::where('mission_key', $clave_buscada)->first();
+        });
+        if ($solo_admin !== null) {
+            return array_merge($this->senal($oficina), $this->seguimiento->como_mision($solo_admin, $this->seguimiento->ahora(), true));
         }
 
         throw new \InvalidArgumentException('No la veo entre las ' . EscenaService::TOPE_MISIONES . ' más recientes de El local: ' . $buscada);
@@ -259,6 +292,17 @@ class McpLecturaService
         if ($pedido_id === null) {
             $pedidos = [];
             foreach ($misiones as $m) {
+                if (empty($m['pedido_id'])) {
+                    continue;
+                }
+                $p = $m['pedido_id'];
+                $pedidos[$p] = isset($pedidos[$p]) ? $pedidos[$p] : ['pedido_id' => $p, 'misiones' => 0, 'terminadas' => 0, 'en_cola' => 0];
+                $pedidos[$p]['misiones']++;
+                if ($m['estado'] === 'terminada') {
+                    $pedidos[$p]['terminadas']++;
+                }
+            }
+            foreach ($this->misiones_solo_admin($oficina, null) as $m) {
                 if (empty($m['pedido_id'])) {
                     continue;
                 }
@@ -304,6 +348,19 @@ class McpLecturaService
             }
         }
 
+        // Seguimiento del pedido: las de la escena que tienen fila y las que sólo existen en el Admin (éstas se suman a
+        // `misiones`; `progreso` queda exactamente como siempre, sólo con lo que ve la escena).
+        $con_seguimiento = [];
+        foreach ($misiones as $m) {
+            if (isset($m['pedido_id']) && $m['pedido_id'] === $pedido_id && isset($m['seguimiento'])) {
+                $con_seguimiento[] = $m;
+            }
+        }
+        foreach ($this->misiones_solo_admin($oficina, $pedido_id) as $m) {
+            $de_misiones[]     = $this->mision_resumida($m);
+            $con_seguimiento[] = $m;
+        }
+
         $de_cola = [];
         foreach ($en_espera as $e) {
             if (isset($e['pedido_id']) && $e['pedido_id'] === $pedido_id) {
@@ -327,6 +384,8 @@ class McpLecturaService
         return array_merge($this->senal($oficina), $this->recorte_de_misiones($oficina), [
             'pedido_id' => $pedido_id,
             'progreso'  => $progreso,
+            'progreso_seguimiento' => $this->contar_seguimiento($con_seguimiento),
+            'preguntas_abiertas'   => $this->preguntas_abiertas($con_seguimiento),
             'misiones'  => $de_misiones,
             'cola'      => $de_cola,
             'agenda'    => $de_agenda,
@@ -509,6 +568,139 @@ class McpLecturaService
     }
 
     /**
+     * Ejecuta una consulta del seguimiento del Admin sin que un fallo (por ejemplo, tablas que todavía no existen) rompa
+     * la lectura de El local: se anota y se sigue con lo que ve la escena.
+     *
+     * @param \Closure $consulta Consulta a correr.
+     *
+     * @return mixed El resultado de la consulta o null si falló.
+     */
+    private function consultar_seguimiento(\Closure $consulta)
+    {
+        try {
+            return $consulta();
+        } catch (\Throwable $e) {
+            Log::warning('mcp seguimiento no disponible: ' . get_class($e));
+
+            return null;
+        }
+    }
+
+    /**
+     * Las misiones que sólo existen en el seguimiento del Admin (no están en la escena), con la forma de las misiones
+     * de la escena y su bloque `seguimiento`.
+     *
+     * @param array<string, mixed> $oficina   Oficina de la escena.
+     * @param string|null          $pedido_id Sólo las de ese pedido (null = todas).
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function misiones_solo_admin(array $oficina, $pedido_id)
+    {
+        $en_escena = [];
+        foreach ($this->misiones($oficina) as $m) {
+            $en_escena[] = $m['id'];
+        }
+
+        $filas = $this->consultar_seguimiento(function () use ($en_escena, $pedido_id) {
+            $consulta = MissionTracking::query();
+            if (count($en_escena) > 0) {
+                $consulta->whereNotIn('mission_key', $en_escena);
+            }
+            if ($pedido_id !== null) {
+                $consulta->where('pedido_id', $pedido_id);
+            }
+
+            return $consulta->orderBy('reportado_at', 'desc')->orderBy('id', 'desc')->limit(200)->get();
+        });
+
+        $ahora  = $this->seguimiento->ahora();
+        $salida = [];
+        foreach ($filas === null ? [] : $filas as $fila) {
+            $salida[] = $this->seguimiento->como_mision($fila, $ahora, false);
+        }
+
+        return $salida;
+    }
+
+    /**
+     * Si una misión coincide con el filtro `seguimiento`: `desactualizada` es vigencia distinta de al día; el resto se
+     * compara con el estado visible («activa» no incluye a la que figura «activa sin señal»).
+     *
+     * @param array<string, mixed> $m      Misión (de la escena o sólo-Admin).
+     * @param string               $filtro Valor del filtro.
+     *
+     * @return bool
+     */
+    private function coincide_seguimiento(array $m, $filtro)
+    {
+        if (! isset($m['seguimiento'])) {
+            return false;
+        }
+        if ($filtro === 'desactualizada') {
+            return $m['seguimiento']['vigencia'] !== 'al_dia';
+        }
+
+        return $m['seguimiento']['estado_visible'] === $filtro;
+    }
+
+    /**
+     * Cuenta las misiones por estado visible del seguimiento, más cuántas tienen la información desactualizada.
+     *
+     * @param array<int, array<string, mixed>> $misiones Misiones con `seguimiento`.
+     *
+     * @return array<string, int>
+     */
+    private function contar_seguimiento(array $misiones)
+    {
+        $cuenta = [
+            'en_cola' => 0, 'activa' => 0, 'activa_sin_senal' => 0, 'pausada_tecnica' => 0, 'esperando_decision' => 0,
+            'terminada' => 0, 'detenida' => 0, 'desactualizadas' => 0,
+        ];
+        foreach ($misiones as $m) {
+            $visible = $m['seguimiento']['estado_visible'];
+            if (isset($cuenta[$visible])) {
+                $cuenta[$visible]++;
+            }
+            if ($m['seguimiento']['vigencia'] !== 'al_dia') {
+                $cuenta['desactualizadas']++;
+            }
+        }
+
+        return $cuenta;
+    }
+
+    /**
+     * Las preguntas que esperan una decisión (abiertas) de una lista de misiones con seguimiento.
+     *
+     * @param array<int, array<string, mixed>> $misiones Misiones con `seguimiento`.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function preguntas_abiertas(array $misiones)
+    {
+        $salida = [];
+        foreach ($misiones as $m) {
+            $p = isset($m['seguimiento']['pregunta']) ? $m['seguimiento']['pregunta'] : null;
+            if ($p === null || $p['estado'] !== 'abierta') {
+                continue;
+            }
+            $salida[] = [
+                'mission_id'      => $m['id'],
+                'question_uid'    => $p['question_uid'],
+                'revision'        => $p['revision'],
+                'tipo'            => $p['tipo'],
+                'pregunta'        => $p['pregunta'],
+                'opciones'        => $p['opciones'],
+                'recomendada'     => $p['recomendada'],
+                'puede_responder' => $p['puede_responder'],
+            ];
+        }
+
+        return $salida;
+    }
+
+    /**
      * Las misiones en espera de la cola.
      *
      * @param array<string, mixed> $oficina Oficina de la escena.
@@ -572,7 +764,7 @@ class McpLecturaService
      */
     private function mision_resumida(array $m)
     {
-        return [
+        $resumida = [
             'id'                  => $m['id'],
             'titulo'              => isset($m['titulo']) ? $m['titulo'] : null,
             'origen'              => $m['origen'],
@@ -588,6 +780,16 @@ class McpLecturaService
             'repos'               => isset($m['repos']) ? array_values($m['repos']) : [],
             'ultima_actividad_at' => isset($m['ultima_actividad_at']) ? $m['ultima_actividad_at'] : null,
         ];
+
+        // Sólo las misiones con seguimiento llevan estas claves: las demás salen exactamente como siempre.
+        if (isset($m['fuente'])) {
+            $resumida['fuente'] = $m['fuente'];
+        }
+        if (isset($m['seguimiento'])) {
+            $resumida['seguimiento'] = $m['seguimiento'];
+        }
+
+        return $resumida;
     }
 
     /**
