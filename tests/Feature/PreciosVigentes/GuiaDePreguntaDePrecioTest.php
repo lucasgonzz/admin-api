@@ -11,7 +11,7 @@ use Tests\TestCase;
 /**
  * Guía «CUANDO EL LEAD PREGUNTA PRECIOS» del bloque de precios de Martín (Lucas, 21/11/2026): ante «quiero
  * saber el precio del sistema» no se contesta sólo la cifra; se presenta, cuenta los 3 productos, responde
- * el precio y cierra con un siguiente paso (prueba guiada de ~1 hora y prueba gratis de 7 días).
+ * el precio y cierra con un siguiente paso (la prueba gratis de 7 días; la demo sólo si el lead la pide, política del 21/11/2026).
  * Criterios CA-R1 a CA-R4 de `.mision/PLAN.md`.
  *
  * Las cifras salen de la fuente (no están escritas en la guía) y Martín nunca ve USD ni ganancia.
@@ -69,9 +69,9 @@ class GuiaDePreguntaDePrecioTest extends TestCase
             'automatizan la mayor parte de los procesos digitales del negocio',
             'cada producto se implementa por $628.400',
             '30 % de descuento ($1.319.640)',
-            'prueba gratuita guiada',
-            'alrededor de 1 hora',
-            'prueba gratis de 7 días',
+            'invitalo a la prueba gratis de 7 días',
+            'pasale el link de la prueba textual',
+            'La demo guiada se ofrece sólo si el lead la pidió con sus palabras',
         ];
 
         $desde = 0;
@@ -140,8 +140,9 @@ class GuiaDePreguntaDePrecioTest extends TestCase
     }
 
     /**
-     * Ronda 1 de revisión. El paso 4 llama «demo» a la prueba guiada, la condiciona a que el lead no tenga
-     * demo ni prueba, remite a las reglas de la demo y cede ante el bloque de la oferta de la prueba.
+     * Política del 21/11/2026. El paso 4 invita a la prueba gratis (con el link textual), la condiciona a que el
+     * lead no tenga demo ni prueba, ofrece la demo sólo si el lead la pidió (con las reglas de la demo) y cede ante
+     * el bloque de la oferta de la prueba o del flujo de entrada.
      *
      * @return void
      */
@@ -149,14 +150,15 @@ class GuiaDePreguntaDePrecioTest extends TestCase
     {
         $guia = $this->guia();
 
-        $this->assertStringContainsString('ofrecele la demo', $guia);
+        $this->assertStringNotContainsString('ofrecele la demo', $guia);
+        $this->assertStringNotContainsString('alrededor de 1 hora', $guia);
+        $this->assertStringNotContainsString('prueba gratuita guiada', $guia);
         $this->assertStringContainsString(
             'sólo si el lead todavía no tiene una demo agendada o hecha ni una prueba creada',
             $guia
         );
         $this->assertStringContainsString('seguí las reglas de la demo', $guia);
-        $this->assertStringContainsString('horario y mail antes de pasar links', $guia);
-        $this->assertStringContainsString('ese bloque manda sobre este paso', $guia);
+        $this->assertStringContainsString('Si más abajo hay un bloque de la oferta de la prueba o del flujo de entrada, ese bloque manda sobre este paso', $guia);
     }
 
     /**
