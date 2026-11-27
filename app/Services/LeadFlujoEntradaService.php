@@ -1011,6 +1011,9 @@ class LeadFlujoEntradaService
         if ($hay_lugar) {
             $txt .= "  - Si dice que quiere probar, empezar o hacerlo por su cuenta: mandale el link de la prueba textual, en un mensaje corto,\n"
                 . "    con estado_sugerido: \"link_enviado\". Link (copiar textual, sin cambiarle nada): " . $link . "\n";
+            /* Guarda de texto: la IA ofrecía el link en vez de mandarlo («¿te paso el link?», ensayo del lead 711). La guarda
+               determinista de completar_paquete lo corrige igual, pero el agente tiene que saberlo. */
+            $txt .= "  - Nunca preguntes si quiere el link («¿te paso el link?»): si corresponde, mandalo directamente.\n";
         } else {
             $txt .= "  - Hoy NO hay lugar para crear pruebas nuevas: si quiere probar, NO le pases ningún link.\n"
                 . "    Decile: Juan te escribe para darte el acceso. Y devolvé requiere_intervencion_humana: true con el motivo.\n";
