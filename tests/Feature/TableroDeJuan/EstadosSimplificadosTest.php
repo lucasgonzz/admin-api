@@ -13,7 +13,8 @@ use App\Services\PruebaDelClienteService;
  * CA9, CA10 y CA11 de la etapa E1 (misión embudo-juan-pipeline): los estados del lead simplificados.
  *
  * Qué se protege, y por qué cada cosa:
- *  1. CA9 — `GET lead/status-cards?version=2` devuelve las 10 tarjetas nuevas, en orden, con las etiquetas de Juan
+ *  1. CA9 — `GET lead/status-cards?version=2` devuelve las 11 tarjetas nuevas (la 11 es «Aceptó probar», misión
+ *     leads-charla-antes-de-la-demo), en orden, con las etiquetas de Juan
  *     («Quiere probar», «Cliente», «Perdido»), «Conversando» sumando `contactado` + `calificado` y «Archivados» sólo si hay
  *     un lead en un estado archivado. SIN el parámetro la respuesta es exactamente la de hoy: un SPA viejo no manda
  *     `version` y no puede notar nada (compatible hacia atrás en las dos direcciones). El filtro de chats entiende los
@@ -136,7 +137,7 @@ class EstadosSimplificadosTest extends BaseDelTableroDeJuan
     // ------------------------------------------------------------------------------------------
 
     /**
-     * CA9. Las 10 tarjetas de la versión 2, en el orden del plan, con sus etiquetas y sus totales; «Conversando» cuenta
+     * CA9. Las 11 tarjetas de la versión 2 (con «Aceptó probar», misión leads-charla-antes-de-la-demo), en el orden del plan, con sus etiquetas y sus totales; «Conversando» cuenta
      * `contactado` + `calificado`; «Archivados» no aparece si no hay ningún lead archivado.
      *
      * @return void
@@ -146,23 +147,23 @@ class EstadosSimplificadosTest extends BaseDelTableroDeJuan
         $this->crear_leads_en('nuevo', 1);
         $this->crear_leads_en('contactado', 2);
         $this->crear_leads_en('calificado', 1);
-        foreach (['link_enviado', 'implementacion_pedida', 'prueba_activa', 'en_implementacion', 'prueba_vencida', 'cerrado_ganado', 'cerrado_perdido', 'en_pausa'] as $estado) {
+        foreach (['acepto_probar', 'link_enviado', 'implementacion_pedida', 'prueba_activa', 'en_implementacion', 'prueba_vencida', 'cerrado_ganado', 'cerrado_perdido', 'en_pausa'] as $estado) {
             $this->crear_leads_en($estado, 1);
         }
 
         $tarjetas = $this->pedir_tarjetas('?version=2');
 
         $this->assertSame(
-            ['nuevo', 'conversando', 'link_enviado', 'implementacion_pedida', 'prueba_activa', 'en_implementacion', 'prueba_vencida', 'cerrado_ganado', 'cerrado_perdido', 'en_pausa'],
+            ['nuevo', 'conversando', 'acepto_probar', 'link_enviado', 'implementacion_pedida', 'prueba_activa', 'en_implementacion', 'prueba_vencida', 'cerrado_ganado', 'cerrado_perdido', 'en_pausa'],
             array_column($tarjetas, 'value'),
-            'Las 10 tarjetas, en el orden del plan y sin «Archivados» (no hay leads archivados).'
+            'Las 11 tarjetas, en el orden del plan y sin «Archivados» (no hay leads archivados).'
         );
         $this->assertSame(
-            ['Nuevo', 'Conversando', 'Quiere probar', 'Implementación pedida', 'En prueba', 'En implementación', 'Prueba vencida', 'Cliente', 'Perdido', 'En pausa'],
+            ['Nuevo', 'Conversando', 'Aceptó probar', 'Quiere probar', 'Implementación pedida', 'En prueba', 'En implementación', 'Prueba vencida', 'Cliente', 'Perdido', 'En pausa'],
             array_column($tarjetas, 'text'),
             'Las etiquetas de Juan.'
         );
-        $this->assertSame([1, 3, 1, 1, 1, 1, 1, 1, 1, 1], array_map('intval', array_column($tarjetas, 'total')), '«Conversando» suma contactado (2) + calificado (1).');
+        $this->assertSame([1, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1], array_map('intval', array_column($tarjetas, 'total')), '«Conversando» suma contactado (2) + calificado (1).');
 
         foreach ($tarjetas as $tarjeta) {
             $this->assertArrayHasKey('sin_responder', $tarjeta, 'Cada tarjeta trae su contador de «sin responder».');
@@ -199,7 +200,7 @@ class EstadosSimplificadosTest extends BaseDelTableroDeJuan
         $esperados = self::ARCHIVADOS_SIN_TARJETA;
         sort($esperados);
         $this->assertSame($esperados, $slugs);
-        $this->assertCount(11, $con, 'Las 10 de siempre más «Archivados».');
+        $this->assertCount(12, $con, 'Las 11 de siempre más «Archivados».');
     }
 
     /**
