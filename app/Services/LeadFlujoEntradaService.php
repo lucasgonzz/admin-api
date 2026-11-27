@@ -102,22 +102,26 @@ class LeadFlujoEntradaService
      * de CALIFICACIÓN que el flujo de entrada tiene prohibidas («no pidas el nombre, ni cuántos trabajan, ni qué sistema
      * usa»): si trabaja solo o con alguien, cuántos son, si tiene empleados, qué sistema usa hoy y cómo se llama.
      *
-     * 🔴 Son deliberadamente estrechos: sacar una pregunta legítima es peor que dejar pasar una de calificación. Por eso «solo o»
-     * sólo cuenta si lo que sigue es «hay / con / tenés / alguien…» (no el «¿lo probás solo o que te lo carguemos?» de las dos
-     * formas de arrancar) y «cuántos» sólo con trabajan / empleados / personas / vendedores (nunca «cuántos productos»).
+     * 🔴 Son deliberadamente estrechos: sacar una pregunta legítima es peor que dejar pasar una de calificación. «solo o» sólo
+     * cuenta como «solo o hay…», «solo o con alguien / empleados / gente» o «solo o tenés empleados / gente» (nunca «solo o con
+     * nuestra ayuda»: es la pregunta de las dos formas de arrancar); «alguien más» sólo junto a trabaja / atiende / te ayuda /
+     * con vos; el nombre sólo como «cómo te llamás», «cuál es tu nombre» o «pasame tu nombre» (no «sale con tu nombre»); y
+     * «cuántos» sólo con trabajan / empleados / personas / vendedores (nunca «cuántos productos»).
      * Se aplican únicamente a oraciones-pregunta (con «¿…?»), ver {@see tipo_de_oracion_de_pregunta()}.
      */
     public const PATRONES_DE_PREGUNTA_DE_CALIFICACION = [
-        '/\bsolo o (hay|con|tenes|tienes|tiene|tienen|alguien)\b/',
-        '/\bsos solo\b/',
-        '/\balguien mas\b/',
+        '/\bsolo o (hay|con alguien|con (empleados|gente|un empleado)|(tenes|tienes) (empleados|gente))\b/',
+        '/\b(sos|trabajas) solo\b/',
+        '/\balguien mas (con vos|trabaja|trabajan|atiende|atienden|te ayuda|te ayudan)\b/',
+        '/\b(trabaja|trabajan|atiende|atienden|te ayuda|te ayudan) alguien mas\b/',
         '/\bcuant[oa]s (trabajan|empleados|personas|vendedores)\b/',
         '/\bcuantos son (en|ustedes|vos|el equipo)\b/',
         '/\b(tenes|tienes|tiene|tienen) (empleados|vendedores|personal|gente)\b/',
         '/\bque (sistema|programa) (usas|usan|utilizas|utilizan|tenes|tienen|manejas|manejan)\b/',
         '/\b(usas|usan|utilizas|tenes|tienen) (algun|un) (sistema|programa)\b/',
         '/\bcomo te llamas\b/',
-        '/\btu nombre\b/',
+        '/\bcual es tu nombre\b/',
+        '/\b(pasas|decis|das|dejas|compartis) (me )?tu nombre\b/',
     ];
 
     /**
@@ -133,6 +137,20 @@ class LeadFlujoEntradaService
         '/(?<![\p{L}])que te (lo |la )?(pase|mande|envíe|envie|comparta)(?![\p{L}])/u',
         '/(?<![\p{L}])quer[eé]s (el|este|ese|un) (link|enlace)(?![\p{L}])/u',
     ];
+
+    /**
+     * Patrón (sobre el texto NORMALIZADO de la oración) de que el link ofrecido lleva a OTRO destino que la prueba: «el link de /
+     * del …» (la página, el video, la factura) o un destino nombrado (página, video, pago, demo, tienda, formulario, Excel,
+     * Mercado Pago, cotización, implementación, testimonios, presupuesto). «¿Te paso el link para que arranques?» no lleva destino.
+     * Una oración que nombra la prueba (prueba / probar / probalo) es siempre oferta de la prueba aunque diga «el link de la prueba».
+     */
+    public const PATRON_DE_LINK_CON_OTRO_DESTINO = '/\b(link|enlace) (de|del)\b|\b(pagina|web|video|pago|pagar|pagas|demo|tienda|formulario|excel|mercado pago|cotizacion|implementacion|testimonios|presupuesto|factura)\b/';
+
+    /** Patrón (sobre texto normalizado) de que la oración nombra la prueba gratis. */
+    public const PATRON_DE_NOMBRA_LA_PRUEBA = '/\b(prueba|probar|probarlo|probala|probalo|probas)\b/';
+
+    /** Estados sugeridos por la IA con los que corre el reemplazo de la oferta por el link (camino de la prueba); '' = sin estado. */
+    public const ESTADOS_SUGERIDOS_DEL_CAMINO_DE_LA_PRUEBA = ['', 'nuevo', 'contactado', 'calificado', 'link_enviado'];
 
     /**
      * Los puntos obligatorios, en el orden en que salen. `paso` es 1 (llegada) o 2 (respuesta del lead); `clave` es
@@ -1137,9 +1155,15 @@ class LeadFlujoEntradaService
            («que te pase») con una pregunta por el link ya mandado («que te pasé»). */
         $minusculas = mb_strtolower($oracion, 'UTF-8');
         if (preg_match('/(?<![\p{L}])(link|enlace)(?![\p{L}])/u', $minusculas) === 1) {
-            foreach (self::PATRONES_DE_OFERTA_DEL_LINK as $patron) {
-                if (preg_match($patron, $minusculas) === 1) {
-                    return 'oferta_link';
+            /* Es la oferta de la PRUEBA si la nombra o si el link no lleva destino; con otro destino (la página, el video, pagar…)
+               es otra oferta y no se toca. */
+            $es_de_la_prueba = preg_match(self::PATRON_DE_NOMBRA_LA_PRUEBA, $normalizada) === 1
+                || preg_match(self::PATRON_DE_LINK_CON_OTRO_DESTINO, $normalizada) !== 1;
+            if ($es_de_la_prueba) {
+                foreach (self::PATRONES_DE_OFERTA_DEL_LINK as $patron) {
+                    if (preg_match($patron, $minusculas) === 1) {
+                        return 'oferta_link';
+                    }
                 }
             }
         }
@@ -1179,6 +1203,8 @@ class LeadFlujoEntradaService
 
             /* Texto del segmento que se va armando con lo que se conserva. */
             $acumulado = '';
+            /* Largo de `$acumulado` antes de la última oración conservada, si ésta termina en «:» y es la inmediata anterior. */
+            $inicio_del_arranque = null;
             for ($i = 0; $i < count($partes); $i += 2) {
                 $oracion   = $partes[$i];
                 $separador = $partes[$i + 1] ?? '';
@@ -1186,9 +1212,15 @@ class LeadFlujoEntradaService
 
                 if ($tipo === 'calificacion') {
                     $califico = true;
+                    /* «Contame:» que queda huérfano al sacar la pregunta que presentaba, se saca también. */
+                    if ($inicio_del_arranque !== null) {
+                        $acumulado = substr($acumulado, 0, $inicio_del_arranque);
+                    }
+                    $inicio_del_arranque = null;
 
                     continue;
                 }
+                $inicio_del_arranque = null;
 
                 if ($tipo === 'oferta_link' && $reemplazar_link) {
                     /* Lo anterior queda como segmento, el link va como segmento propio y lo que sigue abre otro. */
@@ -1204,6 +1236,9 @@ class LeadFlujoEntradaService
                     continue;
                 }
 
+                if (substr(rtrim($oracion), -1) === ':') {
+                    $inicio_del_arranque = strlen($acumulado);
+                }
                 $acumulado .= $oracion . $separador;
             }
 
@@ -1281,9 +1316,11 @@ class LeadFlujoEntradaService
         $parsed_sin_limpiar = $parsed;
         $se_limpio          = false;
         if (self::oculta_la_demo($lead)) {
-            /* El link se manda en vez de ofrecerlo sólo si corresponde: oferta activa, sin prueba, lugar en el pool y el mensaje
-               todavía no lo trae. Sin lugar el bloque ya le dice otra cosa a la IA y no se toca. */
-            $reemplazar_link = LeadOfertaDePruebaService::activa()
+            /* El link se manda en vez de ofrecerlo sólo si corresponde: la IA no sugiere un estado de otro camino (implementación
+               pedida, demo: ahí no se pisa), oferta activa, sin prueba, lugar en el pool y el mensaje todavía no lo trae. Sin lugar el bloque ya le dice otra cosa a la IA y no se toca. */
+            $estado_de_la_ia = trim((string) ($parsed['estado_sugerido'] ?? ''));
+            $reemplazar_link = in_array($estado_de_la_ia, self::ESTADOS_SUGERIDOS_DEL_CAMINO_DE_LA_PRUEBA, true)
+                && LeadOfertaDePruebaService::activa()
                 && ! LeadOfertaDePruebaService::tiene_prueba($lead)
                 && self::hay_lugar_en_el_pool()
                 && ! self::cumple_el_ancla('link_prueba', $mensaje);
