@@ -6113,6 +6113,9 @@ TXT;
             $lead->requiere_intervencion_humana = true;
 
             $this->crear_tarea_de_intervencion_humana($lead, (string) $parsed['motivo_intervencion']);
+
+            /* Marca para el paquete retenido: al aprobarse, apply_parsed_response() no crea otra tarea ni vuelve a escalar. */
+            $parsed['tarea_de_intervencion_ya_creada'] = true;
         }
 
         // Antes de cambiar el estado o encolar: nunca confirmar una liberación sin su acción.
@@ -8503,34 +8506,43 @@ TXT;
             $lead->requiere_intervencion_humana = true;
             $lead->claude_auto_reply            = false;
 
-            /* La tarea vive en su propio método porque este mismo bloque lo necesita también el
-             * freno por horario ya no disponible (frenar_por_horario_no_disponible()): ese camino
-             * marca el lead igual que este, y sin tarea el único aviso sería un toast en el
-             * navegador del admin que apretó aprobar. Extraído sin cambiarle el comportamiento. */
-            $this->crear_tarea_de_intervencion_humana($lead, $motivo_intervencion);
+            /* 🔴 Misión martin-mensaje-puntos, ronda 3: el paquete retenido por no tener un mensaje utilizable ya creó su
+             * tarea y avisó a las personas (notificaciones de la tarea) al GENERARSE, en
+             * create_message_and_update_lead(), y dejó esta marca en pending_actions. Al aprobar el mensaje de espera NO se
+             * crea otra tarea idéntica ni se vuelve a escalar: una sola tarea por mensaje retenido. Sin la marca
+             * (derivaciones comunes) todo sigue como siempre. */
+            $aviso_ya_dado = ! empty($parsed['tarea_de_intervencion_ya_creada']);
 
-            /* Notificar por WhatsApp a los admins suscritos a escalaciones de lead.
-             * Se ejecuta en bloque separado para que un fallo en WhatsApp no afecte
-             * el AdminTask ya creado ni el flujo principal del mensaje. */
-            try {
-                /* Web Push primero: llega al teléfono con el admin cerrado y no gasta plantilla.
-                 * El WhatsApp queda como red de seguridad, solo para los admins que no tienen
-                 * ningún device registrado. Ver EscalationPushNotificationService. */
-                $reparto_escalado = app(\App\Services\EscalationPushNotificationService::class)
-                    ->notificar_lead($lead, $motivo_intervencion);
+            if (! $aviso_ya_dado) {
+                /* La tarea vive en su propio método porque este mismo bloque lo necesita también el
+                 * freno por horario ya no disponible (frenar_por_horario_no_disponible()): ese camino
+                 * marca el lead igual que este, y sin tarea el único aviso sería un toast en el
+                 * navegador del admin que apretó aprobar. Extraído sin cambiarle el comportamiento. */
+                $this->crear_tarea_de_intervencion_humana($lead, $motivo_intervencion);
 
-                $escalation_service = new \App\Services\LeadEscalationWhatsappService(
-                    new \App\Services\WhatsappSendService()
-                );
-                $escalation_notified = $escalation_service->notify($lead, $motivo_intervencion, $reparto_escalado['sin_device']);
-                if (! empty($escalation_notified)) {
-                    $admin_notifications_log[] = ['evento' => 'Escalación a humano requerida', 'admins' => $escalation_notified];
+                /* Notificar por WhatsApp a los admins suscritos a escalaciones de lead.
+                 * Se ejecuta en bloque separado para que un fallo en WhatsApp no afecte
+                 * el AdminTask ya creado ni el flujo principal del mensaje. */
+                try {
+                    /* Web Push primero: llega al teléfono con el admin cerrado y no gasta plantilla.
+                     * El WhatsApp queda como red de seguridad, solo para los admins que no tienen
+                     * ningún device registrado. Ver EscalationPushNotificationService. */
+                    $reparto_escalado = app(\App\Services\EscalationPushNotificationService::class)
+                        ->notificar_lead($lead, $motivo_intervencion);
+
+                    $escalation_service = new \App\Services\LeadEscalationWhatsappService(
+                        new \App\Services\WhatsappSendService()
+                    );
+                    $escalation_notified = $escalation_service->notify($lead, $motivo_intervencion, $reparto_escalado['sin_device']);
+                    if (! empty($escalation_notified)) {
+                        $admin_notifications_log[] = ['evento' => 'Escalación a humano requerida', 'admins' => $escalation_notified];
+                    }
+                } catch (\Throwable $e) {
+                    Log::error('LeadAiService: error al notificar escalación por WhatsApp.', [
+                        'lead_id' => $lead->id,
+                        'error'   => $e->getMessage(),
+                    ]);
                 }
-            } catch (\Throwable $e) {
-                Log::error('LeadAiService: error al notificar escalación por WhatsApp.', [
-                    'lead_id' => $lead->id,
-                    'error'   => $e->getMessage(),
-                ]);
             }
         }
 
@@ -11812,7 +11824,9 @@ TXT;
 
         $paquete['mensaje_sugerido']             = '';
         $paquete['requiere_intervencion_humana'] = true;
-        $paquete['motivo_intervencion']          = $nota . ' Revisá la conversación y contestale a mano.';
+        /* El motivo que trajo el paquete (si ya pedía intervención) se conserva a continuación de la nota. */
+        $motivo_previo                           = isset($paquete['motivo_intervencion']) && is_string($paquete['motivo_intervencion']) ? trim($paquete['motivo_intervencion']) : '';
+        $paquete['motivo_intervencion']          = trim($nota . ' Revisá la conversación y contestale a mano. ' . $motivo_previo);
         $paquete['razonamiento']                 = trim((isset($paquete['razonamiento']) && is_string($paquete['razonamiento']) ? $paquete['razonamiento'] : '') . ' ⚠️ ' . $nota);
 
         return $paquete;
