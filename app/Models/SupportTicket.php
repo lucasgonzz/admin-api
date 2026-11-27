@@ -69,6 +69,9 @@ class SupportTicket extends Model
         'sistema_exclusivo_at' => 'datetime',
         'agentes_erp' => 'boolean',
         'alert_sent_at' => 'datetime',
+        /* Marcas manuales de la bandeja (misión soporte-fijar-no-leido): fijado arriba y «marcado como no leído». */
+        'pinned_at' => 'datetime',
+        'marked_unread_at' => 'datetime',
         'ai_suggestion_send_at' => 'datetime',
         /* Momento en que Claude escaló el ticket a revisión humana. */
         'escalated_at' => 'datetime',

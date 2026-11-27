@@ -625,6 +625,61 @@ class SupportTicketController extends BaseController
         return response()->json(['model' => $this->ticketQueryForInbox()->where('id', $id)->first()]);
     }
 
+    /**
+     * Fija o desfija un ticket en la bandeja (misión soporte-fijar-no-leido): un ticket fijado va arriba de todo.
+     *
+     * La marca es del ticket y no del operador: la bandeja es una sola para todos.
+     *
+     * @param Request $request Lleva `pinned` (booleano).
+     * @param int|string $id Id del ticket.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function pin(Request $request, $id)
+    {
+        $data = $request->validate(['pinned' => 'required|boolean']);
+        $ticket = SupportTicket::findOrFail($id);
+        $fijar = (bool) $data['pinned'];
+        // Volver a fijar uno ya fijado no le cambia el momento: conserva el orden entre los fijados.
+        if ($fijar && $ticket->pinned_at === null) {
+            $ticket->pinned_at = now();
+            $ticket->timestamps = false; // fijar no es actividad: no mueve `updated_at`
+            $ticket->save();
+        } elseif (!$fijar && $ticket->pinned_at !== null) {
+            $ticket->pinned_at = null;
+            $ticket->timestamps = false;
+            $ticket->save();
+        }
+        SupportTicketUpdated::dispatch((int) $ticket->id);
+        return response()->json(['model' => $this->ticketQueryForInbox()->where('id', $ticket->id)->first()]);
+    }
+
+    /**
+     * Marca un ticket como no leído (amarillo en la bandeja) o le saca la marca, que es lo que pasa al abrirlo.
+     *
+     * @param Request $request Lleva `unread` (booleano).
+     * @param int|string $id Id del ticket.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function mark_unread(Request $request, $id)
+    {
+        $data = $request->validate(['unread' => 'required|boolean']);
+        $ticket = SupportTicket::findOrFail($id);
+        $marcar = (bool) $data['unread'];
+        if ($marcar && $ticket->marked_unread_at === null) {
+            $ticket->marked_unread_at = now();
+            $ticket->timestamps = false; // marcar no es actividad: no mueve `updated_at`
+            $ticket->save();
+        } elseif (!$marcar && $ticket->marked_unread_at !== null) {
+            $ticket->marked_unread_at = null;
+            $ticket->timestamps = false;
+            $ticket->save();
+        }
+        SupportTicketUpdated::dispatch((int) $ticket->id);
+        return response()->json(['model' => $this->ticketQueryForInbox()->where('id', $ticket->id)->first()]);
+    }
+
     public function toggle_requiere_verificacion($id)
     {
         $ticket = SupportTicket::findOrFail($id);

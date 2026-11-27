@@ -1796,6 +1796,8 @@ Route::prefix('admin')->group(function () {
         Route::post('support-message/{id}/approve-ai-draft', [\App\Http\Controllers\Api\SupportMessageController::class, 'approve_ai_draft']);
         Route::post('support-message/{id}/discard-ai-draft', [\App\Http\Controllers\Api\SupportMessageController::class, 'discard_ai_draft']);
         Route::patch('support-ticket/{id}/attention', [\App\Http\Controllers\Api\SupportTicketController::class, 'attention']);
+        Route::patch('support-ticket/{id}/pin', [\App\Http\Controllers\Api\SupportTicketController::class, 'pin'])->whereNumber('id');
+        Route::patch('support-ticket/{id}/mark-unread', [\App\Http\Controllers\Api\SupportTicketController::class, 'mark_unread'])->whereNumber('id');
         Route::post('support-ticket/{id}/toggle-claude-auto-reply', [\App\Http\Controllers\Api\SupportTicketController::class, 'toggle_claude_auto_reply']);
         Route::post('support-ticket/{id}/toggle-requiere-verificacion', [\App\Http\Controllers\Api\SupportTicketController::class, 'toggle_requiere_verificacion']);
         Route::post('support-ticket/{ticket_id}/typing', [\App\Http\Controllers\Api\SupportMessageController::class, 'typing']);
