@@ -4,6 +4,8 @@ namespace App\Services\Mcp;
 
 use App\Models\Admin;
 use App\Services\Missions\MissionQuestionService;
+use Illuminate\Support\Str;
+use Ramsey\Uuid\Uuid;
 
 /**
  * La única herramienta del conector de DECISIONES de misiones (misión dotin-misiones-admin, 26/11/2026):
@@ -54,7 +56,7 @@ class McpDecisionesService
             'name'        => 'answer_mission_question',
             'title'       => 'Responder una decisión de misión',
             'description' => 'Registra la respuesta de Lucas a una pregunta ORDINARIA de una misión (la que ves en get_mission o get_request_status, en '
-                . 'seguimiento.pregunta con puede_responder = true). Pasá la opción elegida (option) o un texto (text) y una idempotency_key (uuid) nueva por intento. '
+                . 'seguimiento.pregunta con puede_responder = true). Pasá la opción elegida (option) o un texto (text) y una idempotency_key (texto de 8 a 120 caracteres) nueva por intento. '
                 . 'No sirve para preguntas sensibles (producción, clientes o terceros, gastos, borrados): esas las responde Lucas en persona por Slack o Telegram. '
                 . 'La misión se retoma sola cuando la PC la levante (hasta 10 minutos): no hace falta avisar a OpenClaw.',
             'inputSchema' => [
@@ -65,7 +67,7 @@ class McpDecisionesService
                     'revision'        => ['type' => 'integer', 'minimum' => 1, 'description' => 'Revisión de la pregunta que se está respondiendo.'],
                     'option'          => ['type' => 'string', 'description' => 'Clave de la opción elegida (por ejemplo A).'],
                     'text'            => ['type' => 'string', 'maxLength' => 1000, 'description' => 'Respuesta en texto libre (opcional si hay option).'],
-                    'idempotency_key' => ['type' => 'string', 'description' => 'uuid nuevo por intento; repetirlo devuelve la misma respuesta.'],
+                    'idempotency_key' => ['type' => 'string', 'minLength' => 8, 'maxLength' => 120, 'description' => 'Clave de idempotencia por intento: cualquier texto de 8 a 120 caracteres (un uuid también vale). Repetir la misma clave sobre la misma pregunta devuelve la misma respuesta.'],
                 ],
                 'required'   => ['mission_id', 'question_id', 'revision', 'idempotency_key'],
             ],
@@ -103,6 +105,12 @@ class McpDecisionesService
             }
         }
 
+        // La clave es libre (8 a 120 caracteres): ChatGPT/Dotin puede mandar cualquier texto.
+        $clave = trim($argumentos['idempotency_key']);
+        if (strlen($clave) < 8 || strlen($clave) > 120) {
+            return $this->error('argumentos_invalidos', 'El argumento "idempotency_key" tiene que tener entre 8 y 120 caracteres.');
+        }
+
         $slug = trim($argumentos['mission_id']);
         if (strpos($slug, 'cc:') === 0) {
             $slug = substr($slug, 3);
@@ -112,7 +120,7 @@ class McpDecisionesService
             'revision'   => $argumentos['revision'],
             'opcion'     => isset($argumentos['option']) ? $argumentos['option'] : null,
             'texto'      => isset($argumentos['text']) ? $argumentos['text'] : null,
-            'answer_uid' => trim($argumentos['idempotency_key']),
+            'answer_uid' => $this->answer_uid_de($slug, trim($argumentos['question_id']), $clave),
         ], $admin, 'mcp');
 
         if ($resultado['status'] >= 400) {
@@ -146,6 +154,25 @@ class McpDecisionesService
             'structuredContent' => $datos,
             'isError'           => false,
         ];
+    }
+
+    /**
+     * El `answer_uid` de una clave de idempotencia: un UUID se usa tal cual (compatibilidad) y cualquier otro texto se
+     * convierte en un UUID v5 determinístico de (misión, pregunta, clave), así la misma clave es siempre la misma respuesta.
+     *
+     * @param string $slug        Slug de la misión.
+     * @param string $question_id `question_uid`.
+     * @param string $clave       `idempotency_key` (8 a 120 caracteres).
+     *
+     * @return string UUID.
+     */
+    private function answer_uid_de($slug, $question_id, $clave)
+    {
+        if (Str::isUuid($clave)) {
+            return $clave;
+        }
+
+        return Uuid::uuid5(Uuid::NAMESPACE_URL, 'cc:' . $slug . '|' . $question_id . '|' . $clave)->toString();
     }
 
     /**
