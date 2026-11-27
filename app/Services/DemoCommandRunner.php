@@ -65,6 +65,19 @@ class DemoCommandRunner
         'view:clear'                => '/^\s*$/',
     ];
 
+    /**
+     * Binario de PHP con el que se corre artisan en una demo que vive en el VPS.
+     *
+     * 🔴 Medido el 27/11/2026: las tres demos (api-demo, api-demo2, api-demo3) corren con PHP 8.4
+     * (pool /etc/php/8.4/fpm y queue:work con /usr/bin/php8.4), pero el `php` por defecto del CLI
+     * del VPS es 7.4 y el vendor de las demos exige >=8.4.27: `php artisan db:seed` moría en
+     * platform_check. Por eso se usa la ruta absoluta del 8.4.
+     */
+    const PHP_BINARIO_VPS = '/usr/bin/php8.4';
+
+    /** Binario de PHP en hosting compartido: el `php` del PATH, como siempre. */
+    const PHP_BINARIO_COMPARTIDO = 'php';
+
     /** Segundos que se le dan al comando antes de cortarlo. */
     const TIMEOUT_SEGUNDOS = 180;
 
@@ -98,13 +111,10 @@ class DemoCommandRunner
             );
         }
 
-        /*
-         * La ruta sale del MISMO resolver que usa el pipeline de actualización. No se arma acá:
-         * dos definiciones de "dónde vive la API de una demo" se separan con el tiempo y la
-         * segunda termina corriendo comandos contra un directorio equivocado.
-         */
         $resolver = new DemoPathResolver();
-        $api_path = $resolver->api_path($demo);
+
+        // Se arma ANTES de abrir el SSH: si la ruta no se puede resolver, falla sin tocar el servidor.
+        $linea = $this->armar_linea($demo, $comando, $argumentos);
 
         /*
          * 🔴 EL TIPO DE CREDENCIAL SALE DEL RESOLVER, NO SE ASUME.
@@ -137,17 +147,6 @@ class DemoCommandRunner
 
         $ssh->setTimeout(self::TIMEOUT_SEGUNDOS);
 
-        /*
-         * `escapeshellarg` sobre la ruta y el comando armado a partir de piezas ya validadas.
-         * Los argumentos NO se escapan de a uno porque tienen que llegar como flags separados; lo
-         * que los hace seguros es el patrón cerrado de arriba, que solo deja pasar `--clave=numero`
-         * y `--limpiar`.
-         */
-        $linea = 'cd ' . escapeshellarg($api_path)
-            . ' && php artisan ' . $comando
-            . ($argumentos !== '' ? ' ' . $argumentos : '')
-            . ' --no-ansi 2>&1';
-
         $salida = $ssh->exec($linea);
         $ssh->disconnect();
 
@@ -161,5 +160,35 @@ class DemoCommandRunner
             'salida'           => $salida,
             'comando_completo' => 'php artisan ' . $comando . ($argumentos !== '' ? ' ' . $argumentos : ''),
         ];
+    }
+
+    /**
+     * Arma la línea de shell que se ejecuta en el servidor de la demo (sin abrir SSH, por eso es
+     * testeable). No valida contra la lista blanca: eso lo hace run() antes de llamarla.
+     *
+     * La ruta sale del MISMO resolver que usa el pipeline de actualización: dos definiciones de
+     * "dónde vive la API de una demo" se separan con el tiempo y la segunda termina corriendo
+     * comandos contra un directorio equivocado. El binario de PHP depende de dónde vive la demo
+     * (ver PHP_BINARIO_VPS).
+     *
+     * `escapeshellarg` sobre la ruta; los argumentos NO se escapan de a uno porque tienen que llegar
+     * como flags separados: los hace seguros el patrón cerrado de COMANDOS_PERMITIDOS.
+     *
+     * @param Demo   $demo       Demo sobre la que se corre.
+     * @param string $comando    Nombre del comando de artisan.
+     * @param string $argumentos Argumentos ya validados (puede ser '').
+     *
+     * @return string Línea completa, p. ej. `cd '/ruta' && /usr/bin/php8.4 artisan x --no-ansi 2>&1`.
+     */
+    public function armar_linea(Demo $demo, string $comando, string $argumentos): string
+    {
+        $resolver = new DemoPathResolver();
+
+        $binario = $resolver->is_vps($demo) ? self::PHP_BINARIO_VPS : self::PHP_BINARIO_COMPARTIDO;
+
+        return 'cd ' . escapeshellarg($resolver->api_path($demo))
+            . ' && ' . $binario . ' artisan ' . $comando
+            . ($argumentos !== '' ? ' ' . $argumentos : '')
+            . ' --no-ansi 2>&1';
     }
 }
