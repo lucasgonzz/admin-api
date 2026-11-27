@@ -44,8 +44,18 @@ class DemoCommandRunner
      * Los comandos de acá son los que efectivamente hicieron falta, no una lista especulativa:
      * sembrar la trazabilidad del clip 4.4, reiniciar los workers (que trabó tres clips el 28/8) y
      * limpiar cachés, que es lo que se pide cuando una demo sirve código viejo.
+     *
+     * 🔴 `db:seed` NO es libre: solo vale con `--class=VenderLayoutAgilSeeder`, el seeder que
+     * siembra el Diseño ágil de Vender (es idempotente, se puede correr varias veces sobre la misma
+     * demo). `--force` es opcional pero hace falta en la práctica: en producción `db:seed` pide
+     * confirmación interactiva y por SSH sin TTY se queda esperando. El patrón está anclado con `^`
+     * y `\z` (sin `$`, que aceptaría un salto de línea final) y no admite otra clase, otro flag ni
+     * espacios de más: un `db:seed` abierto podría correr cualquier seeder, incluidos los que
+     * borran datos.
      */
     const COMANDOS_PERMITIDOS = [
+        // --class=VenderLayoutAgilSeeder [--force]
+        'db:seed'                   => '/^--class=VenderLayoutAgilSeeder( --force)?\z/',
         // --article_id=43 --user_id=400 --limpiar
         'demo:sembrar-trazabilidad' => '/^(--article_id=\d{1,9}|--user_id=\d{1,9}|--limpiar|\s)*$/',
         'queue:restart'             => '/^\s*$/',

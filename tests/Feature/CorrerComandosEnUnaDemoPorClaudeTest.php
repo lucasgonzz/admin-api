@@ -269,7 +269,9 @@ class CorrerComandosEnUnaDemoPorClaudeTest extends TestCase
             'comando'           => 'db:seed',
             'argumentos'        => '--class=OtraClase',
             'confirm_demo_name' => self::URL_DEMO,
-            'dry_run'           => true,
+            // El patrón de argumentos lo aplica el runner, que solo corre con dry_run=false;
+            // rechaza antes de buscar credencial y de abrir el SSH.
+            'dry_run'           => false,
         ], $this->headers());
 
         $otra->assertStatus(422);
