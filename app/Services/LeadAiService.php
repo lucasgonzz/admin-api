@@ -11716,7 +11716,157 @@ TXT;
 
         $elegido = ! empty($candidates_with_mensaje) ? end($candidates_with_mensaje) : end($candidates);
 
+        /* Misión martin-mensaje-puntos (27/11/2026, lead 718): si `mensaje_sugerido` es un marcador de lugar («...»), se
+         * recupera el texto real del bloque de código o se deriva a una persona; nunca sale «...» al lead. */
+        $elegido = $this->reparar_el_mensaje_marcador_de_lugar($elegido, $raw);
+
         return $this->separar_la_verificacion_pedida_por_claude($elegido);
+    }
+
+    /**
+     * Evita que un marcador de lugar («...», «…», «<mensaje>», vacío) salga como mensaje al lead.
+     *
+     * Por qué existe (lead 718 «Rubén (ENSAYO)», 27/11/2026, lead_messages 17448): el modelo escribió el texto real en
+     * un bloque de código FUERA del JSON y dejó `"mensaje_sugerido": "..."`; el JSON se tomó tal cual y los tres puntos
+     * salieron por WhatsApp. No se confía en que el prompt lo evite: es una defensa determinista sobre lo que ya llegó.
+     *
+     * Qué hace, en orden:
+     *   1. Si `mensaje_sugerido` NO es un marcador de lugar, no toca nada (un texto con «...» adentro es un texto).
+     *   2. Si es un marcador y el mensaje vacío es intencional (`solicita_disponibilidad`: el sistema hace la segunda
+     *      llamada con los horarios), tampoco toca nada.
+     *   3. Si la respuesta trae un bloque ``` sin JSON y con texto real, ese texto pasa a ser el mensaje.
+     *   4. Si no hay bloque utilizable, deriva a una persona: `requiere_intervencion_humana`, mensaje '' (no queda
+     *      nada que pueda salir) y la nota en `razonamiento` y `motivo_intervencion`.
+     *
+     * 🔴 No «simplificar» quitando el paso 2: sin él, el flujo normal de la agenda (mensaje vacío a propósito) se
+     * derivaría a una persona en cada pedido de horarios.
+     *
+     * @param array<string, mixed> $paquete Paquete ya decodificado (el objeto raíz elegido).
+     * @param string               $raw     Respuesta cruda del modelo, de donde se saca el bloque de código.
+     *
+     * @return array<string, mixed> El paquete, con el mensaje recuperado, derivado a una persona o intacto.
+     */
+    protected function reparar_el_mensaje_marcador_de_lugar(array $paquete, string $raw): array
+    {
+        if (! array_key_exists('mensaje_sugerido', $paquete)) {
+            return $paquete;
+        }
+
+        $mensaje = $paquete['mensaje_sugerido'];
+
+        /* Sólo se analiza un texto (o null, que el resto del código lee como vacío): cualquier otro tipo queda como vino. */
+        if ($mensaje !== null && ! is_string($mensaje)) {
+            return $paquete;
+        }
+
+        if (! $this->es_marcador_de_lugar((string) $mensaje)) {
+            return $paquete;
+        }
+
+        /* El vacío que acompaña a un pedido de disponibilidad es intencional (ver el docblock). */
+        $pide_disponibilidad = ! empty($paquete['solicita_disponibilidad']);
+        if ($pide_disponibilidad && trim((string) $mensaje) === '') {
+            return $paquete;
+        }
+
+        $texto_del_bloque = $this->primer_bloque_de_codigo_con_texto_real($raw);
+
+        if ($texto_del_bloque !== '') {
+            Log::channel('daily')->warning('LeadAiService: mensaje_sugerido era un marcador de lugar; se tomó el texto del bloque de código.', [
+                'mensaje_original' => $mensaje,
+            ]);
+
+            $paquete['mensaje_sugerido'] = $texto_del_bloque;
+
+            return $paquete;
+        }
+
+        /* Con un pedido de disponibilidad y un marcador («...»), el mensaje de esta llamada no es el que sale: lo reemplaza
+         * el de la segunda llamada. No se deriva a nadie por eso. */
+        if ($pide_disponibilidad) {
+            return $paquete;
+        }
+
+        Log::channel('daily')->warning('LeadAiService: mensaje_sugerido era un marcador de lugar y no hay texto utilizable; se deriva a una persona.', [
+            'mensaje_original' => $mensaje,
+        ]);
+
+        $nota = 'La IA no devolvió un mensaje utilizable (llegó «' . trim((string) $mensaje) . '» y no había texto real en la respuesta): no se envía nada al lead.';
+
+        $paquete['mensaje_sugerido']             = '';
+        $paquete['requiere_intervencion_humana'] = true;
+        $paquete['motivo_intervencion']          = $nota . ' Revisá la conversación y contestale a mano.';
+        $paquete['razonamiento']                 = trim((isset($paquete['razonamiento']) && is_string($paquete['razonamiento']) ? $paquete['razonamiento'] : '') . ' ⚠️ ' . $nota);
+
+        return $paquete;
+    }
+
+    /**
+     * ¿El texto es un marcador de lugar y no un mensaje?
+     *
+     * Lo es si está vacío, o si sacando espacios y puntuación (incluidos «…», «.» y los signos < > [ ]) no queda ninguna
+     * letra ni número («...», «. . .», «—»), o si es un rótulo corto envuelto entero en < > o [ ] («<mensaje>», «[mensaje]»).
+     * Un texto con puntos suspensivos entre palabras («Un almacén... bárbaro») NO lo es. Un emoji solo tampoco: los
+     * símbolos no se cuentan como puntuación.
+     *
+     * @param string $texto Valor de `mensaje_sugerido` o contenido de un bloque de código.
+     *
+     * @return bool
+     */
+    private function es_marcador_de_lugar(string $texto): bool
+    {
+        $recortado = trim($texto);
+
+        if ($recortado === '') {
+            return true;
+        }
+
+        /* Sin espacios, puntuación ni los signos < > (que son símbolos y no puntuación), ¿queda algo? */
+        $sin_signos = preg_replace('/[\s\p{P}\p{Z}<>]+/u', '', $recortado);
+        if ($sin_signos === null || $sin_signos === '') {
+            return true;
+        }
+
+        /* «<mensaje>» y «[mensaje]»: el rótulo de la plantilla que el modelo copió sin reemplazar. Sólo si ENVUELVE todo el
+         * texto y es corto; «[Hola] ¿cómo andás?» no entra. */
+        return preg_match('/^[<\[][^<>\[\]\r\n]{0,40}[>\]]$/u', $recortado) === 1;
+    }
+
+    /**
+     * Texto del primer bloque de código (``` ... ```) que no contiene JSON y tiene texto real.
+     *
+     * Se saltea el bloque vacío, el que es otro marcador de lugar y el que trae JSON adentro (el del propio paquete,
+     * con o sin la etiqueta ```json). Devuelve el contenido sin las vallas y recortado. No importa si el bloque viene
+     * antes o después del JSON: lo que descarta un bloque es lo que tiene adentro, no dónde está.
+     *
+     * @param string $raw Respuesta cruda del modelo.
+     *
+     * @return string El texto, o '' si no hay ningún bloque utilizable.
+     */
+    private function primer_bloque_de_codigo_con_texto_real(string $raw): string
+    {
+        /* Las vallas, con una etiqueta de lenguaje opcional pegada a la apertura (```json, ```text). */
+        if (preg_match_all('/```[A-Za-z0-9_+-]*[ \t]*\R(.*?)```/su', $raw, $bloques) === 0) {
+            return '';
+        }
+
+        foreach ($bloques[1] as $bloque) {
+            /* Contenido del bloque, sin las vallas ni espacios de los bordes. */
+            $contenido = trim($bloque);
+
+            if ($this->es_marcador_de_lugar($contenido)) {
+                continue;
+            }
+
+            /* Un bloque con un objeto JSON adentro es el paquete, no el mensaje. */
+            if (strpos($contenido, '{') !== false && strrpos($contenido, '}') !== false) {
+                continue;
+            }
+
+            return $contenido;
+        }
+
+        return '';
     }
 
     /**
