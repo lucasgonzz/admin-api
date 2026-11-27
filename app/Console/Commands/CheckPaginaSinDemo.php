@@ -11,6 +11,7 @@ use App\Services\ClientPhoneDirectory;
 use App\Services\FranjaHorariaDeSeguimientos;
 use App\Services\LeadBroadcastService;
 use App\Services\LeadDemoSettings;
+use App\Services\LeadFlujoEntradaService;
 use App\Services\WhatsappSendService;
 use App\Services\WhatsappSessionWindowService;
 use Carbon\Carbon;
@@ -224,6 +225,15 @@ class CheckPaginaSinDemo extends Command
         $directorio = new ClientPhoneDirectory();
 
         foreach ($candidates as $lead) {
+            /* Misión embudo-prueba-martin-precios (ensayo 707): al lead del flujo de entrada que todavía no pidió la
+             * demo no se le manda el «pedí la demo»: su camino es la prueba y, si recibió su página antes de este
+             * arreglo, el seguimiento lo empujaría a la demo. Va en PHP y no en la consulta porque el criterio
+             * (interruptor, fecha de encendido, estado) es el mismo de `LeadFlujoEntradaService::oculta_la_demo()`.
+             * No se marca: si el lead pide la demo y deja de estar oculta, el próximo tick lo vuelve a evaluar. */
+            if (LeadFlujoEntradaService::oculta_la_demo($lead)) {
+                continue;
+            }
+
             /* 🔴 Misión asistente-arreglos-segunda-prueba (N11, 19/10/2026): a un cliente (su teléfono
              * es el de un cliente activo, de su equipo o de un admin, o el lead ya fue promovido) no se
              * le manda el seguimiento de la página: es la cadencia de un lead, la misma guarda que el

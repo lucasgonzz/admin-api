@@ -90,6 +90,14 @@ class LeadFlujoEntradaService
     public const ESTADOS_QUE_PASAN_A_LINK_ENVIADO = ['nuevo', 'contactado', 'calificado'];
 
     /**
+     * Estados en los que el lead del flujo todavía NO pidió la demo: ahí el camino es la prueba y el agente no recibe
+     * el guion de la demo (su página `/experiencia/`, la calificación mínima, la nota de la demo directa).
+     * Pedir la demo con sus palabras lo mueve a `solicita_disponibilidad` y ahí vuelve todo (misión
+     * embudo-prueba-martin-precios, ensayo 707).
+     */
+    public const ESTADOS_SIN_DEMO = ['nuevo', 'contactado', 'calificado', 'link_enviado', 'implementacion_pedida'];
+
+    /**
      * Los puntos obligatorios, en el orden en que salen. `paso` es 1 (llegada) o 2 (respuesta del lead); `clave` es
      * la del texto literal; `kind` es el `system_message_kind` con el que sale por el camino literal.
      *
@@ -207,6 +215,59 @@ class LeadFlujoEntradaService
         $desde = self::activado_en();
 
         return $desde !== null && $lead->created_at !== null && Carbon::parse($lead->created_at)->greaterThanOrEqualTo($desde);
+    }
+
+    /**
+     * ¿Hay que ocultarle al agente el guion de la demo a este lead? Sí si está en el flujo de entrada
+     * ({@see en_el_flujo()}: interruptor prendido, creado desde el encendido, sin demo asignada) y en un estado
+     * donde todavía no pidió la demo ({@see ESTADOS_SIN_DEMO}).
+     *
+     * Por qué existe: el bloque DEMO DIRECTA le dicta al agente pasar la página del lead y calificarlo, y el flujo de
+     * entrada manda al lead a la prueba; con los dos bloques en el prompt, el de la demo (más concreto) le ganaba al
+     * del flujo (ensayo 707, 27/11/2026). No tocar este criterio sin revisar `LeadAiService::generate_suggestion()`
+     * y `leads:check-pagina-sin-demo`, que lo comparten.
+     *
+     * @param Lead $lead
+     *
+     * @return bool
+     */
+    public static function oculta_la_demo(Lead $lead): bool
+    {
+        return self::en_el_flujo($lead) && in_array((string) $lead->status, self::ESTADOS_SIN_DEMO, true);
+    }
+
+    /**
+     * El bloque corto que reemplaza a la demo directa para el lead que {@see oculta_la_demo()}: dice qué hacer si
+     * pide la demo con sus palabras, sin ningún link de su página ni calificación.
+     *
+     * El lead que pide la demo pasa por `solicita_disponibilidad` (con el mail primero) y recién en el turno
+     * siguiente el sistema le da el bloque completo de la demo. Excepción: el lead en `implementacion_pedida` NO puede
+     * pasar a `solicita_disponibilidad` (la guarda de «no retroceder de tramo» de `LeadAiService` compara `sort_order`
+     * y ese estado va después), así que el sistema nunca le da el bloque de la demo: a ese lead no se le promete nada
+     * automático, la demo se la muestra Juan en la llamada de la implementación.
+     *
+     * @param string $estado_del_lead Estado actual del lead ('' si no se conoce).
+     *
+     * @return string Bloque listo para concatenar al contexto de usuario.
+     */
+    public static function bloque_de_la_demo_a_pedido(string $estado_del_lead = ''): string
+    {
+        $encabezado = "\n\nDEMO SÓLO A PEDIDO (el camino de este lead es la prueba gratis; no hay demo asignada ni se la ofrezcas):\n"
+            . "  - NO le pases la página de su demo ni ningún link de demo, y no lo califiques con preguntas de la demo.\n";
+
+        /* Lead que ya pidió la implementación: la demo no se agenda por acá, se la muestra Juan en la llamada. */
+        if ($estado_del_lead === 'implementacion_pedida') {
+            return $encabezado
+                . "  - Este lead ya pidió la implementación: si pide una DEMO con sus palabras, decile que Juan se la muestra\n"
+                . "    en la llamada de la implementación. NO la agendes, NO pidas mail ni horario para una demo, NO prometas una demo automática ni un bloque de\n"
+                . "    demo en el turno siguiente, y NO devuelvas estado_sugerido \"solicita_disponibilidad\".\n";
+        }
+
+        return $encabezado
+            . "  - Si el lead pide una DEMO con sus palabras (un mensaje suyo, no el texto de un botón): confirmale que sí. Si todavía no\n"
+            . "    tenemos su mail, pedíselo con una sola pregunta; si ya lo tenemos, preguntale si la hace ahora o cuándo.\n"
+            . "    Devolvé estado_sugerido: \"solicita_disponibilidad\", SIN agendar_demo y SIN links en este turno: en el turno\n"
+            . "    siguiente el sistema te da el bloque de la demo.\n";
     }
 
     /**
@@ -491,13 +552,15 @@ class LeadFlujoEntradaService
             return [];
         }
 
-        $es_de_la_web = self::es_lead_de_la_web($lead);
+        /* Quién merece el link de la prueba: el lead de la web o el que, desde su primer mensaje, dice que quiere probar. */
+        $quiere_probar = self::es_lead_de_la_web($lead) || self::quiere_probar_desde_el_primer_mensaje($lead);
         foreach (self::PUNTOS as $punto => $datos) {
             if ($datos['paso'] !== 2 || isset($entregados[$punto])) {
                 continue;
             }
-            /* El link sólo se le debe al lead de la web, con el link prendido y lugar en el pool de pruebas. */
-            if ($punto === 'link_prueba' && ! ($es_de_la_web && LeadOfertaDePruebaService::activa() && self::hay_lugar_en_el_pool())) {
+            /* El link sólo se le debe al lead de la web o al que dijo «quiero probar» en su primer mensaje (los textos
+               precargados de los anuncios), con el link prendido y lugar en el pool de pruebas. */
+            if ($punto === 'link_prueba' && ! ($quiere_probar && LeadOfertaDePruebaService::activa() && self::hay_lugar_en_el_pool())) {
                 continue;
             }
             $debidos[] = $punto;
@@ -518,6 +581,30 @@ class LeadFlujoEntradaService
         $primero = self::primer_mensaje_del_lead($lead);
 
         return $primero !== null && LeadOrigenService::origen_por_frase($primero) === LeadOrigenService::ORIGEN_LANDING;
+    }
+
+    /**
+     * ¿El primer mensaje del lead dice que quiere probar? Es el caso del lead del anuncio, cuyo texto precargado
+     * («Hola, vi el video de los presupuestos y quiero probar ComercioCity») no contiene la frase contigua de la web
+     * y por eso no cuenta como lead de la web ({@see es_lead_de_la_web()}), aunque pida exactamente lo mismo.
+     *
+     * Sí si el primer mensaje, normalizado, contiene «quiero probar» como palabras enteras. No se lee del origen (atribución de Meta) a propósito: acá
+     * se mide la intención del lead.
+     *
+     * @param Lead $lead
+     *
+     * @return bool false si todavía no escribió.
+     */
+    public static function quiere_probar_desde_el_primer_mensaje(Lead $lead): bool
+    {
+        $primero = self::primer_mensaje_del_lead($lead);
+        if ($primero === null) {
+            return false;
+        }
+
+        /* Sólo la intención explícita. Ser igual a un texto precargado NO alcanza: esa perilla guarda lo que «no cuenta
+           como pregunta» (p. ej. «Hola, vi el video» o «Quiero más información»), que no pide probar nada. */
+        return LeadOrigenService::contiene_frase($primero, 'quiero probar');
     }
 
     /**
@@ -896,7 +983,11 @@ class LeadFlujoEntradaService
             . "    la implementación (la llamada no tiene costo; la implementación es un pago único de PRECIOS VIGENTES), sin pedirle hora, y\n"
             . "    devolvé estado_sugerido: \"implementacion_pedida\".\n"
             . "  - No le pidas hora. No le pidas datos para calificarlo más allá de lo que ya pide el flujo.\n"
-            . "  - Si pregunta precios, dale los de PRECIOS VIGENTES (citá \"" . PreciosVigentesSettings::FUENTE_PARA_EL_GATE . "\" en fuentes_kb).\n"
+            . "  - No pidas el nombre, ni cuántos trabajan, ni qué sistema usa: con el rubro alcanza.\n"
+            . "  - Si pregunta precios: contestá con PRECIOS VIGENTES (citá \"" . PreciosVigentesSettings::FUENTE_PARA_EL_GATE . "\" en fuentes_kb)"
+            . ($hay_lugar
+                ? " y cerrá con el link de la prueba textual (estado_sugerido link_enviado).\n"
+                : ".\n")
             . "  - NO le ofrezcas la demo ni una llamada, NO devuelvas agendar_demo y NO le pidas disponibilidad.\n"
             . "    SALVO que el lead pida EXPLICITAMENTE una DEMO con sus palabras (un mensaje suyo, no el texto de un botón): ahí seguí el\n"
             . "    flujo de la demo de arriba.\n"
@@ -933,6 +1024,47 @@ class LeadFlujoEntradaService
     // ------------------------------------------------------------------------------------------
 
     /**
+     * Separa la pregunta final de un segmento que termina en «?» de lo que la precede.
+     *
+     * La pregunta final es la ORACIÓN que contiene el último «¿»: empieza después del último límite de oración
+     * anterior a ese «¿» (un `.`, `!`, `…` o `?` seguido de espacio o salto, o un salto de línea) o al principio del
+     * segmento si no hay ninguno. Así un giro antes del signo («Contame, ¿a qué se dedica tu negocio?») viaja con su
+     * pregunta. `respuesta` es todo lo anterior a esa oración (sin espacios finales); si queda vacía, el segmento
+     * entero es la pregunta. Sin «¿» en el segmento no se separa nada.
+     *
+     * @param string $segmento Último segmento de la IA, ya recortado y terminado en «?».
+     *
+     * @return array{respuesta: string, pregunta: string} `respuesta` queda '' cuando no hay nada antes de la oración
+     *                                                    (y `pregunta` es entonces el segmento completo).
+     */
+    private static function separar_la_pregunta_final(string $segmento): array
+    {
+        $sin_separar = ['respuesta' => '', 'pregunta' => $segmento];
+
+        /* Posición (en caracteres) del último «¿»: la pregunta final es la oración que lo contiene. */
+        $signo = mb_strrpos($segmento, '¿');
+        if ($signo === false) {
+            return $sin_separar;
+        }
+
+        /* Lo anterior al «¿»; el último límite de oración que contiene marca dónde empieza la oración de la pregunta. */
+        $antes  = mb_substr($segmento, 0, $signo);
+        $inicio = 0;
+        if (preg_match_all('/[.!…?](?=\s)|\R/u', $antes, $limites, PREG_OFFSET_CAPTURE) > 0) {
+            $ultimo = end($limites[0]);
+            /* El offset es en bytes: se pasa a caracteres y se avanza hasta después del límite. */
+            $inicio = mb_strlen(substr($antes, 0, $ultimo[1])) + mb_strlen($ultimo[0]);
+        }
+
+        $respuesta = rtrim(mb_substr($segmento, 0, $inicio));
+        if ($respuesta === '') {
+            return $sin_separar;
+        }
+
+        return ['respuesta' => $respuesta, 'pregunta' => trim(mb_substr($segmento, $inicio))];
+    }
+
+    /**
      * Completa el paquete del agente con lo que todavía se le debe al lead del flujo de entrada.
      *
      * Se llama DESPUÉS del gate de respaldo documental, y no lo destraba nunca: si el gate frenó
@@ -963,17 +1095,50 @@ class LeadFlujoEntradaService
             return $parsed;
         }
 
+        /* Si el último mensaje (segmento separado por `---`) de la IA termina en pregunta, esa pregunta tiene que seguir
+           siendo lo último que lee el lead: los puntos que agrega el flujo van ANTES de ella y no detrás («pregunta →
+           dos formas → página», ensayo 707). Sin pregunta final, los puntos van al final como siempre. */
+        $segmentos      = preg_split('/\R---\R/u', $mensaje) ?: [$mensaje];
+        $pregunta_final = trim((string) end($segmentos));
+        $texto_base     = $mensaje;
+        if (substr($pregunta_final, -1) === '?') {
+            array_pop($segmentos);
+
+            /* Si la pregunta viene pegada al final de una respuesta del mismo segmento («…todo en un solo lugar. ¿A qué se
+               dedica tu negocio?»), se separa: la respuesta se queda donde estaba y sólo la pregunta pasa detrás de los
+               puntos. Si no se puede aislar con seguridad, el segmento entero sigue siendo «la pregunta» (orden de antes). */
+            $partes_de_la_pregunta = self::separar_la_pregunta_final($pregunta_final);
+            if ($partes_de_la_pregunta['respuesta'] !== '') {
+                $segmentos[]    = $partes_de_la_pregunta['respuesta'];
+                $pregunta_final = $partes_de_la_pregunta['pregunta'];
+            }
+            $texto_base = trim(implode("\n---\n", array_map('trim', $segmentos)));
+        } else {
+            $pregunta_final = '';
+        }
+
+        /* Los textos de los puntos que faltan, cada uno con su separador por delante. */
         $agregados = [];
+        $nuevos    = '';
         foreach (self::puntos_debidos($lead) as $punto) {
             if (self::cumple_el_ancla($punto, $mensaje)) {
                 continue;
             }
-            $mensaje    .= "\n---\n" . self::texto_del_punto($punto);
+            $nuevos     .= "\n---\n" . self::texto_del_punto($punto);
             $agregados[] = $punto;
         }
 
         if (empty($agregados)) {
             return $parsed;
+        }
+
+        /* Sin texto antes de la pregunta (la IA sólo preguntó) se saca el primer separador para no empezar con `---`. */
+        $mensaje = $texto_base . $nuevos;
+        if ($texto_base === '') {
+            $mensaje = ltrim($nuevos, "\n-");
+        }
+        if ($pregunta_final !== '') {
+            $mensaje .= "\n---\n" . $pregunta_final;
         }
 
         $parsed['mensaje_sugerido'] = $mensaje;

@@ -530,10 +530,11 @@ class PreciosVigentesSettings
         $lineas[] = '1. Si todavía no te presentaste en esta conversación: «Hola, soy Martín, de ComercioCity».';
         $lineas[] = '2. Contale que tenemos 3 productos: el sistema de gestión, la tienda online y los agentes de IA, que automatizan la mayor parte de los procesos digitales del negocio.';
         $lineas[] = '3. Respondé lo que preguntó: ' . $frase_precio . $frase_tres . '. Si preguntó por la mensualidad, dala también.';
-        $lineas[] = '4. Cerrá con un siguiente paso concreto, sólo si el lead todavía no tiene una demo agendada o hecha ni una prueba creada: ofrecele la demo'
-            . ' (decile «prueba gratuita guiada de la plataforma», para conocer los 3 productos; dura alrededor de 1 hora) y también la prueba gratis de '
-            . $dias_de_prueba . ' días. Si acepta la demo, seguí las reglas de la demo para agendarla (horario y mail antes de pasar links).'
-            . ' Si más abajo hay un bloque de la oferta de la prueba, ese bloque manda sobre este paso.';
+        $lineas[] = '4. Cerrá con un siguiente paso concreto, sólo si el lead todavía no tiene una demo agendada o hecha ni una prueba creada:'
+            . ' invitalo a la prueba gratis de ' . $dias_de_prueba . ' días con su propio negocio, sin tarjeta,'
+            . ' y pasale el link de la prueba textual si lo tenés en tu contexto.'
+            . ' La demo guiada se ofrece sólo si el lead la pidió con sus palabras; en ese caso seguí las reglas de la demo para agendarla.'
+            . ' Si más abajo hay un bloque de la oferta de la prueba o del flujo de entrada, ese bloque manda sobre este paso.';
 
         return $lineas;
     }

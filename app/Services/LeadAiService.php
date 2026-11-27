@@ -803,8 +803,14 @@ TXT;
          * parámetro al system prompt, al contexto y al post-procesado del paquete. */
         $demo_directa = $this->contrato_demo_directa_activo($lead);
 
+        /* Misión embudo-prueba-martin-precios (ensayo 707): el lead del flujo de entrada que todavía no pidió la demo no
+         * recibe la nota de la demo directa en el system prompt (con la demo oculta va la prohibición de rango horario,
+         * que es inocua). `$demo_directa` sigue igual para el post-procesado: si el modelo devolviera `agendar_demo`
+         * igual, la normalización de siempre lo maneja. */
+        $ocultar_demo = LeadFlujoEntradaService::oculta_la_demo($lead);
+
         /* Pasar el estado para inyectar la sección FAQ solo cuando corresponde */
-        $system       = $this->build_system_prompt($demo_directa);
+        $system       = $this->build_system_prompt($demo_directa && ! $ocultar_demo);
         $user_content = $this->build_user_content($lead, $is_followup, '', $intencion_forzada, $demo_directa);
         $model        = LeadAiProveedor::modelo();
         $http         = $this->build_http_client();
@@ -11507,7 +11513,13 @@ TXT;
          * está por confirmar demo_agendada en la respuesta que se está armando ahora mismo). Se
          * inyecta siempre que el lead use la dinámica nueva, sin importar su status.
          */
-        if ($demo_directa) {
+        if (LeadFlujoEntradaService::oculta_la_demo($lead)) {
+            /* Lead del flujo de entrada que todavía no pidió la demo (misión embudo-prueba-martin-precios): ni la
+             * página de acceso ni la demo directa; sólo el bloque corto de qué hacer si la pide con sus palabras.
+             * La segunda llamada (con disponibilidad) no necesita esto: sin demo oculta es la única que llega con un
+             * `solicita_disponibilidad` válido, y ahí `oculta_la_demo()` ya da false. */
+            $txt .= LeadFlujoEntradaService::bloque_de_la_demo_a_pedido((string) $lead->status);
+        } elseif ($demo_directa) {
             /* Demo directa (misión demo-agendado-directo): el bloque trae los dos links, el email,
              * el estado de la demo y si hay instancia libre. Reemplaza al de la página inmersiva. */
             $txt .= $this->build_demo_directa_context($lead);
