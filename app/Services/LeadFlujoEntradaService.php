@@ -1024,37 +1024,40 @@ class LeadFlujoEntradaService
     // ------------------------------------------------------------------------------------------
 
     /**
-     * Separa la última oración interrogativa de un segmento que termina en «?» de lo que la precede.
+     * Separa la pregunta final de un segmento que termina en «?» de lo que la precede.
      *
-     * La pregunta empieza en el último «¿» del texto y sólo se la aísla si lo anterior termina en un fin de oración
-     * (`.`, `!`, `…`, `?`) o en un salto de línea: así no se corta una oración por la mitad («Hola, ¿qué tal?» no se
-     * separa). Sin «¿» o sin nada antes, no hay nada que aislar.
+     * La pregunta final es la ORACIÓN que contiene el último «¿»: empieza después del último límite de oración
+     * anterior a ese «¿» (un `.`, `!`, `…` o `?` seguido de espacio o salto, o un salto de línea) o al principio del
+     * segmento si no hay ninguno. Así un giro antes del signo («Contame, ¿a qué se dedica tu negocio?») viaja con su
+     * pregunta. `respuesta` es todo lo anterior a esa oración (sin espacios finales); si queda vacía, el segmento
+     * entero es la pregunta. Sin «¿» en el segmento no se separa nada.
      *
      * @param string $segmento Último segmento de la IA, ya recortado y terminado en «?».
      *
-     * @return array{respuesta: string, pregunta: string} `respuesta` queda '' cuando no se pudo aislar con seguridad
+     * @return array{respuesta: string, pregunta: string} `respuesta` queda '' cuando no hay nada antes de la oración
      *                                                    (y `pregunta` es entonces el segmento completo).
      */
     private static function separar_la_pregunta_final(string $segmento): array
     {
         $sin_separar = ['respuesta' => '', 'pregunta' => $segmento];
 
-        /* Posición (en caracteres) del último «¿»: ahí empieza la pregunta final. */
-        $inicio = mb_strrpos($segmento, '¿');
-        if ($inicio === false || $inicio === 0) {
+        /* Posición (en caracteres) del último «¿»: la pregunta final es la oración que lo contiene. */
+        $signo = mb_strrpos($segmento, '¿');
+        if ($signo === false) {
             return $sin_separar;
         }
 
-        $antes    = mb_substr($segmento, 0, $inicio);
-        $respuesta = rtrim($antes);
+        /* Lo anterior al «¿»; el último límite de oración que contiene marca dónde empieza la oración de la pregunta. */
+        $antes  = mb_substr($segmento, 0, $signo);
+        $inicio = 0;
+        if (preg_match_all('/[.!…?](?=\s)|\R/u', $antes, $limites, PREG_OFFSET_CAPTURE) > 0) {
+            $ultimo = end($limites[0]);
+            /* El offset es en bytes: se pasa a caracteres y se avanza hasta después del límite. */
+            $inicio = mb_strlen(substr($antes, 0, $ultimo[1])) + mb_strlen($ultimo[0]);
+        }
+
+        $respuesta = rtrim(mb_substr($segmento, 0, $inicio));
         if ($respuesta === '') {
-            return $sin_separar;
-        }
-
-        /* Lo anterior tiene que cerrar una oración: fin de oración, o un salto de línea entre medio. */
-        $hay_salto = preg_match('/\R\s*$/u', $antes) === 1;
-        $cierra    = preg_match('/[.!…?]$/u', $respuesta) === 1;
-        if (! $hay_salto && ! $cierra) {
             return $sin_separar;
         }
 
