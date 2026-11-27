@@ -959,6 +959,19 @@ Route::middleware('claude.task.key')
            minuto cómo está cada slot del pool. Upsert por slot + pulso en admin_settings; no toca nada más. */
         Route::post('local/oficina', 'Api\ClaudeLocalOficinaController@store_json');
 
+        /* Seguimiento de misiones en el Admin (misión dotin-misiones-admin, 26/11/2026): la Gamer publica el estado, los
+           eventos y las preguntas de cada misión y consume las respuestas que Lucas dio en el Admin (pending, claim,
+           respuesta, applied, reject). `{slug}` es el de la misión (`cc:<slug>` en los datos). Esta clave NO registra
+           respuestas: las registra Lucas (Admin) o Dotin (conector MCP de decisiones). */
+        Route::put('missions/{slug}', [\App\Http\Controllers\Api\ClaudeMissionsController::class, 'publicar_estado'])->where('slug', '[a-z0-9][a-z0-9._-]{0,76}');
+        Route::post('missions/{slug}/events', [\App\Http\Controllers\Api\ClaudeMissionsController::class, 'publicar_evento'])->where('slug', '[a-z0-9][a-z0-9._-]{0,76}');
+        Route::post('missions/{slug}/questions', [\App\Http\Controllers\Api\ClaudeMissionsController::class, 'publicar_pregunta'])->where('slug', '[a-z0-9][a-z0-9._-]{0,76}');
+        Route::get('missions/answers/pending', [\App\Http\Controllers\Api\ClaudeMissionsController::class, 'respuestas_pendientes']);
+        Route::post('missions/answers/{id}/claim', [\App\Http\Controllers\Api\ClaudeMissionsController::class, 'reclamar_respuesta'])->whereNumber('id');
+        Route::post('missions/answers/{id}/applied', [\App\Http\Controllers\Api\ClaudeMissionsController::class, 'aplicar_respuesta'])->whereNumber('id');
+        Route::post('missions/answers/{id}/reject', [\App\Http\Controllers\Api\ClaudeMissionsController::class, 'rechazar_respuesta'])->whereNumber('id');
+        Route::get('missions/{slug}/questions/{uid}/answer', [\App\Http\Controllers\Api\ClaudeMissionsController::class, 'ver_respuesta'])->where('slug', '[a-z0-9][a-z0-9._-]{0,76}');
+
         /* Plantillas de CLIENTE (soporte). Idempotentes por `template_name`: reenviar la misma
            plantilla actualiza la fila, nunca crea una segunda, y nunca borra las que no vinieron
            en el payload. No tienen nada que ver con las de lead (`followup_templates`), que las
