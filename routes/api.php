@@ -1739,6 +1739,9 @@ Route::prefix('admin')->group(function () {
            agentes del mostrador, bandeja «Para Lucas», oficinas y eventos—, con cache de 20 s. */
         Route::get('local/escena', [\App\Http\Controllers\Api\LocalEscenaController::class, 'escena_json']);
         Route::post('local/misiones/{id}/iniciar', [\App\Http\Controllers\Api\LocalMisionesController::class, 'iniciar'])->whereNumber('id');
+        /* Respuesta de Lucas a una decisión ORDINARIA de una misión (misión dotin-misiones-admin, 26/11/2026). Las preguntas
+           sensibles nunca se registran por acá (403 `requiere_ok_personal`). */
+        Route::post('local/missions/{slug}/questions/{uid}/answer', [\App\Http\Controllers\Api\AdminMissionsController::class, 'responder'])->where('slug', '[a-z0-9][a-z0-9._-]{0,76}');
 
         /* Agenda personal tipo Structured (misión agenda-admin, 31/10/2026): la vista de abajo de
            las tarjetas del Inicio y la pantalla /agenda. Cada admin ve y opera SOLO sus tareas: una

@@ -1101,9 +1101,22 @@ class EscenaService
         }
         $fases_por_mision = $this->snapshot->phases_by_mission($claves);
 
+        /* Seguimiento publicado por la Gamer en el Admin (misión dotin-misiones-admin): una sola pasada para todas las
+           misiones visibles. Si la tabla todavía no existe (deploy a medias) la escena sigue como siempre. */
+        try {
+            $seguimientos = app(\App\Services\Missions\MissionTrackingService::class)->por_claves($claves, $this->ahora->copy());
+        } catch (\Throwable $e) {
+            $seguimientos = [];
+        }
+
         $misiones = [];
         foreach ($visibles as $fila) {
-            $misiones[] = $this->mision_de_la_escena($fila['mision'], $sin_senal_misiones, isset($fases_por_mision[$fila['mision']['id']]) ? $fases_por_mision[$fila['mision']['id']] : []);
+            $mision_de_escena = $this->mision_de_la_escena($fila['mision'], $sin_senal_misiones, isset($fases_por_mision[$fila['mision']['id']]) ? $fases_por_mision[$fila['mision']['id']] : []);
+            // Sólo las misiones con fila de seguimiento llevan la clave: las demás quedan exactamente como siempre.
+            if (isset($seguimientos[$fila['mision']['id']])) {
+                $mision_de_escena['seguimiento'] = $seguimientos[$fila['mision']['id']];
+            }
+            $misiones[] = $mision_de_escena;
         }
 
         /* Recorte visible (REVISION-1 R6): las que el reporter omitió, las que el admin descartó para entrar en
