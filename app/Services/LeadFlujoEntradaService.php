@@ -98,6 +98,43 @@ class LeadFlujoEntradaService
     public const ESTADOS_SIN_DEMO = ['nuevo', 'contactado', 'calificado', 'link_enviado', 'implementacion_pedida'];
 
     /**
+     * Patrones (regex PCRE sobre el texto NORMALIZADO de una oración, {@see LeadOrigenService::normalizar()}) de las preguntas
+     * de CALIFICACIÓN que el flujo de entrada tiene prohibidas («no pidas el nombre, ni cuántos trabajan, ni qué sistema
+     * usa»): si trabaja solo o con alguien, cuántos son, si tiene empleados, qué sistema usa hoy y cómo se llama.
+     *
+     * 🔴 Son deliberadamente estrechos: sacar una pregunta legítima es peor que dejar pasar una de calificación. Por eso «solo o»
+     * sólo cuenta si lo que sigue es «hay / con / tenés / alguien…» (no el «¿lo probás solo o que te lo carguemos?» de las dos
+     * formas de arrancar) y «cuántos» sólo con trabajan / empleados / personas / vendedores (nunca «cuántos productos»).
+     * Se aplican únicamente a oraciones-pregunta (con «¿…?»), ver {@see tipo_de_oracion_de_pregunta()}.
+     */
+    public const PATRONES_DE_PREGUNTA_DE_CALIFICACION = [
+        '/\bsolo o (hay|con|tenes|tienes|tiene|tienen|alguien)\b/',
+        '/\bsos solo\b/',
+        '/\balguien mas\b/',
+        '/\bcuant[oa]s (trabajan|empleados|personas|vendedores)\b/',
+        '/\bcuantos son (en|ustedes|vos|el equipo)\b/',
+        '/\b(tenes|tienes|tiene|tienen) (empleados|vendedores|personal|gente)\b/',
+        '/\bque (sistema|programa) (usas|usan|utilizas|utilizan|tenes|tienen|manejas|manejan)\b/',
+        '/\b(usas|usan|utilizas|tenes|tienen) (algun|un) (sistema|programa)\b/',
+        '/\bcomo te llamas\b/',
+        '/\btu nombre\b/',
+    ];
+
+    /**
+     * Patrones de una oración-pregunta que OFRECE el link de la prueba («¿te paso el link?»), sobre el texto en minúsculas CON
+     * tildes (no normalizado) de la oración, que además tiene que nombrar «link» o «enlace».
+     *
+     * Van con tildes a propósito: el pasado («el link que te pasé / mandé / envié») sin tildes es idéntico al subjuntivo de la
+     * oferta («querés que te pase / mande / envíe») y no se puede sacar una pregunta por el link que YA se mandó. Con tildes, el
+     * pasado no matchea: «paso / mando / envío / comparto» (presente) o «que te pase / mande / envíe / comparta» (subjuntivo).
+     */
+    public const PATRONES_DE_OFERTA_DEL_LINK = [
+        '/(?<![\p{L}])te (lo |la )?(paso|mando|envío|envio|comparto)(?![\p{L}])/u',
+        '/(?<![\p{L}])que te (lo |la )?(pase|mande|envíe|envie|comparta)(?![\p{L}])/u',
+        '/(?<![\p{L}])quer[eé]s (el|este|ese|un) (link|enlace)(?![\p{L}])/u',
+    ];
+
+    /**
      * Los puntos obligatorios, en el orden en que salen. `paso` es 1 (llegada) o 2 (respuesta del lead); `clave` es
      * la del texto literal; `kind` es el `system_message_kind` con el que sale por el camino literal.
      *
@@ -1065,6 +1102,141 @@ class LeadFlujoEntradaService
     }
 
     /**
+     * Clasifica una ORACIÓN que contiene una pregunta («¿…?») según lo que pide.
+     *
+     * Sólo mira oraciones con «¿» y un «?» posterior: una frase sin signos de pregunta nunca se toca (conservador: dejar pasar
+     * una pregunta es mejor que sacar una legítima). La parte de la oración anterior al «¿» (el giro «De paso, hace un rato me
+     * quedó la duda: ¿…?») viaja con ella porque la oración es la unidad.
+     *
+     * @param string $oracion Una oración (sin los espacios que la separan de la siguiente).
+     *
+     * @return string|null `calificacion` si pide solo/acompañado, cuántos son, empleados, sistema que usa o el nombre
+     *                     ({@see PATRONES_DE_PREGUNTA_DE_CALIFICACION}); `oferta_link` si ofrece el link de la prueba
+     *                     ({@see PATRONES_DE_OFERTA_DEL_LINK}); null en cualquier otro caso.
+     */
+    private static function tipo_de_oracion_de_pregunta(string $oracion): ?string
+    {
+        /* Sin «¿…?» no es una pregunta con la forma que se detecta. */
+        $inicio = mb_strpos($oracion, '¿');
+        if ($inicio === false || mb_strpos($oracion, '?', $inicio) === false) {
+            return null;
+        }
+
+        /* Calificación: sobre el texto normalizado (sin tildes ni signos), como el resto de los chequeos del flujo. */
+        $normalizada = ' ' . LeadOrigenService::normalizar($oracion) . ' ';
+        foreach (self::PATRONES_DE_PREGUNTA_DE_CALIFICACION as $patron) {
+            if (preg_match($patron, $normalizada) === 1) {
+                return 'calificacion';
+            }
+        }
+
+        /* Oferta del link: la oración nombra el link y lo ofrece. Va sobre minúsculas CON tildes para no confundir la oferta
+           («que te pase») con una pregunta por el link ya mandado («que te pasé»). */
+        $minusculas = mb_strtolower($oracion, 'UTF-8');
+        if (preg_match('/(?<![\p{L}])(link|enlace)(?![\p{L}])/u', $minusculas) === 1) {
+            foreach (self::PATRONES_DE_OFERTA_DEL_LINK as $patron) {
+                if (preg_match($patron, $minusculas) === 1) {
+                    return 'oferta_link';
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Aplica las guardas deterministas de preguntas sobre el mensaje del agente, ORACIÓN por oración:
+     *  - Saca toda oración-pregunta de calificación ({@see PATRONES_DE_PREGUNTA_DE_CALIFICACION}).
+     *  - Si `$reemplazar_link`, reemplaza la oración que ofrece el link por el texto del link, como segmento propio (`---`) en
+     *    el mismo lugar; las demás ofertas del mismo mensaje se sacan (el link sale una sola vez).
+     * Un segmento que queda vacío se elimina (sin `---` sueltos ni dobles). Si no hay nada que cambiar el mensaje vuelve
+     * idéntico (sin retocar espacios).
+     *
+     * Los límites de oración son los de {@see separar_la_pregunta_final()}: `.`, `!`, `…` o `?` seguidos de espacio o salto, o
+     * un salto de línea.
+     *
+     * @param string $mensaje          Mensaje sugerido (puede llevar segmentos separados por `---`).
+     * @param bool   $reemplazar_link  true si corresponde mandar el link en vez de ofrecerlo.
+     *
+     * @return array{mensaje: string, cambio: bool, califico: bool, reemplazo_el_link: bool} `mensaje` puede quedar '' si todo era
+     *                                    calificación; quien llama decide qué hacer con eso.
+     */
+    private static function limpiar_las_preguntas_del_mensaje(string $mensaje, bool $reemplazar_link): array
+    {
+        /* Los segmentos de salida, ya limpios. */
+        $salida = [];
+        /* Si se sacó alguna pregunta de calificación y si se puso el link en lugar de una oferta. */
+        $califico          = false;
+        $reemplazo_el_link = false;
+
+        $segmentos = preg_split('/\R---\R/u', $mensaje) ?: [$mensaje];
+        foreach ($segmentos as $segmento) {
+            /* Oraciones y separadores alternados: [oración, separador, oración, separador, …, última oración]. */
+            $partes = preg_split('/((?<=[.!…?])\s+|\R+)/u', trim($segmento), -1, PREG_SPLIT_DELIM_CAPTURE) ?: [trim($segmento)];
+
+            /* Texto del segmento que se va armando con lo que se conserva. */
+            $acumulado = '';
+            for ($i = 0; $i < count($partes); $i += 2) {
+                $oracion   = $partes[$i];
+                $separador = $partes[$i + 1] ?? '';
+                $tipo      = self::tipo_de_oracion_de_pregunta($oracion);
+
+                if ($tipo === 'calificacion') {
+                    $califico = true;
+
+                    continue;
+                }
+
+                if ($tipo === 'oferta_link' && $reemplazar_link) {
+                    /* Lo anterior queda como segmento, el link va como segmento propio y lo que sigue abre otro. */
+                    if (trim($acumulado) !== '') {
+                        $salida[] = trim($acumulado);
+                    }
+                    $acumulado = '';
+                    if (! $reemplazo_el_link) {
+                        $salida[] = self::texto_del_punto('link_prueba');
+                    }
+                    $reemplazo_el_link = true;
+
+                    continue;
+                }
+
+                $acumulado .= $oracion . $separador;
+            }
+
+            if (trim($acumulado) !== '') {
+                $salida[] = trim($acumulado);
+            }
+        }
+
+        $cambio = $califico || $reemplazo_el_link;
+
+        return [
+            'mensaje'           => $cambio ? implode("\n---\n", $salida) : $mensaje,
+            'cambio'            => $cambio,
+            'califico'          => $califico,
+            'reemplazo_el_link' => $reemplazo_el_link,
+        ];
+    }
+
+    /**
+     * Suma una nota al `razonamiento` del paquete sin pisar lo que ya dice.
+     *
+     * @param array<string, mixed> $parsed Paquete del agente.
+     * @param string               $nota   Nota a sumar.
+     *
+     * @return array<string, mixed> El paquete con la nota.
+     */
+    private static function sumar_nota_al_razonamiento(array $parsed, string $nota): array
+    {
+        $parsed['razonamiento'] = trim((string) ($parsed['razonamiento'] ?? '')) === ''
+            ? $nota
+            : trim((string) $parsed['razonamiento']) . ' ' . $nota;
+
+        return $parsed;
+    }
+
+    /**
      * Completa el paquete del agente con lo que todavía se le debe al lead del flujo de entrada.
      *
      * Se llama DESPUÉS del gate de respaldo documental, y no lo destraba nunca: si el gate frenó
@@ -1072,6 +1244,12 @@ class LeadFlujoEntradaService
      * (los puntos siguen debidos y decide la persona). Si no, por cada punto debido cuya ancla no aparece en
      * `mensaje_sugerido` agrega `"\n---\n"` y el texto literal, en el orden de {@see PUNTOS}, y deja asentado en
      * `razonamiento` «Flujo de entrada: se agregaron <puntos>».
+     *
+     * ANTES de calcular la pregunta final y los puntos debidos, y sólo para el lead al que el flujo le oculta la demo
+     * ({@see oculta_la_demo()}), corren dos guardas por ORACIÓN-pregunta (misión martin-link-directo, ensayo del lead 711): se
+     * saca toda pregunta de calificación y, con lugar en el pool, la oferta del link («¿te paso el link?») se reemplaza por el
+     * link. Así el resto del método trabaja sobre el mensaje ya limpio. Si la limpieza deja el mensaje vacío, queda lo que se
+     * debe; si no se debe nada, el paquete sale intacto (nunca un `mensaje_sugerido` vacío).
      *
      * @param Lead                 $lead
      * @param array<string, mixed> $parsed       Paquete del agente.
@@ -1093,6 +1271,36 @@ class LeadFlujoEntradaService
         $mensaje = isset($parsed['mensaje_sugerido']) ? trim((string) $parsed['mensaje_sugerido']) : '';
         if ($mensaje === '') {
             return $parsed;
+        }
+
+        /* Guardas de preguntas (CA1/CA3): el paquete de partida se guarda para devolverlo intacto si la limpieza deja todo vacío
+           y no hay nada que agregar. */
+        $parsed_sin_limpiar = $parsed;
+        $se_limpio          = false;
+        if (self::oculta_la_demo($lead)) {
+            /* El link se manda en vez de ofrecerlo sólo si corresponde: oferta activa, sin prueba, lugar en el pool y el mensaje
+               todavía no lo trae. Sin lugar el bloque ya le dice otra cosa a la IA y no se toca. */
+            $reemplazar_link = LeadOfertaDePruebaService::activa()
+                && ! LeadOfertaDePruebaService::tiene_prueba($lead)
+                && self::hay_lugar_en_el_pool()
+                && ! self::cumple_el_ancla('link_prueba', $mensaje);
+
+            $limpieza = self::limpiar_las_preguntas_del_mensaje($mensaje, $reemplazar_link);
+            if ($limpieza['cambio']) {
+                $se_limpio = true;
+                $mensaje   = trim($limpieza['mensaje']);
+                if ($limpieza['califico']) {
+                    $parsed = self::sumar_nota_al_razonamiento($parsed, 'Flujo de entrada: se sacó una pregunta de calificación.');
+                }
+                if ($limpieza['reemplazo_el_link']) {
+                    $parsed = self::sumar_nota_al_razonamiento($parsed, 'Flujo de entrada: se reemplazó la oferta del link por el link.');
+                    $parsed['estado_sugerido'] = self::estado_sin_retroceso($lead, 'link_enviado');
+                }
+                /* El mensaje vacío no se escribe: de acá en más `$mensaje` vale '' y el paquete de salida lo arma lo debido. */
+                if ($mensaje !== '') {
+                    $parsed['mensaje_sugerido'] = $mensaje;
+                }
+            }
         }
 
         /* Si el último mensaje (segmento separado por `---`) de la IA termina en pregunta, esa pregunta tiene que seguir
@@ -1129,7 +1337,8 @@ class LeadFlujoEntradaService
         }
 
         if (empty($agregados)) {
-            return $parsed;
+            /* Sin nada que agregar: si la limpieza vació el mensaje no se limpia (nunca un mensaje vacío). */
+            return $mensaje === '' && $se_limpio ? $parsed_sin_limpiar : $parsed;
         }
 
         /* Sin texto antes de la pregunta (la IA sólo preguntó) se saca el primer separador para no empezar con `---`. */
@@ -1143,12 +1352,7 @@ class LeadFlujoEntradaService
 
         $parsed['mensaje_sugerido'] = $mensaje;
 
-        $nota = 'Flujo de entrada: se agregaron ' . implode(', ', $agregados);
-        $parsed['razonamiento'] = trim((string) ($parsed['razonamiento'] ?? '')) === ''
-            ? $nota
-            : trim((string) $parsed['razonamiento']) . ' ' . $nota;
-
-        return $parsed;
+        return self::sumar_nota_al_razonamiento($parsed, 'Flujo de entrada: se agregaron ' . implode(', ', $agregados));
     }
 
     // ------------------------------------------------------------------------------------------
