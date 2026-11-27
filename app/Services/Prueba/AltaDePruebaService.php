@@ -8,6 +8,7 @@ use App\Jobs\ArmarPruebaJob;
 use App\Models\Client;
 use App\Models\ClientApi;
 use App\Models\ClientEcommerce;
+use App\Models\EcommerceVersion;
 use App\Models\Lead;
 use App\Models\LeadEventoMeta;
 use App\Models\LeadMessage;
@@ -309,8 +310,11 @@ class AltaDePruebaService
      */
     private function crear_cliente(Lead $lead, TrialInstance $instancia, string $slug, string $empresa, string $nombre, string $email, string $telefono, int $dias, Carbon $vence): Client
     {
-        $latest_version = Version::where('status', 'published')->orderByDesc('id')->first();
-        $hosts          = PruebaNombres::hosts_del_slug($slug);
+        /* La ficha dice lo que la instancia TIENE instalado (no «la última publicada»): si la versión no está
+           registrada queda null (desconocida), nunca una versión que la instancia no tiene. */
+        $version_instalada = $this->version_instalada_de_empresa($instancia);
+        $tienda_instalada  = $this->version_instalada_de_tienda($instancia);
+        $hosts             = PruebaNombres::hosts_del_slug($slug);
 
         $client = Client::create([
             'name'               => $nombre !== '' ? $nombre : 'Cliente',
@@ -327,7 +331,7 @@ class AltaDePruebaService
             'phone'              => $telefono,
             'email'              => $email !== '' ? $email : null,
             'tiene_ecommerce'    => true,
-            'current_version_id' => $latest_version ? $latest_version->id : null,
+            'current_version_id' => $version_instalada ? $version_instalada->id : null,
             /* E2: la prueba nueva nace sin implementación (los clientes que ya existían quedan `incluida`, el default de la columna). */
             'implementacion_contratada' => 'no',
         ]);
@@ -370,10 +374,49 @@ class AltaDePruebaService
             'api_url'              => 'https://' . $hosts['tienda_api'],
             'spa_url'              => 'https://' . $hosts['tienda_spa'],
             'status'               => 'active',
+            'ecommerce_version_id' => $tienda_instalada ? $tienda_instalada->id : null,
             'ecommerce_setup_data' => ['hosting_type' => 'vps', 'prueba' => true, 'instancia' => $instancia->nombre],
         ]);
 
         return $client;
+    }
+
+    /**
+     * La `Version` de empresa que la instancia tiene instalada (cualquier status), o null si no está registrada.
+     *
+     * @param TrialInstance $instancia Instancia asignada al alta.
+     *
+     * @return Version|null
+     */
+    private function version_instalada_de_empresa(TrialInstance $instancia): ?Version
+    {
+        $numero = trim((string) $instancia->version);
+        $version = $numero !== '' ? Version::where('version', $numero)->orderByDesc('id')->first() : null;
+
+        if ($version === null) {
+            Log::warning('AltaDePruebaService: la versión de empresa de la instancia no está en versions; la ficha queda sin versión.', ['instancia' => $instancia->nombre, 'version' => $numero]);
+        }
+
+        return $version;
+    }
+
+    /**
+     * La `EcommerceVersion` de tienda que la instancia tiene instalada (cualquier status), o null si no está registrada.
+     *
+     * @param TrialInstance $instancia Instancia asignada al alta.
+     *
+     * @return EcommerceVersion|null
+     */
+    private function version_instalada_de_tienda(TrialInstance $instancia): ?EcommerceVersion
+    {
+        $numero = trim((string) $instancia->ecommerce_version);
+        $version = $numero !== '' ? EcommerceVersion::where('version', $numero)->orderByDesc('id')->first() : null;
+
+        if ($version === null) {
+            Log::warning('AltaDePruebaService: la versión de tienda de la instancia no está en ecommerce_versions; la ficha queda sin versión.', ['instancia' => $instancia->nombre, 'version' => $numero]);
+        }
+
+        return $version;
     }
 
     /**
