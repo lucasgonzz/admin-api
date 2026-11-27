@@ -90,6 +90,14 @@ class LeadFlujoEntradaService
     public const ESTADOS_QUE_PASAN_A_LINK_ENVIADO = ['nuevo', 'contactado', 'calificado'];
 
     /**
+     * Estados en los que el lead del flujo todavía NO pidió la demo: ahí el camino es la prueba y el agente no recibe
+     * el guion de la demo (su página `/experiencia/`, la calificación mínima, la nota de la demo directa).
+     * Pedir la demo con sus palabras lo mueve a `solicita_disponibilidad` y ahí vuelve todo (misión
+     * embudo-prueba-martin-precios, ensayo 707).
+     */
+    public const ESTADOS_SIN_DEMO = ['nuevo', 'contactado', 'calificado', 'link_enviado', 'implementacion_pedida'];
+
+    /**
      * Los puntos obligatorios, en el orden en que salen. `paso` es 1 (llegada) o 2 (respuesta del lead); `clave` es
      * la del texto literal; `kind` es el `system_message_kind` con el que sale por el camino literal.
      *
@@ -207,6 +215,44 @@ class LeadFlujoEntradaService
         $desde = self::activado_en();
 
         return $desde !== null && $lead->created_at !== null && Carbon::parse($lead->created_at)->greaterThanOrEqualTo($desde);
+    }
+
+    /**
+     * ¿Hay que ocultarle al agente el guion de la demo a este lead? Sí si está en el flujo de entrada
+     * ({@see en_el_flujo()}: interruptor prendido, creado desde el encendido, sin demo asignada) y en un estado
+     * donde todavía no pidió la demo ({@see ESTADOS_SIN_DEMO}).
+     *
+     * Por qué existe: el bloque DEMO DIRECTA le dicta al agente pasar la página del lead y calificarlo, y el flujo de
+     * entrada manda al lead a la prueba; con los dos bloques en el prompt, el de la demo (más concreto) le ganaba al
+     * del flujo (ensayo 707, 27/11/2026). No tocar este criterio sin revisar `LeadAiService::generate_suggestion()`
+     * y `leads:check-pagina-sin-demo`, que lo comparten.
+     *
+     * @param Lead $lead
+     *
+     * @return bool
+     */
+    public static function oculta_la_demo(Lead $lead): bool
+    {
+        return self::en_el_flujo($lead) && in_array((string) $lead->status, self::ESTADOS_SIN_DEMO, true);
+    }
+
+    /**
+     * El bloque corto que reemplaza a la demo directa para el lead que {@see oculta_la_demo()}: dice qué hacer si
+     * pide la demo con sus palabras, sin ningún link de su página ni calificación.
+     *
+     * El lead que pide la demo pasa por `solicita_disponibilidad` (con el mail primero) y recién en el turno
+     * siguiente el sistema le da el bloque completo de la demo.
+     *
+     * @return string Bloque listo para concatenar al contexto de usuario.
+     */
+    public static function bloque_de_la_demo_a_pedido(): string
+    {
+        return "\n\nDEMO SÓLO A PEDIDO (el camino de este lead es la prueba gratis; no hay demo asignada ni se la ofrezcas):\n"
+            . "  - NO le pases la página de su demo ni ningún link de demo, y no lo califiques con preguntas de la demo.\n"
+            . "  - Si el lead pide una DEMO con sus palabras (un mensaje suyo, no el texto de un botón): confirmale que sí. Si todavía no\n"
+            . "    tenemos su mail, pedíselo con una sola pregunta; si ya lo tenemos, preguntale si la hace ahora o cuándo.\n"
+            . "    Devolvé estado_sugerido: \"solicita_disponibilidad\", SIN agendar_demo y SIN links en este turno: en el turno\n"
+            . "    siguiente el sistema te da el bloque de la demo.\n";
     }
 
     /**
