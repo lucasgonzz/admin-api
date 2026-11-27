@@ -223,7 +223,15 @@ class CharlaAceptaProbarTest extends BaseDelTableroDeJuan
         ));
 
         $this->assertSame('acepto_probar', (string) $lead->fresh()->status, 'Pedir la demo es el sí: acepto_probar, no solicita_disponibilidad.');
-        $this->assertCount(1, $this->pedidos_a_la_ia, 'No hay segunda llamada a la IA para pedir horarios.');
+        /* Se cuentan los pedidos REALES a Anthropic con `Http::recorded()`: el setUp registra dos veces el `Http::fake` de la IA (la base del
+           tablero y `preparar_flujo_de_entrada`) y `$this->pedidos_a_la_ia` cuenta el doble por pedido. */
+        $pedidos_reales = 0;
+        foreach (\Illuminate\Support\Facades\Http::recorded() as $par) {
+            if (strpos((string) $par[0]->url(), 'api.anthropic.com') !== false) {
+                $pedidos_reales++;
+            }
+        }
+        $this->assertSame(1, $pedidos_reales, 'No hay segunda llamada a la IA para pedir horarios.');
         $this->assertNull($lead->fresh()->demo_id, 'No se agenda ninguna demo.');
         $this->assertCount(1, $this->tarjetas_del_lead($lead), 'Y entra a Interesados como cualquier sí.');
     }
