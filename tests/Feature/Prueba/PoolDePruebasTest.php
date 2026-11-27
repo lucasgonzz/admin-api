@@ -54,7 +54,9 @@ class PoolDePruebasTest extends BaseDePruebaGratuita
         $this->assertSame(TrialInstance::ESTADO_LIBRE, $instancia->estado, (string) $instancia->error);
         $this->assertSame(100, (int) $instancia->progreso);
 
-        $this->assertSame(['pool-crear.sh', 'pool-configurar.sh'], $this->vps->scripts_corridos());
+        /* Misión prueba-ultima-version (D5): la plantilla del release ya no es manual, el job la arma antes de crear. */
+        $this->assertSame(['pool-plantilla.sh', 'pool-crear.sh', 'pool-configurar.sh'], $this->vps->scripts_corridos());
+        $this->assertSame(["bash /root/prueba-gratuita/pool-plantilla.sh '4.3.99' '1.9.99'"], $this->vps->comandos_de('pool-plantilla.sh'));
         $this->assertStringContainsString("pool-crear.sh 'prueba-01' '4.3.99' '1.9.99' '" . $instancia->user_id . "'", $this->vps->comandos_de('pool-crear.sh')[0]);
 
         /* Los A records del pool. */
