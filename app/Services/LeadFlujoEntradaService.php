@@ -537,13 +537,15 @@ class LeadFlujoEntradaService
             return [];
         }
 
-        $es_de_la_web = self::es_lead_de_la_web($lead);
+        /* Quién merece el link de la prueba: el lead de la web o el que, desde su primer mensaje, dice que quiere probar. */
+        $quiere_probar = self::es_lead_de_la_web($lead) || self::quiere_probar_desde_el_primer_mensaje($lead);
         foreach (self::PUNTOS as $punto => $datos) {
             if ($datos['paso'] !== 2 || isset($entregados[$punto])) {
                 continue;
             }
-            /* El link sólo se le debe al lead de la web, con el link prendido y lugar en el pool de pruebas. */
-            if ($punto === 'link_prueba' && ! ($es_de_la_web && LeadOfertaDePruebaService::activa() && self::hay_lugar_en_el_pool())) {
+            /* El link sólo se le debe al lead de la web o al que dijo «quiero probar» en su primer mensaje (los textos
+               precargados de los anuncios), con el link prendido y lugar en el pool de pruebas. */
+            if ($punto === 'link_prueba' && ! ($quiere_probar && LeadOfertaDePruebaService::activa() && self::hay_lugar_en_el_pool())) {
                 continue;
             }
             $debidos[] = $punto;
@@ -564,6 +566,33 @@ class LeadFlujoEntradaService
         $primero = self::primer_mensaje_del_lead($lead);
 
         return $primero !== null && LeadOrigenService::origen_por_frase($primero) === LeadOrigenService::ORIGEN_LANDING;
+    }
+
+    /**
+     * ¿El primer mensaje del lead dice que quiere probar? Es el caso del lead del anuncio, cuyo texto precargado
+     * («Hola, vi el video de los presupuestos y quiero probar ComercioCity») no contiene la frase contigua de la web
+     * y por eso no cuenta como lead de la web ({@see es_lead_de_la_web()}), aunque pida exactamente lo mismo.
+     *
+     * Sí si el primer mensaje, normalizado, contiene «quiero probar» como palabras enteras o es igual a uno de los
+     * textos precargados ({@see textos_precargados()}). No se lee del origen (atribución de Meta) a propósito: acá
+     * se mide la intención del lead.
+     *
+     * @param Lead $lead
+     *
+     * @return bool false si todavía no escribió.
+     */
+    public static function quiere_probar_desde_el_primer_mensaje(Lead $lead): bool
+    {
+        $primero = self::primer_mensaje_del_lead($lead);
+        if ($primero === null) {
+            return false;
+        }
+
+        if (LeadOrigenService::contiene_frase($primero, 'quiero probar')) {
+            return true;
+        }
+
+        return in_array(LeadOrigenService::normalizar($primero), self::textos_precargados(), true);
     }
 
     /**
