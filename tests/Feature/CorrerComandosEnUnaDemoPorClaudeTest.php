@@ -269,12 +269,22 @@ class CorrerComandosEnUnaDemoPorClaudeTest extends TestCase
             'comando'           => 'db:seed',
             'argumentos'        => '--class=OtraClase',
             'confirm_demo_name' => self::URL_DEMO,
-            // El patrón de argumentos lo aplica el runner, que solo corre con dry_run=false;
-            // rechaza antes de buscar credencial y de abrir el SSH.
+            // 🔴 dry_run=false A PROPÓSITO: el simulacro (dry_run=true) NO valida los argumentos,
+            // solo la lista blanca; es un comportamiento preexistente para todos los comandos. El
+            // patrón de argumentos lo aplica el runner, que solo corre con dry_run=false, y lo hace
+            // ANTES de buscar credencial y de abrir el SSH.
             'dry_run'           => false,
         ], $this->headers());
 
         $otra->assertStatus(422);
+
+        // Se afirma el MOTIVO del 422 y no solo el código: el controlador convierte cualquier
+        // Throwable (por ejemplo un SSH caído) en 422, así que sin esto el test pasaría igual
+        // aunque el patrón dejara pasar la clase. El runner lanza este texto antes de tocar el SSH.
+        $this->assertStringContainsString(
+            'no tienen la forma permitida',
+            (string) $otra->json('message') . (string) $otra->getContent()
+        );
     }
 
     /**
