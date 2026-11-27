@@ -494,6 +494,48 @@ class LeadEmbudoSeguimientosService
     }
 
     // ------------------------------------------------------------------------------------------
+    // Filas programadas antes de prender la charla
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * ¿Este paso ya programado NO tiene que salir porque el lead está en la charla? Sí para los pasos de {@see PASOS_SIN_CHARLA} (el día 3
+     * de «conversando» es una plantilla que ofrece el link). Lo usa el despacho: una fila armada antes del deploy no puede salir.
+     *
+     * @param LeadScheduledMessage $paso
+     * @param Lead                 $lead
+     *
+     * @return bool
+     */
+    public static function no_sale_en_la_charla(LeadScheduledMessage $paso, Lead $lead): bool
+    {
+        return in_array((string) $paso->paso_embudo, self::PASOS_SIN_CHARLA, true) && LeadFlujoEntradaService::en_charla($lead);
+    }
+
+    /**
+     * Si el lead está en la charla y el paso es de texto con texto de charla, deja en la fila el texto de charla VIGENTE
+     * ({@see texto_del_paso()}): las filas se programaron con el texto de antes (las dos formas, la prueba gratis) y el despacho manda lo
+     * que guarda la fila. No toca plantillas ni los pasos del link. Guarda la fila sólo si el texto cambió.
+     *
+     * @param LeadScheduledMessage $paso Paso ya reclamado por el despacho.
+     * @param Lead                 $lead
+     *
+     * @return void
+     */
+    public static function poner_el_texto_de_la_charla(LeadScheduledMessage $paso, Lead $lead): void
+    {
+        $clave = (string) $paso->paso_embudo;
+        if (! isset(self::TEXTOS_DE_LA_CHARLA[$clave]) || (string) $paso->mode !== LeadScheduledMessage::MODE_TEXTO_LIBRE || ! LeadFlujoEntradaService::en_charla($lead)) {
+            return;
+        }
+
+        $texto = self::texto_del_paso($clave);
+        if ($texto !== '' && (string) $paso->content !== $texto) {
+            $paso->content = $texto;
+            $paso->save();
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------
     // Textos
     // ------------------------------------------------------------------------------------------
 

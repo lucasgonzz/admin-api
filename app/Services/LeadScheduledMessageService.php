@@ -699,6 +699,14 @@ class LeadScheduledMessageService
             return $this->marcar_cancelado($programado, LeadScheduledMessage::CANCELED_CAMBIO_DE_ESTADO);
         }
 
+        /* Charla antes de la demo: una fila programada ANTES de prender la charla guarda el texto viejo (las dos formas, la prueba gratis) o es
+           la plantilla del día 3 que ofrece el link. El día 3 no sale; los textos se reemplazan por el de la charla vigente. Reusa
+           `CANCELED_REANCLADO` (no hay constante propia). */
+        if (LeadEmbudoSeguimientosService::no_sale_en_la_charla($programado, $lead)) {
+            return $this->marcar_cancelado($programado, LeadScheduledMessage::CANCELED_REANCLADO);
+        }
+        LeadEmbudoSeguimientosService::poner_el_texto_de_la_charla($programado, $lead);
+
         if (! LeadEmbudoSeguimientosService::hay_conversacion_pendiente($lead)) {
             return null;
         }

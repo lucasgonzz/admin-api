@@ -1538,6 +1538,14 @@ class LeadFlujoEntradaService
         /* Charla antes de la demo: las guardas deterministas del sí y del link. Corren aunque el gate haya frenado el paquete o pida
            intervención humana (salvo el aviso de Juan, que no le agrega texto a un paquete derivado). */
         $en_la_charla = self::esta_en_la_charla($lead);
+
+        /* El sí no existe fuera de la charla (interruptor apagado o lead fuera del flujo): sin esto el camino genérico aplicaría el
+           `acepto_probar` al enviar sin validar los 2 mensajes. El estado vuelve al actual, salvo que el lead ya esté en `acepto_probar`. */
+        if (! $en_la_charla && trim((string) ($parsed['estado_sugerido'] ?? '')) === 'acepto_probar' && (string) $lead->status !== 'acepto_probar') {
+            $parsed['estado_sugerido'] = (string) $lead->status;
+            $parsed = self::sumar_nota_al_razonamiento($parsed, 'Charla: acepto_probar no aplica (el lead no está en la charla).');
+        }
+
         if ($en_la_charla) {
             $derivado = $gate_rechazo || ! empty($parsed['requiere_intervencion_humana']);
             $parsed   = self::aplicar_las_guardas_de_la_charla($lead, $parsed, ! $derivado);
@@ -1721,11 +1729,19 @@ class LeadFlujoEntradaService
         /* Estado que sugiere el agente, ya sin retroceso ('' si no sugirió ninguno). */
         $sugerido = trim((string) ($parsed['estado_sugerido'] ?? ''));
 
-        /* 2. Pedir la demo es el sí de la charla: no se agenda nada. */
-        if ($sugerido === 'solicita_disponibilidad' && in_array($actual, self::ESTADOS_DE_LA_CHARLA, true)) {
+        /* 2. Pedir o agendar la demo, de la forma que sea, es el sí de la charla: no se agenda nada. Las formas: el estado
+           `solicita_disponibilidad` o `demo_agendada`, el booleano `solicita_disponibilidad`, `agendar_demo` y `cancelar_demo`. Cualquiera
+           de ellas dispararía en `LeadAiService` la segunda llamada de horarios, que no pasa por acá, o agendaría sola con la demo directa;
+           por eso se borran todas y el paquete queda como un sí. El lead del flujo no tiene demo asignada, así que `cancelar_demo` no tiene
+           nada que cancelar. */
+        $pidio_la_demo = in_array($sugerido, ['solicita_disponibilidad', 'demo_agendada'], true)
+            || ! empty($parsed['solicita_disponibilidad'])
+            || ! empty($parsed['agendar_demo'])
+            || ! empty($parsed['cancelar_demo']);
+        if ($pidio_la_demo && in_array($actual, self::ESTADOS_DE_LA_CHARLA, true)) {
             $sugerido                   = 'acepto_probar';
             $parsed['estado_sugerido']  = 'acepto_probar';
-            unset($parsed['agendar_demo']);
+            unset($parsed['agendar_demo'], $parsed['cancelar_demo']);
             $parsed['solicita_disponibilidad'] = false;
             $parsed = self::sumar_nota_al_razonamiento($parsed, 'Charla: el pedido de demo se toma como sí; lo llama Juan.');
         }
