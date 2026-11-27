@@ -22,6 +22,8 @@ class Kernel extends ConsoleKernel
         $schedule->exec(self::artisan_sin_el_lock_del_cron('support:check-codex-health'))
             ->everyMinute()->withoutOverlapping(2)->runInBackground();
         $schedule->command('support:notify-attention')->everyMinute()->withoutOverlapping(5);
+        /* Misión push-mensajes-por-aprobar: push por cada mensaje (lead, soporte, chat de la demo) que espera el ok de una persona. */
+        $schedule->exec(self::artisan_sin_el_lock_del_cron('pending-approvals:notify'))->everyMinute()->withoutOverlapping(5)->runInBackground();
         $schedule->exec(self::artisan_sin_el_lock_del_cron('support:notify-blocked-migrations'))
             ->everyMinute()->withoutOverlapping(5)->runInBackground();
         if (\App\Services\SupportScheduledUpgradeService::enabled()) {
