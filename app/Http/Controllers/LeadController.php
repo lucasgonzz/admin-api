@@ -3344,18 +3344,16 @@ class LeadController extends Controller
         // Notificar a la conversación abierta y a los listados (mismo broadcast que el webhook).
         LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
 
-        // Bienvenida inmediata + job de presentación (igual que webhook real). El contenido viaja como
-        // `primer_mensaje`, como en WhatsappWebhookController: sin él el onboarding no puede decidir si el lead
-        // del flujo de entrada pregunta o no, y el lead simulado recibía el auto genérico en vez de la presentación
-        // del flujo (ensayo del 26/11/2026).
+        // Bienvenida inmediata + job de presentación (igual que webhook real).
+        // Se le pasa el texto simulado, igual que el webhook real (WhatsappWebhookController): sin él el onboarding no ve el
+        // primer mensaje, no entra al flujo de entrada nuevo y cae en la bienvenida vieja (ensayo del lead 711).
         if ($run_onboarding) {
             $onboarding_service->send_welcome_and_schedule_presentation($lead, $display_name, $content);
         } elseif (
             (string) $lead->status === 'nuevo'
             && ! $onboarding_service->has_auto_message_been_sent($lead)
         ) {
-            // Recuperación: inbound previo sin auto (p. ej. simulación anterior sin onboarding). También con el
-            // contenido del mensaje actual como `primer_mensaje`, por la misma razón que arriba.
+            // Recuperación: inbound previo sin auto (p. ej. simulación anterior sin onboarding). También lleva el texto.
             $onboarding_service->send_welcome_and_schedule_presentation($lead, $display_name, $content);
         }
 
