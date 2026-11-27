@@ -6098,6 +6098,23 @@ TXT;
         ?array $calendar_snapshot = null,
         ?RespaldoDeepSeek $respaldo_deepseek = null
     ): LeadMessage {
+        /* Misión martin-mensaje-puntos, ronda 2: por acá pasan TODAS las sugerencias que genera el agente (la primera
+         * llamada, el fallback de la segunda y la segunda misma). Si el mensaje es un marcador de lugar o está vacío,
+         * se retiene para una persona con el mensaje de espera, antes de cualquier política de envío o de agenda. */
+        $mensaje_inutilizable = false;
+        $parsed               = $this->retener_el_mensaje_inutilizable($parsed, $mensaje_inutilizable);
+
+        if ($mensaje_inutilizable) {
+            /* 🔴 El lead queda marcado para intervención humana YA (no recién al aprobar): es lo que le dice al respaldo
+             * automático (LeadAiSuggestionAutoSendScheduler) que este mensaje de espera NO se auto-envía nunca, y la tarea
+             * le avisa a una persona con el motivo. Update acotado y sin tocar claude_auto_reply, igual que
+             * frenar_por_horario_no_disponible(): apagar el agente deja al lead mudo y no se revierte desde el panel. */
+            Lead::query()->whereKey($lead->id)->update(['requiere_intervencion_humana' => true]);
+            $lead->requiere_intervencion_humana = true;
+
+            $this->crear_tarea_de_intervencion_humana($lead, (string) $parsed['motivo_intervencion']);
+        }
+
         // Antes de cambiar el estado o encolar: nunca confirmar una liberación sin su acción.
         if (app(AgendaDemoAutomaticaPolicy::class)->cancelacion_sin_accion($lead->fresh() ?: $lead, $parsed)) {
             $parsed['requiere_verificacion'] = true;
@@ -11799,6 +11816,71 @@ TXT;
         $paquete['razonamiento']                 = trim((isset($paquete['razonamiento']) && is_string($paquete['razonamiento']) ? $paquete['razonamiento'] : '') . ' ⚠️ ' . $nota);
 
         return $paquete;
+    }
+
+    /**
+     * Última red: una sugerencia nunca se guarda con un marcador de lugar («...») ni vacía como mensaje.
+     *
+     * `reparar_el_mensaje_marcador_de_lugar()` (al leer la respuesta) recupera el texto del bloque de código o deriva a
+     * una persona, pero deja pasar a propósito el marcador cuando hay `solicita_disponibilidad` (el mensaje de esa
+     * llamada lo reemplaza el de la segunda). Ese reemplazo no siempre ocurre: con la demo directa no hay segunda
+     * llamada, `guardar_email` sin `agendar_demo` la anula y si la segunda llamada falla se conserva el mensaje de la
+     * primera. Y la derivación de la lectura deja el mensaje en '' (el contrato de parse_json_response()), que en
+     * validate_parsed_response() es una excepción y no deja nada guardado para que la persona lo vea.
+     *
+     * Se resuelve con el mismo mecanismo que aplicar_gate_de_respaldo(): el mensaje neutro
+     * MENSAJE_DE_ESPERA_SIN_RESPALDO, `requiere_verificacion` (el paquete queda retenido y no se auto-envía),
+     * `requiere_intervencion_humana` con el motivo a la vista («La IA no devolvió un mensaje utilizable») y el
+     * agendamiento neutralizado: si no se confía en el texto, tampoco en la acción que viene con él.
+     *
+     * Se llama desde create_message_and_update_lead(): es el único lugar donde terminan las sugerencias del agente
+     * (primera llamada, fallback y segunda llamada). Un mensaje con texto real pasa intacto.
+     *
+     * @param array<string, mixed> $parsed     Paquete que está por convertirse en sugerencia.
+     * @param bool                 $retenido   Queda en true si el mensaje era inutilizable y el paquete se retuvo.
+     *
+     * @return array<string, mixed> El paquete retenido, o el mismo si el mensaje es utilizable.
+     */
+    protected function retener_el_mensaje_inutilizable(array $parsed, bool &$retenido = false): array
+    {
+        $retenido = false;
+
+        $mensaje = isset($parsed['mensaje_sugerido']) ? $parsed['mensaje_sugerido'] : null;
+
+        /* Sólo se juzga un texto (o su ausencia): cualquier otro tipo lo trata validate_parsed_response() como siempre. */
+        if ($mensaje !== null && ! is_string($mensaje)) {
+            return $parsed;
+        }
+
+        if (! $this->es_marcador_de_lugar((string) $mensaje)) {
+            return $parsed;
+        }
+
+        Log::channel('daily')->warning('LeadAiService: la sugerencia no tiene un mensaje utilizable; queda retenida para una persona.', [
+            'mensaje_original' => $mensaje,
+        ]);
+
+        /* La nota del motivo: la misma que escribe la lectura de la respuesta; no se repite si ya está. */
+        $nota = 'La IA no devolvió un mensaje utilizable (llegó «' . trim((string) $mensaje) . '» y no había texto real en la respuesta): no se envía nada al lead.';
+
+        $razonamiento = isset($parsed['razonamiento']) && is_string($parsed['razonamiento']) ? $parsed['razonamiento'] : '';
+        if (strpos($razonamiento, 'La IA no devolvió un mensaje utilizable') === false) {
+            $parsed['razonamiento'] = trim($razonamiento . ' ⚠️ ' . $nota);
+        }
+
+        $motivo_previo = isset($parsed['motivo_intervencion']) && is_string($parsed['motivo_intervencion']) ? trim($parsed['motivo_intervencion']) : '';
+        if (strpos($motivo_previo, 'La IA no devolvió un mensaje utilizable') === false) {
+            $parsed['motivo_intervencion'] = trim($nota . ' Revisá la conversación y contestale a mano. ' . $motivo_previo);
+        }
+
+        $parsed['requiere_intervencion_humana'] = true;
+        $parsed['requiere_verificacion']        = true;
+        $parsed['mensaje_sugerido']             = self::MENSAJE_DE_ESPERA_SIN_RESPALDO;
+        $parsed['agendar_demo']                 = null;
+
+        $retenido = true;
+
+        return $parsed;
     }
 
     /**
