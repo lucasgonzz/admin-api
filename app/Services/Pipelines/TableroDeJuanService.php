@@ -19,6 +19,8 @@ use Illuminate\Support\Facades\Log;
  *
  * Entrada automática a «Interesados» (idempotente: si el lead ya tiene una tarjeta abierta en el pipeline, no se crea otra):
  *  - el lead pasa a `link_enviado` o a `implementacion_pedida` (esta además vuelve a Interesados a quien estaba esperando);
+ *  - el lead pasa a `acepto_probar`: dijo que sí a ver la plataforma en la charla y Juan lo tiene que llamar
+ *    (misión leads-charla-antes-de-la-demo);
  *  - el lead crea su prueba (la alta escribe el estado por query builder, así que la llama de forma explícita);
  *  - negocio grande: `cantidad_empleados >= 3` en un lead que todavía no avanzó.
  * Y cuando el lead pasa a `cerrado_ganado` su tarjeta abierta va a «Cliente».
@@ -58,7 +60,7 @@ class TableroDeJuanService
     const EMPLEADOS_NEGOCIO_GRANDE = 3;
 
     /** Estados del lead desde los que un negocio grande entra al tablero (los que todavía no avanzaron). */
-    const ESTADOS_DEL_NEGOCIO_GRANDE = ['nuevo', 'contactado', 'calificado', 'link_enviado', 'implementacion_pedida'];
+    const ESTADOS_DEL_NEGOCIO_GRANDE = ['nuevo', 'contactado', 'calificado', 'acepto_probar', 'link_enviado', 'implementacion_pedida'];
 
     /** @var PipelineOpportunityService */
     private $oportunidades;
@@ -84,6 +86,10 @@ class TableroDeJuanService
             switch ((string) $lead->status) {
                 case 'link_enviado':
                     $this->entrar_en_interesados($lead, 'le mandaron el link de la prueba');
+                    break;
+                case 'acepto_probar':
+                    /* Charla antes de la demo: el lead aceptó ver la plataforma; Juan lo llama desde «Interesados». */
+                    $this->entrar_en_interesados($lead, 'aceptó probar la plataforma en la charla');
                     break;
                 case 'implementacion_pedida':
                     $this->al_pedir_la_implementacion($lead);

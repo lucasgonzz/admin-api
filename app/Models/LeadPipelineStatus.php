@@ -28,6 +28,10 @@ class LeadPipelineStatus extends Model
         // (misión embudo-whatsapp-precios, E2). Ya significaba «respondió a la presentación».
         'contactado'                   => 'Conversando',
         'calificado'                   => 'Calificado',
+        // Charla antes de la demo (misión leads-charla-antes-de-la-demo): el lead dijo que sí a ver la plataforma; lo llama Juan
+        // y la prueba la ofrece Lucas a mano. Va detrás de `calificado` y ANTES de `link_enviado` a propósito: el guardia de «no
+        // retroceder de tramo» compara `sort_order` y un lead que aceptó tiene que poder pasar después a `link_enviado`.
+        'acepto_probar'                => 'Aceptó probar',
         // Embudo nuevo (E2): al lead se le envió el link de la prueba. Va ANTES del tramo de la demo en el orden, a propósito:
         // el guardia de «no retroceder de tramo» compara `sort_order`, y un lead con el link que después pide la demo tiene
         // que poder pasar a `solicita_disponibilidad`.
@@ -77,6 +81,7 @@ class LeadPipelineStatus extends Model
         'nuevo'                        => '#adb5bd',
         'contactado'                   => '#adb5bd',
         'calificado'                   => '#28a745',
+        'acepto_probar'                => '#ff922b',
         'link_enviado'                 => '#0dcaf0',
         'solicita_disponibilidad'      => '#0d6efd',
         'demo_agendada'                => '#0a58ca',
@@ -102,6 +107,7 @@ class LeadPipelineStatus extends Model
         'nuevo'                      => 'Calificación',
         'contactado'                 => 'Calificación',
         'calificado'                 => 'Calificación',
+        'acepto_probar'              => 'Calificación',
         'solicita_disponibilidad'    => 'Calificación',
         'demo_agendada'              => 'Demo',
         'demo_en_curso'              => 'Demo',
@@ -164,6 +170,8 @@ class LeadPipelineStatus extends Model
     public const TARJETAS_V2 = [
         'nuevo'                 => ['Nuevo', '#adb5bd', ['nuevo']],
         'conversando'           => ['Conversando', '#adb5bd', ['contactado', 'calificado']],
+        // Charla antes de la demo: el lead aceptó ver la plataforma y espera la llamada de Juan.
+        'acepto_probar'         => ['Aceptó probar', '#ff922b', ['acepto_probar']],
         'link_enviado'          => ['Quiere probar', '#0dcaf0', ['link_enviado']],
         'implementacion_pedida' => ['Implementación pedida', '#fd7e14', ['implementacion_pedida']],
         'prueba_activa'         => ['En prueba', '#20c997', ['prueba_activa']],
@@ -174,14 +182,14 @@ class LeadPipelineStatus extends Model
         'en_pausa'              => ['En pausa', '#adb5bd', ['en_pausa']],
     ];
 
-    /** Tarjeta «Archivados» de la versión 2: todo slug del catálogo que no está en ninguna de las 10. */
+    /** Tarjeta «Archivados» de la versión 2: todo slug del catálogo que no está en ninguna de las 11. */
     public const TARJETA_ARCHIVADOS_VALUE = 'archivados';
     public const TARJETA_ARCHIVADOS_LABEL = 'Archivados';
     public const TARJETA_ARCHIVADOS_COLOR = '#6c757d';
     public const TARJETA_CONVERSANDO_VALUE = 'conversando';
 
     /**
-     * Slugs que agrupa la tarjeta «Archivados» de la versión 2: el catálogo completo menos los de las 10 tarjetas.
+     * Slugs que agrupa la tarjeta «Archivados» de la versión 2: el catálogo completo menos los de las 11 tarjetas.
      *
      * @return array<int, string>
      */

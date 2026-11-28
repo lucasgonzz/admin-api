@@ -59,6 +59,9 @@ class LeadWhatsappOnboardingSettingsController extends Controller
              * los escribe sólo si vinieron). */
             'flujo_entrada_activo'          => 'sometimes|nullable|boolean',
             'flujo_textos_precargados'      => 'sometimes|nullable|string|max:8000',
+            /* Charla antes de la demo (misión leads-charla-antes-de-la-demo): su interruptor. OPCIONAL por la misma razón: un SPA que no lo
+             * manda no puede prenderla ni apagarla. */
+            'charla_antes_de_la_demo_activa' => 'sometimes|nullable|boolean',
             /* Motor de compromisos y leads de otros medios (misión leads-referidos-compromisos, E2): tres interruptores y dos nombres de
              * plantilla de Meta. OPCIONALES por la misma razón: un SPA que no los manda no puede apagar el motor. */
             'compromisos_activo'            => 'sometimes|nullable|boolean',

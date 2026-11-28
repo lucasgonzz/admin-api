@@ -9,7 +9,8 @@ use Illuminate\Support\Facades\Log;
 /**
  * La tarea del embudo (lo que antes se llamaba «tarea para Juan»; misión embudo-whatsapp-precios, E2).
  *
- * Cuando un lead crea su prueba gratis o pide que se la carguen nosotros (`implementacion_pedida`), alguien del
+ * Cuando un lead crea su prueba gratis, pide que se la carguen nosotros (`implementacion_pedida`) o acepta ver la
+ * plataforma en la charla (`acepto_probar`), alguien del
  * equipo lo tiene que llamar. Se crea UNA `AdminTask` por lead y motivo, asignada según
  * {@see AdminTaskAssignmentResolver::for_embudo_task()} y con su aviso (push y pila de avisos) creado por
  * {@see AdminTaskNotificationService}.
@@ -25,15 +26,20 @@ class LeadTareaVendedorService
     /** Motivo: el lead pidió que se lo carguemos nosotros (implementación). */
     public const MOTIVO_IMPLEMENTACION_PEDIDA = 'implementacion_pedida';
 
+    /** Motivo: el lead aceptó ver la plataforma en la charla antes de la demo (misión leads-charla-antes-de-la-demo). */
+    public const MOTIVO_ACEPTO_PROBAR = 'acepto_probar';
+
     /**
      * Motivo => [valor de `created_via`, cola del título].
      *
      * 🔴 `admin_tasks.created_via` es varchar(20): `embudo_implementacion_pedida` (28) no entra, por eso el
-     * valor de la implementación es `embudo_impl_pedida` (18). No se agrega una migración por esto.
+     * valor de la implementación es `embudo_impl_pedida` (18). No se agrega una migración por esto. `embudo_acepto_probar`
+     * mide justo 20 y entra.
      */
     private const MOTIVOS = [
         self::MOTIVO_PRUEBA_CREADA          => ['created_via' => 'embudo_prueba_creada', 'titulo' => 'creó su prueba'],
         self::MOTIVO_IMPLEMENTACION_PEDIDA => ['created_via' => 'embudo_impl_pedida', 'titulo' => 'pidió la implementación'],
+        self::MOTIVO_ACEPTO_PROBAR         => ['created_via' => 'embudo_acepto_probar', 'titulo' => 'aceptó probar la plataforma'],
     ];
 
     /**
@@ -44,7 +50,7 @@ class LeadTareaVendedorService
      * creada igual (se loguea): un aviso caído no puede tirar el alta de la prueba ni la respuesta del agente.
      *
      * @param Lead   $lead
-     * @param string $motivo `prueba_creada` o `implementacion_pedida`.
+     * @param string $motivo `prueba_creada`, `implementacion_pedida` o `acepto_probar`.
      * @param bool   $avisar false = no crea el aviso (push y pila) de la tarea: la tarea nace para quedar cerrada en el mismo pedido.
      *
      * @return AdminTask|null La tarea (nueva o existente); null si el motivo no existe o no se pudo crear.

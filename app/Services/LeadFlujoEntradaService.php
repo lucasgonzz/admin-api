@@ -24,6 +24,12 @@ use Illuminate\Support\Facades\Log;
  * comportamiento de hoy (los «puntos debidos» son `[]`, el bloque del agente es '', la transición al link no corre).
  * Se vuelve atrás apagándolo: no hay datos que migrar.
  *
+ * LA CHARLA ANTES DE LA DEMO (misión leads-charla-antes-de-la-demo, 27/11/2026): es una VARIANTE del flujo, con su propio
+ * interruptor ({@see KEY_CHARLA}, PRENDIDO por defecto). Con ella prendida el lead no recibe solo las dos formas de arrancar ni
+ * el link de la prueba: la llegada pregunta el rubro, el agente charla (negocios, rubro, empleados, un dolor) y recién ahí ofrece
+ * ver la plataforma; el «sí» pasa al lead a `acepto_probar` y lo llama Juan ({@see aplicar_acepto_probar()}). La prueba la ofrece
+ * Lucas a mano. Con la charla apagada todo queda como antes de esa misión.
+ *
  * Los PUNTOS ({@see PUNTOS}) son lo obligatorio del flujo. El registro de cuáles ya se entregaron NO se guarda en
  * ninguna columna: sale del hilo ({@see puntos_entregados()}), así que no se desincroniza si un setter edita,
  * rechaza o descarta una sugerencia.
@@ -48,6 +54,18 @@ class LeadFlujoEntradaService
 
     /** Clave opcional que pisa el texto del mensaje 2 de la llegada (rubro y cantidad de productos). */
     public const KEY_LLEGADA_2 = 'lead_whatsapp_flujo_llegada_2';
+
+    /**
+     * Clave del interruptor de la «charla antes de la demo»: '1' (default, sin fila = prendida) o '0'. Es una variante del flujo de
+     * entrada ({@see en_charla()}): con el flujo apagado no corre. Volver al comportamiento de antes = poner '0'.
+     */
+    public const KEY_CHARLA = 'lead_whatsapp_charla_antes_de_la_demo_activa';
+
+    /** Clave opcional que pisa el texto del mensaje 2 de la llegada EN MODO CHARLA (la pregunta del rubro). */
+    public const KEY_CHARLA_LLEGADA_2 = 'lead_whatsapp_charla_llegada_2';
+
+    /** Clave opcional que pisa el aviso «te va a llamar Juan» que se agrega al mensaje del sí si la IA no nombró a Juan. */
+    public const KEY_CHARLA_AVISO_JUAN = 'lead_whatsapp_charla_aviso_juan';
 
     /** Clave opcional que pisa el texto de las dos formas de arrancar. */
     public const KEY_RESPUESTA_1 = 'lead_whatsapp_flujo_respuesta_1';
@@ -84,10 +102,22 @@ class LeadFlujoEntradaService
     public const ESTADOS_CON_PUNTOS = ['nuevo', 'contactado', 'calificado'];
 
     /** Estados en los que el agente recibe el bloque del flujo (los de arriba más el del link ya enviado). */
-    public const ESTADOS_CON_EL_BLOQUE = ['nuevo', 'contactado', 'calificado', 'link_enviado'];
+    public const ESTADOS_CON_EL_BLOQUE = ['nuevo', 'contactado', 'calificado', 'acepto_probar', 'link_enviado'];
+
+    /**
+     * Estados en los que, con la charla prendida, el lead está «en la charla»: todavía no se le ofreció la prueba (los tres de
+     * siempre) o ya dijo que sí y espera a Juan (`acepto_probar`). Ahí rigen el bloque de la charla y sus guardas.
+     */
+    public const ESTADOS_DE_LA_CHARLA = ['nuevo', 'contactado', 'calificado', 'acepto_probar'];
+
+    /** Estados desde los que el «sí» de la charla (`acepto_probar`) se puede aplicar: los que todavía no pasaron a Juan ni a la prueba. */
+    public const ESTADOS_QUE_PUEDEN_ACEPTAR_PROBAR = ['nuevo', 'contactado', 'calificado'];
+
+    /** Cuántos mensajes tiene que haber escrito el lead para que un «sí» valga: el primero es el texto precargado del anuncio o del botón. */
+    public const MENSAJES_MINIMOS_PARA_ACEPTAR = 2;
 
     /** Estados desde los que enviar el link de la prueba mueve al lead a `link_enviado`. */
-    public const ESTADOS_QUE_PASAN_A_LINK_ENVIADO = ['nuevo', 'contactado', 'calificado'];
+    public const ESTADOS_QUE_PASAN_A_LINK_ENVIADO = ['nuevo', 'contactado', 'calificado', 'acepto_probar'];
 
     /**
      * Estados en los que el lead del flujo todavía NO pidió la demo: ahí el camino es la prueba y el agente no recibe
@@ -95,7 +125,7 @@ class LeadFlujoEntradaService
      * Pedir la demo con sus palabras lo mueve a `solicita_disponibilidad` y ahí vuelve todo (misión
      * embudo-prueba-martin-precios, ensayo 707).
      */
-    public const ESTADOS_SIN_DEMO = ['nuevo', 'contactado', 'calificado', 'link_enviado', 'implementacion_pedida'];
+    public const ESTADOS_SIN_DEMO = ['nuevo', 'contactado', 'calificado', 'acepto_probar', 'link_enviado', 'implementacion_pedida'];
 
     /**
      * Patrones (regex PCRE sobre el texto NORMALIZADO de una oración, {@see LeadOrigenService::normalizar()}) de las preguntas
@@ -190,6 +220,12 @@ class LeadFlujoEntradaService
     /** Texto por defecto del mensaje 2 de la llegada; `{dias_prueba}` sale de `PruebaSettings::dias_default()`. */
     public const DEFAULT_LLEGADA_2 = 'Lo podés probar gratis {dias_prueba} días con tu propio negocio. Comentame, ¿qué rubro trabajás y más o menos cuántos productos manejás?';
 
+    /** Texto por defecto del mensaje 2 de la llegada EN MODO CHARLA: una sola pregunta, sin «gratis» ni «probar». */
+    public const DEFAULT_CHARLA_LLEGADA_2 = 'Contame un poco de tu negocio, ¿de qué rubro es?';
+
+    /** Aviso por defecto que se agrega al mensaje del «sí» si la IA no nombró a Juan. */
+    public const DEFAULT_CHARLA_AVISO_JUAN = 'Genial. Te va a llamar Juan, del equipo, para mostrarte la plataforma.';
+
     /** Texto por defecto de las dos formas de arrancar; `{precio_implementacion}` sale de PRECIOS VIGENTES. */
     public const DEFAULT_RESPUESTA_1 = "Tenés dos formas de arrancar:\n"
         . "\n"
@@ -273,6 +309,43 @@ class LeadFlujoEntradaService
     }
 
     /**
+     * ¿La «charla antes de la demo» está prendida? Default SÍ: sin fila en `admin_settings` rige la charla (decisión de producto de
+     * Lucas, 27/11/2026). Sólo un '0' explícito la apaga. No mira el flujo de entrada: para eso está {@see en_charla()}.
+     *
+     * @return bool
+     */
+    public static function charla_activa(): bool
+    {
+        return (string) AdminSetting::get(self::KEY_CHARLA, '1') === '1';
+    }
+
+    /**
+     * ¿El lead está en modo charla? Sí si está en el flujo de entrada ({@see en_el_flujo()}) y la charla está prendida
+     * ({@see charla_activa()}). La charla es una variante del flujo: con el flujo apagado no corre.
+     *
+     * @param Lead $lead
+     *
+     * @return bool
+     */
+    public static function en_charla(Lead $lead): bool
+    {
+        return self::charla_activa() && self::en_el_flujo($lead);
+    }
+
+    /**
+     * ¿Rigen para este lead el bloque y las guardas de la charla? Sí si está en modo charla ({@see en_charla()}) y en un estado de la
+     * charla ({@see ESTADOS_DE_LA_CHARLA}). Un lead en `link_enviado` (Lucas ya le mandó el link a mano) o más adelante sigue con lo de hoy.
+     *
+     * @param Lead $lead
+     *
+     * @return bool
+     */
+    private static function esta_en_la_charla(Lead $lead): bool
+    {
+        return self::en_charla($lead) && in_array((string) $lead->status, self::ESTADOS_DE_LA_CHARLA, true);
+    }
+
+    /**
      * ¿Hay que ocultarle al agente el guion de la demo a este lead? Sí si está en el flujo de entrada
      * ({@see en_el_flujo()}: interruptor prendido, creado desde el encendido, sin demo asignada) y en un estado
      * donde todavía no pidió la demo ({@see ESTADOS_SIN_DEMO}).
@@ -307,6 +380,12 @@ class LeadFlujoEntradaService
      */
     public static function bloque_de_la_demo_a_pedido(string $estado_del_lead = ''): string
     {
+        /* Con la charla prendida, pedir la demo ES el «sí»: lo llama Juan, no se agenda nada por acá. Sólo para los estados de la
+           charla; `link_enviado` e `implementacion_pedida` siguen con lo de hoy. Esta función sólo se llama con el lead ya en el flujo. */
+        if (self::charla_activa() && in_array($estado_del_lead, self::ESTADOS_DE_LA_CHARLA, true)) {
+            return self::bloque_de_la_demo_en_la_charla($estado_del_lead);
+        }
+
         $encabezado = "\n\nDEMO SÓLO A PEDIDO (el camino de este lead es la prueba gratis; no hay demo asignada ni se la ofrezcas):\n"
             . "  - NO le pases la página de su demo ni ningún link de demo, y no lo califiques con preguntas de la demo.\n";
 
@@ -326,6 +405,31 @@ class LeadFlujoEntradaService
     }
 
     /**
+     * La variante charla del bloque corto de la demo: pedir la demo con sus palabras es el «sí» de la charla (lo llama Juan), nunca
+     * una demo agendada por el sistema.
+     *
+     * @param string $estado_del_lead Estado actual del lead (uno de {@see ESTADOS_DE_LA_CHARLA}).
+     *
+     * @return string Bloque listo para concatenar al contexto de usuario.
+     */
+    private static function bloque_de_la_demo_en_la_charla(string $estado_del_lead): string
+    {
+        $encabezado = "\n\nDEMO A PEDIDO EN LA CHARLA (no hay demo asignada ni se agenda por acá: la muestra Juan en una llamada):\n"
+            . "  - NO le pases la página de su demo ni ningún link de demo, y NO devuelvas agendar_demo ni solicita_disponibilidad.\n";
+
+        /* Ya aceptó: no se vuelve a ofrecer nada, sólo se contesta. */
+        if ($estado_del_lead === 'acepto_probar') {
+            return $encabezado
+                . "  - Este lead YA aceptó ver la plataforma: si vuelve a pedir la demo, decile que Juan lo llama para mostrársela. NO pidas mail ni\n"
+                . "    hora y NO cambies de estado.\n";
+        }
+
+        return $encabezado
+            . "  - Si el lead pide una DEMO con sus palabras (un mensaje suyo, no el texto de un botón): es el sí de la charla. Decile que lo\n"
+            . "    llama Juan, del equipo, para mostrarle la plataforma, SIN pedirle mail ni hora, y devolvé estado_sugerido: \"acepto_probar\".\n";
+    }
+
+    /**
      * El texto literal de un punto, ya con el precio, los días y el link.
      *
      * @param string $punto Clave de {@see PUNTOS}.
@@ -342,6 +446,12 @@ class LeadFlujoEntradaService
             case 'llegada_1':
                 return self::texto_guardado_o_por_defecto(self::KEY_LLEGADA_1, self::DEFAULT_LLEGADA_1);
             case 'llegada_2':
+                /* En modo charla la llegada pregunta el rubro sin vender la prueba; se IGNORA `KEY_LLEGADA_2` (en producción puede
+                   tener el texto viejo, con «gratis»). */
+                if (self::charla_activa()) {
+                    return self::texto_guardado_o_por_defecto(self::KEY_CHARLA_LLEGADA_2, self::DEFAULT_CHARLA_LLEGADA_2);
+                }
+
                 return self::texto_guardado_o_por_defecto(self::KEY_LLEGADA_2, self::DEFAULT_LLEGADA_2);
             case 'respuesta_1':
                 return self::texto_guardado_o_por_defecto(self::KEY_RESPUESTA_1, self::DEFAULT_RESPUESTA_1);
@@ -462,7 +572,7 @@ class LeadFlujoEntradaService
      *
      * Las anclas se buscan sobre el texto normalizado (minúsculas, sin tildes):
      *  - `presentacion`: contiene `comerciocity`;
-     *  - `prueba_y_rubro`: contiene `gratis` y `rubro`;
+     *  - `prueba_y_rubro`: contiene `gratis` y `rubro` (con la charla prendida, sólo `rubro`: la llegada ya no vende la prueba);
      *  - `dos_formas`: contiene el precio de implementación formateado y `gratis`;
      *  - `pagina`: contiene `comerciocity.com` que NO sea el comienzo de una ruta (la página, no el link de la
      *    prueba);
@@ -485,6 +595,10 @@ class LeadFlujoEntradaService
             case 'presentacion':
                 return strpos($normalizado, 'comerciocity') !== false;
             case 'prueba_y_rubro':
+                if (self::charla_activa()) {
+                    return strpos($normalizado, 'rubro') !== false;
+                }
+
                 return strpos($envuelto, ' gratis ') !== false && strpos($normalizado, 'rubro') !== false;
             case 'dos_formas':
                 $precio = LeadOrigenService::normalizar(self::precio_de_implementacion());
@@ -595,6 +709,13 @@ class LeadFlujoEntradaService
         /* Mientras falte algo del paso 1, el paso 2 no se debe. */
         if (! empty($debidos)) {
             return $debidos;
+        }
+
+        /* Charla antes de la demo: el paso 2 (las dos formas, la página y el link de la prueba) NO sale solo, para ningún lead
+           (anuncio, web o «quiero probar»; D2 del plan). Sin puntos del paso 2 debidos, el webhook agenda la IA y no encola el job
+           de las dos formas: contesta el agente, que charla. */
+        if (self::charla_activa()) {
+            return [];
         }
 
         /* El paso 2 se debe cuando el lead contestó: hay un mensaje suyo posterior al último envío del paso 1. */
@@ -974,6 +1095,9 @@ class LeadFlujoEntradaService
      *
      * @param Lead $lead
      *
+     * Con la charla prendida ({@see en_charla()}): `nuevo`, `contactado` y `calificado` reciben el bloque de la CHARLA (en lugar del
+     * de las dos formas y el link) y `acepto_probar` el de ESPERANDO A JUAN; `link_enviado` sigue con el de hoy.
+     *
      * @return string '' si el flujo está apagado, el lead pidió o tiene demo, tiene su prueba o está en otro
      *                estado (ahí valen el bloque «YA CREO SU PRUEBA» o el flujo de la demo de hoy).
      */
@@ -1010,6 +1134,20 @@ class LeadFlujoEntradaService
                 $txt .= '  - ' . $punto . ': ' . self::frase_del_ancla($punto) . "\n"
                     . '    Texto de referencia: «' . str_replace("\n", "\n      ", self::texto_del_punto($punto)) . "»\n";
             }
+        }
+
+        /* Charla antes de la demo: el bloque de la charla reemplaza al de las dos formas y el link (el encabezado de puntos
+           obligatorios de arriba, si se debe la llegada, se conserva). */
+        if (self::esta_en_la_charla($lead)) {
+            return $txt . ((string) $lead->status === 'acepto_probar'
+                ? self::bloque_esperando_a_juan()
+                : self::bloque_de_la_charla());
+        }
+
+        /* `acepto_probar` sin la charla prendida (la apagaron después del sí): el lead igual espera a Juan; el bloque de hoy le
+           mandaría el link. */
+        if ((string) $lead->status === 'acepto_probar') {
+            return $txt . self::bloque_esperando_a_juan();
         }
 
         $txt .= "\n\nFLUJO DE ENTRADA (esto PISA lo que digan los bloques de arriba y los recursos sobre calificar, pasar su página u ofrecer\n"
@@ -1088,6 +1226,60 @@ class LeadFlujoEntradaService
     }
 
     /**
+     * El bloque de la CHARLA ANTES DE LA DEMO: lo que el agente lee en cada turno de un lead `nuevo`, `contactado` o `calificado` con
+     * la charla prendida. Reemplaza al de las dos formas y el link: no lleva el link de la prueba ni lo manda.
+     *
+     * 🔴 Las frases-ancla de este texto las buscan los tests (CharlaAntesDeLaDemoTest::test_bloque_de_la_charla): no se reescriben sin
+     * correrlos.
+     *
+     * @return string
+     */
+    private static function bloque_de_la_charla(): string
+    {
+        return "\n\nCHARLA ANTES DE LA DEMO (esto PISA lo que digan los bloques de arriba y los recursos sobre las dos formas de arrancar, el\n"
+            . "link de la prueba, calificar y agendar la demo):\n"
+            . "  - Tu objetivo NO es que arranque solo: es charlar con él, entender su negocio y, si le interesa, que acepte ver la plataforma\n"
+            . "    en una demo con Juan, del equipo.\n"
+            . "  - Contale brevemente cómo es ComercioCity, conectado con su rubro (una o dos frases). Si afirmás una función, citá el recurso\n"
+            . "    \"posicionamiento\" en fuentes_kb.\n"
+            . "  - Preguntá UNA sola cosa por mensaje, sin juntar preguntas: el tipo de negocio o rubro (si todavía no lo dijo), cuántos negocios\n"
+            . "    o sucursales tiene y cuántas personas trabajan con él. Guardalo con guardar_calificacion (rubro, empleados).\n"
+            . "  - Indagá AL MENOS UN dolor: preguntale qué es lo que más le cuesta hoy en el negocio (stock, precios, caja, ventas, compras…).\n"
+            . "    Respondé en una frase cómo lo resuelve ComercioCity y seguí la charla; con un dolor identificado alcanza.\n"
+            . "  - Recién con al menos un dolor identificado, preguntale si le gustaría ver la plataforma, con una demo de ComercioCity.\n"
+            . "    Antes no se la ofrezcas.\n"
+            . "  - Si dice que sí (o pide la demo, probar, el link o cómo arrancar, en un mensaje suyo posterior al primero): decile que lo va a\n"
+            . "    llamar Juan, del equipo, para mostrarle la plataforma, sin pedirle hora, y devolvé estado_sugerido: \"acepto_probar\".\n"
+            . "  - El primer mensaje del lead (el texto precargado del anuncio o del botón de la web, aunque diga «quiero probar») NO es un\n"
+            . "    sí: arrancá la charla.\n"
+            . "  - NO le mandes el link de la prueba ni le expliques las dos formas de arrancar; NO le ofrezcas la implementación ni precios por\n"
+            . "    tu cuenta. La prueba la ofrece Lucas a mano después de la llamada de Juan.\n"
+            . "  - Si PREGUNTA precios: contestá con PRECIOS VIGENTES (citá \"" . PreciosVigentesSettings::FUENTE_PARA_EL_GATE . "\" en fuentes_kb), sin\n"
+            . "    ningún link, y retomá la charla.\n"
+            . "  - Si pide que se lo carguemos nosotros: decile que lo llama Juan, del equipo, hoy, sin pedirle hora, y devolvé\n"
+            . "    estado_sugerido: \"implementacion_pedida\".\n"
+            . "  - NO le ofrezcas ayuda con la carga («te doy una mano para subirlo», «pasame tu Excel») ni le pidas la contraseña.\n"
+            . "  - NO devuelvas agendar_demo ni solicita_disponibilidad: no se agenda ninguna demo por acá.\n";
+    }
+
+    /**
+     * El bloque ESPERANDO A JUAN: el lead ya aceptó ver la plataforma en la charla (`acepto_probar`) y lo llama Juan.
+     *
+     * @return string
+     */
+    private static function bloque_esperando_a_juan(): string
+    {
+        return "\n\nESPERANDO A JUAN (este lead YA aceptó ver la plataforma; esto PISA lo que digan los bloques de arriba y los recursos):\n"
+            . "  - Juan, del equipo, lo va a llamar para mostrarle la plataforma. NO vuelvas a ofrecerle la demo.\n"
+            . "  - Contestá sus dudas con información correcta y en pocas palabras; no le hagas más preguntas de calificación.\n"
+            . "  - NO le mandes el link de la prueba ni le expliques las dos formas de arrancar: la prueba la ofrece Lucas a mano después de\n"
+            . "    la llamada.\n"
+            . "  - NO cambies su estado, salvo que pida que se lo carguemos nosotros: ahí decile que lo llama Juan y devolvé\n"
+            . "    estado_sugerido: \"implementacion_pedida\".\n"
+            . "  - NO devuelvas agendar_demo ni solicita_disponibilidad.\n";
+    }
+
+    /**
      * La frase que tiene que aparecer en el mensaje para que el punto cuente como cubierto (el ancla, en castellano).
      *
      * @param string $punto Clave de {@see PUNTOS}.
@@ -1100,6 +1292,10 @@ class LeadFlujoEntradaService
             case 'presentacion':
                 return 'tiene que aparecer el nombre ComercioCity (presentarte como Martín, de ComercioCity).';
             case 'prueba_y_rubro':
+                if (self::charla_activa()) {
+                    return 'tiene que preguntar por su rubro (sin hablar de probar ni de gratis).';
+                }
+
                 return 'tiene que decir que lo puede probar gratis y preguntar por su rubro.';
             case 'dos_formas':
                 return 'tiene que nombrar la forma gratis y el pago único de ' . self::precio_de_implementacion() . '.';
@@ -1316,8 +1512,12 @@ class LeadFlujoEntradaService
      * `mensaje_sugerido` agrega `"\n---\n"` y el texto literal, en el orden de {@see PUNTOS}, y deja asentado en
      * `razonamiento` «Flujo de entrada: se agregaron <puntos>».
      *
+     * CHARLA ({@see esta_en_la_charla()}): corren primero las guardas de la charla ({@see aplicar_las_guardas_de_la_charla()}: el pedido
+     * de demo es el sí, la validación del sí, el aviso de Juan y el link retenido) y NO corren las dos guardas por oración de abajo:
+     * Lucas pidió justamente preguntar empleados y negocios, y el link no se manda ni se ofrece.
+     *
      * ANTES de calcular la pregunta final y los puntos debidos, y sólo para el lead al que el flujo le oculta la demo
-     * ({@see oculta_la_demo()}), corren dos guardas por ORACIÓN-pregunta (misión martin-link-directo, ensayo del lead 711): se
+     * ({@see oculta_la_demo()}) y no está en la charla, corren dos guardas por ORACIÓN-pregunta (misión martin-link-directo, ensayo del lead 711): se
      * saca toda pregunta de calificación y, con lugar en el pool, la oferta del link («¿te paso el link?») se reemplaza por el
      * link. Así el resto del método trabaja sobre el mensaje ya limpio. Si la limpieza deja el mensaje vacío, queda lo que se
      * debe; si no se debe nada, el paquete sale intacto (nunca un `mensaje_sugerido` vacío).
@@ -1335,6 +1535,22 @@ class LeadFlujoEntradaService
             $parsed['estado_sugerido'] = self::estado_sin_retroceso($lead, (string) $parsed['estado_sugerido']);
         }
 
+        /* Charla antes de la demo: las guardas deterministas del sí y del link. Corren aunque el gate haya frenado el paquete o pida
+           intervención humana (salvo el aviso de Juan, que no le agrega texto a un paquete derivado). */
+        $en_la_charla = self::esta_en_la_charla($lead);
+
+        /* El sí no existe fuera de la charla (interruptor apagado o lead fuera del flujo): sin esto el camino genérico aplicaría el
+           `acepto_probar` al enviar sin validar los 2 mensajes. El estado vuelve al actual, salvo que el lead ya esté en `acepto_probar`. */
+        if (! $en_la_charla && trim((string) ($parsed['estado_sugerido'] ?? '')) === 'acepto_probar' && (string) $lead->status !== 'acepto_probar') {
+            $parsed['estado_sugerido'] = (string) $lead->status;
+            $parsed = self::sumar_nota_al_razonamiento($parsed, 'Charla: acepto_probar no aplica (el lead no está en la charla).');
+        }
+
+        if ($en_la_charla) {
+            $derivado = $gate_rechazo || ! empty($parsed['requiere_intervencion_humana']);
+            $parsed   = self::aplicar_las_guardas_de_la_charla($lead, $parsed, ! $derivado);
+        }
+
         if ($gate_rechazo || ! empty($parsed['requiere_intervencion_humana'])) {
             return $parsed;
         }
@@ -1348,7 +1564,7 @@ class LeadFlujoEntradaService
            y no hay nada que agregar. */
         $parsed_sin_limpiar = $parsed;
         $se_limpio          = false;
-        if (self::oculta_la_demo($lead)) {
+        if (! $en_la_charla && self::oculta_la_demo($lead)) {
             /* El link se manda en vez de ofrecerlo sólo si corresponde: la IA no sugiere un estado de otro camino (implementación
                pedida, demo: ahí no se pisa), oferta activa, sin prueba, lugar en el pool y el mensaje todavía no lo trae. Sin lugar el bloque ya le dice otra cosa a la IA y no se toca. */
             $estado_de_la_ia = trim((string) ($parsed['estado_sugerido'] ?? ''));
@@ -1429,6 +1645,136 @@ class LeadFlujoEntradaService
     }
 
     // ------------------------------------------------------------------------------------------
+    // Guardas de la charla antes de la demo
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * El aviso «te va a llamar Juan» que se agrega al mensaje del sí si la IA no nombró a Juan: el guardado en
+     * {@see KEY_CHARLA_AVISO_JUAN} o {@see DEFAULT_CHARLA_AVISO_JUAN}.
+     *
+     * @return string
+     */
+    public static function texto_aviso_juan(): string
+    {
+        return self::texto_guardado_o_por_defecto(self::KEY_CHARLA_AVISO_JUAN, self::DEFAULT_CHARLA_AVISO_JUAN);
+    }
+
+    /**
+     * ¿Vale el «sí» de la charla para este lead? Sí si está en modo charla, en `nuevo`, `contactado` o `calificado` (todavía no pasó a
+     * Juan ni a la prueba), no tiene su prueba y escribió al menos {@see MENSAJES_MINIMOS_PARA_ACEPTAR} mensajes: el primero es el
+     * texto precargado del anuncio o del botón («Hola, quiero probar ComercioCity»), que NO es un sí (D7 del plan).
+     *
+     * @param Lead $lead
+     *
+     * @return bool
+     */
+    public static function puede_aceptar_probar(Lead $lead): bool
+    {
+        return self::motivo_de_que_no_puede_aceptar_probar($lead) === null;
+    }
+
+    /**
+     * Por qué el «sí» NO vale para el lead, en una frase corta para el razonamiento del paquete.
+     *
+     * @param Lead $lead
+     *
+     * @return string|null null si el sí vale.
+     */
+    private static function motivo_de_que_no_puede_aceptar_probar(Lead $lead): ?string
+    {
+        if (! self::en_charla($lead)) {
+            return 'el lead no está en la charla';
+        }
+        if (! in_array((string) $lead->status, self::ESTADOS_QUE_PUEDEN_ACEPTAR_PROBAR, true)) {
+            return 'el lead está en "' . (string) $lead->status . '"';
+        }
+        if (LeadOfertaDePruebaService::tiene_prueba($lead)) {
+            return 'el lead ya tiene su prueba';
+        }
+
+        /* Cuántos mensajes escribió el lead: con uno solo, es el texto precargado. */
+        $mensajes_del_lead = LeadMessage::query()
+            ->where('lead_id', (int) $lead->id)
+            ->where('sender', 'lead')
+            ->where('is_status_event', false)
+            ->count();
+        if ($mensajes_del_lead < self::MENSAJES_MINIMOS_PARA_ACEPTAR) {
+            return 'el lead escribió sólo ' . $mensajes_del_lead . ' mensaje (el primero es el texto precargado, no un sí)';
+        }
+
+        return null;
+    }
+
+    /**
+     * Las guardas deterministas de la charla sobre el paquete del agente (PLAN §2.5, puntos 2 a 5; el 1 —estado sin retroceso— ya
+     * corrió). Sólo se llama con el lead en la charla ({@see esta_en_la_charla()}).
+     *
+     *  2. Demo = sí: un `estado_sugerido` `solicita_disponibilidad` (el lead pidió la demo) se toma como el sí: pasa a
+     *     `acepto_probar` y se borran `agendar_demo` y `solicita_disponibilidad` para que no haya segunda llamada de horarios.
+     *  3. Validación del sí: `acepto_probar` sólo vale si {@see puede_aceptar_probar()}; si no, el estado vuelve al actual y se anota por qué.
+     *  4. Aviso de Juan: al entrar a `acepto_probar` y sin «Juan» en el mensaje, se agrega {@see texto_aviso_juan()} como último segmento.
+     *  5. Link prohibido: un mensaje con el link de la prueba queda retenido (`requiere_verificacion`) para que lo decida Lucas; el texto
+     *     no se reescribe.
+     *
+     * @param Lead                 $lead
+     * @param array<string, mixed> $parsed         Paquete del agente.
+     * @param bool                 $puede_agregar  false = paquete derivado a una persona: no se le agrega el aviso de Juan.
+     *
+     * @return array<string, mixed> El paquete con las guardas aplicadas.
+     */
+    private static function aplicar_las_guardas_de_la_charla(Lead $lead, array $parsed, bool $puede_agregar): array
+    {
+        $actual = (string) $lead->status;
+
+        /* Estado que sugiere el agente, ya sin retroceso ('' si no sugirió ninguno). */
+        $sugerido = trim((string) ($parsed['estado_sugerido'] ?? ''));
+
+        /* 2. Pedir o agendar la demo, de la forma que sea, es el sí de la charla: no se agenda nada. Las formas: el estado
+           `solicita_disponibilidad` o `demo_agendada`, el booleano `solicita_disponibilidad`, `agendar_demo` y `cancelar_demo`. Cualquiera
+           de ellas dispararía en `LeadAiService` la segunda llamada de horarios, que no pasa por acá, o agendaría sola con la demo directa;
+           por eso se borran todas y el paquete queda como un sí. El lead del flujo no tiene demo asignada, así que `cancelar_demo` no tiene
+           nada que cancelar. */
+        $pidio_la_demo = in_array($sugerido, ['solicita_disponibilidad', 'demo_agendada'], true)
+            || ! empty($parsed['solicita_disponibilidad'])
+            || ! empty($parsed['agendar_demo'])
+            || ! empty($parsed['cancelar_demo']);
+        if ($pidio_la_demo && in_array($actual, self::ESTADOS_DE_LA_CHARLA, true)) {
+            $sugerido                   = 'acepto_probar';
+            $parsed['estado_sugerido']  = 'acepto_probar';
+            unset($parsed['agendar_demo'], $parsed['cancelar_demo']);
+            $parsed['solicita_disponibilidad'] = false;
+            $parsed = self::sumar_nota_al_razonamiento($parsed, 'Charla: el pedido de demo se toma como sí; lo llama Juan.');
+        }
+
+        /* 3. El sí sólo vale con la charla hecha: si no vale, el estado vuelve al actual. Un lead que ya está en `acepto_probar` queda ahí. */
+        if ($sugerido === 'acepto_probar' && $actual !== 'acepto_probar') {
+            $motivo = self::motivo_de_que_no_puede_aceptar_probar($lead);
+            if ($motivo !== null) {
+                $parsed['estado_sugerido'] = $actual;
+                $sugerido                  = $actual;
+                $parsed = self::sumar_nota_al_razonamiento($parsed, 'Charla: acepto_probar no aplica (' . $motivo . ').');
+            }
+        }
+
+        /* Mensaje del paquete, para las dos guardas que siguen. */
+        $mensaje = isset($parsed['mensaje_sugerido']) ? trim((string) $parsed['mensaje_sugerido']) : '';
+
+        /* 4. Aviso de Juan: sólo al ENTRAR a `acepto_probar` (un lead que ya estaba no lo recibe de nuevo en cada turno). */
+        if ($puede_agregar && $sugerido === 'acepto_probar' && $actual !== 'acepto_probar' && stripos($mensaje, 'Juan') === false) {
+            $parsed['mensaje_sugerido'] = $mensaje === '' ? self::texto_aviso_juan() : $mensaje . "\n---\n" . self::texto_aviso_juan();
+            $mensaje                    = trim((string) $parsed['mensaje_sugerido']);
+        }
+
+        /* 5. El link de la prueba no se manda solo en la charla: la prueba la ofrece Lucas a mano. El paquete queda retenido. */
+        if ($mensaje !== '' && strpos($mensaje, LeadOfertaDePruebaService::link()) !== false) {
+            $parsed['requiere_verificacion'] = true;
+            $parsed = self::sumar_nota_al_razonamiento($parsed, 'Charla: el mensaje lleva el link de la prueba; lo decide Lucas.');
+        }
+
+        return $parsed;
+    }
+
+    // ------------------------------------------------------------------------------------------
     // Transiciones de estado del embudo
     // ------------------------------------------------------------------------------------------
 
@@ -1437,8 +1783,10 @@ class LeadFlujoEntradaService
      * `implementacion_pedida` no retroceden. Avanzar (demo, prueba, cierre) sí se aplica.
      */
     public const ESTADOS_QUE_NO_RETROCEDEN = [
-        'link_enviado'          => ['nuevo', 'contactado', 'calificado'],
-        'implementacion_pedida' => ['nuevo', 'contactado', 'calificado', 'link_enviado'],
+        /* `acepto_probar` (charla): ya pasó a Juan; sólo avanza (link enviado, implementación, demo, cierre). */
+        'acepto_probar'         => ['nuevo', 'contactado', 'calificado'],
+        'link_enviado'          => ['nuevo', 'contactado', 'calificado', 'acepto_probar'],
+        'implementacion_pedida' => ['nuevo', 'contactado', 'calificado', 'acepto_probar', 'link_enviado'],
     ];
 
     /**
@@ -1507,6 +1855,41 @@ class LeadFlujoEntradaService
            (2 h, 22 h y, con plantilla, día 3), anclados en el momento en que salió. Sale por el camino que sea (la IA, el
            setter o el literal del paso 2). */
         LeadEmbudoSeguimientosService::programar_para_estado($lead, Carbon::now());
+
+        return true;
+    }
+
+    /**
+     * El agente sugirió `acepto_probar` (el lead dijo que sí a ver la plataforma en la charla): el lead pasa a ese estado YA (aunque el
+     * mensaje quede pendiente de aprobación), entra solo a «Interesados» del tablero de Juan (lo hace `Lead::saved`), se crea la tarea
+     * del embudo para el vendedor y se cancelan los pasos de seguimiento de los estados anteriores (`acepto_probar` no tiene pasos: lo
+     * lleva Juan). Mismo patrón que {@see aplicar_implementacion_pedida()}.
+     *
+     * Sólo si el sí vale ({@see puede_aceptar_probar()}): el servidor lo valida aunque el paquete ya lo haya filtrado. Idempotente: un
+     * lead que ya está en `acepto_probar` no se toca y no se repite nada.
+     *
+     * @param Lead   $lead
+     * @param string $estado_sugerido Slug que sugirió el agente.
+     *
+     * @return bool true si el lead quedó en `acepto_probar` por esta llamada.
+     */
+    public static function aplicar_acepto_probar(Lead $lead, string $estado_sugerido): bool
+    {
+        if ($estado_sugerido !== 'acepto_probar' || (string) $lead->status === 'acepto_probar') {
+            return false;
+        }
+        if (! self::puede_aceptar_probar($lead)) {
+            return false;
+        }
+
+        LeadPipelineStatus::ensure_exists('acepto_probar');
+        $lead->status = 'acepto_probar';
+        $lead->save();
+
+        LeadTareaVendedorService::crear($lead, LeadTareaVendedorService::MOTIVO_ACEPTO_PROBAR);
+
+        /* El estado nuevo no tiene pasos: esto cancela los pendientes de `nuevo` / `contactado`. */
+        LeadEmbudoSeguimientosService::programar_para_estado($lead);
 
         return true;
     }

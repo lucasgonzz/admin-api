@@ -6485,6 +6485,8 @@ TXT;
          * quiere que se lo carguemos nosotros: pasa YA a ese estado, aunque el mensaje quede esperando aprobación, y se
          * crea la tarea del vendedor (una sola por lead). Sólo mueve desde los estados del embudo; no toca la demo. */
         LeadFlujoEntradaService::aplicar_implementacion_pedida($lead, $estado);
+        /* Charla antes de la demo: el «sí» (`acepto_probar`) es la otra transición inmediata; el servidor la valida. */
+        LeadFlujoEntradaService::aplicar_acepto_probar($lead, $estado);
 
         $lead->save();
 
@@ -7100,6 +7102,7 @@ TXT;
             $pipeline_status       = LeadPipelineStatus::ensure_exists($estado);
             $suggested_lead_status = $estado !== $previous_status ? $estado : null;
         }
+        LeadFlujoEntradaService::aplicar_acepto_probar($lead, $estado); /* Charla: el «sí» pasa ya a `acepto_probar` (idempotente; camino sin retención). */
 
         /*
          * Flag para detectar si el agendar_demo que sigue es un reagendado (el lead ya tenía demo

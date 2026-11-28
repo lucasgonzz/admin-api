@@ -175,6 +175,8 @@ class LeadWhatsappOnboardingSettings
              * textos precargados de los anuncios (uno por línea; no cuentan como pregunta). El SPA de hoy los ignora. */
             'flujo_entrada_activo'                => LeadFlujoEntradaService::activo(),
             'flujo_textos_precargados'            => (string) AdminSetting::get(LeadFlujoEntradaService::KEY_TEXTOS_PRECARGADOS, ''),
+            /* Charla antes de la demo (misión leads-charla-antes-de-la-demo): el interruptor, PRENDIDO por defecto. El SPA de hoy lo ignora. */
+            'charla_antes_de_la_demo_activa'      => LeadFlujoEntradaService::charla_activa(),
             /* Motor de compromisos y leads de otros medios (misión leads-referidos-compromisos, E2): los tres interruptores nacen
              * APAGADOS y los dos nombres de plantilla de Meta. El SPA de hoy los ignora. */
             'compromisos_activo'                  => LeadCompromisoService::activo(),
@@ -221,6 +223,11 @@ class LeadWhatsappOnboardingSettings
             if ($data['flujo_entrada_activo'] && ! $estaba_prendido) {
                 LeadFlujoEntradaService::sellar_encendido();
             }
+        }
+        /* El interruptor de la charla antes de la demo es OPCIONAL en el PUT, por la misma razón: un SPA que no lo manda no puede prenderla
+         * ni apagarla. Se escribe sólo si vino. */
+        if (array_key_exists('charla_antes_de_la_demo_activa', $data) && $data['charla_antes_de_la_demo_activa'] !== null) {
+            AdminSetting::set(LeadFlujoEntradaService::KEY_CHARLA, $data['charla_antes_de_la_demo_activa'] ? '1' : '0');
         }
         /* La textarea vacía llega como null (el middleware convierte '' en null): con la clave presente es «borrar los textos». */
         if (array_key_exists('flujo_textos_precargados', $data)) {
@@ -304,6 +311,11 @@ class LeadWhatsappOnboardingSettings
            aplicar el conocimiento nuevo. Sólo se siembra la clave si falta, para que el GET la muestre. */
         if (AdminSetting::get(LeadFlujoEntradaService::KEY_ACTIVO) === null) {
             AdminSetting::set(LeadFlujoEntradaService::KEY_ACTIVO, '0');
+        }
+        /* La charla antes de la demo nace PRENDIDA (decisión de producto, 27/11/2026): sólo se siembra la clave si falta, para que el GET la
+           muestre. Sin fila ya regía el '1' por defecto. */
+        if (AdminSetting::get(LeadFlujoEntradaService::KEY_CHARLA) === null) {
+            AdminSetting::set(LeadFlujoEntradaService::KEY_CHARLA, '1');
         }
     }
 

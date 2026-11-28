@@ -39,6 +39,10 @@ use Illuminate\Support\Facades\Log;
  *  - todo paso cae dentro de la franja de seguimientos ({@see FranjaHorariaDeSeguimientos}): fuera de ella se corre al próximo
  *    inicio de franja y, si eso saca a un texto libre de la ventana, se adelanta a la última hora de franja que quede dentro.
  *
+ * CHARLA ANTES DE LA DEMO (misión leads-charla-antes-de-la-demo): con la charla prendida ({@see LeadFlujoEntradaService::charla_activa()}) los
+ * textos de `nuevo_3h`, `nuevo_22h` y `conversando_22h` son de charla (sin link, sin «gratis», sin el precio) y `conversando_dia_3` no
+ * se programa (su plantilla de Meta, ya aprobada, ofrece el link). `acepto_probar` no tiene pasos: lo lleva Juan.
+ *
  * Sólo se programa para un lead que está «en el flujo» de entrada ({@see LeadFlujoEntradaService::en_el_flujo()}): con el
  * interruptor apagado no se programa nada (y el despacho cancela lo que ya estuviera programado).
  */
@@ -53,6 +57,15 @@ class LeadEmbudoSeguimientosService
     /** Prefijo de la clave de `admin_settings` que pisa el texto de un paso. */
     private const PREFIJO_TEXTO = 'lead_embudo_paso_';
 
+    /** Prefijo de la clave de `admin_settings` que pisa el texto de un paso EN MODO CHARLA (la clave vieja se ignora en ese modo). */
+    private const PREFIJO_TEXTO_CHARLA = 'lead_embudo_paso_charla_';
+
+    /**
+     * Pasos que NO se programan con la charla prendida: el día 3 de «conversando» es una plantilla de Meta que ofrece el link de la
+     * prueba y no se puede editar.
+     */
+    private const PASOS_SIN_CHARLA = ['conversando_dia_3'];
+
     /** Prefijo de la clave de `admin_settings` con el nombre de la plantilla de un paso. */
     private const PREFIJO_PLANTILLA = 'lead_embudo_plantilla_';
 
@@ -61,6 +74,18 @@ class LeadEmbudoSeguimientosService
 
     /** Nombre que se usa en la plantilla cuando no se sabe cómo se llama el lead. */
     private const NOMBRE_GENERICO = 'qué tal';
+
+    /**
+     * Textos por defecto de los pasos de texto libre EN MODO CHARLA: siguen la charla (rubro, qué le cuesta) en lugar de empujar la
+     * prueba. Ninguno lleva el link, «gratis» ni el precio de la implementación.
+     *
+     * @var array<string, string>
+     */
+    private const TEXTOS_DE_LA_CHARLA = [
+        'nuevo_3h'        => '¿Pudiste ver mi mensaje? Contame de qué rubro es tu negocio y te cuento cómo te puede ayudar ComercioCity.',
+        'nuevo_22h'       => 'Te escribo de nuevo por si te quedó pendiente: contame qué tipo de negocio tenés y qué es lo que más te cuesta hoy (stock, precios, caja…), así te cuento cómo lo resolvemos.',
+        'conversando_22h' => '¿Seguimos? Contame qué es lo que más te complica hoy en el negocio y te cuento cómo lo resolvemos con ComercioCity.',
+    ];
 
     /**
      * Los pasos de cada estado, en orden. `horas` es el desfase desde el ancla; `modo` es texto libre o plantilla.
@@ -186,6 +211,20 @@ class LeadEmbudoSeguimientosService
         foreach (self::PASOS[$estado] as $definicion) {
             $paso = $definicion['paso'];
             $es_texto = $definicion['modo'] === self::TEXTO;
+
+            /* Charla antes de la demo: este paso no sale. Si ya había una fila pendiente (se programó antes de prender la charla), se
+               cancela acá: el despacho (`LeadScheduledMessageService`) no se toca. Reusa `CANCELED_REANCLADO` (no hay constante propia). */
+            if (in_array($paso, self::PASOS_SIN_CHARLA, true) && LeadFlujoEntradaService::en_charla($lead)) {
+                $sobrantes = LeadScheduledMessage::query()
+                    ->where('lead_id', (int) $lead->id)
+                    ->where('paso_embudo', $paso)
+                    ->where('status', LeadScheduledMessage::STATUS_PENDIENTE)
+                    ->get();
+                foreach ($sobrantes as $sobrante) {
+                    self::cancelar($sobrante, LeadScheduledMessage::CANCELED_REANCLADO);
+                }
+                continue;
+            }
 
             /* Un paso de plantilla sólo existe si tiene nombre configurado. */
             $plantilla = $es_texto ? '' : self::nombre_de_la_plantilla($paso);
@@ -455,12 +494,55 @@ class LeadEmbudoSeguimientosService
     }
 
     // ------------------------------------------------------------------------------------------
+    // Filas programadas antes de prender la charla
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * ¿Este paso ya programado NO tiene que salir porque el lead está en la charla? Sí para los pasos de {@see PASOS_SIN_CHARLA} (el día 3
+     * de «conversando» es una plantilla que ofrece el link). Lo usa el despacho: una fila armada antes del deploy no puede salir.
+     *
+     * @param LeadScheduledMessage $paso
+     * @param Lead                 $lead
+     *
+     * @return bool
+     */
+    public static function no_sale_en_la_charla(LeadScheduledMessage $paso, Lead $lead): bool
+    {
+        return in_array((string) $paso->paso_embudo, self::PASOS_SIN_CHARLA, true) && LeadFlujoEntradaService::en_charla($lead);
+    }
+
+    /**
+     * Si el lead está en la charla y el paso es de texto con texto de charla, deja en la fila el texto de charla VIGENTE
+     * ({@see texto_del_paso()}): las filas se programaron con el texto de antes (las dos formas, la prueba gratis) y el despacho manda lo
+     * que guarda la fila. No toca plantillas ni los pasos del link. Guarda la fila sólo si el texto cambió.
+     *
+     * @param LeadScheduledMessage $paso Paso ya reclamado por el despacho.
+     * @param Lead                 $lead
+     *
+     * @return void
+     */
+    public static function poner_el_texto_de_la_charla(LeadScheduledMessage $paso, Lead $lead): void
+    {
+        $clave = (string) $paso->paso_embudo;
+        if (! isset(self::TEXTOS_DE_LA_CHARLA[$clave]) || (string) $paso->mode !== LeadScheduledMessage::MODE_TEXTO_LIBRE || ! LeadFlujoEntradaService::en_charla($lead)) {
+            return;
+        }
+
+        $texto = self::texto_del_paso($clave);
+        if ($texto !== '' && (string) $paso->content !== $texto) {
+            $paso->content = $texto;
+            $paso->save();
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------
     // Textos
     // ------------------------------------------------------------------------------------------
 
     /**
      * El texto de un paso de texto libre: el que se pisó en `admin_settings` (`lead_embudo_paso_<paso>`) o el de por defecto,
-     * con el link de la prueba puesto. `nuevo_22h` es `respuesta_1`, las dos formas de arrancar, tal cual.
+     * con el link de la prueba puesto. `nuevo_22h` es `respuesta_1`, las dos formas de arrancar, tal cual. Con la charla prendida,
+     * `nuevo_3h`, `nuevo_22h` y `conversando_22h` son los de la charla ({@see TEXTOS_DE_LA_CHARLA}, o `lead_embudo_paso_charla_<paso>`).
      *
      * @param string $paso Clave del paso.
      *
@@ -468,6 +550,14 @@ class LeadEmbudoSeguimientosService
      */
     public static function texto_del_paso(string $paso): string
     {
+        /* Charla antes de la demo: los pasos con texto de charla leen primero su clave propia y, si no, el texto de la charla; la clave
+           vieja se ignora (en producción puede tener las dos formas de arrancar). Los demás pasos (el link) siguen como siempre. */
+        if (LeadFlujoEntradaService::charla_activa() && isset(self::TEXTOS_DE_LA_CHARLA[$paso])) {
+            $de_la_charla = trim((string) AdminSetting::get(self::PREFIJO_TEXTO_CHARLA . $paso, ''));
+
+            return str_replace('{link_prueba}', LeadOfertaDePruebaService::link(), $de_la_charla !== '' ? $de_la_charla : self::TEXTOS_DE_LA_CHARLA[$paso]);
+        }
+
         $guardado = trim((string) AdminSetting::get(self::PREFIJO_TEXTO . $paso, ''));
 
         if ($guardado !== '') {

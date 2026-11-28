@@ -104,6 +104,8 @@ class CronViejoSinDemoTest extends TestCase
     {
         AdminSetting::set(LeadFlujoEntradaService::KEY_ACTIVO, '1');
         AdminSetting::set(LeadFlujoEntradaService::KEY_ACTIVADO_EN, $desde->toIso8601String());
+        /* Este test fija el bloque de las dos formas y el link (el de antes de la charla): se prueba con la charla apagada (misión leads-charla-antes-de-la-demo). */
+        AdminSetting::set(LeadFlujoEntradaService::KEY_CHARLA, '0');
     }
 
     /**
